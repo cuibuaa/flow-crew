@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" width="480" height="360">
+  <!-- FlowCrew Mascot: Mini-Bot Crew in DAG formation — final version, transparent bg -->
+  <defs>
+    <linearGradient id="bodyG" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#4a5bc7"/>
+    </linearGradient>
+    <linearGradient id="accentG" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#764ba2"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glowSm" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="shadow">
+      <stop offset="0%" stop-color="rgba(0,0,0,0.12)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0)"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Ground shadows -->
+  <ellipse cx="105" cy="310" rx="55" ry="8" fill="url(#shadow)"/>
+  <ellipse cx="240" cy="280" rx="48" ry="7" fill="url(#shadow)"/>
+  <ellipse cx="240" cy="340" rx="48" ry="7" fill="url(#shadow)"/>
+  <ellipse cx="375" cy="310" rx="55" ry="8" fill="url(#shadow)"/>
+
+  <!-- === FLOW CONNECTIONS === -->
+  <!-- Planner → Coder -->
+  <path d="M155,195 C185,195 195,148 225,148" stroke="#667eea" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+  <!-- Planner → QA -->
+  <path d="M155,215 C185,215 195,258 225,258" stroke="#667eea" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+  <!-- Coder → Result -->
+  <path d="M270,148 C300,148 310,200 340,200" stroke="#667eea" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+  <!-- QA → Result -->
+  <path d="M270,258 C300,258 310,210 340,210" stroke="#667eea" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.35"/>
+
+  <!-- Flow arrow particles (small dots along paths) -->
+  <circle cx="188" cy="170" r="3" fill="#667eea" opacity="0.3">
+    <animate attributeName="opacity" values="0.15;0.5;0.15" dur="2s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="188" cy="238" r="3" fill="#667eea" opacity="0.3">
+    <animate attributeName="opacity" values="0.15;0.5;0.15" dur="2s" begin="0.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="305" cy="175" r="3" fill="#667eea" opacity="0.3">
+    <animate attributeName="opacity" values="0.15;0.5;0.15" dur="2s" begin="1s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="305" cy="235" r="3" fill="#667eea" opacity="0.3">
+    <animate attributeName="opacity" values="0.15;0.5;0.15" dur="2s" begin="1.5s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Retry arc (dashed, from Result back toward QA) -->
+  <path d="M385,230 C405,280 310,305 260,280" stroke="#fbbf24" stroke-width="2.5" fill="none" stroke-dasharray="6,5" stroke-linecap="round" opacity="0.4"/>
+  <polygon points="256,278 264,284 266,274" fill="#fbbf24" opacity="0.4"/>
+
+  <!-- ============================================ -->
+  <!-- BOT 1: PLANNER (left, slightly larger)       -->
+  <!-- ============================================ -->
+  <g transform="translate(60,155)">
+    <!-- Head -->
+    <rect x="0" y="0" width="90" height="72" rx="18" fill="url(#bodyG)"/>
+    <rect x="4" y="2" width="82" height="5" rx="2.5" fill="white" opacity="0.07"/>
+    <!-- Visor -->
+    <rect x="12" y="14" width="66" height="38" rx="10" fill="#0d1117"/>
+    <rect x="15" y="16" width="60" height="3" rx="1.5" fill="white" opacity="0.04"/>
+    <!-- Eyes -->
+    <circle cx="32" cy="33" r="7" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="58" cy="33" r="7" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="34" cy="30.5" r="2.5" fill="white" opacity="0.45"/>
+    <circle cx="60" cy="30.5" r="2.5" fill="white" opacity="0.45"/>
+    <!-- Smile -->
+    <path d="M34,43 Q45,51 56,43" stroke="#4ade80" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.8"/>
+    <!-- Antenna -->
+    <line x1="45" y1="0" x2="45" y2="-14" stroke="#5a6fd6" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="45" cy="-18" r="7" fill="#667eea" filter="url(#glowSm)"/>
+    <!-- Ears -->
+    <rect x="-10" y="20" width="10" height="24" rx="4" fill="#4a5bc7"/>
+    <rect x="90" y="20" width="10" height="24" rx="4" fill="#4a5bc7"/>
+    <!-- Body -->
+    <rect x="14" y="76" width="62" height="42" rx="12" fill="#4a5bc7"/>
+    <rect x="18" y="78" width="54" height="4" rx="2" fill="white" opacity="0.05"/>
+    <!-- Label -->
+    <text x="45" y="103" text-anchor="middle" fill="white" font-family="Inter, system-ui, sans-serif" font-weight="700" font-size="16" opacity="0.9">P</text>
+    <!-- Legs -->
+    <rect x="22" y="118" width="14" height="22" rx="6" fill="#4a5bc7"/>
+    <rect x="54" y="118" width="14" height="22" rx="6" fill="#4a5bc7"/>
+    <rect x="18" y="134" width="22" height="10" rx="5" fill="#4a5bc7"/>
+    <rect x="50" y="134" width="22" height="10" rx="5" fill="#4a5bc7"/>
+  </g>
+
+  <!-- ============================================ -->
+  <!-- BOT 2: CODER (top center)                    -->
+  <!-- ============================================ -->
+  <g transform="translate(200,100)">
+    <!-- Head -->
+    <rect x="0" y="0" width="78" height="64" rx="16" fill="url(#bodyG)"/>
+    <rect x="4" y="2" width="70" height="4" rx="2" fill="white" opacity="0.07"/>
+    <!-- Visor -->
+    <rect x="10" y="12" width="58" height="34" rx="9" fill="#0d1117"/>
+    <!-- Eyes -->
+    <circle cx="28" cy="29" r="6" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" begin="0.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="50" cy="29" r="6" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" begin="0.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="30" cy="27" r="2" fill="white" opacity="0.45"/>
+    <circle cx="52" cy="27" r="2" fill="white" opacity="0.45"/>
+    <!-- Focused expression (straight mouth) -->
+    <line x1="30" y1="39" x2="48" y2="39" stroke="#4ade80" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+    <!-- Antenna -->
+    <line x1="39" y1="0" x2="39" y2="-12" stroke="#5a6fd6" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="39" cy="-16" r="6" fill="#fbbf24" filter="url(#glowSm)"/>
+    <!-- Ears -->
+    <rect x="-8" y="18" width="8" height="20" rx="3.5" fill="#4a5bc7"/>
+    <rect x="78" y="18" width="8" height="20" rx="3.5" fill="#4a5bc7"/>
+    <!-- Body -->
+    <rect x="12" y="68" width="54" height="36" rx="10" fill="#4a5bc7"/>
+    <text x="39" y="92" text-anchor="middle" fill="white" font-family="Inter, system-ui, sans-serif" font-weight="700" font-size="14" opacity="0.9">C</text>
+    <!-- Legs -->
+    <rect x="20" y="104" width="12" height="18" rx="5" fill="#4a5bc7"/>
+    <rect x="46" y="104" width="12" height="18" rx="5" fill="#4a5bc7"/>
+    <rect x="16" y="118" width="20" height="8" rx="4" fill="#4a5bc7"/>
+    <rect x="42" y="118" width="20" height="8" rx="4" fill="#4a5bc7"/>
+  </g>
+
+  <!-- ============================================ -->
+  <!-- BOT 3: QA (bottom center, with gate badge)   -->
+  <!-- ============================================ -->
+  <g transform="translate(200,218)">
+    <!-- Head -->
+    <rect x="0" y="0" width="78" height="64" rx="16" fill="url(#bodyG)"/>
+    <rect x="4" y="2" width="70" height="4" rx="2" fill="white" opacity="0.07"/>
+    <!-- Visor -->
+    <rect x="10" y="12" width="58" height="34" rx="9" fill="#0d1117"/>
+    <!-- Eyes (slightly narrowed — scrutinizing) -->
+    <ellipse cx="28" cy="29" rx="6" ry="5" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" begin="0.8s" repeatCount="indefinite"/>
+    </ellipse>
+    <ellipse cx="50" cy="29" rx="6" ry="5" fill="#4ade80" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.65;1" dur="3s" begin="0.8s" repeatCount="indefinite"/>
+    </ellipse>
+    <circle cx="30" cy="27" r="2" fill="white" opacity="0.45"/>
+    <circle cx="52" cy="27" r="2" fill="white" opacity="0.45"/>
+    <!-- Determined mouth -->
+    <path d="M30,40 Q39,44 48,40" stroke="#4ade80" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.7"/>
+    <!-- Antenna -->
+    <line x1="39" y1="0" x2="39" y2="-12" stroke="#5a6fd6" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="39" cy="-16" r="6" fill="#f87171" filter="url(#glowSm)"/>
+    <!-- Ears -->
+    <rect x="-8" y="18" width="8" height="20" rx="3.5" fill="#4a5bc7"/>
+    <rect x="78" y="18" width="8" height="20" rx="3.5" fill="#4a5bc7"/>
+    <!-- Gate badge (top-right) -->
+    <circle cx="72" cy="6" r="12" fill="#4ade80" filter="url(#glowSm)"/>
+    <path d="M66,6 L70,10 L78,1" stroke="#1a1a2e" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Body -->
+    <rect x="12" y="68" width="54" height="36" rx="10" fill="#4a5bc7"/>
+    <text x="39" y="92" text-anchor="middle" fill="white" font-family="Inter, system-ui, sans-serif" font-weight="700" font-size="14" opacity="0.9">Q</text>
+    <!-- Legs -->
+    <rect x="20" y="104" width="12" height="18" rx="5" fill="#4a5bc7"/>
+    <rect x="46" y="104" width="12" height="18" rx="5" fill="#4a5bc7"/>
+    <rect x="16" y="118" width="20" height="8" rx="4" fill="#4a5bc7"/>
+    <rect x="42" y="118" width="20" height="8" rx="4" fill="#4a5bc7"/>
+  </g>
+
+  <!-- ============================================ -->
+  <!-- BOT 4: RESULT (right, happy)                 -->
+  <!-- ============================================ -->
+  <g transform="translate(330,165)">
+    <!-- Head -->
+    <rect x="0" y="0" width="90" height="72" rx="18" fill="url(#bodyG)"/>
+    <rect x="4" y="2" width="82" height="5" rx="2.5" fill="white" opacity="0.07"/>
+    <!-- Visor -->
+    <rect x="12" y="14" width="66" height="38" rx="10" fill="#0d1117"/>
+    <!-- Happy eyes (arcs) -->
+    <path d="M27,30 Q32,38 37,30" stroke="#4ade80" stroke-width="3" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+    <path d="M53,30 Q58,38 63,30" stroke="#4ade80" stroke-width="3" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+    <!-- Big smile -->
+    <path d="M32,42 Q45,54 58,42" stroke="#4ade80" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.9"/>
+    <!-- Antenna -->
+    <line x1="45" y1="0" x2="45" y2="-14" stroke="#5a6fd6" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="45" cy="-18" r="7" fill="#4ade80" filter="url(#glowSm)">
+      <animate attributeName="opacity" values="0.8;1;0.8" dur="1.5s" repeatCount="indefinite"/>
+    </circle>
+    <!-- Ears -->
+    <rect x="-10" y="20" width="10" height="24" rx="4" fill="#4a5bc7"/>
+    <rect x="90" y="20" width="10" height="24" rx="4" fill="#4a5bc7"/>
+    <!-- Body -->
+    <rect x="14" y="76" width="62" height="42" rx="12" fill="#4a5bc7"/>
+    <rect x="18" y="78" width="54" height="4" rx="2" fill="white" opacity="0.05"/>
+    <!-- Star on chest -->
+    <text x="45" y="105" text-anchor="middle" fill="#fbbf24" font-size="22" filter="url(#glowSm)">★</text>
+    <!-- Legs -->
+    <rect x="22" y="118" width="14" height="22" rx="6" fill="#4a5bc7"/>
+    <rect x="54" y="118" width="14" height="22" rx="6" fill="#4a5bc7"/>
+    <rect x="18" y="134" width="22" height="10" rx="5" fill="#4a5bc7"/>
+    <rect x="50" y="134" width="22" height="10" rx="5" fill="#4a5bc7"/>
+  </g>
+</svg>

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- FlowCrew Favicon: Planner bot head with 3-node antenna -->
+  <defs>
+    <linearGradient id="fH" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#4a5bc7"/>
+    </linearGradient>
+    <filter id="fg" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Antenna -->
+  <line x1="32" y1="10" x2="32" y2="16" stroke="#5a6fd6" stroke-width="2" stroke-linecap="round"/>
+  <line x1="32" y1="10" x2="22" y2="4" stroke="#5a6fd6" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="32" y1="10" x2="32" y2="2" stroke="#5a6fd6" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="32" y1="10" x2="42" y2="4" stroke="#5a6fd6" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="32" cy="10" r="2" fill="#5a6fd6"/>
+  <circle cx="22" cy="3.5" r="2.5" fill="#4ade80"/>
+  <circle cx="32" cy="1.5" r="2.5" fill="#667eea"/>
+  <circle cx="42" cy="3.5" r="2.5" fill="#fbbf24"/>
+
+  <!-- Head -->
+  <rect x="8" y="16" width="48" height="38" rx="10" fill="url(#fH)"/>
+
+  <!-- Visor -->
+  <rect x="14" y="22" width="36" height="22" rx="6" fill="#0d1117"/>
+
+  <!-- Eyes -->
+  <circle cx="25" cy="33" r="4" fill="#4ade80" filter="url(#fg)"/>
+  <circle cx="39" cy="33" r="4" fill="#4ade80" filter="url(#fg)"/>
+  <circle cx="26.5" cy="31.5" r="1.5" fill="white" opacity="0.45"/>
+  <circle cx="40.5" cy="31.5" r="1.5" fill="white" opacity="0.45"/>
+
+  <!-- Smile -->
+  <path d="M26,39 Q32,43 38,39" stroke="#4ade80" stroke-width="1.5" fill="none" stroke-linecap="round" opacity="0.8"/>
+
+  <!-- Ears -->
+  <rect x="3" y="26" width="5" height="14" rx="2.5" fill="#4a5bc7"/>
+  <rect x="56" y="26" width="5" height="14" rx="2.5" fill="#4a5bc7"/>
+
+  <!-- Tiny body -->
+  <rect x="20" y="55" width="24" height="8" rx="4" fill="#4a5bc7"/>
+</svg>

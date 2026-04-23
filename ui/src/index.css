@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .glass-panel {
+    background: #16213e;
+    border: 1px solid #2a2a4a;
+    box-shadow: 0 4px 20px rgba(102, 126, 234, 0.1);
+  }
+  .node-active {
+    border-color: #667eea;
+    background: rgba(102, 126, 234, 0.08);
+  }
+  .btn-accent {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    border-radius: 8px;
+    transition: all 200ms ease;
+  }
+  .btn-accent:hover {
+    filter: brightness(1.1);
+  }
+  .btn-accent:disabled {
+    opacity: 0.5;
+  }
+  .btn-ghost {
+    background: transparent;
+    color: #a0a0b0;
+    border-radius: 8px;
+    transition: all 200ms ease;
+  }
+  .btn-ghost:hover {
+    background: #0f3460;
+    color: #e0e0e0;
+  }
+}
+
+/* Tree-line pipeline connectors */
+.tree-line { position: relative; }
+.tree-line::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: -12px;
+  bottom: 50%;
+  width: 2px;
+  background: #2a2a4a;
+}
+.tree-line::after {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  width: 16px;
+  height: 2px;
+  background: #2a2a4a;
+}
+.tree-root { position: relative; }
+.tree-root::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: 36px;
+  bottom: -16px;
+  width: 2px;
+  background: #2a2a4a;
+  z-index: 0;
+}
+
+@keyframes stage-appear {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.stage-enter {
+  animation: stage-appear 0.3s ease-out both;
+}
+
+.prose pre { background: #0d1117; border-radius: 12px; }
+.prose code { color: #4ade80; }
+.prose p { margin: 0.25rem 0; }
+.prose ul, .prose ol { margin: 0.25rem 0; }
+.prose h1, .prose h2, .prose h3 { color: #e0e0e0; margin-top: 0.5rem; margin-bottom: 0.25rem; }
+
+* { transition-property: color, background-color, border-color, opacity, box-shadow; transition-duration: 200ms; transition-timing-function: ease; }
+input, textarea, button, a { transition: all 200ms ease; }

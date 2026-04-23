@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.fc/
+*.log
+npm-debug.log*
+coverage/
+.vitest/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.tsbuildinfo
+ui/*.d.ts.map

@@ -1,0 +1,16 @@
+default_timeout_ms: 1800000
+default_max_retries: 2
+heartbeat_interval_ms: 5000
+adapter: codex
+model: default
+reasoning_effort: default
+paths:
+  runs: .fc/runs
+  agents: config/agents
+  workflows: config/workflows
+campaign_triggers:
+  enabled: true
+  regression_after: 2
+  plateau_after: 3
+  plateau_threshold: 5
+  repeated_failure_after: 3
