@@ -83,7 +83,7 @@ Score tracking across runs via JSONL. The system auto-detects regression (score 
 | ![Live Monitor](assets/screenshot_monitor.png) | ![Discussion](assets/screenshot_discussion.png) |
 
 ## 🚀 Quick Start
-
+FIRST, Get your backend agent cli (Codex or Claude Code) Installed. 
 ```bash
 npm install
 npm run dev
