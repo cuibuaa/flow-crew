@@ -122,7 +122,7 @@ The `examples/` directory contains reference plans based on the shipped agent ro
 
 First, install your backend agent CLI: Codex or Claude Code.
 
-`ash
+```bash
 npm install
 npm run dev
 ```
