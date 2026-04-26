@@ -214,12 +214,15 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
 
   if (sorted.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-rc-muted gap-4">
-        <p>No tasks</p>
-        <div className="flex gap-2">
-          <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
-          <button onClick={() => nav("/import")} className="btn-ghost px-4 py-2 text-sm border border-rc-border">Import</button>
+      <div className="h-full">
+        <div className="flex flex-col items-center justify-center h-full text-rc-muted gap-4">
+          <p>No tasks</p>
+          <div className="flex gap-2">
+            <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
+            <button onClick={() => nav("/import")} className="btn-ghost px-4 py-2 text-sm border border-rc-border">Import</button>
+          </div>
         </div>
+        <NewTaskDialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} onSubmit={handleNewTask} />
       </div>
     );
   }
