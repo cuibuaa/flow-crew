@@ -41,6 +41,70 @@ body {
     background: #0f3460;
     color: #e0e0e0;
   }
+  .monitor-scroll-area {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(102, 126, 234, 0.4) rgba(13, 17, 23, 0.35);
+    scrollbar-gutter: stable both-edges;
+  }
+  .monitor-scroll-area::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .monitor-scroll-area::-webkit-scrollbar-track {
+    background: rgba(13, 17, 23, 0.45);
+    border-radius: 999px;
+  }
+  .monitor-scroll-area::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(102, 126, 234, 0.55), rgba(118, 75, 162, 0.55));
+    border-radius: 999px;
+  }
+  .monitor-grid-surface {
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(10, 14, 24, 0.96), rgba(11, 18, 32, 0.94));
+  }
+  .monitor-grid-surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(circle at center, black 70%, transparent 100%);
+    pointer-events: none;
+  }
+  .monitor-node-shell {
+    backdrop-filter: blur(10px);
+    box-shadow: 0 16px 36px rgba(6, 10, 18, 0.22);
+  }
+  .monitor-edge {
+    transition: stroke 200ms ease, opacity 200ms ease, filter 200ms ease;
+    stroke: rgba(148, 163, 184, 0.34);
+    opacity: 0.65;
+  }
+  .monitor-edge[data-emphasis="direct"] {
+    stroke: rgba(125, 211, 252, 0.95);
+    opacity: 1;
+    filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.18));
+  }
+  .monitor-edge[data-emphasis="context"] {
+    stroke: rgba(96, 165, 250, 0.72);
+    opacity: 0.95;
+  }
+  .monitor-edge[data-emphasis="dim"] {
+    stroke: rgba(100, 116, 139, 0.22);
+    opacity: 0.25;
+  }
+  .monitor-edge[data-edge-kind="branch"] {
+    stroke-dasharray: 9 7;
+  }
+  .monitor-edge[data-edge-kind="merge"] {
+    stroke-width: 3;
+  }
+  .monitor-edge[data-edge-kind="retry"] {
+    stroke: rgba(251, 191, 36, 0.72);
+    stroke-dasharray: 5 5;
+  }
 }
 
 /* Tree-line pipeline connectors */

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { getCampaignDisplayName, getCampaignIteration } from "../types";
 import type { PlanStage } from "../types";
-import { executeTask, fetchTask, fetchDispatch, approveDispatch, fetchIterationLog } from "../api";
+import { executeTask, fetchDispatch, approveDispatch, fetchIterationLog } from "../api";
 import { useTasks } from "./Layout";
 import PipelineNode from "./PipelineNode";
 
@@ -26,6 +27,8 @@ export default function PlanReview() {
 
   const isAwaiting = task?.status === "awaiting_approval";
   const plan = task?.plan ?? [];
+  const campaignIteration = task ? getCampaignIteration(task) : 1;
+  const showIterationSummary = Boolean(task && task.currentIteration > 1 && iterationLog);
 
   useEffect(() => {
     if (!id || !task || task.currentIteration <= 1) return;
@@ -80,15 +83,39 @@ export default function PlanReview() {
   return (
     <div className="flex-1 overflow-auto">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-sm font-semibold text-rc-text">
-          {task && task.currentIteration > 1
-            ? `🔄 Plan Review — Iteration ${task.currentIteration} (retry)`
-            : "Pipeline Stages"}
-        </h2>
+        <div className="space-y-1">
+          <h2 className="text-sm font-semibold text-rc-text">Plan Review</h2>
+          {task && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-rc-text-secondary">
+              {task.campaignId && (
+                <span className="rounded-input bg-rc-card px-2 py-0.5 font-mono">
+                  {getCampaignDisplayName(task)} #{task.campaignSeq ?? "?"}
+                </span>
+              )}
+              {task.campaignId ? (
+                <span className="rounded-input border border-rc-border px-2 py-0.5 font-mono">
+                  Campaign iteration {campaignIteration}
+                </span>
+              ) : (
+                task.currentIteration > 1 && <span className="rounded-input border border-rc-border px-2 py-0.5 font-mono">Run iteration {task.currentIteration}</span>
+              )}
+              <span className="font-mono">Max {task.maxIterations} iterations</span>
+            </div>
+          )}
+        </div>
       </div>
       {error && <div className="text-rc-error text-sm mb-3">{error}</div>}
 
-      {task && task.currentIteration > 1 && iterationLog && (
+      {task?.researchInjection && (
+        <div className="mb-4 rounded-card border border-amber-300/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+          <div className="font-semibold">Research injected for this plan review</div>
+          <div className="mt-1 text-xs text-amber-100/90">
+            Campaign iteration {task.researchInjection.iteration}: {task.researchInjection.message}
+          </div>
+        </div>
+      )}
+
+      {showIterationSummary && (
         <div className="mb-4 glass-panel rounded-card">
           <button onClick={() => setIterLogOpen(!iterLogOpen)} className="w-full text-left px-3 py-2 text-xs text-rc-text-secondary hover:text-rc-text">
             {iterLogOpen ? "▾" : "▸"} Previous Iteration Summary

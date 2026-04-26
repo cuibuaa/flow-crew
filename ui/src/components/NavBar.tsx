@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { useTasks } from "./Layout";
+import { useRefreshTasks, useTasks } from "./Layout";
 import TaskSettingsPanel from "./TaskSettingsPanel";
 import NewTaskDialog from "./NewTaskDialog";
-import { createTask } from "../api";
+import { createTask, updateTask } from "../api";
+import type { CampaignTriggers } from "../types";
 
 export default function NavBar() {
   const nav = useNavigate();
   const location = useLocation();
   const tasks = useTasks();
+  const refreshTasks = useRefreshTasks();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
 
@@ -16,19 +18,16 @@ export default function NavBar() {
   const selectedId = match?.[1];
   const task = selectedId ? tasks.find(t => t.id === selectedId) : undefined;
 
-  const handleSaveSettings = async (vals: { timeoutMs: number; maxIterations: number; maxRetries: number; autoApproveRetries: boolean; campaignTriggers?: unknown }) => {
+  const handleSaveSettings = async (vals: { timeoutMs: number; maxIterations: number; maxRetries: number; autoApproveRetries: boolean; campaignTriggers?: CampaignTriggers }) => {
     if (!selectedId) return;
-    await fetch(`/api/tasks/${selectedId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(vals),
-    });
+    await updateTask(selectedId, vals);
+    refreshTasks();
   };
 
-  const handleNewTask = async (name: string, campaignId?: string) => {
+  const handleNewTask = async (name: string, campaignId?: string, campaignName?: string) => {
     setNewTaskOpen(false);
     try {
-      const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId });
+      const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
       nav(`/task/${id}/discuss`);
     } catch { /* ignore */ }
   };

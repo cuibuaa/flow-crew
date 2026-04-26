@@ -1,13 +1,9 @@
-import { defineConfig } from "vitest/config";
-import react from "@vitejs/plugin-react";
-
-export default defineConfig({
-  plugins: [react()],
+export default {
   test: {
     environment: "jsdom",
     globals: true,
     include: ["tests/ui/**/*.test.tsx"],
-    setupFiles: ["tests/ui/test-setup.ts"],
+    setupFiles: ["ui/tests/ui/test-setup.ts"],
     isolate: true,
     clearMocks: true,
     mockReset: true,
@@ -16,4 +12,4 @@ export default defineConfig({
     maxWorkers: 1,
     fileParallelism: false,
   },
-});
+};

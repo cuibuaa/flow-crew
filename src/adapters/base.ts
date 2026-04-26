@@ -57,7 +57,7 @@ export interface InteractiveSession {
 export function execWithTimeout(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string },
+  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv },
 ): Promise<RunResult> {
   const timeoutSec = Math.ceil(opts.timeout_ms / 1000);
   const start = Date.now();
@@ -70,6 +70,7 @@ export function execWithTimeout(
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
       detached: false,
+      env: { ...process.env, ...opts.env },
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (d: Buffer) => {
@@ -96,7 +97,7 @@ export function execWithTimeout(
 export function execWithStreaming(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void },
+  opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void; env?: NodeJS.ProcessEnv },
 ): Promise<RunResult> {
   const timeoutSec = Math.ceil(opts.timeout_ms / 1000);
   const start = Date.now();
@@ -106,6 +107,7 @@ export function execWithStreaming(
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
       detached: false,
+      env: { ...process.env, ...opts.env },
     });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (d: Buffer) => {

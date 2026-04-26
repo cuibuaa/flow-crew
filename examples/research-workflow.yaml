@@ -1,0 +1,38 @@
+name: research-workflow
+description: Research a technical topic, draft a concise brief, and review it for accuracy.
+defaults:
+  timeout_ms: 1800000
+  max_retries: 1
+  max_iterations: 2
+stages:
+  - id: gather_sources
+    role: researcher
+    prompt_template: >
+      Research the requested technical topic using primary sources where possible.
+      Record source URLs, key findings, conflicting evidence, and relevance to the
+      user's question. Do not fabricate metrics, citations, or repository details.
+
+  - id: write_brief
+    role: doc_writer
+    depends_on: [gather_sources]
+    prompt_template: >
+      Write a concise technical brief based on the research findings. Include an
+      overview, architecture or mechanism notes when relevant, key components, and
+      data flow or decision flow. Ground claims in the gathered sources.
+
+  - id: review_brief
+    role: doc_reviewer
+    depends_on: [write_brief]
+    is_gate: true
+    prompt_template: >
+      Review the brief for accuracy, source support, clarity, and missing caveats.
+      Verify that links and concrete claims are supported, then write a pass/fail
+      verdict with specific corrections if needed.
+
+  - id: revise_brief
+    role: doc_writer
+    depends_on: [review_brief]
+    retry_to: [review_brief]
+    prompt_template: >
+      Revise the brief according to the reviewer verdict. Keep claims source-backed
+      and remove unsupported or over-broad statements.

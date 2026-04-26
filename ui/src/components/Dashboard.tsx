@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { getCampaignDisplayName, getCampaignIteration } from "../types";
 import type { Task } from "../types";
 import Sparkline from "./Sparkline";
 import AlertsFeed from "./AlertsFeed";
 import TaskCard from "./TaskCard";
-import { renameTask, deleteTask, cancelTask, rerunTask } from "../api";
+import NewTaskDialog from "./NewTaskDialog";
+import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask } from "../api";
 import { useRefreshTasks } from "./Layout";
 
 function fmtDuration(ms: number): string {
@@ -51,6 +53,56 @@ function GatesSummary({ stages }: { stages: Task["stages"] }) {
   if (gates.length === 0) return <span className="text-rc-muted">—</span>;
   const passed = gates.filter(s => s.status === "complete").length;
   return <span className="font-mono">{passed}/{gates.length}</span>;
+}
+
+function CampaignStateSummary({ task }: { task: Task }) {
+  const hasCampaignContext = Boolean(task.campaignId);
+  const campaignIteration = getCampaignIteration(task);
+
+  if (!hasCampaignContext && !task.researchInjection && task.currentIteration <= 1) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-rc-text-secondary">
+      {task.campaignId && (
+        <span className="font-mono rounded-input bg-rc-card px-2 py-0.5">
+          {getCampaignDisplayName(task)} #{task.campaignSeq ?? "?"}
+        </span>
+      )}
+      {task.campaignId && (
+        <span className="rounded-input border border-rc-border px-2 py-0.5 font-mono">
+          Campaign iteration {campaignIteration}
+        </span>
+      )}
+      <span className="font-mono">Run iteration {task.currentIteration}/{task.maxIterations}</span>
+      {task.researchInjection && (
+        <span className="rounded-input border border-amber-300/40 bg-amber-400/10 px-2 py-0.5 text-amber-100">
+          Research injected
+        </span>
+      )}
+    </div>
+  );
+}
+
+function TaskIdentityCell({ task, forceEdit, onEditDone }: { task: Task; forceEdit?: boolean; onEditDone?: () => void }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2">
+        <EditableTaskName task={task} forceEdit={forceEdit} onEditDone={onEditDone} />
+        {task.researchInjection && (
+          <span className="rounded-input border border-amber-300/40 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-100">
+            Research injected
+          </span>
+        )}
+      </div>
+      {(task.campaignId || task.currentIteration > 1) && (
+        <div className="text-[10px] text-rc-muted">
+          {task.campaignId
+            ? `Campaign iteration ${getCampaignIteration(task)}`
+            : `Run iteration ${task.currentIteration}/${task.maxIterations}`}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function EditableTaskName({ task, forceEdit, onEditDone }: { task: Task; forceEdit?: boolean; onEditDone?: () => void }) {
@@ -104,9 +156,11 @@ function EditableTaskName({ task, forceEdit, onEditDone }: { task: Task; forceEd
 
 export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const nav = useNavigate();
+  const refresh = useRefreshTasks();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; task: Task } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -128,13 +182,20 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const doCancel = async () => { if (ctxMenu) { await cancelTask(ctxMenu.task.id); setCtxMenu(null); } };
   const doCreateCampaign = async () => {
     if (!ctxMenu) return;
-    const name = ctxMenu.task.name.toLowerCase().replace(/\s+/g, '-');
-    await fetch(`/api/tasks/${ctxMenu.task.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ campaignId: name, campaignSeq: 1 }),
-    }).catch(() => {});
+    const name = ctxMenu.task.name;
+    await updateTask(ctxMenu.task.id, { campaignName: name }).catch(() => {});
+    refresh();
     setCtxMenu(null);
+  };
+
+  const handleNewTask = async (name: string, campaignId?: string, campaignName?: string) => {
+    setNewTaskOpen(false);
+    try {
+      const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
+      nav(`/task/${id}/discuss`);
+    } catch {
+      // Ignore create failures here; navbar remains available.
+    }
   };
 
   const sorted = [...tasks].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
@@ -156,7 +217,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       <div className="flex flex-col items-center justify-center h-full text-rc-muted gap-4">
         <p>No tasks</p>
         <div className="flex gap-2">
-          <button onClick={() => nav("/task/new/discuss")} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
+          <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
           <button onClick={() => nav("/import")} className="btn-ghost px-4 py-2 text-sm border border-rc-border">Import</button>
         </div>
       </div>
@@ -175,7 +236,9 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           onDoubleClick={() => nav(navTarget(t))}
           onContextMenu={(e) => handleCtx(e, t)}
         >
-          <td className="px-3 py-2"><EditableTaskName task={t} forceEdit={editingId === t.id} onEditDone={() => setEditingId(null)} /></td>
+          <td className="px-3 py-2">
+            <TaskIdentityCell task={t} forceEdit={editingId === t.id} onEditDone={() => setEditingId(null)} />
+          </td>
           <td className="px-3 py-2 text-xs">
             <span>{phaseIcon[t.status] ?? ""} {t.status}</span>
           </td>
@@ -190,7 +253,13 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
         {expanded && (
           <tr>
             <td colSpan={7} className="px-6 py-3 bg-rc-code/50">
-              <div className="text-xs space-y-1">
+              <div className="text-xs space-y-2">
+                <CampaignStateSummary task={t} />
+                {t.researchInjection && (
+                  <div className="rounded-card border border-amber-300/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                    Research injected at campaign iteration {t.researchInjection.iteration}: {t.researchInjection.message}
+                  </div>
+                )}
                 <div className="font-bold text-rc-muted uppercase tracking-wider mb-1">Iteration History</div>
                 {t.iterationLog ? (
                   <pre className="text-rc-text-secondary whitespace-pre-wrap font-mono text-[11px] max-h-40 overflow-auto">{t.iterationLog}</pre>
@@ -220,7 +289,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           <div className="flex flex-col gap-4" data-testid="card-layout">
             {[...campaigns.entries()].map(([cid, cTasks]) => (
               <div key={`camp-${cid}`}>
-                <div className="text-xs font-semibold text-rc-accent mb-2">📊 Campaign: {cid}</div>
+                <div className="text-xs font-semibold text-rc-accent mb-2">📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}</div>
                 <div className="flex flex-wrap gap-4">
                   {cTasks.map(t => (
                     <div key={t.id} className="w-full sm:w-[calc(50%-0.5rem)] lg:w-[calc(33.333%-0.75rem)]">
@@ -258,7 +327,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
               <tbody key={`campaign-${cid}`}>
                 <tr className="bg-rc-card/50 border-b border-rc-border">
                   <td colSpan={3} className="px-3 py-1.5 text-xs font-semibold text-rc-accent">
-                    📊 Campaign: {cid}
+                    📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}
                   </td>
                   <td className="px-3 py-1.5">
                     <Sparkline values={cTasks.map(t => t.bestScore ?? 0).filter(Boolean)} />
@@ -278,7 +347,9 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
                         onDoubleClick={() => nav(navTarget(t))}
                         onContextMenu={(e) => handleCtx(e, t)}
                       >
-                        <td className="px-3 py-2 pl-6"><EditableTaskName task={t} forceEdit={editingId === t.id} onEditDone={() => setEditingId(null)} /></td>
+                        <td className="px-3 py-2 pl-6">
+                          <TaskIdentityCell task={t} forceEdit={editingId === t.id} onEditDone={() => setEditingId(null)} />
+                        </td>
                         <td className="px-3 py-2 text-xs">{phaseIcon[t.status] ?? ""} {t.status}</td>
                         <td className="px-3 py-2"><ProgressBar stages={t.stages} /></td>
                         <td className="px-3 py-2">{t.bestScore != null ? <Sparkline values={[t.bestScore]} /> : <span className="text-rc-muted">—</span>}</td>
@@ -289,7 +360,13 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
                       {expanded && (
                         <tr>
                           <td colSpan={7} className="px-6 py-3 bg-rc-code/50">
-                            <div className="text-xs space-y-1">
+                            <div className="text-xs space-y-2">
+                              <CampaignStateSummary task={t} />
+                              {t.researchInjection && (
+                                <div className="rounded-card border border-amber-300/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+                                  Research injected at campaign iteration {t.researchInjection.iteration}: {t.researchInjection.message}
+                                </div>
+                              )}
                               <div className="font-bold text-rc-muted uppercase tracking-wider mb-1">Iteration History</div>
                               {t.iterationLog ? (
                                 <pre className="text-rc-text-secondary whitespace-pre-wrap font-mono text-[11px] max-h-40 overflow-auto">{t.iterationLog}</pre>
@@ -333,6 +410,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           )}
         </div>
       )}
+      <NewTaskDialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} onSubmit={handleNewTask} />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { createTask, discussWsUrl, executeTask } from "../api";
+import { discussWsUrl, executeTask } from "../api";
 import { useTasks } from "./Layout";
 import Terminal, { type TerminalHandle } from "./Terminal";
 
@@ -9,29 +9,13 @@ export default function TaskDiscussion() {
   const nav = useNavigate();
   const tasks = useTasks();
   const task = tasks.find((t) => t.id === id);
-  const [taskId, setTaskId] = useState(id);
+  const taskId = id;
   const [generating, setGenerating] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [showMonitorLink, setShowMonitorLink] = useState(false);
   const termRef = useRef<TerminalHandle>(null);
-  const createdRef = useRef(false);
 
   const taskRunning = task && task.status !== 'pending';
-
-  // Bug 2: Auto-create task on mount when taskId === "new"
-  useEffect(() => {
-    if (taskId !== "new" || createdRef.current) return;
-    createdRef.current = true;
-    setCreating(true);
-    createTask({ name: "New Discussion", workflow: "default", discussion: [], plan: [] })
-      .then(({ id: newId }) => {
-        setTaskId(newId);
-        nav(`/task/${newId}/discuss`, { replace: true });
-      })
-      .catch(() => {})
-      .finally(() => setCreating(false));
-  }, [taskId, nav]);
 
   const handleReady = () => setConnected(true);
 
@@ -68,17 +52,15 @@ export default function TaskDiscussion() {
           />
         ) : (
           <div className="h-full flex items-center justify-center">
-            {creating ? (
-              <div className="flex items-center gap-3 text-rc-text-secondary">
-                <svg className="animate-spin h-5 w-5 text-rc-accent" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                <span className="text-sm">Creating task…</span>
-              </div>
-            ) : (
-              <span className="text-rc-muted text-sm">Initializing…</span>
-            )}
+            <div className="glass-panel rounded-card p-6 max-w-md text-center space-y-3">
+              <h2 className="text-sm font-semibold text-rc-text">Start a task from the campaign-aware flow</h2>
+              <p className="text-sm text-rc-text-secondary">
+                This direct route no longer auto-creates a standalone task because it bypasses campaign selection.
+              </p>
+              <button onClick={() => nav("/", { replace: true })} className="btn-accent px-4 py-2 text-sm">
+                Return Home
+              </button>
+            </div>
           </div>
         )}
       </div>

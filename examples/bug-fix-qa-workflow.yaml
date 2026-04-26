@@ -1,0 +1,32 @@
+name: bug-fix-qa-workflow
+description: Reproduce a reported bug, fix it, and use a QA gate to drive retries.
+defaults:
+  timeout_ms: 1800000
+  max_retries: 2
+  max_iterations: 3
+stages:
+  - id: investigate_bug
+    role: coder
+    prompt_template: >
+      Investigate the reported bug. Identify the likely root cause, note the files
+      involved, and create the smallest code change that addresses the problem.
+      Do not broaden scope beyond the reported behavior.
+
+  - id: qa_regression_gate
+    role: qa
+    depends_on: [investigate_bug]
+    is_gate: true
+    prompt_template: >
+      Verify that the bug is fixed and no nearby behavior regressed. Write targeted
+      regression tests under tests/, run the relevant checks, and write a pass/fail
+      verdict with exact failures. If this is a re-evaluation after a fix, write
+      additional tests targeting the previously failed areas and any new edge cases;
+      do not simply re-run the original tests.
+
+  - id: patch_regression
+    role: coder
+    depends_on: [qa_regression_gate]
+    retry_to: [qa_regression_gate]
+    prompt_template: >
+      Fix the issues reported by the QA gate. Keep the patch focused on the failing
+      behavior and avoid unrelated refactors.

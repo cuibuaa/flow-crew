@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { getCampaignDisplayName, getCampaignIteration } from "../types";
 import type { Task } from "../types";
 import { renameTask } from "../api";
 
@@ -87,6 +88,23 @@ export default function TaskCard({ task, onContextMenu, forceEdit, onEditDone }:
         {gates.length > 0 && <span>Gates: {gatesPassed}/{gates.length}</span>}
         <span>{fmtTime(task.elapsed_ms)} elapsed</span>
       </div>
+
+      {(task.campaignId || task.currentIteration > 1 || task.researchInjection) && (
+        <div className="flex items-center gap-2 text-[11px] text-rc-text-secondary mb-2">
+          {task.campaignId && (
+            <span className="font-mono rounded-input bg-rc-code px-2 py-0.5">
+              {getCampaignDisplayName(task)} #{task.campaignSeq ?? "?"}
+            </span>
+          )}
+          {task.campaignId && <span className="font-mono">Campaign iteration {getCampaignIteration(task)}</span>}
+          <span className="font-mono">Run iteration {task.currentIteration}/{task.maxIterations}</span>
+          {task.researchInjection && (
+            <span className="rounded-input border border-amber-300/40 bg-amber-400/10 px-2 py-0.5 text-amber-100">
+              Research injected
+            </span>
+          )}
+        </div>
+      )}
 
       {task.stages.length > 0 && (
         <div className="flex flex-wrap gap-1 text-[10px]" data-testid="mini-pipeline">

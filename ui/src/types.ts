@@ -46,10 +46,39 @@ export interface Task {
   dispatchedStages?: PlanStage[];
   currentIteration: number;
   maxIterations: number;
+  timeoutMs?: number;
+  maxRetries?: number;
   autoApproveRetries: boolean;
+  campaignTriggers?: CampaignTriggers;
   iterationLog: string | null;
   campaignId?: string;
+  campaignStorageKey?: string;
+  campaignName?: string;
   campaignSeq?: number;
+  campaignIteration?: number;
+  campaignAlert?: {
+    type: "regression" | "plateau" | "repeated_failure";
+    action: "inject_researcher";
+    message: string;
+    source: "campaign_health";
+    triggeredAt: string;
+    iteration: number;
+  };
+  researchInjection?: {
+    source: "campaign_health";
+    triggeredAt: string;
+    iteration: number;
+    alertType: "regression" | "plateau" | "repeated_failure";
+    message: string;
+  };
+}
+
+export interface CampaignTriggers {
+  enabled: boolean;
+  regressionAfter: number;
+  plateauAfter: number;
+  plateauThreshold: number;
+  repeatedFailureAfter: number;
 }
 
 export interface StageDetail extends Stage {
@@ -91,4 +120,25 @@ export interface CampaignEntry {
   gates: string;
   status: string;
   timestamp: string;
+}
+
+export type CampaignSelectionMode = "existing" | "new" | "standalone";
+
+export function cleanCampaignDisplayName(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^new:/i.test(trimmed)) {
+    const cleaned = trimmed.slice(4).trim();
+    return cleaned || undefined;
+  }
+  return trimmed;
+}
+
+export function getCampaignDisplayName(target: { campaignName?: string | null; campaignId?: string | null }): string {
+  return cleanCampaignDisplayName(target.campaignName) ?? cleanCampaignDisplayName(target.campaignId) ?? "Unnamed campaign";
+}
+
+export function getCampaignIteration(task: Pick<Task, "campaignIteration" | "currentIteration">): number {
+  return task.campaignIteration ?? task.currentIteration;
 }

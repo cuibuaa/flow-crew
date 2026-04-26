@@ -7,6 +7,13 @@ import { evaluateCondition } from './condition.js';
 import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus, readStageOutput } from './store.js';
 import type { StoreState, StageStatus } from './store.js';
 import { runStage } from './worker.js';
+import {
+  canonicalCampaignId,
+  collapseEntriesForHealth,
+  readCampaignEntries,
+  resolveCampaignStorageKey,
+} from './campaigns.js';
+import { recordRunEvent, recordStageOutcome } from './run-events.js';
 import pino from 'pino';
 
 const log = pino({ name: 'scheduler' });
@@ -359,12 +366,17 @@ export function appendIterationLog(
   }
 }
 
-/** Write campaign entry after run completes */
-function writeCampaignEntry(projectDir: string, state: StoreState): void {
-  if (!state.campaignId) return;
+/** Persist the latest scored campaign entry for the current run iteration. */
+export function writeCampaignEntry(projectDir: string, state: StoreState): void {
+  const campaignStorageKey = resolveCampaignStorageKey({
+    campaignId: state.campaignId,
+    campaignStorageKey: state.campaignStorageKey,
+    campaignName: state.campaignName,
+  });
+  if (!campaignStorageKey) return;
   const campaignsDir = join(projectDir, '.fc', 'campaigns');
   mkdirSync(campaignsDir, { recursive: true });
-  const filePath = join(campaignsDir, `${state.campaignId}.jsonl`);
+  const filePath = join(campaignsDir, `${campaignStorageKey}.jsonl`);
   const runPath = join(projectDir, '.fc', 'runs', state.runId);
   // Find scored verdict from gate stages (extended verdict format)
   const metric = findCampaignMetric(projectDir, state);
@@ -392,6 +404,10 @@ function writeCampaignEntry(projectDir: string, state: StoreState): void {
     gates: `${gatesPassed}/${gatesTotal}`,
     status: state.status,
     timestamp: new Date().toISOString(),
+    campaignId: canonicalCampaignId(state.campaignId ?? state.campaignName ?? campaignStorageKey)
+      ?? campaignStorageKey,
+    campaignStorageKey,
+    campaignName: state.campaignName,
   };
   appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
 }
@@ -447,24 +463,28 @@ export interface CampaignEntry {
 }
 
 /** Check campaign health from JSONL entries */
-export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { regressionAfter?: number; plateauAfter?: number; plateauThreshold?: number; repeatedFailureAfter?: number }): CampaignAlert | null {
-  if (entries.length < 2) return null;
+export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabled?: boolean; regressionAfter?: number; plateauAfter?: number; plateauThreshold?: number; repeatedFailureAfter?: number }): CampaignAlert | null {
+  if (triggers?.enabled === false) return null;
+  const scoped = collapseEntriesForHealth(entries);
+  if (scoped.length < 2) return null;
   const regAfter = triggers?.regressionAfter ?? 2;
   const platAfter = triggers?.plateauAfter ?? 3;
   const platThresh = triggers?.plateauThreshold ?? 5;
   const repAfter = triggers?.repeatedFailureAfter ?? 3;
+  const latestMetric = scoped.at(-1)?.metric;
+  const comparable = latestMetric ? scoped.filter((entry) => entry.metric === latestMetric) : scoped;
 
   // Consecutive declines
   let declines = 0;
-  for (let i = entries.length - 1; i > 0; i--) {
-    if (entries[i].score < entries[i - 1].score) declines++;
+  for (let i = comparable.length - 1; i > 0; i--) {
+    if (comparable[i].score < comparable[i - 1].score) declines++;
     else break;
   }
   if (declines >= regAfter) return { type: 'regression', action: 'inject_researcher', message: `${declines} consecutive score declines` };
 
   // Plateau (±threshold% for N+ entries)
-  if (entries.length >= platAfter) {
-    const recent = entries.slice(-platAfter);
+  if (comparable.length >= platAfter) {
+    const recent = comparable.slice(-platAfter);
     const avg = recent.reduce((s, e) => s + e.score, 0) / recent.length;
     if (!isFinite(avg)) {
       // All non-finite (Infinity/-Infinity/NaN): treat identical non-finite values as plateau
@@ -478,8 +498,8 @@ export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { regre
   }
 
   // Repeated same-gate failure
-  if (entries.length >= repAfter) {
-    const recent = entries.slice(-repAfter);
+  if (scoped.length >= repAfter) {
+    const recent = scoped.slice(-repAfter);
     if (recent.every(e => !e.pass) && recent.every(e => e.gate === recent[0].gate)) {
       return { type: 'repeated_failure', action: 'inject_researcher', message: `${repAfter} consecutive failures on gate ${recent[0].gate}` };
     }
@@ -585,7 +605,7 @@ export async function runWorkflow(
 ): Promise<StoreState> {
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
-  const maxIterations = workflow.defaults.max_iterations ?? 3;
+  let maxIterations = workflow.defaults.max_iterations ?? 3;
 
   let runId: string;
   let runDirPath: string;
@@ -597,6 +617,7 @@ export async function runWorkflow(
       mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
     }
     const state = readRunState(projectDir, runId);
+    maxIterations = state.maxIterations ?? maxIterations;
     for (const s of baseStages) {
       if (!state.stages[s.id]) state.stages[s.id] = { status: 'pending', retries: 0 };
     }
@@ -634,6 +655,17 @@ export async function runWorkflow(
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     let state = readRunState(projectDir, runId);
     state.currentIteration = iteration;
+    const campaignStorageKey = resolveCampaignStorageKey({
+      campaignId: state.campaignId,
+      campaignStorageKey: state.campaignStorageKey,
+      campaignName: state.campaignName,
+    });
+    if (campaignStorageKey) {
+      state.campaignStorageKey = campaignStorageKey;
+      state.campaignIteration = iteration;
+    } else {
+      state.campaignIteration = undefined;
+    }
     writeRunState(projectDir, runId, state);
 
     // Build sorted stages for this iteration: start from base stages
@@ -669,18 +701,44 @@ export async function runWorkflow(
     let iterationDispatchedIds: string[] = [];
 
     // Campaign health check: inject researcher if regression/plateau detected
-    if (state.campaignId && iteration > 1) {
-      const campaignPath = join(projectDir, '.fc', 'campaigns', `${state.campaignId}.jsonl`);
-      if (existsSync(campaignPath)) {
-        try {
-          const lines = readFileSync(campaignPath, 'utf-8').trim().split('\n').filter(Boolean);
-          const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-          const triggers = (state as any).campaignTriggers;
-          const alert = checkCampaignHealth(entries, triggers?.enabled === false ? undefined : triggers);
-          if (alert) {
-            log.info({ runId, alert: alert.type }, 'Campaign health alert — researcher will be injected via planner context');
-          }
-        } catch { /* ignore */ }
+    if (campaignStorageKey && iteration > 1) {
+      const entries = readCampaignEntries(projectDir, campaignStorageKey);
+      const triggers = state.campaignTriggers;
+      const alert = checkCampaignHealth(entries, triggers);
+      if (alert) {
+        const triggeredAt = new Date().toISOString();
+        state.campaignAlert = {
+          ...alert,
+          source: 'campaign_health',
+          triggeredAt,
+          iteration,
+        };
+        state.researchInjection = {
+          source: 'campaign_health',
+          triggeredAt,
+          iteration,
+          alertType: alert.type,
+          message: alert.message,
+        };
+        writeRunState(projectDir, runId, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'campaign_alert',
+          runId,
+          timestamp: triggeredAt,
+          iteration,
+          detail: `${alert.type}: ${alert.message}`,
+        });
+        recordRunEvent(projectDir, runId, {
+          type: 'research_injected',
+          runId,
+          timestamp: triggeredAt,
+          iteration,
+          detail: `${alert.type}: ${alert.message}`,
+        });
+        log.info({ runId, alert: alert.type }, 'Campaign health alert — researcher will be injected via planner context');
+      } else if (state.campaignAlert) {
+        state.campaignAlert = undefined;
+        writeRunState(projectDir, runId, state);
       }
     }
 
@@ -792,6 +850,14 @@ export async function runWorkflow(
 
     // Append iteration log
     appendIterationLog(projectDir, runId, iteration, state, iterationDispatchedIds);
+    writeCampaignEntry(projectDir, state);
+    recordRunEvent(projectDir, runId, {
+      type: 'iteration_completed',
+      runId,
+      timestamp: new Date().toISOString(),
+      iteration,
+      detail: `iteration ${iteration} completed`,
+    });
 
     // Check if last gate passed
     if (iterationDispatchedIds.length > 0 && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
@@ -799,6 +865,13 @@ export async function runWorkflow(
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
+      recordRunEvent(projectDir, runId, {
+        type: 'run_completed',
+        runId,
+        timestamp: state.completedAt,
+        iteration,
+        detail: state.status,
+      });
       log.info({ runId, iteration }, 'All gates passed, run complete');
       return state;
     }
@@ -813,6 +886,13 @@ export async function runWorkflow(
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
+      recordRunEvent(projectDir, runId, {
+        type: 'run_completed',
+        runId,
+        timestamp: state.completedAt,
+        iteration,
+        detail: state.status,
+      });
       return state;
     }
 
@@ -822,6 +902,13 @@ export async function runWorkflow(
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
+      recordRunEvent(projectDir, runId, {
+        type: 'run_completed',
+        runId,
+        timestamp: state.completedAt,
+        iteration,
+        detail: state.status,
+      });
       log.info({ runId, iteration }, 'Max iterations reached, run failed');
       return state;
     }
@@ -845,6 +932,13 @@ export async function runWorkflow(
   finalState.completedAt = new Date().toISOString();
   writeRunState(projectDir, runId, finalState);
   writeCampaignEntry(projectDir, finalState);
+  recordRunEvent(projectDir, runId, {
+    type: 'run_completed',
+    runId,
+    timestamp: finalState.completedAt,
+    iteration: finalState.currentIteration,
+    detail: finalState.status,
+  });
   return finalState;
 }
 
@@ -903,6 +997,7 @@ async function executeSingleStage(
   state = readRunState(projectDir, runId);
   state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
   writeRunState(projectDir, runId, state);
+  recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, state.stages[stage.id]);
 }
 
 async function executeIteration(
@@ -978,6 +1073,7 @@ async function executeIteration(
     }
 
     const toRun: StageConfig[] = [];
+    const stageEvents: Array<{ stageId: string; status: StageStatus }> = [];
     for (const stage of ready) {
       if (stage.condition) {
         const met = evaluateCondition(stage.condition, projectDir, runId);
@@ -986,6 +1082,7 @@ async function executeIteration(
           writeStageStatus(projectDir, runId, stage.id, skipped);
           state.stages[stage.id] = skipped;
           writeRunState(projectDir, runId, state);
+          recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, skipped);
           log.info({ stage: stage.id }, 'Skipped (condition not met)');
           continue;
         }
@@ -997,6 +1094,7 @@ async function executeIteration(
         writeStageStatus(projectDir, runId, stage.id, skipped);
         state.stages[stage.id] = skipped;
         writeRunState(projectDir, runId, state);
+        recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, skipped);
         continue;
       }
       toRun.push(stage);
@@ -1049,35 +1147,35 @@ async function executeIteration(
           resolvedPrompt += `\n\nRead ${runDirPath}/iteration_log.md for previous iteration results. Fix the issues identified there.`;
         }
         // Campaign context: prepend history of previous runs
-        if (state.campaignId) {
-          const campaignPath = join(projectDir, '.fc', 'campaigns', `${state.campaignId}.jsonl`);
-          if (existsSync(campaignPath)) {
-            try {
-              const lines = readFileSync(campaignPath, 'utf-8').trim().split('\n').filter(Boolean);
-              const entries: CampaignEntry[] = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-              if (entries.length > 0) {
-                const rows = entries.map(e => `| ${e.seq} | ${e.score} | ${e.metric} | ${e.gate} | ${e.pass ? 'pass' : 'fail'} |`).join('\n');
-                const best = entries.reduce((max, e) => e.score > max ? e.score : max, -Infinity);
-                let ctx = `=== CAMPAIGN: ${state.campaignId} ===\n| # | Score | Metric | Gate | Status |\n|---|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
-                // Include file paths to previous run summaries
-                const summaryPaths: string[] = [];
-                for (const e of entries) {
-                  const prevRunDir = join(projectDir, '.fc', 'runs', (e as any).runId);
-                  const iterLog = join(prevRunDir, 'iteration_log.md');
-                  if (existsSync(iterLog)) summaryPaths.push(iterLog);
-                }
-                if (summaryPaths.length > 0) {
-                  ctx += `\nPrevious run summaries:\n${summaryPaths.map(p => `- ${p}`).join('\n')}\n`;
-                }
-                const triggers = (state as any).campaignTriggers;
-                const alert = checkCampaignHealth(entries, triggers?.enabled === false ? undefined : triggers);
-                if (alert) {
-                  ctx += `\n⚠️ CAMPAIGN ALERT: ${alert.type} — ${alert.message}\nDO NOT retry approaches from failed runs. Propose a fundamentally different approach.\n`;
-                }
-                ctx += `=== END CAMPAIGN ===\n\n`;
-                resolvedPrompt = ctx + resolvedPrompt;
-              }
-            } catch { /* ignore */ }
+        const campaignStorageKey = resolveCampaignStorageKey({
+          campaignId: state.campaignId,
+          campaignStorageKey: state.campaignStorageKey,
+          campaignName: state.campaignName,
+        });
+        if (campaignStorageKey) {
+          const entries = readCampaignEntries(projectDir, campaignStorageKey);
+          if (entries.length > 0) {
+            const rows = collapseEntriesForHealth(entries)
+              .map(e => `| ${e.seq} | ${e.iteration ?? 1} | ${e.score} | ${e.metric} | ${e.gate} | ${e.pass ? 'pass' : 'fail'} |`)
+              .join('\n');
+            const best = entries.reduce((max, e) => e.score > max ? e.score : max, -Infinity);
+            let ctx = `=== CAMPAIGN: ${state.campaignName ?? state.campaignId} ===\n| # | Iteration | Score | Metric | Gate | Status |\n|---|-----------|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
+            const summaryPaths: string[] = [];
+            for (const e of entries) {
+              const prevRunDir = join(projectDir, '.fc', 'runs', e.runId);
+              const iterLog = join(prevRunDir, 'iteration_log.md');
+              if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
+            }
+            if (summaryPaths.length > 0) {
+              ctx += `\nPrevious run summaries:\n${summaryPaths.map(p => `- ${p}`).join('\n')}\n`;
+            }
+            const triggers = state.campaignTriggers;
+            const alert = checkCampaignHealth(entries, triggers);
+            if (alert) {
+              ctx += `\n⚠️ CAMPAIGN ALERT: ${alert.type} — ${alert.message}\nDO NOT retry approaches from failed runs. Propose a fundamentally different approach.\n`;
+            }
+            ctx += `=== END CAMPAIGN ===\n\n`;
+            resolvedPrompt = ctx + resolvedPrompt;
           }
         }
       }
@@ -1111,7 +1209,7 @@ async function executeIteration(
     let failed = false;
 
     for (const { stage, result, currentRetries } of results) {
-      const maxRetries = stage.max_retries ?? workflow.defaults.max_retries;
+      const maxRetries = state.maxRetries ?? stage.max_retries ?? workflow.defaults.max_retries;
 
       if (result.timedOut && currentRetries < maxRetries) {
         const nextRetry = currentRetries + 1;
@@ -1134,14 +1232,19 @@ async function executeIteration(
         log.error({ stage: stage.id }, 'Stage failed');
         failed = true;
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+        stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
         continue;
       }
 
       state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+      stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');
     }
 
     writeRunState(projectDir, runId, state);
+    for (const event of stageEvents) {
+      recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
+    }
 
     if (failed) {
       // Don't set run status to failed here — let the iteration loop handle it

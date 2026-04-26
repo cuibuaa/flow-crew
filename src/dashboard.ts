@@ -6,9 +6,18 @@ import { join, extname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { listRuns, readRunState, readStageOutput, readStageInput, createRun, writeRunState } from "./store.js";
 import type { StoreState } from "./store.js";
+import {
+  canonicalCampaignId,
+  listCampaigns,
+  nextCampaignSeq,
+  readCampaignEntries,
+  resolveCampaignSelection,
+  resolveCampaignStorageKey,
+} from "./campaigns.js";
 import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
 import type { StageConfig } from "./scheduler.js";
 import type { AgentConfig, Adapter } from "./adapters/base.js";
+import { readAttemptSummaryRefreshState } from "./run-events.js";
 import { z } from "zod";
 
 // --- Dynamic adapter loading ---
@@ -62,18 +71,14 @@ function loadStageRoles(projectDir: string, runId: string): Record<string, { rol
 const agentsDir = join(process.cwd(), 'config', 'agents');
 
 export function buildCampaignContext(projectDir: string, campaignId: string, currentRunId: string): string {
-  const campaignPath = join(projectDir, '.fc', 'campaigns', `${campaignId}.jsonl`);
   const runsDir = join(projectDir, '.fc', 'runs');
+  const targetCampaignStorageKey = resolveCampaignStorageKey({ campaignId }) ?? campaignId;
 
-  // Load JSONL entries
-  let entries: { seq?: number; runId?: string; score?: number; metric?: string; gate?: string; pass?: boolean; timestamp?: string }[] = [];
-  try {
-    const lines = readFileSync(campaignPath, 'utf-8').trim().split('\n').filter(Boolean);
-    entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  } catch { /* no JSONL */ }
+  const entries = readCampaignEntries(projectDir, targetCampaignStorageKey);
+  const campaignName = entries[0]?.campaignName ?? campaignId;
 
   // Find sibling runs
-  interface SiblingRun { runId: string; taskDescription?: string; startedAt?: string; briefPath: string }
+  interface SiblingRun { runId: string; taskDescription?: string; startedAt?: string; briefPath: string; currentIteration?: number; campaignSeq?: number }
   const siblings: SiblingRun[] = [];
   try {
     for (const dir of readdirSync(runsDir)) {
@@ -81,9 +86,21 @@ export function buildCampaignContext(projectDir: string, campaignId: string, cur
       const runJsonPath = join(runsDir, dir, 'run.json');
       try {
         const rState = JSON.parse(readFileSync(runJsonPath, 'utf-8'));
-        if (rState.campaignId === campaignId) {
+        const siblingStorageKey = resolveCampaignStorageKey({
+          campaignId: rState.campaignId,
+          campaignStorageKey: rState.campaignStorageKey,
+          campaignName: rState.campaignName,
+        });
+        if (siblingStorageKey === targetCampaignStorageKey) {
           const bp = join(runsDir, dir, 'task_brief.md');
-          siblings.push({ runId: dir, taskDescription: rState.taskDescription, startedAt: rState.startedAt, briefPath: bp });
+          siblings.push({
+            runId: dir,
+            taskDescription: rState.taskDescription,
+            startedAt: rState.startedAt,
+            briefPath: bp,
+            currentIteration: rState.currentIteration,
+            campaignSeq: rState.campaignSeq,
+          });
         }
       } catch { /* skip */ }
     }
@@ -91,7 +108,7 @@ export function buildCampaignContext(projectDir: string, campaignId: string, cur
 
   if (entries.length === 0 && siblings.length === 0) return '';
 
-  let ctx = '# Campaign Context\n\nThis task belongs to a campaign. Use the information below to answer questions about previous explorations — do NOT search the filesystem for this information.\n\n';
+  let ctx = `# Campaign Context\n\nCampaign: ${campaignName}\n\nThis task belongs to a campaign. Use the information below to answer questions about previous explorations — do NOT search the filesystem for this information.\n\n`;
 
   // Score history table
   if (entries.length > 0) {
@@ -111,7 +128,7 @@ export function buildCampaignContext(projectDir: string, campaignId: string, cur
     if (i < 3) {
       try {
         const brief = readFileSync(s.briefPath, 'utf-8');
-        ctx += `## Run ${s.runId.slice(0, 8)} — Full Brief\n\n${brief}\n\n`;
+        ctx += `## Run ${s.runId.slice(0, 8)} — Seq ${s.campaignSeq ?? '?'} / Iteration ${s.currentIteration ?? 1}\n\n${brief}\n\n`;
       } catch {
         ctx += `- Run ${s.runId.slice(0, 8)}: ${s.taskDescription ?? 'no description'}\n`;
       }
@@ -121,6 +138,21 @@ export function buildCampaignContext(projectDir: string, campaignId: string, cur
   }
 
   return ctx;
+}
+
+export function buildCampaignContextInjection(campaignContext: string): string {
+  return [
+    'System-provided campaign context for this discussion session.',
+    'Use this background context when answering campaign questions. Do not generate a plan unless the user explicitly asks for plan generation.',
+    '',
+    campaignContext.trim(),
+  ].filter(Boolean).join('\n\n');
+}
+
+export function injectInitialTuiMessage(session: import('./adapters/base.js').InteractiveSession, message: string): void {
+  if (!message.trim()) return;
+  session.write(`\x1b[200~${message}\x1b[201~`);
+  session.write('\r');
 }
 
 function readBestScore(projectDir: string, runId: string): { bestScore?: number; metricName?: string } {
@@ -185,15 +217,42 @@ interface TaskShape {
   dispatchedStages?: unknown[];
   currentIteration: number;
   maxIterations: number;
+  maxRetries: number;
   autoApproveRetries: boolean;
+  timeoutMs?: number;
+  campaignTriggers?: StoreState['campaignTriggers'];
   iterationLog: string | null;
   campaignId?: string;
+  campaignStorageKey?: string;
+  campaignName?: string;
   campaignSeq?: number;
+  campaignIteration?: number;
   failureReason?: string;
   completedAt?: string;
+  campaignAlert?: StoreState['campaignAlert'];
+  researchInjection?: StoreState['researchInjection'];
+  attemptSummaryRefresh?: ReturnType<typeof readAttemptSummaryRefreshState>;
+}
+
+function normalizeCampaignTriggers(value: unknown): StoreState['campaignTriggers'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const triggers: StoreState['campaignTriggers'] = {};
+  if (typeof input.enabled === 'boolean') triggers.enabled = input.enabled;
+  for (const key of ['regressionAfter', 'plateauAfter', 'plateauThreshold', 'repeatedFailureAfter'] as const) {
+    if (input[key] === undefined) continue;
+    const parsed = Number(input[key]);
+    if (Number.isFinite(parsed) && parsed >= 0) triggers[key] = parsed;
+  }
+  return triggers;
 }
 
 function stateToTask(state: StoreState, projectDir: string): TaskShape {
+  const campaign = resolveCampaignSelection(projectDir, {
+    campaignId: state.campaignId,
+    campaignStorageKey: state.campaignStorageKey,
+    campaignName: state.campaignName,
+  });
   const roles = loadStageRoles(projectDir, state.runId);
   const dsArr = Array.isArray(state.dispatchedStages) ? (state.dispatchedStages as { id?: string; is_gate?: boolean }[]).filter(Boolean) : [];
   const dispatchedIds = new Set(
@@ -233,12 +292,21 @@ function stateToTask(state: StoreState, projectDir: string): TaskShape {
     plan: state.plan ?? [],
     currentIteration: state.currentIteration ?? 1,
     maxIterations: state.maxIterations ?? 3,
+    maxRetries: state.maxRetries ?? 1,
     autoApproveRetries: state.autoApproveRetries ?? true,
+    timeoutMs: state.timeoutMs,
+    campaignTriggers: state.campaignTriggers,
     iterationLog: null,
-    campaignId: state.campaignId,
+    campaignId: campaign?.id,
+    campaignStorageKey: campaign?.storageKey,
+    campaignName: campaign?.name,
     campaignSeq: state.campaignSeq,
+    campaignIteration: state.campaignIteration ?? state.currentIteration,
     failureReason: state.failureReason,
     completedAt: state.completedAt,
+    campaignAlert: state.campaignAlert,
+    researchInjection: state.researchInjection,
+    attemptSummaryRefresh: readAttemptSummaryRefreshState(projectDir, state.runId),
   };
   if (state.dispatchedStages) task.dispatchedStages = state.dispatchedStages;
   const logPath = join(projectDir, '.fc', 'runs', state.runId, 'iteration_log.md');
@@ -250,7 +318,14 @@ function isSafeId(id: string): boolean {
   return !id.includes('..') && !id.includes('/') && !id.includes('\\');
 }
 
-export async function startDashboard(projectDir: string, port = 3000) {
+interface DashboardOptions {
+  adapter?: Adapter;
+  agentConfig?: AgentConfig;
+  skillContent?: string;
+  onPlanPollingStart?: (taskId: string) => void;
+}
+
+export async function startDashboard(projectDir: string, port = 3000, options: DashboardOptions = {}) {
   // Migration: rename .omx to .fc if needed
   const oldDir = join(projectDir, '.omx');
   const newDir = join(projectDir, '.fc');
@@ -372,9 +447,9 @@ export async function startDashboard(projectDir: string, port = 3000) {
   });
 
   // 2. POST /api/tasks
-  app.post<{ Body: { name: string; workflow: string; discussion?: unknown[]; plan?: unknown[]; planFile?: string; campaignId?: string; campaignSeq?: number } }>("/api/tasks", async (req, reply) => {
+  app.post<{ Body: { name: string; workflow: string; discussion?: unknown[]; plan?: unknown[]; planFile?: string; campaignId?: string; campaignName?: string; campaignSeq?: number } }>("/api/tasks", async (req, reply) => {
     if (!req.body || typeof req.body !== 'object') return reply.code(400).send({ error: 'missing body' });
-    const { name, workflow, discussion, plan, planFile, campaignId, campaignSeq } = req.body;
+    const { name, workflow, discussion, plan, planFile, campaignId, campaignName } = req.body;
     const safeName = typeof name === 'string' ? name : (name != null ? String(name) : undefined);
     const yamlName = typeof name === 'string' ? name : String(name ?? 'untitled');
     const minimalYaml = stringifyYaml({ name: yamlName, stages: [] });
@@ -385,8 +460,14 @@ export async function startDashboard(projectDir: string, port = 3000) {
     state.autoApproveRetries = true;
     if (discussion) state.discussion = discussion;
     if (plan) state.plan = plan;
-    if (campaignId) state.campaignId = campaignId;
-    if (campaignSeq != null) state.campaignSeq = campaignSeq;
+    const campaign = resolveCampaignSelection(projectDir, { campaignId, campaignName });
+    if (campaign) {
+      state.campaignId = campaign.id;
+      state.campaignStorageKey = campaign.storageKey;
+      state.campaignName = campaign.name;
+      state.campaignSeq = nextCampaignSeq(projectDir, campaign.storageKey);
+      state.campaignIteration = 1;
+    }
     writeRunState(projectDir, runId, state);
     if (planFile) {
       const runPath = join(projectDir, '.fc', 'runs', runId);
@@ -430,7 +511,7 @@ export async function startDashboard(projectDir: string, port = 3000) {
   });
 
   // PATCH /api/tasks/:id — update task settings
-  app.patch<{ Params: { id: string }; Body: { name?: string; timeoutMs?: number; maxIterations?: number; maxRetries?: number; autoApproveRetries?: boolean; campaignTriggers?: unknown; campaignId?: string; campaignSeq?: number } }>("/api/tasks/:id", async (req, reply) => {
+  app.patch<{ Params: { id: string }; Body: { name?: string; timeoutMs?: number; maxIterations?: number; maxRetries?: number; autoApproveRetries?: boolean; campaignTriggers?: unknown; campaignId?: string; campaignName?: string; campaignSeq?: number } }>("/api/tasks/:id", async (req, reply) => {
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
@@ -449,12 +530,28 @@ export async function startDashboard(projectDir: string, port = 3000) {
     }
     if (body.maxRetries !== undefined) {
       const r = Number(body.maxRetries);
-      if (isFinite(r) && r >= 0) (state as any).maxRetries = r;
+      if (isFinite(r) && r >= 0) state.maxRetries = r;
     }
     if (body.autoApproveRetries !== undefined) state.autoApproveRetries = !!body.autoApproveRetries;
-    if (body.campaignTriggers !== undefined) (state as any).campaignTriggers = body.campaignTriggers;
-    if (body.campaignId !== undefined) state.campaignId = body.campaignId;
-    if (body.campaignSeq !== undefined) state.campaignSeq = body.campaignSeq;
+    if (body.campaignTriggers !== undefined) state.campaignTriggers = normalizeCampaignTriggers(body.campaignTriggers);
+    if (body.campaignId !== undefined || body.campaignName !== undefined) {
+      const campaign = resolveCampaignSelection(projectDir, { campaignId: body.campaignId, campaignName: body.campaignName });
+      if (campaign) {
+        state.campaignId = campaign.id;
+        state.campaignStorageKey = campaign.storageKey;
+        state.campaignName = campaign.name;
+        state.campaignSeq = typeof state.campaignSeq === 'number' ? state.campaignSeq : nextCampaignSeq(projectDir, campaign.storageKey);
+        state.campaignIteration = state.currentIteration ?? state.campaignIteration ?? 1;
+      } else {
+        state.campaignId = undefined;
+        state.campaignStorageKey = undefined;
+        state.campaignName = undefined;
+        state.campaignSeq = undefined;
+        state.campaignIteration = undefined;
+      }
+    } else if (body.campaignSeq !== undefined) {
+      state.campaignSeq = body.campaignSeq;
+    }
     writeRunState(projectDir, req.params.id, state);
     return { ok: true };
   });
@@ -612,7 +709,10 @@ export async function startDashboard(projectDir: string, port = 3000) {
 
     // Reset iteration state on rerun
     state.currentIteration = 1;
+    state.campaignIteration = state.campaignId || state.campaignStorageKey ? 1 : undefined;
     state.failureReason = undefined;
+    state.campaignAlert = undefined;
+    state.researchInjection = undefined;
 
     // Issue 61: clean up orphaned dispatched stages
     // First, remove any stages listed in dispatchedStages (these were dynamically added)
@@ -734,6 +834,8 @@ export async function startDashboard(projectDir: string, port = 3000) {
     state.status = 'running';
     state.completedAt = undefined;
     state.failureReason = undefined;
+    state.campaignAlert = undefined;
+    state.researchInjection = undefined;
     writeRunState(projectDir, id, state);
 
     // Resume execution
@@ -778,6 +880,8 @@ export async function startDashboard(projectDir: string, port = 3000) {
     state.status = 'running';
     state.completedAt = undefined;
     state.failureReason = undefined;
+    state.campaignAlert = undefined;
+    state.researchInjection = undefined;
     writeRunState(projectDir, id, state);
 
     // Resume execution
@@ -878,30 +982,60 @@ export async function startDashboard(projectDir: string, port = 3000) {
     },
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/api/tasks/:id/events",
+    async (req, reply) => {
+      const runPath = join(projectDir, '.fc', 'runs', req.params.id, 'run.json');
+      if (!existsSync(runPath)) return reply.code(404).send({ error: 'not found' });
+
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+
+      let lastPayload = '';
+      const send = () => {
+        try {
+          const payload = JSON.stringify(stateToTask(readRunState(projectDir, req.params.id), projectDir));
+          if (payload === lastPayload) return;
+          lastPayload = payload;
+          reply.raw.write(`data: ${payload}\n\n`);
+        } catch {
+          // Task may disappear between polls.
+        }
+      };
+
+      send();
+      const interval = setInterval(send, 1000);
+
+      req.raw.on('close', () => {
+        clearInterval(interval);
+        reply.raw.end();
+      });
+    },
+  );
+
   // ===================== Campaign endpoints =====================
 
   // GET /api/campaigns
   app.get("/api/campaigns", async () => {
-    const campaignsDir = join(projectDir, '.fc', 'campaigns');
-    try {
-      const files = readdirSync(campaignsDir).filter(f => f.endsWith('.jsonl'));
-      return files.map(f => {
-        const id = f.replace('.jsonl', '');
-        const lines = readFileSync(join(campaignsDir, f), 'utf-8').trim().split('\n').filter(Boolean);
-        const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-        const best = entries.reduce((max: number | null, e: { score?: number }) => (e.score != null && (max === null || e.score > max)) ? e.score : max, null);
-        return { id, name: id, runCount: entries.length, bestScore: best, latestRun: entries[entries.length - 1]?.runId };
-      });
-    } catch { return []; }
+    return listCampaigns(projectDir).map(({ id, name, runCount, bestScore, latestRun }) => ({
+      id,
+      name,
+      runCount,
+      bestScore,
+      latestRun,
+    }));
   });
 
   // GET /api/campaigns/:id
   app.get<{ Params: { id: string } }>("/api/campaigns/:id", async (req, reply) => {
     if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
-    const filePath = join(projectDir, '.fc', 'campaigns', `${req.params.id}.jsonl`);
-    if (!existsSync(filePath)) return reply.code(404).send({ error: 'not found' });
-    const lines = readFileSync(filePath, 'utf-8').trim().split('\n').filter(Boolean);
-    return lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const entries = readCampaignEntries(projectDir, req.params.id);
+    if (entries.length === 0) return reply.code(404).send({ error: 'not found' });
+    return entries;
   });
 
   // ===================== Agent endpoints =====================
@@ -945,25 +1079,33 @@ export async function startDashboard(projectDir: string, port = 3000) {
 
   async function ensureDiscussSetup(): Promise<{ adapter: Adapter; agentConfig: AgentConfig; skillContent: string }> {
     if (!cachedAdapter) {
-      const defaultsPath = join(process.cwd(), 'config', 'defaults.yaml');
-      const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown> : {};
-      const adapterName = (defaults.adapter as string) || 'codex';
-      const adapterMap: Record<string, string> = { codex: './adapters/codex.js', claude: './adapters/claude.js' };
-      const mod = await import(adapterMap[adapterName] || adapterMap.codex);
-      cachedAdapter = mod.createAdapter();
+      if (options.adapter) {
+        cachedAdapter = options.adapter;
+      } else {
+        const defaultsPath = join(process.cwd(), 'config', 'defaults.yaml');
+        const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown> : {};
+        const adapterName = (defaults.adapter as string) || 'codex';
+        const adapterMap: Record<string, string> = { codex: './adapters/codex.js', claude: './adapters/claude.js' };
+        const mod = await import(adapterMap[adapterName] || adapterMap.codex);
+        cachedAdapter = mod.createAdapter();
+      }
     }
     if (!cachedAgentConfig) {
-      const agentPath = join(process.cwd(), 'config', 'agents', 'discussion.yaml');
-      let parsed: any;
-      try { parsed = parseYaml(readFileSync(agentPath, 'utf-8')); } catch { parsed = null; }
-      if (!parsed) {
-        const fallback = join(process.cwd(), 'config', 'agents', 'planner.yaml');
-        parsed = parseYaml(readFileSync(fallback, 'utf-8'));
+      if (options.agentConfig) {
+        cachedAgentConfig = options.agentConfig;
+      } else {
+        const agentPath = join(process.cwd(), 'config', 'agents', 'discussion.yaml');
+        let parsed: any;
+        try { parsed = parseYaml(readFileSync(agentPath, 'utf-8')); } catch { parsed = null; }
+        if (!parsed) {
+          const fallback = join(process.cwd(), 'config', 'agents', 'planner.yaml');
+          parsed = parseYaml(readFileSync(fallback, 'utf-8'));
+        }
+        cachedAgentConfig = parseAgentConfig(parsed);
       }
-      cachedAgentConfig = parseAgentConfig(parsed);
     }
     if (!cachedSkillContent) {
-      cachedSkillContent = readFileSync(join(process.cwd(), 'config', 'skills', 'deep-interview.md'), 'utf-8');
+      cachedSkillContent = options.skillContent ?? readFileSync(join(process.cwd(), 'config', 'skills', 'deep-interview.md'), 'utf-8');
     }
     return { adapter: cachedAdapter!, agentConfig: cachedAgentConfig!, skillContent: cachedSkillContent! };
   }
@@ -1038,21 +1180,22 @@ export async function startDashboard(projectDir: string, port = 3000) {
       const { adapter, agentConfig } = await ensureDiscussSetup();
       let discussAgent = agentConfig;
       const discussAgentPath = join(process.cwd(), 'config', 'agents', 'discussion.yaml');
-      if (existsSync(discussAgentPath)) {
+      if (!options.agentConfig && existsSync(discussAgentPath)) {
         try {
           const parsed = parseYaml(readFileSync(discussAgentPath, 'utf-8'));
           discussAgent = parseAgentConfig(parsed);
         } catch { /* fall back to planner */ }
       }
-      // Inject campaign context if applicable
+      let initialCampaignMessage = '';
       try {
         const runState = readRunState(projectDir, taskId);
         if (runState.campaignId) {
           const campCtx = buildCampaignContext(projectDir, runState.campaignId, taskId);
-          if (campCtx) discussAgent = { ...discussAgent, prompt: discussAgent.prompt + '\n\n' + campCtx };
+          if (campCtx) initialCampaignMessage = buildCampaignContextInjection(campCtx);
         }
       } catch { /* no run state yet */ }
       const session = await adapter.spawnInteractive(discussAgent, { workDir: projectDir, sessionDir, cols, rows });
+      injectInitialTuiMessage(session, initialCampaignMessage);
       ptyEntry = { session, outputBuffer: [...oldBuffer], alive: true, planPolling: false };
       ptySessions.set(taskId, ptyEntry);
 
@@ -1108,6 +1251,7 @@ export async function startDashboard(projectDir: string, port = 3000) {
   function startPlanPolling(ptyEntry: PtySession, taskId: string, runDir: string, socket: { send: (data: Buffer | Uint8Array) => void }) {
     if (ptyEntry.planPolling) return;
     ptyEntry.planPolling = true;
+    options.onPlanPollingStart?.(taskId);
     mkdirSync(runDir, { recursive: true });
     const cmd = `Summarize our discussion as a task brief. Write it to ${runDir}/task_brief.md. Include: task summary, requirements, scope, constraints, and acceptance criteria.`;
     ptyEntry.session.write(cmd);
