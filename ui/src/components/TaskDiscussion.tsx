@@ -13,26 +13,33 @@ export default function TaskDiscussion() {
   const [generating, setGenerating] = useState(false);
   const [connected, setConnected] = useState(false);
   const [showMonitorLink, setShowMonitorLink] = useState(false);
+  const [briefGuidance, setBriefGuidance] = useState<string | null>(null);
   const termRef = useRef<TerminalHandle>(null);
 
   const taskRunning = task && task.status !== 'pending';
 
   const handleReady = () => setConnected(true);
 
-  // Bug 3: Navigate to monitor instead of plan
   const handlePlanReady = () => {
     setGenerating(false);
+    setBriefGuidance(null);
     if (taskId && taskId !== "new") {
       executeTask(taskId).catch(() => {});
     }
     nav(`/task/${taskId}/monitor`);
   };
 
-  // Bug 4: Keep terminal alive during generate plan — just send the command
+  const handleBriefNotReady = (message?: string) => {
+    setGenerating(false);
+    setShowMonitorLink(false);
+    setBriefGuidance(message ?? "Confirm the final task brief in Discussion before generating a plan.");
+  };
+
   const handleGeneratePlan = () => {
     if (!termRef.current) return;
     setGenerating(true);
     setShowMonitorLink(false);
+    setBriefGuidance(null);
     setTimeout(() => setShowMonitorLink(true), 15000);
     termRef.current.sendJson({ type: "generate_plan" });
   };
@@ -48,6 +55,7 @@ export default function TaskDiscussion() {
             interactive
             onReady={handleReady}
             onPlanReady={handlePlanReady}
+            onBriefNotReady={handleBriefNotReady}
             className="h-full w-full rounded-card overflow-hidden bg-rc-code border border-rc-border shadow-glow"
           />
         ) : (
@@ -75,6 +83,11 @@ export default function TaskDiscussion() {
         )}
         {generating && (
           <span className="text-sm text-rc-text-secondary animate-pulse">Writing task_brief.md…</span>
+        )}
+        {!generating && briefGuidance && (
+          <span className="max-w-xl text-sm text-amber-100">
+            {briefGuidance}
+          </span>
         )}
         {generating && showMonitorLink && (
           <button onClick={() => nav(`/task/${taskId}/monitor`)} className="text-sm text-rc-accent hover:underline">

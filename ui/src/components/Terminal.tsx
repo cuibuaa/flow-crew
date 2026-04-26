@@ -15,6 +15,7 @@ interface TerminalProps {
   interactive?: boolean;
   onReady?: () => void;
   onPlanReady?: () => void;
+  onBriefNotReady?: (message?: string) => void;
 }
 
 function sendBinary(ws: WebSocket, tag: number, data: string) {
@@ -25,7 +26,7 @@ function sendBinary(ws: WebSocket, tag: number, data: string) {
   ws.send(payload);
 }
 
-const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ wsUrl, staticContent, className, interactive, onReady, onPlanReady }, ref) => {
+const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ wsUrl, staticContent, className, interactive, onReady, onPlanReady, onBriefNotReady }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -89,6 +90,12 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ wsUrl, staticConte
             } else if (parsed.type === "plan_ready") {
               term.write("\r\n\x1b[32m[task_brief.md written — moving to plan review]\x1b[0m\r\n");
               onPlanReady?.();
+            } else if (parsed.type === "brief_not_ready") {
+              const message = typeof parsed.message === "string" && parsed.message.trim()
+                ? parsed.message
+                : "No confirmed task brief was produced. Clarify the scope in Discussion, confirm it, then generate the plan again.";
+              term.write(`\r\n\x1b[33m[brief not ready: ${message}]\x1b[0m\r\n`);
+              onBriefNotReady?.(message);
             } else if (parsed.type === "error") {
               term.write(`\r\n\x1b[31m[error: ${parsed.message}]\x1b[0m\r\n`);
             }

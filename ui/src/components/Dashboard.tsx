@@ -6,8 +6,13 @@ import Sparkline from "./Sparkline";
 import AlertsFeed from "./AlertsFeed";
 import TaskCard from "./TaskCard";
 import NewTaskDialog from "./NewTaskDialog";
-import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask } from "../api";
-import { useRefreshTasks } from "./Layout";
+import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask, fetchCampaigns, fetchCampaign } from "../api";
+import { useRefreshTasks, useRemoveTask } from "./Layout";
+
+type CampaignScoreData = {
+  bestScore: number | null;
+  values: number[];
+};
 
 function fmtDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -24,6 +29,16 @@ function navTarget(task: Task) {
     case "awaiting_approval": return `/task/${task.id}/plan`;
     default: return `/task/${task.id}/monitor`;
   }
+}
+
+function waitForMenuDismissPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => window.setTimeout(resolve, 0));
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
 }
 
 const phaseIcon: Record<string, string> = {
@@ -157,10 +172,12 @@ function EditableTaskName({ task, forceEdit, onEditDone }: { task: Task; forceEd
 export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const nav = useNavigate();
   const refresh = useRefreshTasks();
+  const removeTask = useRemoveTask();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; task: Task } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [campaignScores, setCampaignScores] = useState<Record<string, CampaignScoreData>>({});
   const ctxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -176,16 +193,102 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     setCtxMenu({ x: e.clientX, y: e.clientY, task });
   };
 
+  useEffect(() => {
+    const campaignIds = Array.from(new Set(tasks.flatMap((task) => (
+      [task.campaignId, task.campaignStorageKey].filter((id): id is string => Boolean(id))
+    ))));
+    if (campaignIds.length === 0) {
+      setCampaignScores({});
+      return;
+    }
+
+    let cancelled = false;
+    Promise.all([
+      fetchCampaigns().catch(() => []),
+      Promise.all(campaignIds.map(async (id) => {
+        const entries = await fetchCampaign(id).catch(() => []);
+        return [id, entries.map((entry) => entry.score).filter((score) => Number.isFinite(score))] as const;
+      })),
+    ]).then(([summaries, histories]) => {
+      if (cancelled) return;
+      const next: Record<string, CampaignScoreData> = {};
+      for (const summary of summaries) {
+        next[summary.id] = { bestScore: summary.bestScore, values: [] };
+      }
+      for (const [id, values] of histories) {
+        const historyBest = values.length > 0 ? Math.max(...values) : null;
+        next[id] = {
+          bestScore: next[id]?.bestScore ?? historyBest,
+          values,
+        };
+      }
+      setCampaignScores(next);
+    });
+
+    return () => { cancelled = true; };
+  }, [tasks]);
+
+  const getCampaignScoreData = (campaignId: string, campaignTasks: Task[]): CampaignScoreData => {
+    const keys = Array.from(new Set([
+      campaignId,
+      ...campaignTasks.flatMap((task) => [task.campaignStorageKey, task.campaignId]),
+    ].filter((id): id is string => Boolean(id))));
+    let fallback: CampaignScoreData | null = null;
+    for (const key of keys) {
+      const scoreData = campaignScores[key];
+      if (!scoreData) continue;
+      if (scoreData.values.length > 0) return scoreData;
+      fallback = fallback ?? scoreData;
+    }
+    return fallback ?? { bestScore: null, values: [] };
+  };
+
   const doRename = () => { if (ctxMenu) { setEditingId(ctxMenu.task.id); setCtxMenu(null); } };
-  const doDelete = async () => { if (ctxMenu) { await deleteTask(ctxMenu.task.id); setCtxMenu(null); } };
-  const doRerun = async () => { if (ctxMenu) { const res = await rerunTask(ctxMenu.task.id); setCtxMenu(null); nav(res.route === 'monitor' ? `/task/${ctxMenu.task.id}/monitor` : `/task/${ctxMenu.task.id}/discuss`); } };
-  const doCancel = async () => { if (ctxMenu) { await cancelTask(ctxMenu.task.id); setCtxMenu(null); } };
+  const doDelete = async () => {
+    if (!ctxMenu) return;
+    const task = ctxMenu.task;
+    setCtxMenu(null);
+    await waitForMenuDismissPaint();
+    if (!confirm(`Delete task "${task.name}"?`)) return;
+    removeTask(task.id);
+    try {
+      await deleteTask(task.id);
+      void refresh();
+    } catch (err) {
+      alert(`Could not delete "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+      void refresh();
+    }
+  };
+  const doRerun = async () => {
+    if (!ctxMenu) return;
+    const task = ctxMenu.task;
+    setCtxMenu(null);
+    try {
+      const res = await rerunTask(task.id);
+      refresh();
+      nav(res.route === 'monitor' ? `/task/${task.id}/monitor` : `/task/${task.id}/discuss`);
+    } catch (err) {
+      alert(`Could not rerun "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const doCancel = async () => {
+    if (!ctxMenu) return;
+    const task = ctxMenu.task;
+    setCtxMenu(null);
+    try {
+      await cancelTask(task.id);
+      refresh();
+    } catch (err) {
+      alert(`Could not cancel "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
   const doCreateCampaign = async () => {
     if (!ctxMenu) return;
     const name = ctxMenu.task.name;
-    await updateTask(ctxMenu.task.id, { campaignName: name }).catch(() => {});
-    refresh();
+    const taskId = ctxMenu.task.id;
     setCtxMenu(null);
+    await updateTask(taskId, { campaignName: name }).catch(() => {});
+    refresh();
   };
 
   const handleNewTask = async (name: string, campaignId?: string, campaignName?: string) => {
@@ -326,17 +429,19 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
               </tr>
             </thead>
             {/* Campaign groups */}
-            {[...campaigns.entries()].map(([cid, cTasks]) => (
+            {[...campaigns.entries()].map(([cid, cTasks]) => {
+              const scoreData = getCampaignScoreData(cid, cTasks);
+              return (
               <tbody key={`campaign-${cid}`}>
                 <tr className="bg-rc-card/50 border-b border-rc-border">
                   <td colSpan={3} className="px-3 py-1.5 text-xs font-semibold text-rc-accent">
                     📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}
                   </td>
                   <td className="px-3 py-1.5">
-                    <Sparkline values={cTasks.map(t => t.bestScore ?? 0).filter(Boolean)} />
+                    {scoreData.values.length > 0 ? <Sparkline values={scoreData.values} /> : <span className="text-rc-muted">—</span>}
                   </td>
                   <td className="px-3 py-1.5 text-xs font-mono text-rc-text">
-                    {Math.max(...cTasks.map(t => t.bestScore ?? 0)).toFixed(2)}
+                    {scoreData.bestScore != null ? scoreData.bestScore.toFixed(2) : <span className="text-rc-muted">—</span>}
                   </td>
                   <td colSpan={2} className="px-3 py-1.5 text-xs text-rc-muted">{cTasks.length} runs</td>
                 </tr>
@@ -383,7 +488,8 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
                   );
                 })}
               </tbody>
-            ))}
+              );
+            })}
             {/* Ungrouped tasks */}
             {ungrouped.map(renderRow)}
           </table>

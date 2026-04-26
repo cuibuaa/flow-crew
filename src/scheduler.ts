@@ -79,6 +79,9 @@ export const WorkflowConfigSchema = z.object({
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
+type CampaignMetric = { score: number; metric: string; gate: string; pass: boolean; threshold?: number };
+type GateMetricLookup = { found: boolean; metric: CampaignMetric | null };
+
 function topoSort(stages: StageConfig[]): StageConfig[] {
   const ids = new Set(stages.map((s) => s.id));
   if (ids.size !== stages.length) throw new Error('Duplicate stage IDs detected');
@@ -129,6 +132,48 @@ function allDone(state: StoreState): boolean {
   return Object.values(state.stages).every(
     (s) => s.status === 'complete' || s.status === 'skipped',
   );
+}
+
+function appendGateMetricInstruction(prompt: string, runDirPath: string, stageId: string): string {
+  const metricPath = join(runDirPath, 'stages', stageId, 'metric.json');
+  return `${prompt}
+
+## Optional Campaign Metric Artifact
+
+If this gate evaluates evidence that contains a numeric campaign metric, write a metric artifact to:
+
+${metricPath}
+
+Use exactly this JSON shape when a trustworthy numeric metric exists:
+
+{
+  "hasMetric": true,
+  "metric": "metric name",
+  "value": 0,
+  "higherIsBetter": true,
+  "threshold": null,
+  "pass": false,
+  "source": {
+    "path": "path to the evidence file used",
+    "evidence": "short exact evidence text"
+  },
+  "notes": "short explanation"
+}
+
+Rules:
+- Write this file only from gate stages.
+- Do not invent a metric.
+- Use only evidence you verified in this gate stage.
+- If multiple numeric metrics exist, choose the primary campaign metric stated in the task, workflow, or evidence.
+- If no trustworthy numeric campaign metric exists, write:
+
+{
+  "hasMetric": false,
+  "reason": "No trustworthy numeric campaign metric was found for this gate."
+}
+
+- Keep the normal workflow verdict file separate. The workflow verdict remains pass/reason only unless explicitly instructed otherwise.
+- If you write a metric value, ensure it is a JSON number, not a string.`;
 }
 
 function anyFailed(state: StoreState): boolean {
@@ -412,8 +457,47 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
   appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
 }
 
+function parseGateMetric(projectDir: string, state: StoreState, gateId: string): GateMetricLookup {
+  const metricPath = join(projectDir, '.fc', 'runs', state.runId, 'stages', gateId, 'metric.json');
+  if (!existsSync(metricPath)) return { found: false, metric: null };
+  try {
+    const artifact = JSON.parse(readFileSync(metricPath, 'utf-8'));
+    if (artifact?.hasMetric !== true) return { found: true, metric: null };
+    if (typeof artifact.value !== 'number' || !Number.isFinite(artifact.value)) return { found: true, metric: null };
+    return {
+      found: true,
+      metric: {
+        score: artifact.value,
+        metric: typeof artifact.metric === 'string' ? artifact.metric : '',
+        gate: gateId,
+        pass: artifact.pass === true,
+        threshold: typeof artifact.threshold === 'number' && Number.isFinite(artifact.threshold) ? artifact.threshold : undefined,
+      },
+    };
+  } catch {
+    return { found: true, metric: null };
+  }
+}
+
+function parseLegacyVerdictMetric(projectDir: string, state: StoreState, gateId: string): CampaignMetric | null {
+  const verdictPath = join(projectDir, '.fc', 'runs', state.runId, `verdict_${gateId}.json`);
+  try {
+    const verdict = JSON.parse(readFileSync(verdictPath, 'utf-8'));
+    if (typeof verdict.score !== 'number' || !Number.isFinite(verdict.score)) return null;
+    return {
+      score: verdict.score,
+      metric: typeof verdict.metric === 'string' ? verdict.metric : '',
+      gate: gateId,
+      pass: verdict.pass === true,
+      threshold: typeof verdict.threshold === 'number' && Number.isFinite(verdict.threshold) ? verdict.threshold : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Find the last scored gate in pipeline order for campaign tracking */
-export function findCampaignMetric(projectDir: string, state: StoreState): { score: number; metric: string; gate: string; pass: boolean; threshold?: number } | null {
+export function findCampaignMetric(projectDir: string, state: StoreState): CampaignMetric | null {
   const runPath = join(projectDir, '.fc', 'runs', state.runId);
 
   // Determine pipeline order from dispatched stages if available
@@ -424,22 +508,26 @@ export function findCampaignMetric(projectDir: string, state: StoreState): { sco
       .map(s => s.id);
   }
 
-  let best: { score: number; metric: string; gate: string; pass: boolean; threshold?: number } | null = null;
+  let best: CampaignMetric | null = null;
   try {
     const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
 
     // If we have pipeline order, iterate in that order; otherwise fall back to directory listing
-    const gateIds = orderedGateIds ?? files.map(f => f.replace('verdict_', '').replace('.json', ''));
+    const gateIds = orderedGateIds ?? (() => {
+      const ids = new Set(files.map(f => f.replace('verdict_', '').replace('.json', '')));
+      try {
+        const stagesPath = join(runPath, 'stages');
+        for (const stageId of readdirSync(stagesPath)) {
+          if (existsSync(join(stagesPath, stageId, 'metric.json'))) ids.add(stageId);
+        }
+      } catch { /* no stage metrics */ }
+      return [...ids];
+    })();
 
     for (const gateId of gateIds) {
-      const f = `verdict_${gateId}.json`;
-      const fPath = join(runPath, f);
-      try {
-        const v = JSON.parse(readFileSync(fPath, 'utf-8'));
-        if (typeof v.score === 'number') {
-          best = { score: v.score, metric: v.metric ?? '', gate: gateId, pass: v.pass === true, threshold: v.threshold };
-        }
-      } catch { /* skip */ }
+      const metricLookup = parseGateMetric(projectDir, state, gateId);
+      const metric = metricLookup.found ? metricLookup.metric : parseLegacyVerdictMetric(projectDir, state, gateId);
+      if (metric) best = metric;
     }
   } catch { /* no verdicts */ }
   return best;
@@ -968,6 +1056,7 @@ async function executeSingleStage(
 
   let resolvedPrompt = stage.prompt_template || '';
   if (!resolvedPrompt) resolvedPrompt = taskDescription ?? '';
+  if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
   let availableRoles: string | undefined;
   if (stage.dynamic_dispatch) {
@@ -1185,6 +1274,8 @@ async function executeIteration(
         const timeoutSec = Math.ceil(timeout / 1000);
         resolvedPrompt = `RETRY (attempt ${currentRetries + 1}): Previous attempt timed out after ${timeoutSec}s. Read partial output at .fc/runs/${runId}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`;
       }
+
+      if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
       const result = await runStage(adapter, {
         stageId: stage.id,

@@ -70,12 +70,12 @@ function loadStageRoles(projectDir: string, runId: string): Record<string, { rol
 
 const agentsDir = join(process.cwd(), 'config', 'agents');
 
-export function buildCampaignContext(projectDir: string, campaignId: string, currentRunId: string): string {
+export function buildCampaignContext(projectDir: string, campaignId: string, currentRunId: string, campaignDisplayName?: string): string {
   const runsDir = join(projectDir, '.fc', 'runs');
   const targetCampaignStorageKey = resolveCampaignStorageKey({ campaignId }) ?? campaignId;
 
   const entries = readCampaignEntries(projectDir, targetCampaignStorageKey);
-  const campaignName = entries[0]?.campaignName ?? campaignId;
+  const campaignName = campaignDisplayName ?? entries[0]?.campaignName ?? campaignId;
 
   // Find sibling runs
   interface SiblingRun { runId: string; taskDescription?: string; startedAt?: string; briefPath: string; currentIteration?: number; campaignSeq?: number }
@@ -147,6 +147,17 @@ export function buildCampaignContextInjection(campaignContext: string): string {
     '',
     campaignContext.trim(),
   ].filter(Boolean).join('\n\n');
+}
+
+export function withCampaignContextPrompt(role: AgentConfig, campaignContext: string): AgentConfig {
+  if (!campaignContext.trim()) return role;
+  return {
+    ...role,
+    prompt: [
+      role.prompt,
+      buildCampaignContextInjection(campaignContext),
+    ].filter(Boolean).join('\n\n'),
+  };
 }
 
 export function injectInitialTuiMessage(session: import('./adapters/base.js').InteractiveSession, message: string): void {
@@ -1123,6 +1134,19 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     return { tag: raw[0], payload: raw.slice(1) };
   }
 
+  function isValidTaskBrief(content: string): boolean {
+    const trimmed = content.trim();
+    if (trimmed.length < 120) return false;
+    const requiredMarkers = [
+      /task\s+summary|summary/i,
+      /requirements?/i,
+      /scope/i,
+      /constraints?/i,
+      /acceptance\s+criteria/i,
+    ];
+    return requiredMarkers.every((marker) => marker.test(trimmed));
+  }
+
   // 11a. WS /api/discuss/ws — interactive terminal session with reconnect + binary framing
   app.get<{ Querystring: { taskId: string } }>('/api/discuss/ws', { websocket: true }, async (socket, req) => {
     try {
@@ -1186,16 +1210,14 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           discussAgent = parseAgentConfig(parsed);
         } catch { /* fall back to planner */ }
       }
-      let initialCampaignMessage = '';
       try {
         const runState = readRunState(projectDir, taskId);
         if (runState.campaignId) {
-          const campCtx = buildCampaignContext(projectDir, runState.campaignId, taskId);
-          if (campCtx) initialCampaignMessage = buildCampaignContextInjection(campCtx);
+          const campCtx = buildCampaignContext(projectDir, runState.campaignStorageKey ?? runState.campaignId, taskId, runState.campaignName ?? runState.campaignId);
+          discussAgent = withCampaignContextPrompt(discussAgent, campCtx);
         }
       } catch { /* no run state yet */ }
       const session = await adapter.spawnInteractive(discussAgent, { workDir: projectDir, sessionDir, cols, rows });
-      injectInitialTuiMessage(session, initialCampaignMessage);
       ptyEntry = { session, outputBuffer: [...oldBuffer], alive: true, planPolling: false };
       ptySessions.set(taskId, ptyEntry);
 
@@ -1253,27 +1275,49 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     ptyEntry.planPolling = true;
     options.onPlanPollingStart?.(taskId);
     mkdirSync(runDir, { recursive: true });
-    const cmd = `Summarize our discussion as a task brief. Write it to ${runDir}/task_brief.md. Include: task summary, requirements, scope, constraints, and acceptance criteria.`;
+    const briefPath = join(runDir, 'task_brief.md');
+    try {
+      if (existsSync(briefPath)) unlinkSync(briefPath);
+    } catch { /* ignore stale brief cleanup failure */ }
+    const requestStartMs = Date.now();
+    const cmd = `Generate a plan only if ready. Review the current discussion and decide whether it contains a sufficiently clear, user-confirmed task brief or clearly agreed final scope. If it is ready, write a new task brief to ${runDir}/task_brief.md with these sections: Task Summary, Requirements, Scope, Constraints, and Acceptance Criteria. If it is unclear or not confirmed, do not write task_brief.md; instead ask the missing clarifying questions in the terminal.`;
     ptyEntry.session.write(cmd);
     setTimeout(() => ptyEntry.session.write("\r"), 100);
-    const briefPath = join(runDir, 'task_brief.md');
     let stableCount = 0;
     let lastSize = -1;
-    const pollInterval = setInterval(() => {
+    let finished = false;
+    let pollInterval: ReturnType<typeof setInterval>;
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const finish = (type: 'plan_ready' | 'brief_not_ready', message?: string) => {
+      if (finished) return;
+      finished = true;
+      ptyEntry.planPolling = false;
+      clearInterval(pollInterval);
+      clearTimeout(timeoutHandle);
+      try { sendControl(socket, message ? { type, message } : { type }); } catch { /* closed */ }
+    };
+    pollInterval = setInterval(() => {
       try {
         if (existsSync(briefPath)) {
           const stat = statSync(briefPath);
+          if (stat.mtimeMs < requestStartMs) return;
           if (stat.size > 0 && stat.size === lastSize) {
             stableCount++;
             if (stableCount >= 2) {
-              clearInterval(pollInterval);
-              try { sendControl(socket, { type: 'plan_ready' }); } catch { /* closed */ }
+              const briefContent = readFileSync(briefPath, 'utf-8');
+              if (isValidTaskBrief(briefContent)) {
+                finish('plan_ready');
+              } else {
+                try { unlinkSync(briefPath); } catch { /* ignore invalid brief cleanup failure */ }
+                stableCount = 0;
+                lastSize = -1;
+              }
             }
           } else { stableCount = 0; lastSize = stat.size; }
         }
       } catch { /* file doesn't exist yet */ }
     }, 1000);
-    setTimeout(() => clearInterval(pollInterval), 120000);
+    timeoutHandle = setTimeout(() => finish('brief_not_ready', 'No confirmed task brief was produced. Continue discussion until the task brief is clear and confirmed, then try Generate Plan again.'), 120000);
   }
 
   // 12. POST /api/plan

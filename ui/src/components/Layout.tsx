@@ -5,9 +5,14 @@ import { fetchTasks } from "../api";
 import NavBar from "./NavBar";
 import StatusBar from "./StatusBar";
 
-const TasksCtx = createContext<{ tasks: Task[]; refresh: () => void }>({ tasks: [], refresh: () => {} });
+const TasksCtx = createContext<{ tasks: Task[]; refresh: () => Promise<void>; removeTask: (id: string) => void }>({
+  tasks: [],
+  refresh: async () => {},
+  removeTask: () => {},
+});
 export const useTasks = () => useContext(TasksCtx).tasks;
 export const useRefreshTasks = () => useContext(TasksCtx).refresh;
+export const useRemoveTask = () => useContext(TasksCtx).removeTask;
 
 export default function Layout() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -19,16 +24,25 @@ export default function Layout() {
   const selectedId = match?.[1];
   const isHome = location.pathname === "/";
 
-  const load = useCallback(() => {
-    fetchTasks()
-      .then((t) => { setTasks(t); setError(null); })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+  const load = useCallback(async () => {
+    try {
+      const t = await fetchTasks();
+      setTasks(t);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const removeTask = useCallback((id: string) => {
+    setTasks((current) => current.filter((task) => task.id !== id));
   }, []);
 
   useEffect(() => {
-    load();
-    const iv = setInterval(load, 5000);
+    void load();
+    const iv = setInterval(() => { void load(); }, 5000);
     return () => clearInterval(iv);
   }, [load]);
 
@@ -36,7 +50,7 @@ export default function Layout() {
   if (error) return <div className="h-screen w-screen flex items-center justify-center bg-rc-bg text-rc-error">Error: {error}</div>;
 
   return (
-    <TasksCtx.Provider value={{ tasks, refresh: load }}>
+    <TasksCtx.Provider value={{ tasks, refresh: load, removeTask }}>
       <div className="h-screen w-screen flex flex-col overflow-hidden bg-rc-bg">
         <NavBar />
         <main className="flex-1 overflow-auto p-6">

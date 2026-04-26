@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="assets/flowcrew_mascot.svg" width="300" alt="FlowCrew — Mini-Bot Crew" />
 </p>
 
