@@ -258,7 +258,23 @@ function normalizeCampaignTriggers(value: unknown): StoreState['campaignTriggers
   return triggers;
 }
 
+function readExecutionDefaults(): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
+  const defaultsPath = join(process.cwd(), 'config', 'defaults.yaml');
+  try {
+    const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown> : {};
+    return {
+      timeoutMs: typeof defaults.default_timeout_ms === 'number' ? defaults.default_timeout_ms : 300000,
+      maxIterations: typeof defaults.default_max_iterations === 'number' ? defaults.default_max_iterations : 3,
+      gateRetryLoops: typeof defaults.default_gate_retry_loops === 'number' ? defaults.default_gate_retry_loops : 1,
+      stageTechnicalRetries: typeof defaults.default_stage_technical_retries === 'number' ? defaults.default_stage_technical_retries : 1,
+    };
+  } catch {
+    return { timeoutMs: 300000, maxIterations: 3, gateRetryLoops: 1, stageTechnicalRetries: 1 };
+  }
+}
+
 function stateToTask(state: StoreState, projectDir: string): TaskShape {
+  const defaults = readExecutionDefaults();
   const campaign = resolveCampaignSelection(projectDir, {
     campaignId: state.campaignId,
     campaignStorageKey: state.campaignStorageKey,
@@ -302,8 +318,8 @@ function stateToTask(state: StoreState, projectDir: string): TaskShape {
     discussion: state.discussion ?? [],
     plan: state.plan ?? [],
     currentIteration: state.currentIteration ?? 1,
-    maxIterations: state.maxIterations ?? 3,
-    maxRetries: state.maxRetries ?? 1,
+    maxIterations: state.maxIterations ?? defaults.maxIterations,
+    maxRetries: state.maxRetries ?? defaults.gateRetryLoops,
     autoApproveRetries: state.autoApproveRetries ?? true,
     timeoutMs: state.timeoutMs,
     campaignTriggers: state.campaignTriggers,
@@ -1325,6 +1341,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const workflow = req.body?.workflow || 'default';
     const yamlPath = join(process.cwd(), 'config', 'workflows', `${workflow}.yaml`);
     try {
+      const defaults = readExecutionDefaults();
       const raw = readFileSync(yamlPath, 'utf-8');
       const parsed = parseYaml(raw);
       const config = WorkflowConfigSchema.parse(parsed);
@@ -1333,8 +1350,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         role: s.role,
         prompt_template: s.prompt_template,
         depends_on: s.depends_on,
-        timeout_ms: s.timeout_ms ?? config.defaults.timeout_ms,
-        max_retries: s.max_retries ?? config.defaults.max_retries,
+        timeout_ms: s.timeout_ms ?? config.defaults.timeout_ms ?? defaults.timeoutMs,
+        max_retries: s.max_retries ?? config.defaults.max_retries ?? defaults.stageTechnicalRetries,
       }));
     } catch (err) {
       return reply.code(404).send({ error: `workflow not found: ${workflow}` });

@@ -1,6 +1,4 @@
 name: default
-defaults:
-  max_iterations: 5
 stages:
   - id: plan
     role: planner

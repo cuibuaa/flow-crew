@@ -12,7 +12,7 @@ interface Props {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60000;
 const DEFAULT_MAX_ITERATIONS = 5;
-const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_GATE_RETRY_LOOPS = 1;
 const DEFAULT_TRIGGERS: CampaignTriggers = {
   enabled: true,
   regressionAfter: 2,
@@ -28,7 +28,7 @@ function toMinutes(ms: number): number {
 export default function TaskSettingsPanel({ task, open, onClose, onSave }: Props) {
   const [timeoutMin, setTimeoutMin] = useState(30);
   const [maxIterations, setMaxIterations] = useState(5);
-  const [maxRetries, setMaxRetries] = useState(2);
+  const [maxRetries, setMaxRetries] = useState(DEFAULT_GATE_RETRY_LOOPS);
   const [autoApprove, setAutoApprove] = useState(true);
   const [triggersEnabled, setTriggersEnabled] = useState(true);
   const [regressionAfter, setRegressionAfter] = useState(2);
@@ -36,10 +36,14 @@ export default function TaskSettingsPanel({ task, open, onClose, onSave }: Props
   const [plateauThreshold, setPlateauThreshold] = useState(5);
   const [repeatedFailureAfter, setRepeatedFailureAfter] = useState(3);
   const [defaultTimeoutMs, setDefaultTimeoutMs] = useState(DEFAULT_TIMEOUT_MS);
+  const [defaultMaxIterations, setDefaultMaxIterations] = useState(DEFAULT_MAX_ITERATIONS);
+  const [defaultGateRetryLoops, setDefaultGateRetryLoops] = useState(DEFAULT_GATE_RETRY_LOOPS);
 
   useEffect(() => {
     fetchSettings().then(s => {
       if (s.default_timeout_ms !== undefined) setDefaultTimeoutMs(s.default_timeout_ms);
+      if (s.default_max_iterations !== undefined) setDefaultMaxIterations(s.default_max_iterations);
+      if (s.default_gate_retry_loops !== undefined) setDefaultGateRetryLoops(s.default_gate_retry_loops);
     }).catch(() => {});
   }, []);
 
@@ -47,15 +51,15 @@ export default function TaskSettingsPanel({ task, open, onClose, onSave }: Props
     if (!task) return;
     const triggers = { ...DEFAULT_TRIGGERS, ...(task.campaignTriggers ?? {}) };
     setTimeoutMin(toMinutes(task.timeoutMs ?? defaultTimeoutMs));
-    setMaxIterations(task.maxIterations ?? DEFAULT_MAX_ITERATIONS);
-    setMaxRetries(task.maxRetries ?? DEFAULT_MAX_RETRIES);
+    setMaxIterations(task.maxIterations ?? defaultMaxIterations);
+    setMaxRetries(task.maxRetries ?? defaultGateRetryLoops);
     setAutoApprove(task.autoApproveRetries ?? true);
     setTriggersEnabled(triggers.enabled);
     setRegressionAfter(triggers.regressionAfter);
     setPlateauAfter(triggers.plateauAfter);
     setPlateauThreshold(triggers.plateauThreshold);
     setRepeatedFailureAfter(triggers.repeatedFailureAfter);
-  }, [task, defaultTimeoutMs]);
+  }, [task, defaultTimeoutMs, defaultMaxIterations, defaultGateRetryLoops]);
 
   if (!open) return null;
 
@@ -115,9 +119,10 @@ export default function TaskSettingsPanel({ task, open, onClose, onSave }: Props
         </label>
 
         <label className="block text-xs text-rc-text-secondary">
-          🔁 Max retries (per stage)
+          Gate retry loops
           <input type="number" min={0} value={maxRetries} onChange={e => setMaxRetries(+e.target.value)} disabled={isReadOnly}
             className="w-full mt-1 px-2 py-1 bg-rc-code border border-rc-border rounded-input text-sm text-rc-text focus:outline-none focus:border-rc-accent disabled:opacity-50" />
+          <span className="text-[10px] text-rc-muted">gate fail -&gt; repair stage -&gt; re-check gate</span>
         </label>
 
         <label className="flex items-center space-x-2 text-xs text-rc-text-secondary cursor-pointer">

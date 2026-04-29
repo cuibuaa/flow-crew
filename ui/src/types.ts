@@ -102,6 +102,9 @@ export interface SettingsData {
   skills: string[];
   port: number;
   default_timeout_ms?: number;
+  default_max_iterations?: number;
+  default_gate_retry_loops?: number;
+  default_stage_technical_retries?: number;
 }
 
 export interface CampaignSummary {

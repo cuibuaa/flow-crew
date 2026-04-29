@@ -17,23 +17,35 @@ import { recordRunEvent, recordStageOutcome } from './run-events.js';
 import pino from 'pino';
 
 const log = pino({ name: 'scheduler' });
+const DEFAULT_GATE_RETRY_LOOPS = 1;
+const DEFAULT_MAX_ITERATIONS = 3;
+const DEFAULT_STAGE_TECHNICAL_RETRIES = 1;
 
 /** Load project defaults from config/defaults.yaml */
-function loadDefaults(): { timeout_ms: number; model: string; reasoning_effort: string } {
+function loadDefaults(): { timeout_ms: number; max_iterations: number; model: string; reasoning_effort: string; gate_retry_loops: number; stage_technical_retries: number } {
   try {
     const raw = readFileSync(join(process.cwd(), 'config', 'defaults.yaml'), 'utf-8');
     const parsed = parseYaml(raw) as Record<string, unknown>;
     return {
       timeout_ms: typeof parsed.default_timeout_ms === 'number' ? parsed.default_timeout_ms : 300000,
+      max_iterations: typeof parsed.default_max_iterations === 'number' ? parsed.default_max_iterations : DEFAULT_MAX_ITERATIONS,
       model: typeof parsed.model === 'string' ? parsed.model : 'default',
       reasoning_effort: typeof parsed.reasoning_effort === 'string' ? parsed.reasoning_effort : 'default',
+      gate_retry_loops: typeof parsed.default_gate_retry_loops === 'number' ? parsed.default_gate_retry_loops : DEFAULT_GATE_RETRY_LOOPS,
+      stage_technical_retries: typeof parsed.default_stage_technical_retries === 'number' ? parsed.default_stage_technical_retries : DEFAULT_STAGE_TECHNICAL_RETRIES,
     };
   } catch { /* fallback */ }
-  return { timeout_ms: 300000, model: 'default', reasoning_effort: 'default' };
+  return {
+    timeout_ms: 300000,
+    max_iterations: DEFAULT_MAX_ITERATIONS,
+    model: 'default',
+    reasoning_effort: 'default',
+    gate_retry_loops: DEFAULT_GATE_RETRY_LOOPS,
+    stage_technical_retries: DEFAULT_STAGE_TECHNICAL_RETRIES,
+  };
 }
 
 const projectDefaults = loadDefaults();
-const defaultTimeoutMs = projectDefaults.timeout_ms;
 
 const AgentConfigSchema = z.object({
   name: z.string(),
@@ -69,10 +81,10 @@ export const WorkflowConfigSchema = z.object({
   name: z.string(),
   description: z.string().optional().default(''),
   defaults: z.object({
-    timeout_ms: z.number().default(defaultTimeoutMs),
-    max_retries: z.number().default(1),
-    max_iterations: z.number().default(3),
-  }).default({ timeout_ms: defaultTimeoutMs, max_retries: 1, max_iterations: 3 }),
+    timeout_ms: z.number().optional(),
+    max_retries: z.number().optional(),
+    max_iterations: z.number().optional(),
+  }).optional().default({}),
   stages: z.array(StageConfigSchema).min(1),
 });
 
@@ -693,7 +705,7 @@ export async function runWorkflow(
 ): Promise<StoreState> {
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
-  let maxIterations = workflow.defaults.max_iterations ?? 3;
+  let maxIterations = workflow.defaults.max_iterations ?? projectDefaults.max_iterations;
 
   let runId: string;
   let runDirPath: string;
@@ -844,7 +856,7 @@ export async function runWorkflow(
     );
 
     // === INNER LOOP (retry_to) ===
-    const maxInnerRetries = 3;
+    const maxInnerRetries = Math.max(0, Math.floor(Number(state.maxRetries ?? projectDefaults.gate_retry_loops)));
     let innerLoopCount = 0;
     if (iterationDispatchedIds.length > 0) {
       const { allPass, failedGateIds } = checkGates(sorted, state, projectDir, runId);
@@ -1051,7 +1063,7 @@ async function executeSingleStage(
     agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
   }
   const agent = agents.get(stage.role)!;
-  const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms;
+  const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms ?? projectDefaults.timeout_ms;
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
 
   let resolvedPrompt = stage.prompt_template || '';
@@ -1205,7 +1217,7 @@ async function executeIteration(
         agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
-      const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms;
+      const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms ?? projectDefaults.timeout_ms;
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
 
@@ -1300,7 +1312,7 @@ async function executeIteration(
     let failed = false;
 
     for (const { stage, result, currentRetries } of results) {
-      const maxRetries = state.maxRetries ?? stage.max_retries ?? workflow.defaults.max_retries;
+      const maxRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? projectDefaults.stage_technical_retries)));
 
       if (result.timedOut && currentRetries < maxRetries) {
         const nextRetry = currentRetries + 1;
