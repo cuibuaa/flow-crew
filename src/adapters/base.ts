@@ -54,44 +54,76 @@ export interface InteractiveSession {
   onExit: (cb: (exitCode: number) => void) => void;
 }
 
-export function execWithTimeout(
-  cmd: string,
-  args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv },
-): Promise<RunResult> {
-  const timeoutSec = Math.ceil(opts.timeout_ms / 1000);
+type ExecOpts = {
+  cwd: string;
+  timeout_ms: number;
+  liveLogPath?: string;
+  onStdout?: (text: string) => void;
+  env?: NodeJS.ProcessEnv;
+};
+
+function killChild(child: ChildProcess): void {
+  try {
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
+    else child.kill('SIGKILL');
+  } catch {
+    try { child.kill('SIGKILL'); } catch { /* already exited */ }
+  }
+}
+
+function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResult> {
   const start = Date.now();
   if (opts.liveLogPath) {
     mkdirSync(dirname(opts.liveLogPath), { recursive: true });
   }
   return new Promise((resolve) => {
-    const child = spawn('timeout', ['--signal=KILL', String(timeoutSec), cmd, ...args], {
+    let settled = false;
+    let timedOut = false;
+    const child = spawn(cmd, args, {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
-      detached: false,
+      detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
     });
     const chunks: Buffer[] = [];
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChild(child);
+    }, Math.max(1, opts.timeout_ms));
+
+    const finish = (code: number | null, output?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        output: output ?? Buffer.concat(chunks).toString('utf-8'),
+        exitCode: timedOut ? 124 : code ?? 1,
+        duration_ms: Date.now() - start,
+        timedOut,
+      });
+    };
+
     child.stdout.on('data', (d: Buffer) => {
       chunks.push(d);
+      opts.onStdout?.(d.toString('utf-8'));
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
     });
     child.stderr.on('data', (d: Buffer) => {
       chunks.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
     });
-    child.on('close', (code) => {
-      resolve({
-        output: Buffer.concat(chunks).toString('utf-8'),
-        exitCode: code ?? 1,
-        duration_ms: Date.now() - start,
-      });
-    });
-    child.on('error', () => {
-      resolve({ output: '', exitCode: 1, duration_ms: Date.now() - start });
-    });
+    child.on('close', (code) => finish(code));
+    child.on('error', (error) => finish(1, error.message));
   });
+}
+
+export function execWithTimeout(
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv },
+): Promise<RunResult> {
+  return execChild(cmd, args, opts);
 }
 
 export function execWithStreaming(
@@ -99,33 +131,5 @@ export function execWithStreaming(
   args: string[],
   opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void; env?: NodeJS.ProcessEnv },
 ): Promise<RunResult> {
-  const timeoutSec = Math.ceil(opts.timeout_ms / 1000);
-  const start = Date.now();
-  return new Promise((resolve) => {
-    const child = spawn('timeout', ['--signal=KILL', String(timeoutSec), cmd, ...args], {
-      cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      detached: false,
-      env: { ...process.env, ...opts.env },
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on('data', (d: Buffer) => {
-      chunks.push(d);
-      opts.onChunk(d.toString('utf-8'));
-    });
-    child.stderr.on('data', (d: Buffer) => {
-      chunks.push(d);
-    });
-    child.on('close', (code) => {
-      resolve({
-        output: Buffer.concat(chunks).toString('utf-8'),
-        exitCode: code ?? 1,
-        duration_ms: Date.now() - start,
-      });
-    });
-    child.on('error', () => {
-      resolve({ output: '', exitCode: 1, duration_ms: Date.now() - start });
-    });
-  });
+  return execChild(cmd, args, { ...opts, onStdout: opts.onChunk });
 }
