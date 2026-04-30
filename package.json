@@ -4,7 +4,7 @@
   "description": "TS-first persistent multi-agent orchestration platform",
   "main": "dist/index.js",
   "scripts": {
-    "postinstall": "cd ui && npm install",
+    "postinstall": "node scripts/fix-node-pty-permissions.mjs && cd ui && npm install",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -20,6 +20,7 @@
   "type": "module",
   "files": [
     "dist",
+    "scripts",
     "config",
     "README.md",
     "LICENSE"
