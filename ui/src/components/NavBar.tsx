@@ -18,18 +18,27 @@ export default function NavBar() {
   const selectedId = match?.[1];
   const task = selectedId ? tasks.find(t => t.id === selectedId) : undefined;
 
+  const [newTaskError, setNewTaskError] = useState<string | null>(null);
+
   const handleSaveSettings = async (vals: { timeoutMs: number; maxIterations: number; maxRetries: number; autoApproveRetries: boolean; campaignTriggers?: CampaignTriggers }) => {
     if (!selectedId) return;
-    await updateTask(selectedId, vals);
-    refreshTasks();
+    try {
+      await updateTask(selectedId, vals);
+      refreshTasks();
+    } catch (err) {
+      setNewTaskError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleNewTask = async (name: string, campaignId?: string, campaignName?: string) => {
     setNewTaskOpen(false);
+    setNewTaskError(null);
     try {
       const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
       nav(`/task/${id}/discuss`);
-    } catch { /* ignore */ }
+    } catch (err) {
+      setNewTaskError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   return (
@@ -66,6 +75,11 @@ export default function NavBar() {
         onClose={() => setNewTaskOpen(false)}
         onSubmit={handleNewTask}
       />
+      {newTaskError && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-rc-error/90 text-white text-sm px-4 py-2 rounded-card shadow-xl cursor-pointer" onClick={() => setNewTaskError(null)}>
+          {newTaskError}
+        </div>
+      )}
     </>
   );
 }

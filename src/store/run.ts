@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StageStatus, StoreState } from './types.js';
 import { runDir, runsRoot, stageDir, atomicWrite, createRunId } from './helpers.js';
@@ -56,7 +56,10 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
 
 export function listRuns(projectDir: string): string[] {
   try {
-    return readdirSync(runsRoot(projectDir)).sort();
+    const root = runsRoot(projectDir);
+    return readdirSync(root)
+      .filter(d => existsSync(join(root, d, 'run.json')))
+      .sort();
   } catch {
     return [];
   }

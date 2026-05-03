@@ -2,6 +2,8 @@ node_modules/
 dist/
 .fc/
 *.log
+.tmp_*
+NUL
 npm-debug.log*
 coverage/
 .vitest/
@@ -16,3 +18,15 @@ Thumbs.db
 ui/*.d.ts.map
 docs/
 tests/
+ui/tests/
+design/
+op_*.sh
+eval.sh
+scripts/btc_training_*.py
+scripts/__pycache__/
+__pycache__/
+*.pyc
+btc_training_*_artifacts/
+btc_training_*_result.json
+btc_trading_methods_landscape.md
+btc_training_*.md

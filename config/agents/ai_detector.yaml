@@ -26,5 +26,7 @@ prompt: |
   - Verify every quantitative claim has a source (table, figure, citation).
   - Also provide conference-level review with numerical scores (Novelty, Rigor, Clarity, Soundness 1-10).
   - Write verdict to the path specified in the task (if any).
+  - ALWAYS write the verdict file — even if detection cannot be completed. A missing verdict causes confusing errors.
   - Verdict format: {"pass": true/false, "reason": "...", "score": <number>, "metric": "<name>", "threshold": <number>}
   - Include score/metric/threshold when scoring. Omit them for pass/fail-only checks.
+  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

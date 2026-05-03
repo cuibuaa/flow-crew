@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { discussWsUrl, executeTask } from "../api";
-import { useTasks } from "./Layout";
+import { useTasks, useRefreshTasks } from "./Layout";
 import Terminal, { type TerminalHandle } from "./Terminal";
 
 export default function TaskDiscussion() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const tasks = useTasks();
+  const refreshTasks = useRefreshTasks();
   const task = tasks.find((t) => t.id === id);
   const taskId = id;
   const [generating, setGenerating] = useState(false);
@@ -16,7 +17,7 @@ export default function TaskDiscussion() {
   const [briefGuidance, setBriefGuidance] = useState<string | null>(null);
   const termRef = useRef<TerminalHandle>(null);
 
-  const taskRunning = task && task.status !== 'pending';
+  const taskRunning = task && task.status !== 'pending' && task.status !== 'awaiting_approval';
 
   const handleReady = () => setConnected(true);
 
@@ -24,9 +25,14 @@ export default function TaskDiscussion() {
     setGenerating(false);
     setBriefGuidance(null);
     if (taskId && taskId !== "new") {
-      executeTask(taskId).catch(() => {});
+      // Start execution (planner runs first), then refresh task list and
+      // navigate to plan review so the user sees the dispatched stages.
+      executeTask(taskId).then(() => refreshTasks()).then(() => {
+        nav(`/task/${taskId}/plan`);
+      }).catch((err) => {
+        setBriefGuidance(`Failed to start execution: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
-    nav(`/task/${taskId}/monitor`);
   };
 
   const handleBriefNotReady = (message?: string) => {
@@ -36,7 +42,7 @@ export default function TaskDiscussion() {
   };
 
   const handleGeneratePlan = () => {
-    if (!termRef.current) return;
+    if (!termRef.current || generating) return;
     setGenerating(true);
     setShowMonitorLink(false);
     setBriefGuidance(null);

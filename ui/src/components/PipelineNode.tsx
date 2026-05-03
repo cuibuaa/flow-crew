@@ -73,8 +73,8 @@ export default function PipelineNode({ node, onClick }: { node: NodeData; onClic
         </div>
       </div>
 
-      {expanded && "prompt_template" in node && (
-        <pre className="mt-3 whitespace-pre-wrap rounded-card bg-rc-code p-3 font-mono text-xs text-rc-text-secondary">{node.prompt_template}</pre>
+      {expanded && ("prompt_template" in node || "task" in node) && (
+        <pre className="mt-3 whitespace-pre-wrap rounded-card bg-rc-code p-3 font-mono text-xs text-rc-text-secondary">{(node as PlanStage).prompt_template || (node as PlanStage).task || ""}</pre>
       )}
     </div>
   );

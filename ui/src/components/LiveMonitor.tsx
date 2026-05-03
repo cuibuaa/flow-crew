@@ -2,8 +2,8 @@ import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { useTasks } from "./Layout";
-import { reevalGate, rerunFromHere } from "../api";
+import { useTasks, useRefreshTasks } from "./Layout";
+import { reevalGate, rerunFromHere, rerunTask, cancelTask } from "../api";
 import type { Stage, Task } from "../types";
 
 const NODE_MIN_WIDTH = 220;
@@ -591,22 +591,37 @@ function LiveTerminal({ liveUrl }: { liveUrl: string }) {
       queue = [];
     };
 
-    const es = new EventSource(liveUrl);
-    es.onmessage = (event) => {
-      try {
-        const chunk = JSON.parse(event.data) as string;
-        queue.push(chunk.replace(/\r?\n/g, "\r\n"));
-        if (!rafId) rafId = requestAnimationFrame(flush);
-      } catch {
-        // Ignore malformed chunks.
-      }
-    };
-    es.onerror = () => es.close();
+    let activeEs: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+
+    function connect() {
+      if (closed) return;
+      const es = new EventSource(liveUrl);
+      activeEs = es;
+      es.onmessage = (event) => {
+        try {
+          const chunk = JSON.parse(event.data) as string;
+          queue.push(chunk.replace(/\r?\n/g, "\r\n"));
+          if (!rafId) rafId = requestAnimationFrame(flush);
+        } catch {
+          // Ignore malformed chunks.
+        }
+      };
+      es.onerror = () => {
+        es.close();
+        if (!closed) reconnectTimer = setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
 
     return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       resizeObserver.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
-      es.close();
+      activeEs?.close();
       term.dispose();
     };
   }, [liveUrl]);
@@ -618,10 +633,16 @@ function RunOverview({
   task,
   selectedStage,
   health,
+  onRerun,
+  onCancel,
+  onBackToDiscussion,
 }: {
   task: Task;
   selectedStage?: Stage;
   health?: HealthInfo;
+  onRerun?: () => void;
+  onCancel?: () => void;
+  onBackToDiscussion?: () => void;
 }) {
   const completed = task.stages.filter((stage) => stage.status === "complete").length;
   const running = task.stages.filter((stage) => stage.status === "running").length;
@@ -637,12 +658,21 @@ function RunOverview({
         <p className="text-sm text-rc-text-secondary">
           {task.campaignId ? `${task.campaignName ?? task.campaignId} #${task.campaignSeq ?? "?"} • ` : ""}
           Iteration {task.currentIteration}/{task.maxIterations}
+          {task.completedAt && (task.status === "completed" || task.status === "failed") && (
+            <> • Finished {new Date(task.completedAt).toLocaleString()}</>
+          )}
         </p>
       </div>
 
       {task.campaignAlert && (
         <div className="rounded-card border border-amber-300/35 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
           Campaign trigger: {task.campaignAlert.message}
+        </div>
+      )}
+
+      {task.failureReason && (
+        <div className="rounded-card border border-rose-400/35 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
+          {task.failureReason}
         </div>
       )}
 
@@ -675,6 +705,28 @@ function RunOverview({
           </div>
         )}
       </div>
+
+      {(task.status === "completed" || task.status === "failed") && (
+        <div className="flex flex-wrap gap-2">
+          {onRerun && (
+            <button onClick={onRerun} className="btn-accent px-4 py-2 text-xs font-medium">
+              Rerun Task
+            </button>
+          )}
+          {task.status === "failed" && onBackToDiscussion && (
+            <button onClick={onBackToDiscussion} className="btn-ghost border border-rc-border px-4 py-2 text-xs">
+              ← Back to Discussion
+            </button>
+          )}
+        </div>
+      )}
+      {task.status === "running" && onCancel && (
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onCancel} className="btn-ghost border border-rc-border px-4 py-2 text-xs">
+            Cancel Task
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -787,6 +839,10 @@ function NodeCard({
         <span>{stage.dependsOn.length > 0 ? `Waits on ${joinLabels(stage.dependsOn)}` : "Root stage"}</span>
         <span>{stage.retries > 0 ? "Retry path" : stage.dependsOn.length > 1 ? "Merge point" : "Primary path"}</span>
       </div>
+
+      {stage.error && (
+        <div className="mt-1 truncate text-[10px] text-rose-300" title={stage.error}>{stage.error}</div>
+      )}
 
       {stage.retries > 0 && (
         <div className="pointer-events-none absolute bottom-3 right-3 flex gap-1">
@@ -930,12 +986,14 @@ function ActivityPane({
   stage,
   health,
   onOpenDetail,
+  onError,
 }: {
   taskId: string;
   task: Task;
   stage?: Stage;
   health?: HealthInfo;
   onOpenDetail: (stageId: string) => void;
+  onError: (msg: string) => void;
 }) {
   const dependents = useMemo(() => {
     if (!stage) return [];
@@ -964,6 +1022,9 @@ function ActivityPane({
                 <div className={`mt-2 inline-flex rounded-input border px-2 py-1 text-[10px] uppercase tracking-wider ${statusBadgeTone(stage.status)}`}>
                   {stage.status}
                 </div>
+                {stage.error && (
+                  <div className="mt-1 text-[11px] text-rose-300">{stage.error}</div>
+                )}
               </div>
               <div className="rounded-card border border-rc-border bg-rc-code/65 p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-rc-muted">Elapsed</div>
@@ -976,9 +1037,9 @@ function ActivityPane({
                 <div className="mt-2 font-mono text-sm text-rc-text">{stage.retries + 1}</div>
               </div>
               <div className="rounded-card border border-rc-border bg-rc-code/65 p-3">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-rc-muted">Graph Links</div>
-                <div className="mt-2 text-sm text-rc-text">
-                  {pluralize(stage.dependsOn.length, "dependency")} / {pluralize(dependents.length, "dependent")}
+                <div className="text-[10px] uppercase tracking-[0.22em] text-rc-muted">Tokens</div>
+                <div className="mt-2 font-mono text-sm text-rc-text">
+                  {(stage.tokens_in || stage.tokens_out) ? `${((stage.tokens_in ?? 0) + (stage.tokens_out ?? 0)).toLocaleString()}` : "—"}
                 </div>
               </div>
             </div>
@@ -1002,18 +1063,18 @@ function ActivityPane({
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  {stage.status === "complete" && (
+                  {(stage.status === "complete" || stage.status === "failed") && (
                     <button onClick={() => onOpenDetail(stage.id)} className="btn-ghost border border-rc-border px-3 py-1.5 text-xs">
                       Open Detail
                     </button>
                   )}
-                  {(stage.status === "failed" || health?.stalled) && (
-                    <button onClick={() => rerunFromHere(task.id, stage.id).catch(() => {})} className="btn-accent px-3 py-1.5 text-xs">
+                  {(stage.status === "failed" || health?.stalled) && task.status !== "running" && task.status !== "awaiting_approval" && (
+                    <button onClick={() => rerunFromHere(task.id, stage.id).catch((err) => onError(`Rerun failed: ${err instanceof Error ? err.message : String(err)}`))} className="btn-accent px-3 py-1.5 text-xs">
                       Rerun From Here
                     </button>
                   )}
-                  {stage.isGate && (stage.status === "failed" || health?.stalled) && (
-                    <button onClick={() => reevalGate(task.id, stage.id).catch(() => {})} className="btn-ghost border border-rc-border px-3 py-1.5 text-xs">
+                  {stage.isGate && (stage.status === "failed" || health?.stalled) && task.status !== "running" && task.status !== "awaiting_approval" && (
+                    <button onClick={() => reevalGate(task.id, stage.id).catch((err) => onError(`Re-eval failed: ${err instanceof Error ? err.message : String(err)}`))} className="btn-ghost border border-rc-border px-3 py-1.5 text-xs">
                       Re-evaluate Gate
                     </button>
                   )}
@@ -1060,6 +1121,7 @@ export default function LiveMonitor() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const tasks = useTasks();
+  const refresh = useRefreshTasks();
   const routedTask = tasks.find((task) => task.id === id);
   const [taskState, setTaskState] = useState<Task | undefined>(routedTask);
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
@@ -1071,17 +1133,33 @@ export default function LiveMonitor() {
 
   useEffect(() => {
     if (!id) return;
-    const es = new EventSource(`/api/tasks/${id}/events`);
-    es.onmessage = (event) => {
-      try {
-        const nextTask = JSON.parse(event.data) as Task;
-        startTransition(() => setTaskState(nextTask));
-      } catch {
-        // Ignore malformed updates.
-      }
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+
+    function connect() {
+      if (closed) return;
+      es = new EventSource(`/api/tasks/${id}/events`);
+      es.onmessage = (event) => {
+        try {
+          const nextTask = JSON.parse(event.data) as Task;
+          startTransition(() => setTaskState(nextTask));
+        } catch {
+          // Ignore malformed updates.
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+        if (!closed) reconnectTimer = setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      es?.close();
     };
-    es.onerror = () => es.close();
-    return () => es.close();
   }, [id]);
 
   useEffect(() => {
@@ -1119,8 +1197,32 @@ export default function LiveMonitor() {
 
   const selectedStage = selectedStageId ? task.stages.find((stage) => stage.id === selectedStageId) : undefined;
 
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const handleRerun = async () => {
+    setActionError(null);
+    try {
+      const res = await rerunTask(id);
+      refresh();
+      nav(res.route === 'monitor' ? `/task/${id}/monitor` : `/task/${id}/discuss`);
+    } catch (err) {
+      setActionError(`Rerun failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleCancel = async () => {
+    setActionError(null);
+    try {
+      await cancelTask(id);
+      refresh();
+    } catch (err) {
+      setActionError(`Cancel failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   return (
     <div className="flex min-h-[960px] flex-col gap-4 lg-wide:flex-row lg-wide:items-stretch" data-testid="monitor-layout">
+      {actionError && <div className="text-rc-error text-sm px-2 py-1">{actionError}</div>}
       <div className="grid min-h-0 flex-1 grid-rows-[minmax(640px,1fr)_minmax(340px,auto)] gap-4 lg-wide:w-[62%]">
         <DagViewport task={task} selectedStageId={selectedStageId} onSelectStage={setSelectedStageId} healthMap={healthMap} />
         <ActivityPane
@@ -1129,11 +1231,15 @@ export default function LiveMonitor() {
           stage={selectedStage}
           health={selectedStage ? healthMap.get(selectedStage.id) : undefined}
           onOpenDetail={(stageId) => nav(`/task/${id}/stage/${stageId}`)}
+          onError={setActionError}
         />
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto lg-wide:w-[38%]">
-        <RunOverview task={task} selectedStage={selectedStage} health={selectedStage ? healthMap.get(selectedStage.id) : undefined} />
+        <RunOverview task={task} selectedStage={selectedStage} health={selectedStage ? healthMap.get(selectedStage.id) : undefined} onRerun={handleRerun} onCancel={handleCancel} onBackToDiscussion={() => nav(`/task/${id}/discuss`)} />
+        <button onClick={() => nav(`/task/${id}/knowledge-graph`)} className="btn-ghost border border-rc-border px-4 py-2 text-xs w-full text-left">
+          🧠 Knowledge Graph
+        </button>
         <AttemptsSummary task={task} />
       </div>
     </div>

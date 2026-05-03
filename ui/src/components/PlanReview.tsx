@@ -30,28 +30,54 @@ export default function PlanReview() {
   const campaignIteration = task ? getCampaignIteration(task) : 1;
   const showIterationSummary = Boolean(task && task.currentIteration > 1 && iterationLog);
 
+  const [waitingForPlan, setWaitingForPlan] = useState(false);
+
   useEffect(() => {
     if (!id || !task || task.currentIteration <= 1) return;
     fetchIterationLog(id).then(setIterationLog);
   }, [id, task?.currentIteration]);
 
-  // If task is still pending/running (planner working), redirect to monitor
+  // Track whether we arrived here while planner is still running
+  useEffect(() => {
+    if (!task) return;
+    if (task.status === "running" && !isAwaiting) {
+      setWaitingForPlan(true);
+    } else if (isAwaiting || task.status === "completed" || task.status === "failed") {
+      setWaitingForPlan(false);
+    }
+  }, [task?.status, isAwaiting]);
+
+  // Redirect to the appropriate view based on task status
   useEffect(() => {
     if (!task || !id) return;
-    if (task.status === "pending" || task.status === "running") {
-      nav(`/task/${id}/monitor`, { replace: true });
+    if (task.status === "pending") {
+      nav(`/task/${id}/discuss`, { replace: true });
+      return;
     }
-  }, [task?.status, id, nav]);
+    if (task.status === "completed" || task.status === "failed") {
+      nav(`/task/${id}/monitor`, { replace: true });
+      return;
+    }
+    // When running: stay on plan review if waitingForPlan, otherwise redirect
+    if (task.status === "running" && !waitingForPlan && !isAwaiting) {
+      const hasDispatched = task.stages.some(s => s.dispatched);
+      if (hasDispatched) {
+        nav(`/task/${id}/monitor`, { replace: true });
+      }
+    }
+  }, [task?.status, id, nav, waitingForPlan, isAwaiting]);
 
   useEffect(() => {
-    if (!isAwaiting || !id) return;
+    if (!id) return;
+    // Poll for dispatch while awaiting approval OR while waiting for planner to finish
+    if (!isAwaiting && !waitingForPlan) return;
     const poll = () => {
       fetchDispatch(id).then((d) => setDispatchedStages(d.stages)).catch(() => {});
     };
     poll();
     pollRef.current = setInterval(poll, 3000);
     return () => clearInterval(pollRef.current);
-  }, [isAwaiting, id]);
+  }, [isAwaiting, waitingForPlan, id]);
 
   const handleApprove = async () => {
     if (!id) return;
@@ -173,6 +199,9 @@ export default function PlanReview() {
       )}
       {isAwaiting && !dispatchedStages.length && (
         <div className="mt-6 text-rc-muted text-sm animate-pulse">Loading dispatched stages…</div>
+      )}
+      {waitingForPlan && !isAwaiting && !dispatchedStages.length && (
+        <div className="mt-6 text-rc-muted text-sm animate-pulse">Planner is analyzing the task and creating an execution plan…</div>
       )}
     </div>
   );

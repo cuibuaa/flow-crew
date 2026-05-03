@@ -8,7 +8,11 @@ export interface Stage {
   dependsOn: string[];
   dispatched?: boolean;
   startedAt?: string;
+  completedAt?: string;
   isGate?: boolean;
+  tokens_in?: number;
+  tokens_out?: number;
+  error?: string;
 }
 
 export interface Message {
@@ -51,6 +55,8 @@ export interface Task {
   autoApproveRetries: boolean;
   campaignTriggers?: CampaignTriggers;
   iterationLog: string | null;
+  failureReason?: string;
+  completedAt?: string;
   campaignId?: string;
   campaignStorageKey?: string;
   campaignName?: string;
@@ -71,6 +77,13 @@ export interface Task {
     alertType: "regression" | "plateau" | "repeated_failure";
     message: string;
   };
+  parentTaskId?: string;
+  budget?: {
+    totalTokens?: number;
+    totalTimeMs?: number;
+    usedTokens?: number;
+    usedTimeMs?: number;
+  };
 }
 
 export interface CampaignTriggers {
@@ -86,6 +99,7 @@ export interface StageDetail extends Stage {
   output: string;
   tokens_in: number;
   tokens_out: number;
+  error?: string;
 }
 
 export interface Agent {
@@ -144,4 +158,66 @@ export function getCampaignDisplayName(target: { campaignName?: string | null; c
 
 export function getCampaignIteration(task: Pick<Task, "campaignIteration" | "currentIteration">): number {
   return task.campaignIteration ?? task.currentIteration;
+}
+
+// Knowledge Graph types
+export type KGNodeType = 'goal' | 'approach' | 'finding' | 'result' | 'insight' | 'dead_end' | 'user_hint';
+export type KGEdgeType = 'explored_by' | 'found_that' | 'measured_as' | 'sourced_from' | 'supports' | 'contradicts' | 'combines_with' | 'depends_on';
+
+export interface KGNode {
+  id: string;
+  type: KGNodeType;
+  label: string;
+  details?: string;
+  source?: string;
+  score?: number;
+  timestamp: string;
+  stageId?: string;
+}
+
+export interface KGEdge {
+  id?: string;
+  from?: string;
+  to?: string;
+  source?: string;
+  target?: string;
+  type: KGEdgeType;
+  label?: string;
+  timestamp?: string;
+}
+
+export interface KnowledgeGraph {
+  nodes: KGNode[];
+  edges: KGEdge[];
+  metadata: {
+    bestScore?: number;
+    metricName?: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+}
+
+// Execution Trace types
+export type TraceEventType = 'llm_call' | 'tool_use' | 'web_search' | 'file_read' | 'file_write' | 'kg_update';
+
+export interface TraceEvent {
+  timestamp: string;
+  stageId: string;
+  type: TraceEventType;
+  inputSummary: string;
+  outputSummary: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  durationMs: number;
+  kgNodesAdded?: string[];
+}
+
+export interface TraceSummary {
+  totalEvents: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalCostUsd: number;
+  totalDurationMs: number;
+  byType: Record<string, number>;
 }

@@ -21,15 +21,15 @@ export default function AlertsFeed({ tasks }: { tasks: Task[] }) {
     for (const s of t.stages) {
       if (s.status === "running" && s.startedAt) {
         const elapsed = now - Date.parse(s.startedAt);
-        if (elapsed > 180_000) {
-          alerts.push({ icon: "⚠️", message: `${t.name}: ${s.id} stalled — no output for ${Math.floor(elapsed / 60000)}m`, time: s.startedAt });
+        if (elapsed > 600_000) {
+          alerts.push({ icon: "⚠️", message: `${t.name}: ${s.id} running for ${Math.floor(elapsed / 60000)}m`, time: s.startedAt });
         }
       }
       if (s.status === "complete" && s.startedAt) {
-        alerts.push({ icon: "🟢", message: `${t.name}: ${s.id} completed`, time: s.startedAt });
+        alerts.push({ icon: "🟢", message: `${t.name}: ${s.id} completed`, time: s.completedAt ?? s.startedAt });
       }
       if (s.status === "failed" && s.startedAt) {
-        alerts.push({ icon: "🔴", message: `${t.name}: ${s.id} failed`, time: s.startedAt });
+        alerts.push({ icon: "🔴", message: `${t.name}: ${s.id} failed${s.error ? ` — ${s.error}` : ""}`, time: s.completedAt ?? s.startedAt });
       }
     }
   }

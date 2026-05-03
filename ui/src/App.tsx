@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useParams } from "react-router-dom";
 import Layout from "./components/Layout";
 import TaskBoard from "./components/TaskBoard";
 import TaskDiscussion from "./components/TaskDiscussion";
@@ -8,6 +8,13 @@ import StageDetail from "./components/StageDetail";
 import AgentManagement from "./components/AgentManagement";
 import Settings from "./components/Settings";
 import ImportBrief from "./components/ImportBrief";
+import KnowledgeGraph from "./components/KnowledgeGraph";
+
+function KnowledgeGraphRoute() {
+  const { id } = useParams();
+  if (!id) return null;
+  return <KnowledgeGraph taskId={id} />;
+}
 
 export default function App() {
   return (
@@ -19,6 +26,7 @@ export default function App() {
           <Route path="/task/:id/discuss" element={<TaskDiscussion />} />
           <Route path="/task/:id/plan" element={<PlanReview />} />
           <Route path="/task/:id/monitor" element={<LiveMonitor />} />
+          <Route path="/task/:id/knowledge-graph" element={<KnowledgeGraphRoute />} />
           <Route path="/task/:id/stage/:stageId" element={<StageDetail />} />
           <Route path="/agents" element={<AgentManagement />} />
           <Route path="/settings" element={<Settings />} />

@@ -4,8 +4,18 @@ import { join } from 'node:path';
 import { readStageOutput } from './store.js';
 import { readStageStatus } from './store.js';
 
-const MAX_CONTEXT_CHARS = 2000;
+const MAX_CONTEXT_CHARS = 8000;
 const SKILLS_DIR = 'config/skills';
+const DEFAULT_TIMEOUT_MS = '300000';
+
+function readDefaultTimeout(projectDir: string): string {
+  try {
+    const raw = readFileSync(join(projectDir, 'config', 'defaults.yaml'), 'utf-8');
+    const match = raw.match(/default_timeout_ms:\s*(\d+)/);
+    if (match) return match[1];
+  } catch { /* fallback */ }
+  return DEFAULT_TIMEOUT_MS;
+}
 
 export type HandoffVisibility = 'full' | 'minimal' | 'none';
 
@@ -26,6 +36,7 @@ interface HandoffOpts {
   handoffVisibility?: HandoffVisibility;
   role?: string;
   availableRoles?: string;
+  availableSkills?: string;
   taskDescription?: string;
   isGate?: boolean;
   stageId?: string;
@@ -42,7 +53,14 @@ Before finishing, write a brief handoff note for the next stage:
 - What did you do?
 - What key decisions did you make and why?
 - What should the next person know before starting?
-- Any risks or caveats?`;
+- Any risks or caveats?
+
+Knowledge graph continuity:
+- If this stage produced reusable goals, approaches, findings, results, dead ends, user hints, source references, or candidate metrics, update the task-local knowledge graph at {kg_path}.
+- If the file does not exist, create it with this shape: {"nodes":[],"edges":[],"metadata":{"createdAt":"<iso>","updatedAt":"<iso>"}}.
+- Keep entries concise and evidence-backed. Do not invent sources, scores, or results.
+- Use node types: goal, approach, finding, result, insight, dead_end, user_hint.
+- Use edge types: explored_by, found_that, measured_as, sourced_from, supports, contradicts, combines_with, depends_on.`;
 
 function resolveVisibility(opts: HandoffOpts): HandoffVisibility {
   if (opts.handoffVisibility) return opts.handoffVisibility;
@@ -59,7 +77,12 @@ function buildFullContext(depId: string, opts: HandoffOpts): string {
     artifacts = st.artifacts?.join(', ') || 'none';
   } catch { /* missing stage data */ }
   let output = readStageOutput(opts.projectDir, opts.runId, depId);
-  if (output.length > MAX_CONTEXT_CHARS) output = output.slice(0, MAX_CONTEXT_CHARS) + '\n...(truncated)';
+  if (output.length > MAX_CONTEXT_CHARS) {
+    // Keep both the start and end of the output so the handoff note (written at the end) is preserved
+    const tailSize = Math.min(2000, Math.floor(MAX_CONTEXT_CHARS / 4));
+    const headSize = MAX_CONTEXT_CHARS - tailSize;
+    output = output.slice(0, headSize) + '\n...(truncated)...\n' + output.slice(-tailSize);
+  }
   return `## Context from stage: ${depId}\nStatus: ${statusText}\nArtifacts: ${artifacts}\nSummary:\n${output}`;
 }
 
@@ -105,9 +128,12 @@ export function buildStagePrompt(opts: HandoffOpts): string {
   const vars: Record<string, string> = {
     project: opts.projectDir,
     run_dir: opts.runDir,
+    kg_path: join(opts.runDir, 'knowledge_graph.json'),
     skills: opts.skills ?? '',
     available_roles: opts.availableRoles ?? '',
+    available_skills: opts.availableSkills ?? '',
     task_description: opts.taskDescription ?? '',
+    default_timeout_ms: readDefaultTimeout(opts.projectDir),
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const context = opts.dependsOn.length > 0 ? buildDependencyContext(opts) : '';
@@ -117,15 +143,16 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     : '';
   const parts = [context, body, anchor, skillsContent].filter(Boolean);
   const prompt = parts.join('\n\n');
+  const handoffSuffix = substituteTemplate(HANDOFF_SUFFIX, vars);
 
   // For gate stages: inject the verdict file path
   if (opts.isGate && opts.stageId) {
     const verdictPath = `${opts.runDir}/verdict_${opts.stageId}.json`;
     const verdictInstruction = `\n\nIMPORTANT: After your review, write your verdict to ${verdictPath}:\n{"pass": true} or {"pass": false, "reason": "specific reason"}\nThis file determines whether the workflow proceeds or retries.`;
-    return prompt + verdictInstruction + HANDOFF_SUFFIX;
+    return prompt + verdictInstruction + handoffSuffix;
   }
 
-  return prompt + HANDOFF_SUFFIX;
+  return prompt + handoffSuffix;
 }
 
 function loadSkills(skillNames: string[], projectDir: string): string {

@@ -1,6 +1,7 @@
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 
 export interface StageStatus {
   status: 'pending' | 'running' | 'complete' | 'failed' | 'skipped';
@@ -13,6 +14,7 @@ export interface StageStatus {
   error?: string;
   tokens_in?: number;
   tokens_out?: number;
+  kgChanged?: boolean;
 }
 
 export interface CampaignTriggers {
@@ -39,6 +41,7 @@ export interface StoreState {
   maxIterations?: number;
   maxRetries?: number;
   autoApproveRetries?: boolean;
+  autoApprove?: boolean;
   timeoutMs?: number;
   campaignTriggers?: CampaignTriggers;
   failureReason?: string;
@@ -62,6 +65,13 @@ export interface StoreState {
     alertType: 'regression' | 'plateau' | 'repeated_failure';
     message: string;
   };
+  parentTaskId?: string;
+  budget?: {
+    totalTokens?: number;
+    totalTimeMs?: number;
+    usedTokens?: number;
+    usedTimeMs?: number;
+  };
 }
 
 function runsRoot(projectDir: string): string {
@@ -78,8 +88,13 @@ function stageDir(projectDir: string, runId: string, stageId: string): string {
 
 function atomicWrite(filePath: string, data: string): void {
   const tmp = filePath + '.tmp.' + randomBytes(4).toString('hex');
-  writeFileSync(tmp, data, 'utf-8');
-  renameSync(tmp, filePath);
+  try {
+    writeFileSync(tmp, data, 'utf-8');
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
+    throw err;
+  }
 }
 
 function generateRunId(): string {
@@ -113,6 +128,7 @@ export function createRun(
     startedAt: new Date().toISOString(),
   };
   atomicWrite(join(dir, 'run.json'), JSON.stringify(state, null, 2));
+  try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
   atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
   return { runId, runDirPath: dir };
 }
@@ -123,6 +139,7 @@ export function readRunState(projectDir: string, runId: string): StoreState {
 
 export function writeRunState(projectDir: string, runId: string, state: StoreState): void {
   atomicWrite(join(runDir(projectDir, runId), 'run.json'), JSON.stringify(state, null, 2));
+  try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
 }
 
 export function readStageStatus(projectDir: string, runId: string, stageId: string): StageStatus {
@@ -177,8 +194,13 @@ export function readStageOutput(projectDir: string, runId: string, stageId: stri
 }
 
 export function listRuns(projectDir: string): string[] {
+  const indexed = listRunIdsFromIndex(projectDir);
+  if (indexed) return indexed;
   try {
-    return readdirSync(runsRoot(projectDir)).sort();
+    const root = runsRoot(projectDir);
+    return readdirSync(root)
+      .filter(d => existsSync(join(root, d, 'run.json')))
+      .sort();
   } catch {
     return [];
   }

@@ -23,3 +23,4 @@ prompt: |
   - Every claim needs evidence (citation or experimental result).
   - Vary sentence length and structure — avoid formulaic patterns.
   - No AI buzzwords: avoid "Moreover", "comprehensive", "leverage", "delve", "crucial".
+  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

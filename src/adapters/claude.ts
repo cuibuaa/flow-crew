@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult, DiscussOpts, ChildProcess, InteractiveSession } from './base.js';
-import { execWithTimeout, execWithStreaming } from './base.js';
+import { execWithTimeout, execWithStreaming, tryImportPty, spawnFallbackInteractive } from './base.js';
 
 /** Parse token usage from claude output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -44,7 +44,7 @@ export class ClaudeAdapter implements Adapter {
       '--dangerously-skip-permissions',
       '--output-format', 'text',
     ];
-    if (role.model) args.push('--model', role.model);
+    if (role.model && role.model !== 'default') args.push('--model', role.model);
     if (role.prompt) args.push('--append-system-prompt', role.prompt);
     args.push(prompt);
 
@@ -68,6 +68,7 @@ export class ClaudeAdapter implements Adapter {
       '--dangerously-skip-permissions',
       '--output-format', 'stream-json',
     ];
+    if (role.model && role.model !== 'default') args.push('--model', role.model);
     if (role.prompt) args.push('--append-system-prompt', role.prompt);
     if (hasSession) args.push('-c');
     args.push(message);
@@ -109,6 +110,7 @@ export class ClaudeAdapter implements Adapter {
       '--dangerously-skip-permissions',
       '--output-format', 'stream-json',
     ];
+    if (role.model && role.model !== 'default') args.push('--model', role.model);
     if (role.prompt) args.push('--append-system-prompt', role.prompt);
     if (hasSession) args.push('-c');
     args.push(message);
@@ -117,23 +119,30 @@ export class ClaudeAdapter implements Adapter {
 
   async spawnInteractive(role: AgentConfig, opts: DiscussOpts): Promise<InteractiveSession> {
     mkdirSync(opts.sessionDir, { recursive: true });
-    const pty = await import('node-pty');
+    const pty = await tryImportPty();
     const args = ['--dangerously-skip-permissions'];
+    if (role.model && role.model !== 'default') args.push('--model', role.model);
     if (role.prompt) args.push('--append-system-prompt', role.prompt);
 
-    const proc = pty.spawn('claude', args, {
+    if (pty) {
+      const proc = pty.spawn('claude', args, {
+        cwd: opts.workDir,
+        cols: opts.cols ?? 80,
+        rows: opts.rows ?? 24,
+        env: { ...process.env, TERM: 'xterm-256color' },
+      });
+      return {
+        onData: (cb: (data: string) => void) => proc.onData(cb),
+        write: (data: string) => proc.write(data),
+        resize: (cols: number, rows: number) => proc.resize(cols, rows),
+        kill: () => proc.kill(),
+        onExit: (cb: (exitCode: number) => void) => proc.onExit(({ exitCode }: { exitCode: number }) => cb(exitCode)),
+      };
+    }
+    return spawnFallbackInteractive('claude', args, {
       cwd: opts.workDir,
-      cols: opts.cols ?? 80,
-      rows: opts.rows ?? 24,
       env: { ...process.env, TERM: 'xterm-256color' },
     });
-    return {
-      onData: (cb: (data: string) => void) => proc.onData(cb),
-      write: (data: string) => proc.write(data),
-      resize: (cols: number, rows: number) => proc.resize(cols, rows),
-      kill: () => proc.kill(),
-      onExit: (cb: (exitCode: number) => void) => proc.onExit(({ exitCode }: { exitCode: number }) => cb(exitCode)),
-    };
   }
 }
 

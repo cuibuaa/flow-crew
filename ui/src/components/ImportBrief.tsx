@@ -8,6 +8,7 @@ export default function ImportBrief() {
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
   const [campaignMode, setCampaignMode] = useState<CampaignSelectionMode>("standalone");
   const [campaignId, setCampaignId] = useState("");
@@ -60,8 +61,9 @@ export default function ImportBrief() {
         campaignName: resolvedCampaignName,
       });
       await executeTask(id);
-      nav(`/task/${id}/monitor`);
-    } catch {
+      nav(`/task/${id}/plan`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
   };
@@ -69,6 +71,8 @@ export default function ImportBrief() {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <h2 className="text-lg font-semibold text-rc-text">Import Task Brief</h2>
+
+      {error && <div className="text-rc-error text-sm">{error}</div>}
 
       <div>
         <label className="block text-sm text-rc-text-secondary mb-1">Task Name</label>

@@ -1,10 +1,17 @@
-import type { Task, StageDetail, Agent, Message, PlanStage, SettingsData, CampaignSummary, CampaignEntry, CampaignTriggers } from "./types";
+import type { Task, StageDetail, Agent, Message, PlanStage, SettingsData, CampaignSummary, CampaignEntry, CampaignTriggers, KnowledgeGraph, KGNode, KGEdge, TraceEvent, TraceSummary } from "./types";
 
 const BASE = "/api";
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json() as { error?: string };
+      if (body?.error) msg = body.error;
+    } catch { /* no JSON body */ }
+    throw new Error(msg);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -53,7 +60,6 @@ export const createTask = (data: CreateTaskRequest) =>
 export const updateTask = (id: string, data: UpdateTaskRequest) =>
   patch<Record<string, unknown>>(`${BASE}/tasks/${id}`, data);
 export const executeTask = (id: string) => post<void>(`${BASE}/tasks/${id}/execute`, {});
-export const stopTask = (id: string) => post<void>(`${BASE}/tasks/${id}/stop`, {});
 export const deleteTask = (id: string) =>
   fetch(`${BASE}/tasks/${id}`, { method: 'DELETE' }).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); });
 export const cancelTask = (id: string) => post<void>(`${BASE}/tasks/${id}/cancel`, {});
@@ -101,12 +107,46 @@ export const approveDispatch = (taskId: string, body?: { autoApproveRetries?: bo
   post<{ ok: boolean }>(`${BASE}/tasks/${taskId}/approve`, body ?? {});
 export const fetchIterationLog = (taskId: string) =>
   fetch(`${BASE}/tasks/${taskId}/iteration-log`).then(r => { if (!r.ok) return null; return r.text(); });
-export const fetchStageOutput = (taskId: string, stageId: string) =>
-  fetch(`${BASE}/tasks/${taskId}/stages/${stageId}/output`).then((r) => {
+export interface StageOutputResponse {
+  text: string;
+  totalBytes: number | null;
+  tailBytes: number | null;
+  truncated: boolean;
+}
+export const fetchStageOutput = (taskId: string, stageId: string, opts?: { full?: boolean; tailBytes?: number }): Promise<StageOutputResponse> => {
+  const params = new URLSearchParams();
+  if (opts?.full) params.set("tailBytes", "full");
+  else if (opts?.tailBytes) params.set("tailBytes", String(opts.tailBytes));
+  const query = params.toString();
+  return fetch(`${BASE}/tasks/${taskId}/stages/${stageId}/output${query ? `?${query}` : ""}`).then(async (r) => {
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.text();
+    return {
+      text: await r.text(),
+      totalBytes: Number(r.headers.get("X-Output-Total-Bytes")) || null,
+      tailBytes: Number(r.headers.get("X-Output-Tail-Bytes")) || null,
+      truncated: r.headers.get("X-Output-Truncated") === "true",
+    };
   });
+};
 
 // Campaigns
 export const fetchCampaigns = () => json<CampaignSummary[]>(`${BASE}/campaigns`);
 export const fetchCampaign = (id: string) => json<CampaignEntry[]>(`${BASE}/campaigns/${id}`);
+
+// Knowledge Graph
+export const fetchKnowledgeGraph = (taskId: string) =>
+  json<KnowledgeGraph>(`${BASE}/tasks/${taskId}/knowledge-graph`);
+export const addKGNode = (taskId: string, node: { type: string; label: string; details?: string; source?: string; score?: number }) =>
+  post<KGNode>(`${BASE}/tasks/${taskId}/knowledge-graph/nodes`, node);
+export const updateKGNode = (taskId: string, nodeId: string, updates: { type?: string; label?: string; details?: string; score?: number }) =>
+  patch<KGNode>(`${BASE}/tasks/${taskId}/knowledge-graph/nodes/${nodeId}`, updates);
+export const deleteKGNode = (taskId: string, nodeId: string) =>
+  fetch(`${BASE}/tasks/${taskId}/knowledge-graph/nodes/${nodeId}`, { method: 'DELETE' }).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); });
+export const addKGEdge = (taskId: string, edge: { from: string; to: string; type: string; label?: string }) =>
+  post<KGEdge>(`${BASE}/tasks/${taskId}/knowledge-graph/edges`, edge);
+
+// Execution Trace
+export const fetchTrace = (taskId: string) =>
+  json<{ events: TraceEvent[]; summary: TraceSummary }>(`${BASE}/tasks/${taskId}/trace`);
+export const fetchStageTrace = (taskId: string, stageId: string) =>
+  json<{ events: TraceEvent[]; summary: TraceSummary }>(`${BASE}/tasks/${taskId}/stages/${stageId}/trace`);

@@ -1,20 +1,27 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoreState } from './store.js';
+import { readRunIndexRecords, recordToPartialState } from './run-index.js';
 
 export interface CampaignHistoryEntry {
   seq: number;
   runId: string;
   iteration?: number;
-  score: number;
-  metric: string;
-  gate: string;
+  score?: number;
+  metric?: string;
+  gate?: string;
   pass: boolean;
   status?: string;
   timestamp: string;
   campaignId?: string;
   campaignStorageKey?: string;
   campaignName?: string;
+  phase?: string;
+  phaseComplete?: boolean;
+  nextPhase?: string;
+  outcome?: string;
+  artifactSummary?: string;
+  reason?: string;
 }
 
 export interface CampaignSummaryRecord {
@@ -83,6 +90,9 @@ export function resolveCampaignStorageKey(input: {
 }
 
 function readRunStates(projectDir: string): StoreState[] {
+  const indexed = readRunIndexRecords(projectDir);
+  if (indexed) return indexed.map(recordToPartialState);
+
   let runIds: string[];
   try {
     runIds = readdirSync(runsRoot(projectDir));
@@ -146,22 +156,35 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
           const ref = normalizeEntryCampaign(fileStem, parsed);
           if (!ref || ref.storageKey !== targetStorageKey) continue;
           if (typeof parsed.seq !== 'number' || typeof parsed.runId !== 'string') continue;
-          if (typeof parsed.score !== 'number' || typeof parsed.metric !== 'string' || typeof parsed.gate !== 'string') continue;
+          const hasScore = typeof parsed.score === 'number'
+            && Number.isFinite(parsed.score)
+            && typeof parsed.metric === 'string';
+          const hasPhase = typeof parsed.phase === 'string'
+            || typeof parsed.phaseComplete === 'boolean'
+            || typeof parsed.nextPhase === 'string'
+            || typeof parsed.outcome === 'string';
+          if (!hasScore && !hasPhase) continue;
           const normalized: CampaignHistoryEntry = {
             seq: parsed.seq,
             runId: parsed.runId,
             iteration: typeof parsed.iteration === 'number' ? parsed.iteration : undefined,
-            score: parsed.score,
-            metric: parsed.metric,
-            gate: parsed.gate,
+            score: hasScore ? parsed.score : undefined,
+            metric: hasScore ? parsed.metric : undefined,
+            gate: typeof parsed.gate === 'string' ? parsed.gate : undefined,
             pass: parsed.pass === true,
             status: typeof parsed.status === 'string' ? parsed.status : undefined,
             timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : new Date(0).toISOString(),
             campaignId: ref.id,
             campaignStorageKey: ref.storageKey,
             campaignName: ref.name,
+            phase: typeof parsed.phase === 'string' ? parsed.phase : undefined,
+            phaseComplete: typeof parsed.phaseComplete === 'boolean' ? parsed.phaseComplete : undefined,
+            nextPhase: typeof parsed.nextPhase === 'string' ? parsed.nextPhase : undefined,
+            outcome: typeof parsed.outcome === 'string' ? parsed.outcome : undefined,
+            artifactSummary: typeof parsed.artifactSummary === 'string' ? parsed.artifactSummary : undefined,
+            reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
           };
-          const key = `${normalized.runId}::${normalized.iteration ?? 1}`;
+          const key = `${normalized.runId}::${normalized.iteration ?? 1}::${hasScore ? 'score' : 'phase'}`;
           const previous = byRunIteration.get(key);
           if (!previous || normalized.timestamp >= previous.timestamp) {
             byRunIteration.set(key, normalized);
@@ -278,6 +301,7 @@ export function nextCampaignSeq(projectDir: string, campaignId: string): number 
 export function collapseEntriesForHealth(entries: CampaignHistoryEntry[]): CampaignHistoryEntry[] {
   const bySeq = new Map<number, CampaignHistoryEntry>();
   for (const entry of entries) {
+    if (typeof entry.score !== 'number' || typeof entry.metric !== 'string') continue;
     const previous = bySeq.get(entry.seq);
     if (!previous) {
       bySeq.set(entry.seq, entry);
@@ -293,6 +317,39 @@ export function collapseEntriesForHealth(entries: CampaignHistoryEntry[]): Campa
     if (a.seq !== b.seq) return a.seq - b.seq;
     return a.timestamp.localeCompare(b.timestamp);
   });
+}
+
+export interface CampaignPhaseProgress {
+  entries: CampaignHistoryEntry[];
+  completedPhases: string[];
+  currentPhase?: string;
+  latest?: CampaignHistoryEntry;
+}
+
+export function summarizeCampaignPhaseProgress(entries: CampaignHistoryEntry[]): CampaignPhaseProgress {
+  const phaseEntries = entries
+    .filter((entry) => entry.phase || entry.nextPhase || entry.outcome || typeof entry.phaseComplete === 'boolean')
+    .sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      const iterDiff = (a.iteration ?? 0) - (b.iteration ?? 0);
+      if (iterDiff !== 0) return iterDiff;
+      return a.timestamp.localeCompare(b.timestamp);
+    });
+  const completedPhases = [...new Set(
+    phaseEntries
+      .filter((entry) => entry.phaseComplete === true && entry.phase)
+      .map((entry) => entry.phase as string),
+  )];
+  const latest = phaseEntries.at(-1);
+  const currentPhase = latest?.phaseComplete === true
+    ? latest.nextPhase
+    : latest?.phase ?? latest?.nextPhase;
+  return {
+    entries: phaseEntries,
+    completedPhases,
+    currentPhase,
+    latest,
+  };
 }
 
 export function campaignExists(projectDir: string, campaignId: string): boolean {

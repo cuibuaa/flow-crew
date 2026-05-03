@@ -5,7 +5,7 @@ import type { Task } from "../types";
 import { renameTask } from "../api";
 
 const statusIcon: Record<string, string> = {
-  complete: "✅", running: "🔄", pending: "⏳", failed: "❌", skipped: "⏭",
+  complete: "✅", running: "🔄", pending: "⏳", failed: "❌", skipped: "⏭", awaiting_approval: "⏸️",
 };
 
 function fmtTime(ms: number) {
@@ -41,10 +41,14 @@ export default function TaskCard({ task, onContextMenu, forceEdit, onEditDone }:
     }
   };
 
+  const target = task.status === "pending" ? `/task/${task.id}/discuss`
+    : task.status === "awaiting_approval" ? `/task/${task.id}/plan`
+    : `/task/${task.id}/monitor`;
+
   return (
     <div
       className="glass-panel rounded-card p-4 cursor-pointer transition-all hover:border-rc-border-hover"
-      onClick={() => nav(`/task/${task.id}/monitor`)}
+      onClick={() => nav(target)}
       onContextMenu={onContextMenu}
     >
       <div className="flex items-center justify-between mb-2">
@@ -114,6 +118,12 @@ export default function TaskCard({ task, onContextMenu, forceEdit, onEditDone }:
               {s.id} {statusIcon[s.status] ?? "⏳"}
             </span>
           ))}
+        </div>
+      )}
+
+      {task.failureReason && (
+        <div className="mt-2 text-xs text-rose-300 truncate" title={task.failureReason}>
+          {task.failureReason}
         </div>
       )}
     </div>

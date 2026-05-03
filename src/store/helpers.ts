@@ -1,4 +1,4 @@
-import { writeFileSync, renameSync } from 'node:fs';
+import { writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -31,6 +31,7 @@ export function atomicWrite(filePath: string, data: string): void {
     writeFileSync(tmp, data, 'utf-8');
     renameSync(tmp, filePath);
   } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
     const msg = err instanceof Error ? err.message : String(err);
     throw new StoreError(`atomicWrite failed for ${filePath}: ${msg}`, 'atomicWrite', filePath, { cause: err });
   }

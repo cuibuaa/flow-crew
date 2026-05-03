@@ -1,10 +1,10 @@
-import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
-import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus, readStageOutput } from './store.js';
+import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus } from './store.js';
 import type { StoreState, StageStatus } from './store.js';
 import { runStage } from './worker.js';
 import {
@@ -12,8 +12,11 @@ import {
   collapseEntriesForHealth,
   readCampaignEntries,
   resolveCampaignStorageKey,
+  summarizeCampaignPhaseProgress,
 } from './campaigns.js';
 import { recordRunEvent, recordStageOutcome } from './run-events.js';
+import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
+import { appendTraceEvent } from './trace.js';
 import pino from 'pino';
 
 const log = pino({ name: 'scheduler' });
@@ -22,11 +25,31 @@ const DEFAULT_MAX_ITERATIONS = 3;
 const DEFAULT_STAGE_TECHNICAL_RETRIES = 1;
 
 /** Load project defaults from config/defaults.yaml */
-function loadDefaults(): { timeout_ms: number; max_iterations: number; model: string; reasoning_effort: string; gate_retry_loops: number; stage_technical_retries: number } {
+type ProjectDefaults = { timeout_ms: number; max_iterations: number; model: string; reasoning_effort: string; gate_retry_loops: number; stage_technical_retries: number };
+
+const FALLBACK_DEFAULTS: ProjectDefaults = {
+  timeout_ms: 300000,
+  max_iterations: DEFAULT_MAX_ITERATIONS,
+  model: 'default',
+  reasoning_effort: 'default',
+  gate_retry_loops: DEFAULT_GATE_RETRY_LOOPS,
+  stage_technical_retries: DEFAULT_STAGE_TECHNICAL_RETRIES,
+};
+
+let _schedulerDefaultsCache: ProjectDefaults | null = null;
+let _schedulerDefaultsMtime = 0;
+let _schedulerDefaultsPath = '';
+
+function loadDefaults(projectDir?: string): ProjectDefaults {
+  const defaultsPath = join(projectDir ?? process.cwd(), 'config', 'defaults.yaml');
   try {
-    const raw = readFileSync(join(process.cwd(), 'config', 'defaults.yaml'), 'utf-8');
+    const mtime = statSync(defaultsPath).mtimeMs;
+    if (_schedulerDefaultsCache && mtime === _schedulerDefaultsMtime && defaultsPath === _schedulerDefaultsPath) return _schedulerDefaultsCache;
+    _schedulerDefaultsMtime = mtime;
+    _schedulerDefaultsPath = defaultsPath;
+    const raw = readFileSync(defaultsPath, 'utf-8');
     const parsed = parseYaml(raw) as Record<string, unknown>;
-    return {
+    _schedulerDefaultsCache = {
       timeout_ms: typeof parsed.default_timeout_ms === 'number' ? parsed.default_timeout_ms : 300000,
       max_iterations: typeof parsed.default_max_iterations === 'number' ? parsed.default_max_iterations : DEFAULT_MAX_ITERATIONS,
       model: typeof parsed.model === 'string' ? parsed.model : 'default',
@@ -34,18 +57,10 @@ function loadDefaults(): { timeout_ms: number; max_iterations: number; model: st
       gate_retry_loops: typeof parsed.default_gate_retry_loops === 'number' ? parsed.default_gate_retry_loops : DEFAULT_GATE_RETRY_LOOPS,
       stage_technical_retries: typeof parsed.default_stage_technical_retries === 'number' ? parsed.default_stage_technical_retries : DEFAULT_STAGE_TECHNICAL_RETRIES,
     };
+    return _schedulerDefaultsCache;
   } catch { /* fallback */ }
-  return {
-    timeout_ms: 300000,
-    max_iterations: DEFAULT_MAX_ITERATIONS,
-    model: 'default',
-    reasoning_effort: 'default',
-    gate_retry_loops: DEFAULT_GATE_RETRY_LOOPS,
-    stage_technical_retries: DEFAULT_STAGE_TECHNICAL_RETRIES,
-  };
+  return _schedulerDefaultsCache ?? FALLBACK_DEFAULTS;
 }
-
-const projectDefaults = loadDefaults();
 
 const AgentConfigSchema = z.object({
   name: z.string(),
@@ -56,10 +71,10 @@ const AgentConfigSchema = z.object({
   prompt: z.string(),
 });
 
-function parseAgent(raw: unknown): AgentConfig {
+function parseAgent(raw: unknown, projectDir?: string): AgentConfig {
   const agent = AgentConfigSchema.parse(raw);
-  if (agent.model === 'default') agent.model = projectDefaults.model;
-  if (agent.reasoning_effort === 'default') agent.reasoning_effort = projectDefaults.reasoning_effort;
+  if (agent.model === 'default') agent.model = loadDefaults(projectDir).model;
+  if (agent.reasoning_effort === 'default') agent.reasoning_effort = loadDefaults(projectDir).reasoning_effort;
   return agent;
 }
 
@@ -92,6 +107,16 @@ export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
 type CampaignMetric = { score: number; metric: string; gate: string; pass: boolean; threshold?: number };
+type CampaignPhaseMetadata = {
+  gate: string;
+  pass: boolean;
+  phase?: string;
+  phaseComplete?: boolean;
+  nextPhase?: string;
+  outcome?: string;
+  artifactSummary?: string;
+  reason?: string;
+};
 type GateMetricLookup = { found: boolean; metric: CampaignMetric | null };
 
 function topoSort(stages: StageConfig[]): StageConfig[] {
@@ -185,6 +210,9 @@ Rules:
 }
 
 - Keep the normal workflow verdict file separate. The workflow verdict remains pass/reason only unless explicitly instructed otherwise.
+- If this gate controls a campaign phase, also include phase metadata in the verdict or metric artifact:
+  phase, phaseComplete, nextPhase, outcome, artifactSummary, reason.
+  This lets future planner iterations use the existing campaign file to continue from the next phase instead of redispatching all phases.
 - If you write a metric value, ensure it is a JSON number, not a string.`;
 }
 
@@ -223,6 +251,16 @@ export function buildRoleRegistry(agentsDir: string): Map<string, { name: string
     }
   } catch { /* agents dir may not exist */ }
   return registry;
+}
+
+/** List available skill names from config/skills/ directory */
+function listAvailableSkills(projectDir: string): string {
+  const skillsDir = join(projectDir, 'config', 'skills');
+  try {
+    const files = readdirSync(skillsDir).filter(f => f.endsWith('.md'));
+    if (files.length === 0) return 'none';
+    return files.map(f => f.replace('.md', '')).join(', ');
+  } catch { return 'none'; }
 }
 
 export function parseDispatchBlock(
@@ -322,19 +360,30 @@ function injectDispatchedStages(
     log.warn('Failed to parse dispatch.yaml');
     return [];
   }
-  if (!Array.isArray(items)) return [];
+  // Accept both bare list and {stages: [...]} wrapper
+  let itemList: unknown[];
+  if (Array.isArray(items)) {
+    itemList = items;
+  } else if (items && typeof items === 'object' && Array.isArray((items as Record<string, unknown>).stages)) {
+    itemList = (items as Record<string, unknown>).stages as unknown[];
+  } else {
+    return [];
+  }
 
   const dispatched: StageConfig[] = [];
-  const seenIds = new Set<string>();
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
+  const skippedReasons: string[] = [];
+  const seenIds = new Set<string>(sorted.map(s => s.id));
+  for (let i = 0; i < itemList.length; i++) {
+    const item = itemList[i] as Record<string, unknown> | null;
     if (!item || typeof item !== 'object') continue;
     if (!item.id) item.id = `dispatch_${i}`;
-    if (seenIds.has(item.id)) {
+    if (seenIds.has(item.id as string)) {
+      skippedReasons.push(`${item.id}: duplicate stage ID`);
       log.warn({ id: item.id }, 'Duplicate stage ID in dispatch.yaml, skipping');
       continue;
     }
-    if (!roleRegistry.has(item.role)) {
+    if (!roleRegistry.has(item.role as string)) {
+      skippedReasons.push(`${item.id}: unknown role "${item.role}"`);
       log.warn({ role: item.role, id: item.id }, 'Unknown role in dispatch.yaml, skipping');
       continue;
     }
@@ -345,19 +394,91 @@ function injectDispatchedStages(
     }
     try {
       dispatched.push(StageConfigSchema.parse(item));
-      seenIds.add(item.id);
-    } catch {
+      seenIds.add(item.id as string);
+    } catch (e) {
+      skippedReasons.push(`${item.id}: invalid schema`);
       log.warn({ id: item.id }, 'Invalid stage in dispatch.yaml, skipping');
     }
   }
-  if (dispatched.length === 0) return [];
+  if (dispatched.length === 0) {
+    if (skippedReasons.length > 0) {
+      log.warn({ skippedReasons }, 'All stages in dispatch.yaml were invalid');
+    }
+    return [];
+  }
 
   resolveDispatchDependencies(dispatched, dispatchStageId);
 
-  // Create stage directories and add to state
+  // Validate dependencies: remove references to non-existent stages and self-references to prevent hangs
+  const allKnownIds = new Set([...sorted.map(s => s.id), ...dispatched.map(s => s.id)]);
+  for (const s of dispatched) {
+    const invalid = s.depends_on.filter(d => !allKnownIds.has(d) || d === s.id);
+    if (invalid.length > 0) {
+      log.warn({ stage: s.id, invalidDeps: invalid }, 'Removing invalid depends_on references');
+      s.depends_on = s.depends_on.filter(d => allKnownIds.has(d) && d !== s.id);
+      if (s.depends_on.length === 0) s.depends_on = [dispatchStageId];
+    }
+    // Validate retry_to references
+    if (s.retry_to && s.retry_to.length > 0) {
+      // Gate stages must not also be retry targets — strip retry_to to prevent confusing behavior
+      if (s.is_gate) {
+        log.warn({ stage: s.id }, 'Gate stage has retry_to — stripping retry_to (gates evaluate, fix stages retry)');
+        s.retry_to = undefined;
+      } else {
+        const invalidRetry = s.retry_to.filter(r => !allKnownIds.has(r));
+        if (invalidRetry.length > 0) {
+          log.warn({ stage: s.id, invalidRetryTo: invalidRetry }, 'Removing invalid retry_to references');
+          s.retry_to = s.retry_to.filter(r => allKnownIds.has(r));
+          if (s.retry_to.length === 0) s.retry_to = undefined;
+        }
+        // Auto-add gate IDs to depends_on so retry_to stages wait for the gate
+        if (s.retry_to) {
+          const missing = s.retry_to.filter(g => !s.depends_on.includes(g));
+          if (missing.length > 0) {
+            log.info({ stage: s.id, addedDeps: missing }, 'Auto-adding gate IDs to depends_on for retry_to stage');
+            s.depends_on = [...new Set([...s.depends_on, ...missing])];
+          }
+        }
+      }
+    }
+  }
+
+  // Cycle detection among dispatched stages to prevent hangs
+  {
+    const dispatchedIds = new Set(dispatched.map(s => s.id));
+    const visited = new Set<string>();
+    const inStack = new Set<string>();
+    const hasCycle = (id: string): boolean => {
+      if (inStack.has(id)) return true;
+      if (visited.has(id)) return false;
+      visited.add(id);
+      inStack.add(id);
+      const stage = dispatched.find(s => s.id === id);
+      if (stage) {
+        for (const dep of stage.depends_on) {
+          if (dispatchedIds.has(dep) && hasCycle(dep)) return true;
+        }
+      }
+      inStack.delete(id);
+      return false;
+    };
+    for (const s of dispatched) {
+      if (hasCycle(s.id)) {
+        log.warn({ stage: s.id }, 'Cycle detected in dispatched stages — breaking cycle by resetting depends_on to dispatch stage');
+        s.depends_on = [dispatchStageId];
+      }
+    }
+  }
+
+  // Create stage directories and add to state (preserve existing status for reruns)
+  let isReinjection = false;
   for (const s of dispatched) {
     mkdirSync(join(projectDir, '.fc', 'runs', runId, 'stages', s.id), { recursive: true });
-    state.stages[s.id] = { status: 'pending', retries: 0 };
+    if (state.stages[s.id]) {
+      isReinjection = true;
+    } else {
+      state.stages[s.id] = { status: 'pending', retries: 0 };
+    }
   }
 
   // Mark static stages that transitively depend on dispatch stage as skipped
@@ -383,7 +504,10 @@ function injectDispatchedStages(
   } catch { /* best effort */ }
 
   state.dispatchedStages = dispatched;
-  state.status = 'awaiting_approval';
+  // Skip plan review when re-injecting stages during a stage-level rerun
+  if (!isReinjection) {
+    state.status = 'awaiting_approval';
+  }
   writeRunState(projectDir, runId, state);
 
   return dispatched;
@@ -395,22 +519,43 @@ export function appendIterationLog(
   iteration: number,
   state: StoreState,
   dispatchedStageIds: string[],
+  baseStageIds?: string[],
+  innerRetriesUsed?: number,
+  maxInnerRetries?: number,
 ): void {
   const runDir = join(projectDir, '.fc', 'runs', runId);
   const logPath = join(runDir, 'iteration_log.md');
   mkdirSync(runDir, { recursive: true });
   const lines: string[] = [`# Iteration ${iteration}`];
-  for (const sid of dispatchedStageIds) {
+  if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
+    lines.push(`Fix→gate retries used: ${innerRetriesUsed}/${maxInnerRetries}`);
+  }
+  // Include base stages (e.g. plan) so re-plan iterations have context on failures
+  const allIds = [...(baseStageIds ?? []), ...dispatchedStageIds];
+  const seen = new Set<string>();
+  for (const sid of allIds) {
+    if (seen.has(sid)) continue;
+    seen.add(sid);
     const ss = state.stages[sid];
     if (!ss) continue;
     lines.push(`## ${sid} (${ss.status})`);
-    lines.push(`Output: .fc/runs/${runId}/stages/${sid}/output.md`);
+    lines.push(`Output: ${runDir}/stages/${sid}/output.md`);
     lines.push(`Artifacts: ${ss.artifacts?.join(', ') || 'none'}`);
-    // For gate stages (last in chain), extract verdict from first line of output
-    const output = readStageOutput(projectDir, runId, sid);
-    if (output) {
-      const firstLine = output.split('\n').find(l => l.trim()) || '';
-      lines.push(`Verdict: ${firstLine.slice(0, 200)}`);
+    if (ss.error) {
+      const isAdapter = ss.error === 'adapter connection failed';
+      lines.push(`Error: ${ss.error}${isAdapter ? ' (transient — not a code issue, retry may succeed)' : ''}`);
+    }
+    if (ss.duration_ms !== undefined) lines.push(`Duration: ${Math.round(ss.duration_ms / 1000)}s`);
+    // Include actual gate verdict if available
+    const verdict = readGateVerdict(projectDir, sid, runId);
+    if (verdict) {
+      lines.push(`Gate verdict: ${verdict.pass ? 'PASS' : 'FAIL'}${verdict.reason ? ' — ' + verdict.reason : ''}`);
+    }
+    // Include campaign metric if available
+    const metricLookup = parseGateMetric(projectDir, state, sid);
+    if (metricLookup.metric) {
+      const m = metricLookup.metric;
+      lines.push(`Metric: ${m.metric} = ${m.score}${m.threshold !== undefined ? ` (threshold: ${m.threshold})` : ''}`);
     }
   }
   lines.push('');
@@ -423,7 +568,7 @@ export function appendIterationLog(
   }
 }
 
-/** Persist the latest scored campaign entry for the current run iteration. */
+/** Persist the latest scored and/or phase campaign entry for the current run iteration. */
 export function writeCampaignEntry(projectDir: string, state: StoreState): void {
   const campaignStorageKey = resolveCampaignStorageKey({
     campaignId: state.campaignId,
@@ -435,10 +580,9 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
   mkdirSync(campaignsDir, { recursive: true });
   const filePath = join(campaignsDir, `${campaignStorageKey}.jsonl`);
   const runPath = join(projectDir, '.fc', 'runs', state.runId);
-  // Find scored verdict from gate stages (extended verdict format)
   const metric = findCampaignMetric(projectDir, state);
-  // Only append to campaign JSONL if there's a scored verdict
-  if (!metric) return;
+  const phase = findCampaignPhaseMetadata(projectDir, state);
+  if (!metric && !phase) return;
   let gatesPassed = 0;
   let gatesTotal = 0;
   try {
@@ -450,14 +594,12 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
       } catch { /* skip */ }
     }
   } catch { /* no verdicts */ }
-  const entry = {
+  const entry: Record<string, unknown> = {
     seq: state.campaignSeq ?? 1,
     runId: state.runId,
     iteration: state.currentIteration ?? 1,
-    score: metric.score,
-    metric: metric.metric,
-    gate: metric.gate,
-    pass: metric.pass,
+    gate: metric?.gate ?? phase?.gate ?? 'campaign_phase',
+    pass: metric?.pass ?? phase?.pass ?? false,
     gates: `${gatesPassed}/${gatesTotal}`,
     status: state.status,
     timestamp: new Date().toISOString(),
@@ -466,6 +608,17 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
     campaignStorageKey,
     campaignName: state.campaignName,
   };
+  if (metric) {
+    entry.score = metric.score;
+    entry.metric = metric.metric;
+    entry.threshold = metric.threshold;
+  }
+  if (phase?.phase) entry.phase = phase.phase;
+  if (typeof phase?.phaseComplete === 'boolean') entry.phaseComplete = phase.phaseComplete;
+  if (phase?.nextPhase) entry.nextPhase = phase.nextPhase;
+  if (phase?.outcome) entry.outcome = phase.outcome;
+  if (phase?.artifactSummary) entry.artifactSummary = phase.artifactSummary;
+  if (phase?.reason) entry.reason = phase.reason;
   appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
 }
 
@@ -508,41 +661,108 @@ function parseLegacyVerdictMetric(projectDir: string, state: StoreState, gateId:
   }
 }
 
-/** Find the last scored gate in pipeline order for campaign tracking */
-export function findCampaignMetric(projectDir: string, state: StoreState): CampaignMetric | null {
-  const runPath = join(projectDir, '.fc', 'runs', state.runId);
+function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignPhaseMetadata | null {
+  if (!artifact || typeof artifact !== 'object') return null;
+  const record = artifact as Record<string, unknown>;
+  const phase = typeof record.phase === 'string' ? record.phase : undefined;
+  const nextPhase = typeof record.nextPhase === 'string'
+    ? record.nextPhase
+    : typeof record.next_phase === 'string'
+      ? record.next_phase
+      : undefined;
+  const outcome = typeof record.outcome === 'string' ? record.outcome : undefined;
+  const artifactSummary = typeof record.artifactSummary === 'string'
+    ? record.artifactSummary
+    : typeof record.artifact_summary === 'string'
+      ? record.artifact_summary
+      : undefined;
+  const reason = typeof record.reason === 'string' ? record.reason : undefined;
+  const phaseComplete = typeof record.phaseComplete === 'boolean'
+    ? record.phaseComplete
+    : typeof record.phase_complete === 'boolean'
+      ? record.phase_complete
+      : undefined;
+  const hasPhaseMetadata = phase !== undefined
+    || nextPhase !== undefined
+    || outcome !== undefined
+    || artifactSummary !== undefined
+    || reason !== undefined
+    || phaseComplete !== undefined;
+  if (!hasPhaseMetadata) return null;
+  return {
+    gate: gateId,
+    pass: record.pass === true,
+    phase,
+    phaseComplete,
+    nextPhase,
+    outcome,
+    artifactSummary,
+    reason,
+  };
+}
 
-  // Determine pipeline order from dispatched stages if available
-  let orderedGateIds: string[] | null = null;
+function parseGatePhaseMetadata(projectDir: string, state: StoreState, gateId: string): CampaignPhaseMetadata | null {
+  const paths = [
+    join(projectDir, '.fc', 'runs', state.runId, 'stages', gateId, 'metric.json'),
+    join(projectDir, '.fc', 'runs', state.runId, `verdict_${gateId}.json`),
+  ];
+  for (const artifactPath of paths) {
+    try {
+      const parsed = JSON.parse(readFileSync(artifactPath, 'utf-8'));
+      const metadata = phaseMetadataFromArtifact(parsed, gateId);
+      if (metadata) return metadata;
+    } catch {
+      // Missing or malformed artifacts are ignored for phase tracking.
+    }
+  }
+  return null;
+}
+
+function orderedGateIdsForState(projectDir: string, state: StoreState): string[] {
+  const runPath = join(projectDir, '.fc', 'runs', state.runId);
   if (state.dispatchedStages && Array.isArray(state.dispatchedStages)) {
-    orderedGateIds = (state.dispatchedStages as { id: string; is_gate?: boolean }[])
+    return (state.dispatchedStages as { id: string; is_gate?: boolean }[])
       .filter(s => s.is_gate)
       .map(s => s.id);
   }
 
-  let best: CampaignMetric | null = null;
+  const ids = new Set<string>();
   try {
     const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
-
-    // If we have pipeline order, iterate in that order; otherwise fall back to directory listing
-    const gateIds = orderedGateIds ?? (() => {
-      const ids = new Set(files.map(f => f.replace('verdict_', '').replace('.json', '')));
-      try {
-        const stagesPath = join(runPath, 'stages');
-        for (const stageId of readdirSync(stagesPath)) {
-          if (existsSync(join(stagesPath, stageId, 'metric.json'))) ids.add(stageId);
-        }
-      } catch { /* no stage metrics */ }
-      return [...ids];
-    })();
-
-    for (const gateId of gateIds) {
-      const metricLookup = parseGateMetric(projectDir, state, gateId);
-      const metric = metricLookup.found ? metricLookup.metric : parseLegacyVerdictMetric(projectDir, state, gateId);
-      if (metric) best = metric;
+    for (const file of files) ids.add(file.replace('verdict_', '').replace('.json', ''));
+  } catch {
+    // No verdicts yet.
+  }
+  try {
+    const stagesPath = join(runPath, 'stages');
+    for (const stageId of readdirSync(stagesPath)) {
+      if (existsSync(join(stagesPath, stageId, 'metric.json'))) ids.add(stageId);
     }
-  } catch { /* no verdicts */ }
+  } catch {
+    // No stage metrics yet.
+  }
+  return [...ids];
+}
+
+/** Find the last scored gate in pipeline order for campaign tracking */
+export function findCampaignMetric(projectDir: string, state: StoreState): CampaignMetric | null {
+  let best: CampaignMetric | null = null;
+  for (const gateId of orderedGateIdsForState(projectDir, state)) {
+    const metricLookup = parseGateMetric(projectDir, state, gateId);
+    const metric = metricLookup.found ? metricLookup.metric : parseLegacyVerdictMetric(projectDir, state, gateId);
+    if (metric) best = metric;
+  }
   return best;
+}
+
+/** Find the last gate phase metadata in pipeline order for campaign tracking. */
+export function findCampaignPhaseMetadata(projectDir: string, state: StoreState): CampaignPhaseMetadata | null {
+  let latest: CampaignPhaseMetadata | null = null;
+  for (const gateId of orderedGateIdsForState(projectDir, state)) {
+    const metadata = parseGatePhaseMetadata(projectDir, state, gateId);
+    if (metadata) latest = metadata;
+  }
+  return latest;
 }
 
 export interface CampaignAlert {
@@ -555,17 +775,24 @@ export interface CampaignEntry {
   seq: number;
   runId: string;
   iteration?: number;
-  score: number;
-  metric: string;
-  gate: string;
+  score?: number;
+  metric?: string;
+  gate?: string;
   pass: boolean;
   timestamp: string;
+  phase?: string;
+  phaseComplete?: boolean;
+  nextPhase?: string;
+  outcome?: string;
 }
+
+type ScoredCampaignEntry = CampaignEntry & { score: number; metric: string };
 
 /** Check campaign health from JSONL entries */
 export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabled?: boolean; regressionAfter?: number; plateauAfter?: number; plateauThreshold?: number; repeatedFailureAfter?: number }): CampaignAlert | null {
   if (triggers?.enabled === false) return null;
-  const scoped = collapseEntriesForHealth(entries);
+  const scoredEntries = entries.filter((entry): entry is ScoredCampaignEntry => typeof entry.score === 'number' && typeof entry.metric === 'string');
+  const scoped = collapseEntriesForHealth(scoredEntries) as ScoredCampaignEntry[];
   if (scoped.length < 2) return null;
   const regAfter = triggers?.regressionAfter ?? 2;
   const platAfter = triggers?.plateauAfter ?? 3;
@@ -628,12 +855,25 @@ export function readGateVerdict(projectDir: string, stageId: string, runId?: str
 
 /** Check all is_gate stages. Returns { allPass, failedGateIds } */
 export function checkGates(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): { allPass: boolean; failedGateIds: string[] } {
-  const gateStages = allStages.filter(s => s.is_gate && state.stages[s.id]?.status === 'complete');
+  const seenGateIds = new Set<string>();
+  const gateStages = allStages.filter((s) => {
+    if (!s.is_gate || seenGateIds.has(s.id)) return false;
+    seenGateIds.add(s.id);
+    return true;
+  });
   if (gateStages.length === 0) return { allPass: true, failedGateIds: [] };
   const failedGateIds: string[] = [];
   for (const g of gateStages) {
+    const gateStatus = state.stages[g.id]?.status;
+    // A gate only passes after it completed and wrote an explicit pass verdict.
+    // Pending/running/skipped/missing gates must block run completion.
+    if (gateStatus !== 'complete') {
+      failedGateIds.push(g.id);
+      continue;
+    }
     const verdict = readGateVerdict(projectDir, g.id, runId);
-    if (!verdict || verdict.pass !== false) continue; // pass or malformed → treat as pass
+    if (verdict && verdict.pass === true) continue; // explicit pass
+    // Missing verdict or explicit fail → treat as failure
     failedGateIds.push(g.id);
   }
   return { allPass: failedGateIds.length === 0, failedGateIds };
@@ -658,7 +898,7 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
   // If there are is_gate stages, use verdict-based checking
   const gateStages = allStages.filter(s => s.is_gate && dispatchedStageIds.includes(s.id));
   if (gateStages.length > 0 && projectDir) {
-    const { allPass } = checkGates(allStages, state, projectDir, runId);
+    const { allPass } = checkGates(gateStages, state, projectDir, runId);
     return allPass;
   }
 
@@ -705,7 +945,7 @@ export async function runWorkflow(
 ): Promise<StoreState> {
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
-  let maxIterations = workflow.defaults.max_iterations ?? projectDefaults.max_iterations;
+  let maxIterations = workflow.defaults.max_iterations ?? loadDefaults(projectDir).max_iterations;
 
   let runId: string;
   let runDirPath: string;
@@ -745,15 +985,29 @@ export async function runWorkflow(
     writeRunState(projectDir, runId, initState);
   }
 
-  const resolvedAgentsDir = agentsDir ?? join(process.cwd(), 'config', 'agents');
+  // Use full task brief as taskDescription for template substitution in dispatched stages
+  const briefPath = join(runDirPath, 'task_brief.md');
+  if (existsSync(briefPath)) {
+    const briefContent = readFileSync(briefPath, 'utf-8').trim();
+    if (briefContent) taskDescription = briefContent;
+  }
+
+  const resolvedAgentsDir = agentsDir ?? join(projectDir, 'config', 'agents');
   const basePrompt = loadBasePrompt(resolvedAgentsDir);
   // Apply base prompt to all pre-loaded agents
   for (const [k, v] of agents) agents.set(k, applyBasePrompt(v, basePrompt));
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
+  const availableSkillsList = listAvailableSkills(projectDir);
 
   // Iteration loop
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     let state = readRunState(projectDir, runId);
+
+    // Exit if run was cancelled externally
+    if (state.status === 'failed' || state.status === 'complete') {
+      return state;
+    }
+
     state.currentIteration = iteration;
     const campaignStorageKey = resolveCampaignStorageKey({
       campaignId: state.campaignId,
@@ -792,6 +1046,15 @@ export async function runWorkflow(
       state.dispatchedStages = undefined;
       state.status = 'running';
       writeRunState(projectDir, runId, state);
+
+      // Clean stale verdict files from previous iteration so new gates start fresh
+      try {
+        for (const f of readdirSync(runDirPath)) {
+          if (f.startsWith('verdict') && f.endsWith('.json')) {
+            unlinkSync(join(runDirPath, f));
+          }
+        }
+      } catch { /* best effort */ }
 
       // Re-write workflow.yaml to base stages only
       writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
@@ -836,6 +1099,13 @@ export async function runWorkflow(
           detail: `${alert.type}: ${alert.message}`,
         });
         log.info({ runId, alert: alert.type }, 'Campaign health alert — researcher will be injected via planner context');
+        // Auto-mark current approach nodes as dead ends
+        try {
+          const kg = readKG(projectDir, runId);
+          for (const node of kg.nodes.filter(n => n.type === 'approach')) {
+            markDeadEnd(projectDir, runId, node.id, `Marked dead_end by campaign health: ${alert.message}`);
+          }
+        } catch { /* non-fatal */ }
       } else if (state.campaignAlert) {
         state.campaignAlert = undefined;
         writeRunState(projectDir, runId, state);
@@ -845,26 +1115,30 @@ export async function runWorkflow(
     // Inner execution loop for this iteration
     const iterationResult = await executeIteration(
       sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
-      resolvedAgentsDir, roleRegistry, injectedDispatchStages, skills, taskDescription,
+      resolvedAgentsDir, roleRegistry, injectedDispatchStages, skills, taskDescription, availableSkillsList,
     );
 
     state = readRunState(projectDir, runId);
 
-    // Collect dispatched stage IDs
-    iterationDispatchedIds = Object.keys(state.stages).filter(
-      id => !baseStages.some(s => s.id === id),
-    );
+    // Collect dispatched stage IDs (only from stages in the current sorted pipeline, not orphans)
+    const baseIds = new Set(baseStages.map(s => s.id));
+    iterationDispatchedIds = sorted
+      .filter(s => !baseIds.has(s.id))
+      .map(s => s.id);
 
     // === INNER LOOP (retry_to) ===
-    const maxInnerRetries = Math.max(0, Math.floor(Number(state.maxRetries ?? projectDefaults.gate_retry_loops)));
-    let innerLoopCount = 0;
+    const maxInnerRetries = Math.max(0, Math.floor(Number(state.maxRetries ?? loadDefaults(projectDir).gate_retry_loops)));
+    let innerRetriesUsed = 0;
     if (iterationDispatchedIds.length > 0) {
       const { allPass, failedGateIds } = checkGates(sorted, state, projectDir, runId);
       if (!allPass) {
         const retryStages = findAllRetryToStages(sorted, failedGateIds);
         if (retryStages.length > 0) {
           for (let inner = 0; inner < maxInnerRetries; inner++) {
-            innerLoopCount++;
+
+            // Check for cancellation between retries
+            state = readRunState(projectDir, runId);
+            if (state.status === 'failed' || state.status === 'complete') break;
 
             // Determine which retry stages need to run based on current failed gates
             const currentCheck = inner === 0
@@ -876,11 +1150,13 @@ export async function runWorkflow(
             const activeRetryStages = findAllRetryToStages(sorted, currentFailedGateIds);
             if (activeRetryStages.length === 0) break;
 
-            // Clear verdict files for all gates referenced by active retry stages
+            // Clear verdict and metric files for all gates referenced by active retry stages
             for (const retryStage of activeRetryStages) {
               for (const gid of retryStage.retry_to!) {
                 const perGate = join(runDirPath, `verdict_${gid}.json`);
                 if (existsSync(perGate)) unlinkSync(perGate);
+                const gateMetric = join(runDirPath, 'stages', gid, 'metric.json');
+                if (existsSync(gateMetric)) unlinkSync(gateMetric);
               }
             }
             const sharedVerdict = join(runDirPath, 'verdict.json');
@@ -890,13 +1166,36 @@ export async function runWorkflow(
             for (const retryStage of activeRetryStages) {
               state.stages[retryStage.id] = { status: 'pending', retries: 0 };
               mkdirSync(join(runDirPath, 'stages', retryStage.id), { recursive: true });
+              // Clear live.log so the SSE feed shows only the current attempt's output
+              const liveLog = join(runDirPath, 'stages', retryStage.id, 'live.log');
+              if (existsSync(liveLog)) unlinkSync(liveLog);
             }
             writeRunState(projectDir, runId, state);
 
             await Promise.all(activeRetryStages.map(retryStage =>
-              executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription)
+              executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, availableSkillsList)
             ));
+            innerRetriesUsed = inner + 1;
+            syncStageStatuses(projectDir, runId, activeRetryStages.map(s => s.id));
             state = readRunState(projectDir, runId);
+
+            // Check for cancellation after fix stages complete
+            if (state.status === 'failed' || state.status === 'complete') break;
+
+            // Skip gate re-runs if any fix stage itself failed (saves wasted agent calls)
+            const anyFixFailed = activeRetryStages.some(s => state.stages[s.id]?.status === 'failed');
+            if (anyFixFailed) {
+              // If the failure is a transient adapter error, continue to next retry instead of aborting
+              const allAdapterErrors = activeRetryStages
+                .filter(s => state.stages[s.id]?.status === 'failed')
+                .every(s => state.stages[s.id]?.error === 'adapter connection failed');
+              if (allAdapterErrors && inner < maxInnerRetries - 1) {
+                log.info({ runId, iteration, inner }, 'Fix stage failed due to adapter error — retrying');
+                continue;
+              }
+              log.info({ runId, iteration, inner }, 'Fix stage failed — skipping gate re-evaluation');
+              break;
+            }
 
             // Collect all gates referenced by all active retry stages
             const allRetryGateIds = new Set<string>();
@@ -915,15 +1214,19 @@ export async function runWorkflow(
               if (existsSync(perGate)) unlinkSync(perGate);
               state.stages[gate.id] = { status: 'pending', retries: 0 };
               mkdirSync(join(runDirPath, 'stages', gate.id), { recursive: true });
+              // Clear live.log so the SSE feed shows only the current re-evaluation's output
+              const liveLog = join(runDirPath, 'stages', gate.id, 'live.log');
+              if (existsSync(liveLog)) unlinkSync(liveLog);
               writeRunState(projectDir, runId, state);
             }
             if (existsSync(sharedVerdict)) unlinkSync(sharedVerdict);
 
-            // Run gate stages (possibly in parallel)
+            // Run gate stages (possibly in parallel), passing fix stage IDs for context
             if (gatesToRerun.length > 0) {
               await Promise.all(gatesToRerun.map(gate =>
-                executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription)
+                executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), availableSkillsList)
               ));
+              syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
             state = readRunState(projectDir, runId);
 
@@ -949,8 +1252,26 @@ export async function runWorkflow(
     }
 
     // Append iteration log
-    appendIterationLog(projectDir, runId, iteration, state, iterationDispatchedIds);
+    appendIterationLog(projectDir, runId, iteration, state, iterationDispatchedIds, baseStages.map(s => s.id), innerRetriesUsed, maxInnerRetries);
     writeCampaignEntry(projectDir, state);
+
+    // Update KG metadata with campaign metric
+    try {
+      const metricForKG = findCampaignMetric(projectDir, state);
+      if (metricForKG) updateMetadata(projectDir, runId, metricForKG.score, metricForKG.metric);
+    } catch { /* non-fatal */ }
+
+    // Ratchet check: update knowledge graph with iteration score
+    try {
+      const metric = findCampaignMetric(projectDir, state);
+      if (metric) {
+        const result = ratchetCheck(projectDir, runId, metric.score, metric.metric, metric.gate);
+        log.info({ runId, iteration, improved: result.improved, score: metric.score, previousBest: result.previousBest }, 'Ratchet check completed');
+      }
+    } catch (err) {
+      log.warn({ runId, iteration, err }, 'Ratchet check failed (non-fatal)');
+    }
+
     recordRunEvent(projectDir, runId, {
       type: 'iteration_completed',
       runId,
@@ -960,7 +1281,7 @@ export async function runWorkflow(
     });
 
     // Check if last gate passed
-    if (iterationDispatchedIds.length > 0 && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
+    if (iterationDispatchedIds.length > 0 && !anyFailed(state) && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
@@ -996,9 +1317,37 @@ export async function runWorkflow(
       return state;
     }
 
+    // Non-gate stage failure: if a stage failed and there are no gates to retry through,
+    // fail immediately instead of silently re-planning
+    const hasGates = sorted.some(s => s.is_gate);
+    if (anyFailed(state) && !hasGates) {
+      const failedStageIds = Object.entries(state.stages)
+        .filter(([, s]) => s.status === 'failed')
+        .map(([id]) => id);
+      const details = failedStageIds.map(id => {
+        const s = state.stages[id];
+        return s?.error ? `${id} (${s.error})` : id;
+      }).join(', ');
+      state.status = 'failed';
+      state.failureReason = `Stage(s) failed: ${details}`;
+      state.completedAt = new Date().toISOString();
+      writeRunState(projectDir, runId, state);
+      writeCampaignEntry(projectDir, state);
+      recordRunEvent(projectDir, runId, {
+        type: 'run_completed',
+        runId,
+        timestamp: state.completedAt,
+        iteration,
+        detail: state.status,
+      });
+      log.info({ runId, iteration, failedStageIds }, 'Stage failed with no gates — run failed');
+      return state;
+    }
+
     // Max iterations reached
     if (iteration === maxIterations) {
       state.status = 'failed';
+      state.failureReason = `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s).`;
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
@@ -1029,6 +1378,7 @@ export async function runWorkflow(
   // Should not reach here, but safety net
   const finalState = readRunState(projectDir, runId);
   finalState.status = 'failed';
+  finalState.failureReason = 'Workflow ended unexpectedly.';
   finalState.completedAt = new Date().toISOString();
   writeRunState(projectDir, runId, finalState);
   writeCampaignEntry(projectDir, finalState);
@@ -1040,6 +1390,15 @@ export async function runWorkflow(
     detail: finalState.status,
   });
   return finalState;
+}
+
+/** Re-sync run.json stage entries from individual status.json files after parallel execution. */
+function syncStageStatuses(projectDir: string, runId: string, stageIds: string[]): void {
+  const state = readRunState(projectDir, runId);
+  for (const sid of stageIds) {
+    try { state.stages[sid] = readStageStatus(projectDir, runId, sid); } catch { /* keep existing */ }
+  }
+  writeRunState(projectDir, runId, state);
 }
 
 async function executeSingleStage(
@@ -1055,19 +1414,46 @@ async function executeSingleStage(
   allStages: StageConfig[],
   skills?: string,
   taskDescription?: string,
+  innerRetry?: number,
+  fixStageIds?: string[],
+  availableSkills?: string,
 ): Promise<void> {
   if (!agents.has(stage.role)) {
     const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
     if (!existsSync(agentPath)) throw new Error(`No agent config for role "${stage.role}"`);
     const raw = parseYaml(readFileSync(agentPath, 'utf-8'));
-    agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
+    agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
   }
   const agent = agents.get(stage.role)!;
-  const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms ?? projectDefaults.timeout_ms;
+  const timeout = stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
 
   let resolvedPrompt = stage.prompt_template || '';
   if (!resolvedPrompt) resolvedPrompt = taskDescription ?? '';
+
+  // Inject inner retry context so the agent knows this is a repeated attempt
+  if (innerRetry !== undefined) {
+    if (stage.is_gate) {
+      const fixOutputRefs = (fixStageIds ?? []).map(id => `- ${runDirPath}/stages/${id}/output.md`).join('\n');
+      const fixContext = fixOutputRefs ? `\nFix stage output(s) to review:\n${fixOutputRefs}\n` : '';
+      const prevGateRef = `\nYour previous evaluation output: ${runDirPath}/stages/${stage.id}/output.md — read it to see what you already tested and avoid duplicating those tests.\n`;
+      resolvedPrompt = `RE-EVALUATION (round ${innerRetry + 1}): A fix was applied since the last evaluation. Write NEW and DIFFERENT tests targeting the fix — do not simply re-run the original tests.${fixContext}${prevGateRef}\n${resolvedPrompt}`;
+    } else if (innerRetry > 0) {
+      // Build references to the gate verdicts and outputs that triggered this retry
+      const gateRefs = (stage.retry_to ?? []).map(gid =>
+        `- Verdict: ${runDirPath}/verdict_${gid}.json\n- QA output: ${runDirPath}/stages/${gid}/output.md`
+      ).join('\n');
+      const gateContext = gateRefs ? `\nRead the latest gate results first:\n${gateRefs}\n` : '';
+      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nRead your previous output at ${runDirPath}/stages/${stage.id}/output.md to see what you already tried. Try a DIFFERENT approach — do not repeat the same fix.\n\n${resolvedPrompt}`;
+    }
+  }
+
+  // Knowledge Graph context: inject summary for dispatched stages
+  try {
+    const kgSummary = summarizeKG(readKG(projectDir, runId));
+    if (kgSummary) resolvedPrompt = kgSummary + '\n\n' + resolvedPrompt;
+  } catch { /* no KG yet */ }
+
   if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
   let availableRoles: string | undefined;
@@ -1075,30 +1461,68 @@ async function executeSingleStage(
     availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
   }
 
-  state.stages[stage.id] = { status: 'running', retries: 0, startedAt: new Date().toISOString() };
-  writeRunState(projectDir, runId, state);
+  const maxTechnicalRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
+  let retries = 0;
 
-  const result = await runStage(adapter, {
-    stageId: stage.id,
-    role: agent,
-    dependsOn: stage.depends_on ?? [],
-    promptTemplate: resolvedPrompt,
-    timeout_ms: timeout,
-    projectDir,
-    runId,
-    runDir: runDirPath,
-    retries: 0,
-    skills,
-    stageSkills: stage.skills,
-    availableRoles,
-    taskDescription: state.taskDescription || taskDescription,
-    isGate: stage.is_gate,
-  });
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    state.stages[stage.id] = { status: 'running', retries, startedAt: new Date().toISOString() };
+    writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
+    writeRunState(projectDir, runId, state);
 
-  state = readRunState(projectDir, runId);
-  state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
-  writeRunState(projectDir, runId, state);
-  recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, state.stages[stage.id]);
+    const result = await runStage(adapter, {
+      stageId: stage.id,
+      role: agent,
+      dependsOn: stage.depends_on ?? [],
+      promptTemplate: retries > 0
+        ? `RETRY (attempt ${retries + 1}): Previous attempt timed out after ${Math.ceil(timeout / 1000)}s. Read partial output at ${runDirPath}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`
+        : resolvedPrompt,
+      timeout_ms: timeout,
+      projectDir,
+      runId,
+      runDir: runDirPath,
+      retries,
+      skills,
+      stageSkills: stage.skills,
+      availableRoles,
+      availableSkills,
+      taskDescription: taskDescription || state.taskDescription,
+      isGate: stage.is_gate,
+    });
+
+    if (result.timedOut && retries < maxTechnicalRetries) {
+      retries++;
+      log.warn({ stage: stage.id, retry: retries }, 'Retrying timed-out stage (inner loop)');
+      continue;
+    }
+
+    break;
+  }
+
+  // Stage status is already written to individual status.json by runStage/worker.
+  // Record the outcome event using the authoritative per-stage file.
+  try {
+    const stageStatus = readStageStatus(projectDir, runId, stage.id);
+    recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, stageStatus);
+    // Record trace event for stage completion
+    try {
+      appendTraceEvent(projectDir, runId, stage.id, {
+        timestamp: new Date().toISOString(),
+        stageId: stage.id,
+        type: 'llm_call',
+        inputSummary: `Stage ${stage.id} (${stage.role})`,
+        outputSummary: `Completed in ${Math.round((stageStatus.duration_ms ?? 0) / 1000)}s`,
+        tokensIn: stageStatus.tokens_in,
+        tokensOut: stageStatus.tokens_out,
+        durationMs: stageStatus.duration_ms ?? 0,
+      });
+    } catch { /* non-fatal */ }
+  } catch { /* status file missing — should not happen */ }
+
+  // After stage completion, check for KG updates
+  try {
+    readKG(state.projectDir, state.runId);
+  } catch { /* no KG yet, that's fine */ }
 }
 
 async function executeIteration(
@@ -1115,10 +1539,16 @@ async function executeIteration(
   injectedDispatchStages: Set<string>,
   skills?: string,
   taskDescription?: string,
+  availableSkills?: string,
 ): Promise<StoreState> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let state = readRunState(projectDir, runId);
+
+    // Exit if run was cancelled or failed externally
+    if (state.status === 'failed' || state.status === 'complete') {
+      return state;
+    }
 
     // Poll while awaiting approval
     if (state.status === 'awaiting_approval') {
@@ -1139,9 +1569,30 @@ async function executeIteration(
             s.id !== stage.id && state.stages[s.id]?.status === 'pending'
           );
           if (!hasStaticFollowUp) {
-            log.error({ stage: stage.id }, 'Planner did not write dispatch.yaml. No stages to execute.');
+            const dispatchPath = join(projectDir, '.fc', 'runs', runId, 'dispatch.yaml');
+            const dispatchExists = existsSync(dispatchPath);
+            let reason: string;
+            if (dispatchExists) {
+              // Diagnose why all stages were rejected
+              let detail = '';
+              try {
+                const raw = parseYaml(readFileSync(dispatchPath, 'utf-8'));
+                const items = Array.isArray(raw) ? raw : (raw?.stages ?? []);
+                const unknownRoles = (items as Record<string, unknown>[])
+                  .filter(i => i?.role && !roleRegistry.has(i.role as string))
+                  .map(i => `"${i.role}"`)
+                  .filter((v, idx, arr) => arr.indexOf(v) === idx);
+                if (unknownRoles.length > 0) {
+                  detail = ` Unknown role(s): ${unknownRoles.join(', ')}. Available: ${[...roleRegistry.keys()].join(', ')}.`;
+                }
+              } catch { /* best effort */ }
+              reason = `Planner wrote dispatch.yaml but it contained no valid stages.${detail} Go back to discussion to clarify the task.`;
+            } else {
+              reason = 'Planner did not produce an execution plan (dispatch.yaml). Go back to discussion to clarify the task.';
+            }
+            log.error({ stage: stage.id }, reason);
             state.status = 'failed';
-            state.failureReason = 'Planner did not produce an execution plan (dispatch.yaml). Go back to discussion to clarify the task.';
+            state.failureReason = reason;
             state.completedAt = new Date().toISOString();
             writeRunState(projectDir, runId, state);
             return state;
@@ -1154,9 +1605,11 @@ async function executeIteration(
     }
 
     if (state.status === 'awaiting_approval') {
-      // Auto-approve: skip plan review when autoApproveRetries is true, or on iteration 2+
+      // Auto-approve on iteration 2+ (re-plans) when autoApproveRetries is not explicitly false.
+      // First iteration always requires manual approval so the user can review the plan,
+      // unless autoApprove is explicitly true (API-created autonomous tasks).
       const currentIter = state.currentIteration ?? 1;
-      if (state.autoApproveRetries === true || (currentIter > 1 && state.autoApproveRetries !== false)) {
+      if ((currentIter > 1 && state.autoApproveRetries !== false) || state.autoApprove === true) {
         state.status = 'running';
         writeRunState(projectDir, runId, state);
         continue;
@@ -1214,10 +1667,10 @@ async function executeIteration(
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
         if (!existsSync(agentPath)) throw new Error(`No agent config for role "${stage.role}"`);
         const raw = parseYaml(readFileSync(agentPath, 'utf-8'));
-        agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
+        agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
-      const timeout = state.timeoutMs ?? stage.timeout_ms ?? workflow.defaults.timeout_ms ?? projectDefaults.timeout_ms;
+      const timeout = stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
 
@@ -1256,11 +1709,27 @@ async function executeIteration(
         if (campaignStorageKey) {
           const entries = readCampaignEntries(projectDir, campaignStorageKey);
           if (entries.length > 0) {
-            const rows = collapseEntriesForHealth(entries)
-              .map(e => `| ${e.seq} | ${e.iteration ?? 1} | ${e.score} | ${e.metric} | ${e.gate} | ${e.pass ? 'pass' : 'fail'} |`)
+            const scoredEntries = collapseEntriesForHealth(entries);
+            const rows = scoredEntries
+              .map(e => `| ${e.seq} | ${e.iteration ?? 1} | ${e.score ?? '-'} | ${e.metric ?? '-'} | ${e.gate ?? '-'} | ${e.pass ? 'pass' : 'fail'} |`)
               .join('\n');
-            const best = entries.reduce((max, e) => e.score > max ? e.score : max, -Infinity);
-            let ctx = `=== CAMPAIGN: ${state.campaignName ?? state.campaignId} ===\n| # | Iteration | Score | Metric | Gate | Status |\n|---|-----------|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
+            const best = scoredEntries.reduce((max, e) => typeof e.score === 'number' && e.score > max ? e.score : max, -Infinity);
+            const phaseProgress = summarizeCampaignPhaseProgress(entries);
+            let ctx = `=== CAMPAIGN: ${state.campaignName ?? state.campaignId} ===\n`;
+            if (rows) {
+              ctx += `| # | Iteration | Score | Metric | Gate | Status |\n|---|-----------|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
+            }
+            if (phaseProgress.entries.length > 0) {
+              ctx += `\nPhase progress:\n`;
+              ctx += `- Completed phases: ${phaseProgress.completedPhases.length > 0 ? phaseProgress.completedPhases.join(', ') : 'none'}\n`;
+              ctx += `- Current recommended phase: ${phaseProgress.currentPhase ?? 'not specified'}\n`;
+              if (phaseProgress.latest) {
+                ctx += `- Latest phase event: seq ${phaseProgress.latest.seq}, iteration ${phaseProgress.latest.iteration ?? 1}, phase ${phaseProgress.latest.phase ?? '-'}, phaseComplete ${phaseProgress.latest.phaseComplete === true ? 'true' : 'false'}, nextPhase ${phaseProgress.latest.nextPhase ?? '-'}, outcome ${phaseProgress.latest.outcome ?? '-'}\n`;
+                if (phaseProgress.latest.artifactSummary) ctx += `- Latest artifact summary: ${phaseProgress.latest.artifactSummary}\n`;
+                if (phaseProgress.latest.reason) ctx += `- Latest reason: ${phaseProgress.latest.reason}\n`;
+              }
+              ctx += `Planner rule: for multi-phase tasks, dispatch only the current recommended phase unless the task explicitly asks to restart from phase 0. Do not pack all future phases into one dispatch.\n`;
+            }
             const summaryPaths: string[] = [];
             for (const e of entries) {
               const prevRunDir = join(projectDir, '.fc', 'runs', e.runId);
@@ -1281,10 +1750,21 @@ async function executeIteration(
         }
       }
 
+      // Pivot context: inject into planner prompt when research injection is active
+      if (state.researchInjection && (stage.depends_on ?? []).length === 0) {
+        resolvedPrompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${state.researchInjection.alertType}. ${state.researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation. Check dead_end nodes in the knowledge graph to understand what has been tried and failed.\n\n` + resolvedPrompt;
+      }
+
+      // Knowledge Graph context: inject summary for ALL roles
+      try {
+        const kgSummary = summarizeKG(readKG(projectDir, runId));
+        if (kgSummary) resolvedPrompt = kgSummary + '\n\n' + resolvedPrompt;
+      } catch { /* no KG yet */ }
+
       // Prepend timeout retry context if this is a retry after timeout
       if (currentRetries > 0) {
         const timeoutSec = Math.ceil(timeout / 1000);
-        resolvedPrompt = `RETRY (attempt ${currentRetries + 1}): Previous attempt timed out after ${timeoutSec}s. Read partial output at .fc/runs/${runId}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`;
+        resolvedPrompt = `RETRY (attempt ${currentRetries + 1}): Previous attempt timed out after ${timeoutSec}s. Read partial output at ${runDirPath}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`;
       }
 
       if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
@@ -1302,7 +1782,8 @@ async function executeIteration(
         skills,
         stageSkills: stage.skills,
         availableRoles,
-        taskDescription: state.taskDescription || taskDescription,
+        availableSkills,
+        taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
       });
       return { stage, result, currentRetries };
@@ -1312,7 +1793,7 @@ async function executeIteration(
     let failed = false;
 
     for (const { stage, result, currentRetries } of results) {
-      const maxRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? projectDefaults.stage_technical_retries)));
+      const maxRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
 
       if (result.timedOut && currentRetries < maxRetries) {
         const nextRetry = currentRetries + 1;

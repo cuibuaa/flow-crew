@@ -58,4 +58,11 @@ export interface StoreState {
     alertType: 'regression' | 'plateau' | 'repeated_failure';
     message: string;
   };
+  parentTaskId?: string;
+  budget?: {
+    totalTokens?: number;
+    totalTimeMs?: number;
+    usedTokens?: number;
+    usedTimeMs?: number;
+  };
 }

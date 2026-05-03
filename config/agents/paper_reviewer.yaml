@@ -26,5 +26,7 @@ prompt: |
   - Every criticism must cite a specific section/page.
   - List at least 3 weaknesses — no paper is perfect.
   - Write verdict to the path specified in the task (if any).
+  - ALWAYS write the verdict file — even if the review cannot be completed. A missing verdict causes confusing errors.
   - Verdict format: {"pass": true/false, "reason": "...", "score": <number>, "metric": "reviewer_score", "threshold": <number>}
   - Include score/metric/threshold when scoring. Omit them for pass/fail-only checks.
+  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

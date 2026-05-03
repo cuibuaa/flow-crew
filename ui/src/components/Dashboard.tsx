@@ -14,6 +14,8 @@ type CampaignScoreData = {
   values: number[];
 };
 
+const SCORE_TREND_MAX_POINTS = 30;
+
 function fmtDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -177,6 +179,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; task: Task } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [recentEventsOpen, setRecentEventsOpen] = useState(false);
   const [campaignScores, setCampaignScores] = useState<Record<string, CampaignScoreData>>({});
   const ctxRef = useRef<HTMLDivElement>(null);
 
@@ -287,7 +290,11 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     const name = ctxMenu.task.name;
     const taskId = ctxMenu.task.id;
     setCtxMenu(null);
-    await updateTask(taskId, { campaignName: name }).catch(() => {});
+    try {
+      await updateTask(taskId, { campaignName: name });
+    } catch (err) {
+      alert(`Could not create campaign: ${err instanceof Error ? err.message : String(err)}`);
+    }
     refresh();
   };
 
@@ -296,8 +303,8 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     try {
       const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
       nav(`/task/${id}/discuss`);
-    } catch {
-      // Ignore create failures here; navbar remains available.
+    } catch (err) {
+      alert(`Could not create task: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -387,7 +394,10 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     <div className="flex flex-col h-full gap-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-rc-text">Dashboard</h2>
-        <button onClick={() => nav("/import")} className="btn-ghost px-3 py-1.5 text-sm border border-rc-border">Import</button>
+        <div className="flex gap-2">
+          <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-3 py-1.5 text-sm">+ New Task</button>
+          <button onClick={() => nav("/import")} className="btn-ghost px-3 py-1.5 text-sm border border-rc-border">Import</button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto">
@@ -438,7 +448,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
                     📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}
                   </td>
                   <td className="px-3 py-1.5">
-                    {scoreData.values.length > 0 ? <Sparkline values={scoreData.values} /> : <span className="text-rc-muted">—</span>}
+                    {scoreData.values.length > 0 ? <Sparkline values={scoreData.values} maxPoints={SCORE_TREND_MAX_POINTS} /> : <span className="text-rc-muted">—</span>}
                   </td>
                   <td className="px-3 py-1.5 text-xs font-mono text-rc-text">
                     {scoreData.bestScore != null ? scoreData.bestScore.toFixed(2) : <span className="text-rc-muted">—</span>}
@@ -498,8 +508,22 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
 
       {/* Alerts feed */}
       <div className="shrink-0 glass-panel rounded-card p-3">
-        <h3 className="text-[10px] font-bold text-rc-muted uppercase tracking-wider mb-2">Recent Events</h3>
-        <AlertsFeed tasks={tasks} />
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-3 text-left"
+          onClick={() => setRecentEventsOpen(open => !open)}
+          aria-expanded={recentEventsOpen}
+        >
+          <span className="text-[10px] font-bold text-rc-muted uppercase tracking-wider">Recent Events</span>
+          <span className="text-[10px] font-mono text-rc-accent">
+            {recentEventsOpen ? "Hide" : "Show"}
+          </span>
+        </button>
+        {recentEventsOpen && (
+          <div className="mt-2 max-h-36 overflow-auto pr-1">
+            <AlertsFeed tasks={tasks} />
+          </div>
+        )}
       </div>
 
       {/* Context menu */}
@@ -510,7 +534,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           {(ctxMenu.task.status === "failed" || ctxMenu.task.status === "completed") && (
             <button data-testid="ctx-rerun" onClick={doRerun} className="w-full text-left px-3 py-1.5 text-sm text-rc-text hover:bg-rc-hover">Rerun</button>
           )}
-          {(ctxMenu.task.status === "running" || ctxMenu.task.status === "pending") && (
+          {(ctxMenu.task.status === "running" || ctxMenu.task.status === "pending" || ctxMenu.task.status === "awaiting_approval") && (
             <button data-testid="ctx-cancel" onClick={doCancel} className="w-full text-left px-3 py-1.5 text-sm text-rc-text hover:bg-rc-hover">Cancel</button>
           )}
           <button data-testid="ctx-delete" onClick={doDelete} className="w-full text-left px-3 py-1.5 text-sm text-rc-error hover:bg-rc-hover">Delete</button>

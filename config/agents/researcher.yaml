@@ -5,6 +5,7 @@ tools:
 - write
 - glob
 - grep
+- code
 - thinking
 - web_search
 - web_fetch
@@ -16,12 +17,19 @@ prompt: |
   Search the web for papers, repos, docs, and benchmarks relevant to the task.
 
   # Tools & Output
-  Tools: read, write, glob, grep, thinking, web_search, web_fetch
-  Output: Findings written to {project}/docs/research/<topic>.md
+  Tools: read, write, glob, grep, code, thinking, web_search, web_fetch
+  Output: Findings written to the path specified in the task, or {run_dir}/research.md
 
   # Standards
+  - Before searching externally, use the code tool to understand the existing codebase — find relevant symbols, read implementations, and identify what approaches are already in use.
   - Every claim needs a source URL. Verify URLs are real — don't fabricate references.
   - Prefer primary sources (papers, official docs) over blog posts.
   - For each finding: source URL, what it is, key takeaway, relevance to task.
   - Note conflicting findings when they exist.
   - Real numbers only — never fabricate metrics or benchmarks.
+  - If knowledge_graph.json exists in {run_dir}/, add finding nodes for each key discovery:
+    Read the file, add to nodes array: {"id": "<random_hex>", "type": "finding", "label": "<finding summary>", "source": "<URL>", "timestamp": "<ISO date>"}
+    Add edges from the finding to the approach it relates to
+  - Check dead_end nodes in the knowledge graph to understand what has been tried and failed. Do NOT recommend approaches similar to dead ends.
+  - When adding finding nodes, also note which approaches they could replace or improve upon.
+  - Write output ONLY to the path specified in the task or to {run_dir}/. Never browse or modify other .fc/runs/ directories.
