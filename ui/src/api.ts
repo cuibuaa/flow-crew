@@ -132,6 +132,8 @@ export const fetchStageOutput = (taskId: string, stageId: string, opts?: { full?
 // Campaigns
 export const fetchCampaigns = () => json<CampaignSummary[]>(`${BASE}/campaigns`);
 export const fetchCampaign = (id: string) => json<CampaignEntry[]>(`${BASE}/campaigns/${id}`);
+export const renameCampaign = (campaignId: string, name: string) =>
+  fetch(`${BASE}/campaigns/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignId, name }) }).then(r => r.json());
 
 // Knowledge Graph
 export const fetchKnowledgeGraph = (taskId: string) =>

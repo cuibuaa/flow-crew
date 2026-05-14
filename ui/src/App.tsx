@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, useParams } from "react-router-dom";
 import Layout from "./components/Layout";
+import ToastContainer from "./components/Toast";
 import TaskBoard from "./components/TaskBoard";
 import TaskDiscussion from "./components/TaskDiscussion";
 import PlanReview from "./components/PlanReview";
@@ -19,6 +20,7 @@ function KnowledgeGraphRoute() {
 export default function App() {
   return (
     <BrowserRouter>
+      <ToastContainer />
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<TaskBoard />} />

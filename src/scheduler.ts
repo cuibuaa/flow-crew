@@ -1,10 +1,10 @@
-import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
-import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus } from './store.js';
+import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir } from './store.js';
 import type { StoreState, StageStatus } from './store.js';
 import { runStage } from './worker.js';
 import {
@@ -17,6 +17,9 @@ import {
 import { recordRunEvent, recordStageOutcome } from './run-events.js';
 import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
 import { appendTraceEvent } from './trace.js';
+import { generateRunSummary } from './run-summary.js';
+import { Supervisor } from './supervisor.js';
+import { loadSupervisorConfig } from './config.js';
 import pino from 'pino';
 
 const log = pino({ name: 'scheduler' });
@@ -69,7 +72,25 @@ const AgentConfigSchema = z.object({
   reasoning_effort: z.string().default('default'),
   tools: z.array(z.string()).default([]),
   prompt: z.string(),
+  adapter: z.string().optional(),
 });
+
+const ADAPTER_MODULE_MAP: Record<string, string> = {
+  codex: './adapters/codex.js',
+  claude: './adapters/claude.js',
+};
+
+const _adapterCache = new Map<string, Adapter>();
+export async function loadAdapterByName(name: string): Promise<Adapter> {
+  const cached = _adapterCache.get(name);
+  if (cached) return cached;
+  const modPath = ADAPTER_MODULE_MAP[name];
+  if (!modPath) throw new Error(`Unknown adapter "${name}". Known: ${Object.keys(ADAPTER_MODULE_MAP).join(', ')}`);
+  const mod = await import(modPath);
+  const a = mod.createAdapter() as Adapter;
+  _adapterCache.set(name, a);
+  return a;
+}
 
 function parseAgent(raw: unknown, projectDir?: string): AgentConfig {
   const agent = AgentConfigSchema.parse(raw);
@@ -295,7 +316,7 @@ export function parseDispatchBlock(
       }
       stages.push(StageConfigSchema.parse(item));
       seenIds.add(item.id);
-    } catch {
+    } catch { /* non-critical */
       log.warn({ id: item.id }, 'Invalid stage in DISPATCH block, skipping');
     }
   }
@@ -340,6 +361,11 @@ export function findDownstream(stageId: string, stages: StageConfig[]): string[]
   return [...collectTransitiveDependents(stageId, stages)];
 }
 
+/**
+ * Read dispatch.yaml from the run directory (or project docs/), parse it,
+ * validate stage configs, resolve dependencies, inject into the running workflow,
+ * and mark replaced static stages as skipped.
+ */
 function injectDispatchedStages(
   dispatchStageId: string,
   roleRegistry: Map<string, { name: string; description: string }>,
@@ -349,14 +375,14 @@ function injectDispatchedStages(
   runId: string,
 ): StageConfig[] {
   // Read dispatch.yaml from run dir
-  const runDir = join(projectDir, '.fc', 'runs', runId);
-  const dispatchPath = join(runDir, 'dispatch.yaml');
+  const runDirPath = runDir(projectDir, runId);
+  const dispatchPath = join(runDirPath, 'dispatch.yaml');
   if (!existsSync(dispatchPath)) return [];
 
   let items: unknown;
   try {
     items = parseYaml(readFileSync(dispatchPath, 'utf-8'));
-  } catch {
+  } catch { /* non-critical */
     log.warn('Failed to parse dispatch.yaml');
     return [];
   }
@@ -473,7 +499,7 @@ function injectDispatchedStages(
   // Create stage directories and add to state (preserve existing status for reruns)
   let isReinjection = false;
   for (const s of dispatched) {
-    mkdirSync(join(projectDir, '.fc', 'runs', runId, 'stages', s.id), { recursive: true });
+    mkdirSync(stageDir(projectDir, runId, s.id), { recursive: true });
     if (state.stages[s.id]) {
       isReinjection = true;
     } else {
@@ -494,7 +520,7 @@ function injectDispatchedStages(
   sorted.push(...dispatched);
 
   // Update stored workflow.yaml
-  const wfPath = join(projectDir, '.fc', 'runs', runId, 'workflow.yaml');
+  const wfPath = join(runDir(projectDir, runId), 'workflow.yaml');
   try {
     const wfRaw = readFileSync(wfPath, 'utf-8');
     const wfParsed = parseYaml(wfRaw) ?? {};
@@ -504,10 +530,12 @@ function injectDispatchedStages(
   } catch { /* best effort */ }
 
   state.dispatchedStages = dispatched;
-  // Skip plan review when re-injecting stages during a stage-level rerun
-  if (!isReinjection) {
-    state.status = 'awaiting_approval';
-  }
+  // Auto-execute: planner output runs immediately, no manual approval gate.
+  // The dashboard's "Plan Review" tab still renders the DAG for inspection,
+  // but execution does not block on user click. The legacy `awaiting_approval`
+  // status and the dashboard's `/approve` endpoint remain available for
+  // backward compatibility (older runs may still be in that state), but new
+  // runs never enter it.
   writeRunState(projectDir, runId, state);
 
   return dispatched;
@@ -523,9 +551,9 @@ export function appendIterationLog(
   innerRetriesUsed?: number,
   maxInnerRetries?: number,
 ): void {
-  const runDir = join(projectDir, '.fc', 'runs', runId);
-  const logPath = join(runDir, 'iteration_log.md');
-  mkdirSync(runDir, { recursive: true });
+  const runDirPath = runDir(projectDir, runId);
+  const logPath = join(runDirPath, 'iteration_log.md');
+  mkdirSync(runDirPath, { recursive: true });
   const lines: string[] = [`# Iteration ${iteration}`];
   if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
     lines.push(`Fix→gate retries used: ${innerRetriesUsed}/${maxInnerRetries}`);
@@ -539,7 +567,7 @@ export function appendIterationLog(
     const ss = state.stages[sid];
     if (!ss) continue;
     lines.push(`## ${sid} (${ss.status})`);
-    lines.push(`Output: ${runDir}/stages/${sid}/output.md`);
+    lines.push(`Output: ${runDirPath}/stages/${sid}/output.md`);
     lines.push(`Artifacts: ${ss.artifacts?.join(', ') || 'none'}`);
     if (ss.error) {
       const isAdapter = ss.error === 'adapter connection failed';
@@ -579,7 +607,7 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
   const campaignsDir = join(projectDir, '.fc', 'campaigns');
   mkdirSync(campaignsDir, { recursive: true });
   const filePath = join(campaignsDir, `${campaignStorageKey}.jsonl`);
-  const runPath = join(projectDir, '.fc', 'runs', state.runId);
+  const runPath = runDir(projectDir, state.runId);
   const metric = findCampaignMetric(projectDir, state);
   const phase = findCampaignPhaseMetadata(projectDir, state);
   if (!metric && !phase) return;
@@ -623,7 +651,7 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
 }
 
 function parseGateMetric(projectDir: string, state: StoreState, gateId: string): GateMetricLookup {
-  const metricPath = join(projectDir, '.fc', 'runs', state.runId, 'stages', gateId, 'metric.json');
+  const metricPath = join(stageDir(projectDir, state.runId, gateId), 'metric.json');
   if (!existsSync(metricPath)) return { found: false, metric: null };
   try {
     const artifact = JSON.parse(readFileSync(metricPath, 'utf-8'));
@@ -639,13 +667,13 @@ function parseGateMetric(projectDir: string, state: StoreState, gateId: string):
         threshold: typeof artifact.threshold === 'number' && Number.isFinite(artifact.threshold) ? artifact.threshold : undefined,
       },
     };
-  } catch {
+  } catch { /* non-critical */
     return { found: true, metric: null };
   }
 }
 
 function parseLegacyVerdictMetric(projectDir: string, state: StoreState, gateId: string): CampaignMetric | null {
-  const verdictPath = join(projectDir, '.fc', 'runs', state.runId, `verdict_${gateId}.json`);
+  const verdictPath = join(runDir(projectDir, state.runId), `verdict_${gateId}.json`);
   try {
     const verdict = JSON.parse(readFileSync(verdictPath, 'utf-8'));
     if (typeof verdict.score !== 'number' || !Number.isFinite(verdict.score)) return null;
@@ -656,7 +684,7 @@ function parseLegacyVerdictMetric(projectDir: string, state: StoreState, gateId:
       pass: verdict.pass === true,
       threshold: typeof verdict.threshold === 'number' && Number.isFinite(verdict.threshold) ? verdict.threshold : undefined,
     };
-  } catch {
+  } catch { /* non-critical */
     return null;
   }
 }
@@ -703,15 +731,15 @@ function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignP
 
 function parseGatePhaseMetadata(projectDir: string, state: StoreState, gateId: string): CampaignPhaseMetadata | null {
   const paths = [
-    join(projectDir, '.fc', 'runs', state.runId, 'stages', gateId, 'metric.json'),
-    join(projectDir, '.fc', 'runs', state.runId, `verdict_${gateId}.json`),
+    join(stageDir(projectDir, state.runId, gateId), 'metric.json'),
+    join(runDir(projectDir, state.runId), `verdict_${gateId}.json`),
   ];
   for (const artifactPath of paths) {
     try {
       const parsed = JSON.parse(readFileSync(artifactPath, 'utf-8'));
       const metadata = phaseMetadataFromArtifact(parsed, gateId);
       if (metadata) return metadata;
-    } catch {
+    } catch { /* non-critical */
       // Missing or malformed artifacts are ignored for phase tracking.
     }
   }
@@ -719,7 +747,7 @@ function parseGatePhaseMetadata(projectDir: string, state: StoreState, gateId: s
 }
 
 function orderedGateIdsForState(projectDir: string, state: StoreState): string[] {
-  const runPath = join(projectDir, '.fc', 'runs', state.runId);
+  const runPath = runDir(projectDir, state.runId);
   if (state.dispatchedStages && Array.isArray(state.dispatchedStages)) {
     return (state.dispatchedStages as { id: string; is_gate?: boolean }[])
       .filter(s => s.is_gate)
@@ -730,7 +758,7 @@ function orderedGateIdsForState(projectDir: string, state: StoreState): string[]
   try {
     const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
     for (const file of files) ids.add(file.replace('verdict_', '').replace('.json', ''));
-  } catch {
+  } catch { /* non-critical */
     // No verdicts yet.
   }
   try {
@@ -738,7 +766,7 @@ function orderedGateIdsForState(projectDir: string, state: StoreState): string[]
     for (const stageId of readdirSync(stagesPath)) {
       if (existsSync(join(stagesPath, stageId, 'metric.json'))) ids.add(stageId);
     }
-  } catch {
+  } catch { /* non-critical */
     // No stage metrics yet.
   }
   return [...ids];
@@ -835,22 +863,170 @@ export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabl
   return null;
 }
 
+/**
+ * Campaign-level gate contract. When present (in `<run_dir>/gate_contract.json`,
+ * or copied from `<project>/.fc/campaigns/<campaign_storage_key>/contract.json`
+ * at run start), gate verdicts are validated against this contract — preventing
+ * agents from silently downgrading the metric or threshold to fake-pass a gate.
+ *
+ * Example:
+ *   { "metric": "qa_skeptical_audience",
+ *     "metricSynonyms": ["AIDialyRealAudienceQAGateScore"],
+ *     "threshold": 9.5,
+ *     "higherIsBetter": true,
+ *     "appliesToGates": ["qa_gate", "final_gate"] }
+ */
+export interface GateContract {
+  metric: string;
+  metricSynonyms?: string[];
+  threshold: number;
+  higherIsBetter?: boolean;
+  /** Optional whitelist of gate stage IDs the contract applies to. If absent, applies to all is_gate stages. */
+  appliesToGates?: string[];
+}
+
+const GATE_METRIC_SYNONYMS: Record<string, string[]> = {
+  qa_skeptical_audience: ['skeptical_audience', 'qa_audience'],
+};
+
+function metricNamesMatch(metricName: string, verdictName: string): boolean {
+  const metric = metricName.toLowerCase();
+  const verdict = verdictName.toLowerCase();
+  if (metric === verdict) return true;
+  return (GATE_METRIC_SYNONYMS[metric] ?? []).map(s => s.toLowerCase()).includes(verdict)
+    || (GATE_METRIC_SYNONYMS[verdict] ?? []).map(s => s.toLowerCase()).includes(metric);
+}
+
+function validateVerdictAgainstMetricFile(
+  verdict: Record<string, unknown>,
+  metric: Record<string, unknown>,
+): string | null {
+  if (metric.pass === false && verdict.pass === true) {
+    return 'verdict/metric.json mismatch: metric says fail, verdict says pass';
+  }
+  if (typeof metric.metric === 'string' && typeof verdict.metric === 'string' && !metricNamesMatch(metric.metric, verdict.metric)) {
+    return 'metric name redefined';
+  }
+  if (typeof metric.threshold === 'number' && typeof verdict.threshold === 'number' && verdict.threshold < metric.threshold) {
+    return 'threshold downgraded';
+  }
+  return null;
+}
+
+export function loadGateContract(projectDir: string, runId?: string, campaignStorageKey?: string): GateContract | null {
+  // 1. Per-run override (written by the planner or copied at run start)
+  if (runId) {
+    const p = join(runDir(projectDir, runId), 'gate_contract.json');
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf-8'));
+      if (raw && typeof raw.metric === 'string' && typeof raw.threshold === 'number') return raw as GateContract;
+    } catch { /* not found */ }
+  }
+  // 2. Campaign-level default
+  if (campaignStorageKey) {
+    const p = join(projectDir, '.fc', 'campaigns', campaignStorageKey, 'contract.json');
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf-8'));
+      if (raw && typeof raw.metric === 'string' && typeof raw.threshold === 'number') return raw as GateContract;
+    } catch { /* not found */ }
+  }
+  return null;
+}
+
+/**
+ * Validate a gate verdict against the campaign's contract. Returns null if
+ * the verdict honors the contract; returns an error string describing the
+ * violation otherwise. Common violations:
+ *   - verdict.metric doesn't match contract.metric or any synonym (gate redefined)
+ *   - verdict.threshold downgraded below contract.threshold
+ *   - verdict.pass is true but verdict.value doesn't satisfy contract.threshold
+ *
+ * Cross-references `<runDir>/stages/<stageId>/metric.json` to find the
+ * authoritative `value` and `metric` name when the verdict file omits them.
+ */
+function validateVerdictAgainstContract(
+  verdict: Record<string, unknown>,
+  metric: Record<string, unknown> | null,
+  contract: GateContract,
+  stageId: string,
+): string | null {
+  if (contract.appliesToGates && !contract.appliesToGates.includes(stageId)) return null;
+  const expectedMetric = contract.metric.toLowerCase();
+  const synonyms = (contract.metricSynonyms ?? []).map(s => s.toLowerCase());
+  const acceptableNames = new Set([expectedMetric, ...synonyms]);
+  const verdictMetricName = typeof verdict.metric === 'string' ? verdict.metric.toLowerCase() : '';
+  const metricFileName = metric && typeof metric.metric === 'string' ? metric.metric.toLowerCase() : '';
+  const metricNameMatches = acceptableNames.has(verdictMetricName) || acceptableNames.has(metricFileName);
+  if (!metricNameMatches) {
+    return `verdict.metric="${verdict.metric ?? ''}" / metric.json.metric="${metric?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.`;
+  }
+  const higherIsBetter = contract.higherIsBetter !== false;
+  const verdictThreshold = typeof verdict.threshold === 'number' ? verdict.threshold : null;
+  if (verdictThreshold !== null) {
+    if (higherIsBetter && verdictThreshold < contract.threshold) {
+      return `verdict.threshold=${verdictThreshold} downgraded below contract.threshold=${contract.threshold}. Gate threshold was lowered — verdict invalid.`;
+    }
+    if (!higherIsBetter && verdictThreshold > contract.threshold) {
+      return `verdict.threshold=${verdictThreshold} raised above contract.threshold=${contract.threshold} (lower-is-better). Gate threshold was relaxed — verdict invalid.`;
+    }
+  }
+  const candidateValues: unknown[] = [verdict.value, verdict.score, metric?.value, metric?.score];
+  const value = candidateValues.find(v => typeof v === 'number') as number | undefined;
+  if (typeof value !== 'number') {
+    return `no numeric value found in verdict or metric.json. Cannot mechanically verify gate. Contract requires value compared against threshold=${contract.threshold}.`;
+  }
+  const mechanicalPass = higherIsBetter ? value >= contract.threshold : value <= contract.threshold;
+  if (verdict.pass === true && !mechanicalPass) {
+    return `verdict.pass=true but value=${value} does not satisfy contract (${higherIsBetter ? '>=' : '<='} ${contract.threshold}). Pass set independently of mechanical check — verdict invalid.`;
+  }
+  return null;
+}
+
 /** Read verdict for a specific gate stage from run dir verdict_<stageId>.json, falling back to verdict.json */
-export function readGateVerdict(projectDir: string, stageId: string, runId?: string): { pass: boolean; reason?: string } | null {
-  const base = runId ? join(projectDir, '.fc', 'runs', runId) : join(projectDir, 'docs');
-  // Try per-gate verdict first
+export function readGateVerdict(
+  projectDir: string,
+  stageId: string,
+  runId?: string,
+  contract?: GateContract | null,
+): { pass: boolean; reason?: string } | null {
+  const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
+  let v: Record<string, unknown> | null = null;
   const perGate = join(base, `verdict_${stageId}.json`);
   try {
-    const v = JSON.parse(readFileSync(perGate, 'utf-8'));
-    if (typeof v.pass === 'boolean') return v;
+    const parsed = JSON.parse(readFileSync(perGate, 'utf-8'));
+    if (typeof parsed.pass === 'boolean') v = parsed;
   } catch { /* not found */ }
-  // Fall back to shared verdict.json
-  const shared = join(base, 'verdict.json');
-  try {
-    const v = JSON.parse(readFileSync(shared, 'utf-8'));
-    if (typeof v.pass === 'boolean') return v;
-  } catch { /* not found */ }
-  return null;
+  if (!v) {
+    const shared = join(base, 'verdict.json');
+    try {
+      const parsed = JSON.parse(readFileSync(shared, 'utf-8'));
+      if (typeof parsed.pass === 'boolean') v = parsed;
+    } catch { /* not found */ }
+  }
+  if (!v) return null;
+  if (runId) {
+    const metricPath = join(stageDir(projectDir, runId, stageId), 'metric.json');
+    try {
+      const metric = JSON.parse(readFileSync(metricPath, 'utf-8')) as Record<string, unknown>;
+      const violation = validateVerdictAgainstMetricFile(v, metric);
+      if (violation) {
+        log.warn({ stageId, runId, violation }, 'Gate verdict rejected by metric.json consistency check');
+        return { pass: false, reason: violation };
+      }
+    } catch { /* optional/back-compat */ }
+  }
+  // Contract enforcement: if a contract is provided, validate the verdict against it.
+  if (contract && runId) {
+    const metricPath = join(stageDir(projectDir, runId, stageId), 'metric.json');
+    let metric: Record<string, unknown> | null = null;
+    try { metric = JSON.parse(readFileSync(metricPath, 'utf-8')); } catch { /* optional */ }
+    const violation = validateVerdictAgainstContract(v, metric, contract, stageId);
+    if (violation) {
+      log.warn({ stageId, runId, violation }, 'Gate verdict rejected by contract');
+      return { pass: false, reason: `Gate contract violation: ${violation}` };
+    }
+  }
+  return v as { pass: boolean; reason?: string };
 }
 
 /** Check all is_gate stages. Returns { allPass, failedGateIds } */
@@ -862,6 +1038,8 @@ export function checkGates(allStages: StageConfig[], state: StoreState, projectD
     return true;
   });
   if (gateStages.length === 0) return { allPass: true, failedGateIds: [] };
+  // Load the campaign gate contract once per check; reused across all gates.
+  const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
   const failedGateIds: string[] = [];
   for (const g of gateStages) {
     const gateStatus = state.stages[g.id]?.status;
@@ -871,8 +1049,8 @@ export function checkGates(allStages: StageConfig[], state: StoreState, projectD
       failedGateIds.push(g.id);
       continue;
     }
-    const verdict = readGateVerdict(projectDir, g.id, runId);
-    if (verdict && verdict.pass === true) continue; // explicit pass
+    const verdict = readGateVerdict(projectDir, g.id, runId, contract);
+    if (verdict && verdict.pass === true) continue; // explicit pass (contract-honored if any)
     // Missing verdict or explicit fail → treat as failure
     failedGateIds.push(g.id);
   }
@@ -904,7 +1082,7 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
 
   // No is_gate stages: check verdict.json (legacy) then exit codes
   if (projectDir) {
-    const base = runId ? join(projectDir, '.fc', 'runs', runId) : join(projectDir, 'docs');
+    const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
     const verdictPath = join(base, 'verdict.json');
     try {
       const verdict = JSON.parse(readFileSync(verdictPath, 'utf-8'));
@@ -932,6 +1110,18 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
   });
 }
 
+/**
+ * Main workflow orchestration loop.
+ *
+ * Structure:
+ *   1. Initialize run (create state, load agents, start supervisor)
+ *   2. Iteration loop (outer re-plan cycle):
+ *      a. Execute stages via executeIteration()
+ *      b. Inner retry loop (gate failure → fix → re-gate)
+ *      c. Campaign health check + ratchet
+ *      d. Gate evaluation → complete / re-plan / fail
+ *   3. Finalize (write campaign entry, stop supervisor)
+ */
 export async function runWorkflow(
   workflow: WorkflowConfig,
   workflowYaml: string,
@@ -942,6 +1132,9 @@ export async function runWorkflow(
   agentsDir?: string,
   existingRunId?: string,
   taskDescription?: string,
+  autoApprove?: boolean,
+  supervise?: boolean,
+  campaignId?: string,
 ): Promise<StoreState> {
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
@@ -951,7 +1144,7 @@ export async function runWorkflow(
   let runDirPath: string;
   if (existingRunId) {
     runId = existingRunId;
-    runDirPath = join(projectDir, '.fc', 'runs', runId);
+    runDirPath = runDir(projectDir, runId);
     mkdirSync(join(runDirPath, 'stages'), { recursive: true });
     for (const s of baseStages) {
       mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
@@ -964,6 +1157,7 @@ export async function runWorkflow(
     state.status = 'running';
     state.workflowName = workflow.name;
     state.maxIterations = maxIterations;
+    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
     state.currentIteration = 1;
     writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
     writeRunState(projectDir, runId, state);
@@ -974,14 +1168,35 @@ export async function runWorkflow(
     const state = readRunState(projectDir, runId);
     state.maxIterations = maxIterations;
     state.currentIteration = 1;
+    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
     writeRunState(projectDir, runId, state);
   }
 
   log.info({ runId, workflow: workflow.name }, 'Run started');
 
-  if (taskDescription) {
+  if (taskDescription || autoApprove || supervise || campaignId) {
     const initState = readRunState(projectDir, runId);
-    initState.taskDescription = taskDescription;
+    if (taskDescription) {
+      initState.taskDescription = taskDescription;
+      // Persist the brief into the run dir so CLI-spawned tasks (which only
+      // write task_brief.md to <project>/docs/) get the same file that
+      // dashboard-spawned tasks get from the discuss flow. Without this,
+      // POST /api/tasks/:id/rerun's existsSync(task_brief.md) check fails
+      // and rerun unexpectedly routes to the discuss page.
+      try {
+        const briefDest = join(runDirPath, 'task_brief.md');
+        if (!existsSync(briefDest)) {
+          writeFileSync(briefDest, taskDescription, 'utf-8');
+        }
+      } catch { /* non-critical */ }
+    }
+    if (autoApprove) initState.autoApprove = true;
+    if (supervise) initState.supervise = true;
+    if (campaignId) {
+      initState.campaignId = campaignId;
+      initState.campaignName = campaignId;
+      initState.campaignStorageKey = resolveCampaignStorageKey({ campaignId });
+    }
     writeRunState(projectDir, runId, initState);
   }
 
@@ -999,6 +1214,31 @@ export async function runWorkflow(
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
   const availableSkillsList = listAvailableSkills(projectDir);
 
+  // Write scheduler.pid so the dashboard's startup-recovery sweep can tell whether
+  // this run is genuinely alive (vs orphaned in run.json after a dashboard restart).
+  // Removed in the finally block so re-spawned schedulers don't see stale pids.
+  const schedulerPidPath = join(runDirPath, 'scheduler.pid');
+  try { writeFileSync(schedulerPidPath, String(process.pid), 'utf-8'); } catch { /* non-critical */ }
+
+  // Supervisor brain: start before the iteration loop if enabled, stop in finally.
+  let supervisor: Supervisor | undefined;
+  if (supervise) {
+    try {
+      const supCfg = loadSupervisorConfig(projectDir);
+      // loadSupervisorConfig already inherits adapter from defaults.yaml when not
+      // explicitly set under supervisor:; final fallback is codex.
+      const supAdapterName = supCfg.adapter || 'codex';
+      const supAdapter = await loadAdapterByName(supAdapterName);
+      supervisor = new Supervisor(projectDir, runId, supAdapter, supCfg, taskDescription ?? '');
+      supervisor.start();
+      log.info({ runId, adapter: supAdapterName, model: supCfg.model }, 'Supervisor started');
+    } catch (err) {
+      log.warn({ err }, 'Failed to start supervisor — continuing without it');
+      supervisor = undefined;
+    }
+  }
+
+  try {
   // Iteration loop
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     let state = readRunState(projectDir, runId);
@@ -1006,6 +1246,26 @@ export async function runWorkflow(
     // Exit if run was cancelled externally
     if (state.status === 'failed' || state.status === 'complete') {
       return state;
+    }
+
+    // Bug ② fix: archive the previous iteration's accumulated supervisor
+    // guidance so this iteration starts with an empty `supervisor_guidance.md`.
+    // The archived file under `guidance_history/iter_${N-1}.md` is later
+    // injected into the planner's system prompt by worker.ts, so prior-iter
+    // GUIDE messages still impact this iteration's plan — but they no longer
+    // mix with this iteration's fresh GUIDE messages in the same file.
+    if (iteration > 1) {
+      try {
+        const runDirAbs = runDir(projectDir, runId);
+        const guidancePath = join(runDirAbs, 'supervisor_guidance.md');
+        if (existsSync(guidancePath)) {
+          const archiveDir = join(runDirAbs, 'guidance_history');
+          mkdirSync(archiveDir, { recursive: true });
+          renameSync(guidancePath, join(archiveDir, `iter_${iteration - 1}.md`));
+        }
+      } catch (err) {
+        log.warn({ err, runId, iteration }, 'Failed to archive supervisor guidance');
+      }
     }
 
     state.currentIteration = iteration;
@@ -1282,6 +1542,36 @@ export async function runWorkflow(
 
     // Check if last gate passed
     if (iterationDispatchedIds.length > 0 && !anyFailed(state) && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
+      // Bug ③ fix: before marking the whole run complete, see if any gate
+      // verdict in this iteration declared `phaseComplete: true` together with
+      // a non-empty `nextPhase`. If yes — and we still have iteration budget —
+      // the planner is signalling "this phase done, advance to the next
+      // phase". Continue the outer loop so the next planner iteration can
+      // dispatch nextPhase's stages instead of prematurely marking the whole
+      // run complete.
+      const pendingNextPhase = (() => {
+        try {
+          const gateStageIds = iterationDispatchedIds.filter((id) => {
+            const stage = sorted.find((s) => s.id === id);
+            return stage?.is_gate === true;
+          });
+          for (const gid of gateStageIds) {
+            const vPath = join(runDir(projectDir, runId), `verdict_${gid}.json`);
+            if (!existsSync(vPath)) continue;
+            let v: Record<string, unknown>;
+            try { v = JSON.parse(readFileSync(vPath, 'utf-8')); } catch { continue; }
+            const phaseComplete = v.phaseComplete === true || v.phase_complete === true;
+            const nextPhaseRaw = v.nextPhase ?? v.next_phase;
+            const nextPhase = typeof nextPhaseRaw === 'string' ? nextPhaseRaw.trim() : '';
+            if (phaseComplete && nextPhase) return { gateId: gid, nextPhase };
+          }
+        } catch { /* non-critical */ }
+        return null;
+      })();
+      if (pendingNextPhase && iteration < maxIterations) {
+        log.info({ runId, iteration, gate: pendingNextPhase.gateId, nextPhase: pendingNextPhase.nextPhase }, 'Gate passed with nextPhase set — continuing to next iteration instead of marking complete');
+        continue;
+      }
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
@@ -1294,6 +1584,7 @@ export async function runWorkflow(
         detail: state.status,
       });
       log.info({ runId, iteration }, 'All gates passed, run complete');
+      await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
       return state;
     }
 
@@ -1314,6 +1605,7 @@ export async function runWorkflow(
         iteration,
         detail: state.status,
       });
+      await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
       return state;
     }
 
@@ -1390,6 +1682,12 @@ export async function runWorkflow(
     detail: finalState.status,
   });
   return finalState;
+  } finally {
+    if (supervisor) {
+      try { supervisor.stop(); } catch (err) { log.warn({ err }, 'Supervisor stop failed'); }
+    }
+    try { if (existsSync(schedulerPidPath)) unlinkSync(schedulerPidPath); } catch { /* non-critical */ }
+  }
 }
 
 /** Re-sync run.json stage entries from individual status.json files after parallel execution. */
@@ -1470,7 +1768,8 @@ async function executeSingleStage(
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
-    const result = await runStage(adapter, {
+    const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+    const result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
       dependsOn: stage.depends_on ?? [],
@@ -1525,6 +1824,13 @@ async function executeSingleStage(
   } catch { /* no KG yet, that's fine */ }
 }
 
+/**
+ * Execute one iteration of the workflow: run ready stages, inject dispatched stages,
+ * handle approval polling, and manage stage retries (technical failures).
+ *
+ * Returns the final state for this iteration. The caller (runWorkflow) then handles
+ * gate evaluation and decides whether to re-plan.
+ */
 async function executeIteration(
   sorted: StageConfig[],
   initialState: StoreState,
@@ -1569,7 +1875,7 @@ async function executeIteration(
             s.id !== stage.id && state.stages[s.id]?.status === 'pending'
           );
           if (!hasStaticFollowUp) {
-            const dispatchPath = join(projectDir, '.fc', 'runs', runId, 'dispatch.yaml');
+            const dispatchPath = join(runDir(projectDir, runId), 'dispatch.yaml');
             const dispatchExists = existsSync(dispatchPath);
             let reason: string;
             if (dispatchExists) {
@@ -1732,7 +2038,7 @@ async function executeIteration(
             }
             const summaryPaths: string[] = [];
             for (const e of entries) {
-              const prevRunDir = join(projectDir, '.fc', 'runs', e.runId);
+              const prevRunDir = runDir(projectDir, e.runId);
               const iterLog = join(prevRunDir, 'iteration_log.md');
               if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
             }
@@ -1769,7 +2075,8 @@ async function executeIteration(
 
       if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
-      const result = await runStage(adapter, {
+      const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+      const result = await runStage(stageAdapter, {
         stageId: stage.id,
         role: agent,
         dependsOn: stage.depends_on ?? [],

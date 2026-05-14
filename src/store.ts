@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 
@@ -42,6 +43,7 @@ export interface StoreState {
   maxRetries?: number;
   autoApproveRetries?: boolean;
   autoApprove?: boolean;
+  supervise?: boolean;
   timeoutMs?: number;
   campaignTriggers?: CampaignTriggers;
   failureReason?: string;
@@ -74,19 +76,26 @@ export interface StoreState {
   };
 }
 
-function runsRoot(projectDir: string): string {
-  return join(projectDir, '.fc', 'runs');
+export const FC_DIR = '.fc';
+export const FC_GLOBAL_DIR = join(homedir(), FC_DIR);
+
+export function runsRoot(_projectDir?: string): string {
+  return join(FC_GLOBAL_DIR, 'runs');
 }
 
-function runDir(projectDir: string, runId: string): string {
+export function ensureGlobalRunsDir(): void {
+  mkdirSync(join(FC_GLOBAL_DIR, 'runs'), { recursive: true });
+}
+
+export function runDir(projectDir: string, runId: string): string {
   return join(runsRoot(projectDir), runId);
 }
 
-function stageDir(projectDir: string, runId: string, stageId: string): string {
+export function stageDir(projectDir: string, runId: string, stageId: string): string {
   return join(runDir(projectDir, runId), 'stages', stageId);
 }
 
-function atomicWrite(filePath: string, data: string): void {
+export function atomicWrite(filePath: string, data: string): void {
   const tmp = filePath + '.tmp.' + randomBytes(4).toString('hex');
   try {
     writeFileSync(tmp, data, 'utf-8');
@@ -142,6 +151,13 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
   try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
 }
 
+export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void): StoreState {
+  const state = readRunState(projectDir, runId);
+  mutator(state);
+  writeRunState(projectDir, runId, state);
+  return state;
+}
+
 export function readStageStatus(projectDir: string, runId: string, stageId: string): StageStatus {
   return JSON.parse(
     readFileSync(join(stageDir(projectDir, runId, stageId), 'status.json'), 'utf-8'),
@@ -180,7 +196,7 @@ export function writeStageOutput(
 export function readStageInput(projectDir: string, runId: string, stageId: string): string {
   try {
     return readFileSync(join(stageDir(projectDir, runId, stageId), 'input.md'), 'utf-8');
-  } catch {
+  } catch { /* expected - optional resource */
     return '';
   }
 }
@@ -188,20 +204,21 @@ export function readStageInput(projectDir: string, runId: string, stageId: strin
 export function readStageOutput(projectDir: string, runId: string, stageId: string): string {
   try {
     return readFileSync(join(stageDir(projectDir, runId, stageId), 'output.md'), 'utf-8');
-  } catch {
+  } catch { /* expected - optional resource */
     return '';
   }
 }
 
 export function listRuns(projectDir: string): string[] {
-  const indexed = listRunIdsFromIndex(projectDir);
-  if (indexed) return indexed;
+  // Always use filesystem as source of truth — index may be stale after concurrent writes
+  // The index is still maintained (upsertRunIndex on writes) for future query optimization
+  listRunIdsFromIndex(projectDir); // triggers index seed/rebuild as side effect
   try {
     const root = runsRoot(projectDir);
     return readdirSync(root)
       .filter(d => existsSync(join(root, d, 'run.json')))
       .sort();
-  } catch {
+  } catch { /* expected - optional resource */
     return [];
   }
 }

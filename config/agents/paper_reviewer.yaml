@@ -27,6 +27,10 @@ prompt: |
   - List at least 3 weaknesses — no paper is perfect.
   - Write verdict to the path specified in the task (if any).
   - ALWAYS write the verdict file — even if the review cannot be completed. A missing verdict causes confusing errors.
-  - Verdict format: {"pass": true/false, "reason": "...", "score": <number>, "metric": "reviewer_score", "threshold": <number>}
-  - Include score/metric/threshold when scoring. Omit them for pass/fail-only checks.
+  - Verdict format (ALL fields required):
+    {"pass": true/false, "reason": "...", "score": <number>, "metric": "reviewer_score", "threshold": <number>}
+    score = average of (Novelty + Rigor + Clarity + Soundness + Reproducibility) / 5.
+    threshold = minimum acceptable average (typically 6).
+    pass = true only if score >= threshold AND no major unresolved issues.
+    reason must be structured: "Strengths: ... | Weaknesses: ... | Verdict: ..."
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

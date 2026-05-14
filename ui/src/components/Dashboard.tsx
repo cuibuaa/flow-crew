@@ -6,8 +6,9 @@ import Sparkline from "./Sparkline";
 import AlertsFeed from "./AlertsFeed";
 import TaskCard from "./TaskCard";
 import NewTaskDialog from "./NewTaskDialog";
-import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask, fetchCampaigns, fetchCampaign } from "../api";
+import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask, fetchCampaigns, fetchCampaign, renameCampaign } from "../api";
 import { useRefreshTasks, useRemoveTask } from "./Layout";
+import { showToast } from "./Toast";
 
 type CampaignScoreData = {
   bestScore: number | null;
@@ -171,6 +172,49 @@ function EditableTaskName({ task, forceEdit, onEditDone }: { task: Task; forceEd
   );
 }
 
+function EditableCampaignName({ campaignId, name }: { campaignId: string; name: string }) {
+  const refresh = useRefreshTasks();
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+
+  const commitRename = async () => {
+    setEditing(false);
+    const trimmed = editName.trim();
+    if (trimmed && trimmed !== name) {
+      try { await renameCampaign(campaignId, trimmed); refresh(); } catch { setEditName(name); }
+    } else {
+      setEditName(name);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="text-xs font-semibold text-rc-accent bg-rc-code border border-rc-border rounded-input px-1 w-48"
+        value={editName}
+        onClick={e => e.stopPropagation()}
+        onChange={e => setEditName(e.target.value)}
+        onBlur={commitRename}
+        onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setEditing(false); setEditName(name); } }}
+      />
+    );
+  }
+
+  return (
+    <span
+      className="text-xs font-semibold text-rc-accent cursor-text hover:underline"
+      onDoubleClick={() => setEditing(true)}
+      title="Double-click to rename campaign"
+    >
+      📊 Campaign: {name}
+    </span>
+  );
+}
+
 export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const nav = useNavigate();
   const refresh = useRefreshTasks();
@@ -258,7 +302,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       await deleteTask(task.id);
       void refresh();
     } catch (err) {
-      alert(`Could not delete "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Could not delete "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
       void refresh();
     }
   };
@@ -271,7 +315,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       refresh();
       nav(res.route === 'monitor' ? `/task/${task.id}/monitor` : `/task/${task.id}/discuss`);
     } catch (err) {
-      alert(`Could not rerun "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Could not rerun "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
     }
   };
   const doCancel = async () => {
@@ -282,7 +326,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       await cancelTask(task.id);
       refresh();
     } catch (err) {
-      alert(`Could not cancel "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Could not cancel "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
     }
   };
   const doCreateCampaign = async () => {
@@ -293,7 +337,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     try {
       await updateTask(taskId, { campaignName: name });
     } catch (err) {
-      alert(`Could not create campaign: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Could not create campaign: ${err instanceof Error ? err.message : String(err)}`);
     }
     refresh();
   };
@@ -304,7 +348,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
       nav(`/task/${id}/discuss`);
     } catch (err) {
-      alert(`Could not create task: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Could not create task: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -405,7 +449,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           <div className="flex flex-col gap-4" data-testid="card-layout">
             {[...campaigns.entries()].map(([cid, cTasks]) => (
               <div key={`camp-${cid}`}>
-                <div className="text-xs font-semibold text-rc-accent mb-2">📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}</div>
+                <div className="mb-2"><EditableCampaignName campaignId={cid} name={getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })} /></div>
                 <div className="flex flex-wrap gap-4">
                   {cTasks.map(t => (
                     <div key={t.id} className="w-full sm:w-[calc(50%-0.5rem)] lg:w-[calc(33.333%-0.75rem)]">
@@ -444,8 +488,8 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
               return (
               <tbody key={`campaign-${cid}`}>
                 <tr className="bg-rc-card/50 border-b border-rc-border">
-                  <td colSpan={3} className="px-3 py-1.5 text-xs font-semibold text-rc-accent">
-                    📊 Campaign: {getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })}
+                  <td colSpan={3} className="px-3 py-1.5">
+                    <EditableCampaignName campaignId={cid} name={getCampaignDisplayName(cTasks[0] ?? { campaignId: cid })} />
                   </td>
                   <td className="px-3 py-1.5">
                     {scoreData.values.length > 0 ? <Sparkline values={scoreData.values} maxPoints={SCORE_TREND_MAX_POINTS} /> : <span className="text-rc-muted">—</span>}

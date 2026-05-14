@@ -36,6 +36,8 @@ export interface AgentConfig {
   reasoning_effort: string;
   tools: string[];
   prompt: string;
+  /** Optional per-role adapter override (e.g. "claude", "codex"). When set, this role runs on its own adapter instead of the run-level adapter. */
+  adapter?: string;
 }
 
 export interface Adapter {
@@ -129,6 +131,65 @@ export function execWithTimeout(
   opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv },
 ): Promise<RunResult> {
   return execChild(cmd, args, opts);
+}
+
+export function execWithStdin(
+  cmd: string,
+  args: string[],
+  stdin: string,
+  opts: {
+    cwd: string;
+    timeout_ms: number;
+    liveLogPath?: string;
+    env?: NodeJS.ProcessEnv;
+    onStdout?: (text: string) => void;
+    /** Invoked once the child is spawned, gives caller a kill handle (e.g. to
+     *  force-exit a hung subprocess after detecting a success event in stdout). */
+    onChild?: (handles: { kill: () => void }) => void;
+  },
+): Promise<RunResult> {
+  const start = Date.now();
+  if (opts.liveLogPath) {
+    mkdirSync(dirname(opts.liveLogPath), { recursive: true });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+      detached: process.platform !== 'win32',
+      env: { ...process.env, ...opts.env },
+    });
+    if (opts.onChild) opts.onChild({ kill: () => killChild(child) });
+    const timer = setTimeout(() => { timedOut = true; killChild(child); }, Math.max(1, opts.timeout_ms));
+    child.stdin!.write(stdin);
+    child.stdin!.end();
+    const chunks: Buffer[] = [];
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        output: Buffer.concat(chunks).toString('utf-8'),
+        exitCode: timedOut ? 124 : code ?? 1,
+        duration_ms: Date.now() - start,
+        timedOut,
+      });
+    };
+    child.stdout.on('data', (d: Buffer) => {
+      chunks.push(d);
+      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
+      opts.onStdout?.(d.toString('utf-8'));
+    });
+    child.stderr.on('data', (d: Buffer) => {
+      chunks.push(d);
+      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
+    });
+    child.on('close', (code) => finish(code));
+    child.on('error', () => finish(1));
+  });
 }
 
 export function execWithStreaming(

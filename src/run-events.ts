@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StageStatus } from './store.js';
-import { atomicWrite, runDir } from './store/helpers.js';
+import { atomicWrite, runDir } from './store.js';
 
 export type RunEventType =
   | 'stage_complete'
@@ -75,7 +75,7 @@ function inferSummaryRefreshReasons(event: RunEvent): string[] {
 function readRefreshState(projectDir: string, runId: string): AttemptSummaryRefreshState {
   try {
     return JSON.parse(readFileSync(refreshStatePath(projectDir, runId), 'utf-8')) as AttemptSummaryRefreshState;
-  } catch {
+  } catch { /* non-critical */
     return {
       refreshVersion: 0,
       pending: false,
@@ -111,7 +111,7 @@ export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as RunEvent);
-  } catch {
+  } catch { /* non-critical */
     return [];
   }
 }

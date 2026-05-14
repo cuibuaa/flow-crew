@@ -205,21 +205,7 @@ export function separateNodeOverlaps(
   }
 }
 
-export function truncate(s: string, max = 20) {
+export function truncate(s: string | undefined | null, max = 20) {
+  if (s == null) return "";
   return s.length > max ? s.slice(0, max) + "…" : s;
-}
-
-export function filterByTime(simNodes: SimNode[], edges: KGEdge[], timeSlider: number) {
-  if (simNodes.length === 0) return { visibleNodes: [] as SimNode[], visibleEdges: [] as KGEdge[] };
-  if (timeSlider >= 100) return { visibleNodes: simNodes, visibleEdges: edges };
-  const sorted = [...simNodes].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const cutoff = Math.max(1, Math.floor(sorted.length * timeSlider / 100));
-  const ids = new Set(sorted.slice(0, cutoff).map(n => n.id));
-  return {
-    visibleNodes: simNodes.filter(n => ids.has(n.id)),
-    visibleEdges: edges.filter(e => {
-      const endpoints = edgeEndpoints(e);
-      return Boolean(endpoints.from && endpoints.to && ids.has(endpoints.from) && ids.has(endpoints.to));
-    }),
-  };
 }

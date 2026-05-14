@@ -3,18 +3,13 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStageOutput } from './store.js';
 import { readStageStatus } from './store.js';
+import { getDefaultTimeout } from './config.js';
 
 const MAX_CONTEXT_CHARS = 8000;
 const SKILLS_DIR = 'config/skills';
-const DEFAULT_TIMEOUT_MS = '300000';
 
 function readDefaultTimeout(projectDir: string): string {
-  try {
-    const raw = readFileSync(join(projectDir, 'config', 'defaults.yaml'), 'utf-8');
-    const match = raw.match(/default_timeout_ms:\s*(\d+)/);
-    if (match) return match[1];
-  } catch { /* fallback */ }
-  return DEFAULT_TIMEOUT_MS;
+  return getDefaultTimeout(projectDir);
 }
 
 export type HandoffVisibility = 'full' | 'minimal' | 'none';
@@ -141,7 +136,23 @@ export function buildStagePrompt(opts: HandoffOpts): string {
   const anchor = skillsContent
     ? '\n\n---\nThe skill below provides methodology guidance for HOW to approach your task. Do NOT let it change WHAT you are doing — the task above takes absolute priority.\n'
     : '';
-  const parts = [context, body, anchor, skillsContent].filter(Boolean);
+  // Inject supervisor guidance if present (high priority)
+  const guidanceParts: string[] = [];
+  const runGuidancePath = join(opts.runDir, 'supervisor_guidance.md');
+  if (existsSync(runGuidancePath)) {
+    try { const g = readFileSync(runGuidancePath, 'utf-8').trim(); if (g) guidanceParts.push(g); } catch { /* ignore */ }
+  }
+  if (opts.stageId) {
+    const stageGuidancePath = join(opts.runDir, 'stages', opts.stageId, 'guidance.md');
+    if (existsSync(stageGuidancePath)) {
+      try { const g = readFileSync(stageGuidancePath, 'utf-8').trim(); if (g) guidanceParts.push(g); } catch { /* ignore */ }
+    }
+  }
+  const guidanceBlock = guidanceParts.length > 0
+    ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${guidanceParts.join('\n\n')}\n\n`
+    : '';
+
+  const parts = [guidanceBlock, context, body, anchor, skillsContent].filter(Boolean);
   const prompt = parts.join('\n\n');
   const handoffSuffix = substituteTemplate(HANDOFF_SUFFIX, vars);
 

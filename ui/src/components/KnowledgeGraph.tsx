@@ -2,11 +2,20 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { KGNode, KGEdge, KnowledgeGraph as KnowledgeGraphData, TraceEvent } from "../types";
 import { fetchKnowledgeGraph, addKGNode, updateKGNode, deleteKGNode, fetchTrace } from "../api";
 import { useNavigate } from "react-router-dom";
-import { type SimNode, NODE_COLORS, NODE_ICONS, edgeEndpoints, layoutNodesClustered, runSimulation, separateNodeOverlaps, truncate, filterByTime } from "./kg-utils";
+import { type SimNode, NODE_COLORS, NODE_ICONS, edgeEndpoints, layoutNodesClustered, runSimulation, separateNodeOverlaps, truncate } from "./kg-utils";
 
 const GRAPH_WIDTH = 800;
 const GRAPH_HEIGHT = 600;
 const NODE_TYPES = Object.keys(NODE_COLORS);
+
+// Some agents write KG nodes with `text` / `summary` / `description` instead of
+// `label`. Fall back so the SVG label is never undefined.
+function nodeDisplayLabel(n: SimNode): string {
+  const raw = n as unknown as Record<string, unknown>;
+  const cands = [raw.label, raw.text, raw.summary, raw.description, raw.id];
+  for (const c of cands) if (typeof c === "string" && c) return c;
+  return "";
+}
 
 function graphSizeForNodeCount(count: number) {
   if (count <= 0) return { width: GRAPH_WIDTH, height: GRAPH_HEIGHT };
@@ -27,13 +36,13 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [hintLabel, setHintLabel] = useState("");
   const [hintDetails, setHintDetails] = useState("");
-  const [timeSlider, setTimeSlider] = useState(100);
   const [dragId, setDragId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(() => new Set(NODE_TYPES));
+  const [selectedStageFilter, setSelectedStageFilter] = useState<string>("all");
   const svgRef = useRef<SVGSVGElement>(null);
   const positionsRef = useRef(new Map<string, Pick<SimNode, "x" | "y" | "vx" | "vy">>());
-  const graphSize = useMemo(() => graphSizeForNodeCount(kg?.nodes.length ?? 0), [kg?.nodes.length]);
+  const graphSize = useMemo(() => graphSizeForNodeCount(kg?.nodes?.length ?? 0), [kg?.nodes?.length]);
 
   useEffect(() => {
     positionsRef.current.clear();
@@ -45,8 +54,25 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
   useEffect(() => {
     let active = true;
     const load = () => {
-      fetchKnowledgeGraph(taskId).then(d => { if (active) setKg(d); }).catch(() => {});
-      fetchTrace(taskId).then(d => { if (active) setTraceEvents(d.events); }).catch(() => {});
+      fetchKnowledgeGraph(taskId).then(d => {
+        if (!active) return;
+        // Normalize: tolerate API/file with missing nodes/edges/metadata arrays.
+        const md = (d?.metadata && typeof d.metadata === 'object') ? d.metadata : {} as Record<string, unknown>;
+        setKg({
+          nodes: Array.isArray(d?.nodes) ? d.nodes : [],
+          edges: Array.isArray(d?.edges) ? d.edges : [],
+          metadata: {
+            createdAt: typeof md.createdAt === 'string' ? md.createdAt : '',
+            updatedAt: typeof md.updatedAt === 'string' ? md.updatedAt : '',
+            bestScore: typeof md.bestScore === 'number' ? md.bestScore : undefined,
+            metricName: typeof md.metricName === 'string' ? md.metricName : undefined,
+          },
+        });
+      }).catch(() => {});
+      fetchTrace(taskId).then(d => {
+        if (!active) return;
+        setTraceEvents(Array.isArray(d?.events) ? d.events : []);
+      }).catch(() => {});
     };
     load();
     const interval = setInterval(load, 5000);
@@ -59,13 +85,13 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
 
   useEffect(() => {
     if (!kg) return;
-    setSelectedNode(prev => prev ? kg.nodes.find(n => n.id === prev.id) ?? null : null);
+    setSelectedNode(prev => prev ? (kg.nodes ?? []).find(n => n.id === prev.id) ?? null : null);
   }, [kg]);
 
   // Build graph layout when KG data changes. Existing coordinates are kept so
   // polling does not erase manual drag adjustments.
   useEffect(() => {
-    if (!kg || kg.nodes.length === 0) { setSimNodes([]); return; }
+    if (!kg || !kg.nodes || kg.nodes.length === 0) { setSimNodes([]); return; }
     const existing = positionsRef.current;
     const hadExistingLayout = existing.size > 0;
     const nodes: SimNode[] = kg.nodes.map((n, i) => {
@@ -85,23 +111,34 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
       layoutNodesClustered(nodes, graphSize.width, graphSize.height);
       separateNodeOverlaps(nodes, graphSize.width, graphSize.height, 0.7, 12, { minX: 104, minY: 52 });
     }
-    else if (!hadExistingLayout) runSimulation(nodes, kg.edges, graphSize.width, graphSize.height);
+    else if (!hadExistingLayout) runSimulation(nodes, kg.edges ?? [], graphSize.width, graphSize.height);
     else if (nodes.length !== existing.size) separateNodeOverlaps(nodes, graphSize.width, graphSize.height, 1.0, 20, { minX: 104, minY: 52 });
     setSimNodes(nodes);
   }, [kg, graphSize]);
 
-  // Time/type-filtered nodes/edges
+  // Available stages for filtering
+  const availableStages = useMemo(() => {
+    if (!kg) return [];
+    const stages = new Set<string>();
+    for (const n of kg.nodes) { if (n.stageId) stages.add(n.stageId); }
+    return Array.from(stages).sort();
+  }, [kg]);
+
+  // Type/stage-filtered nodes/edges
   const { visibleNodes, visibleEdges } = useMemo(() => {
     if (!kg) return { visibleNodes: [] as SimNode[], visibleEdges: [] as KGEdge[] };
-    const timeFiltered = filterByTime(simNodes, kg.edges, timeSlider);
-    const nodes = timeFiltered.visibleNodes.filter(n => selectedTypes.has(n.type));
+    const nodes = (simNodes ?? []).filter(n => {
+      if (!selectedTypes.has(n.type)) return false;
+      if (selectedStageFilter !== "all" && n.stageId !== selectedStageFilter) return false;
+      return true;
+    });
     const visibleIds = new Set(nodes.map(n => n.id));
-    const edges = timeFiltered.visibleEdges.filter(e => {
+    const edges = (kg.edges ?? []).filter(e => {
       const endpoints = edgeEndpoints(e);
       return Boolean(endpoints.from && endpoints.to && visibleIds.has(endpoints.from) && visibleIds.has(endpoints.to));
     });
     return { visibleNodes: nodes, visibleEdges: edges };
-  }, [simNodes, kg, timeSlider, selectedTypes]);
+  }, [simNodes, kg, selectedTypes, selectedStageFilter]);
 
   const nodeTypeCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -160,7 +197,10 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
     <div className="flex h-full min-h-[700px]" onClick={() => setCtxMenu(null)}>
       {/* Left sidebar */}
       <div className="w-[240px] shrink-0 border-r border-rc-border bg-rc-card overflow-y-auto p-3 space-y-4">
-        <button onClick={() => nav(`/task/${taskId}/monitor`)} className="text-xs text-rc-muted hover:text-rc-text">Back to Monitor</button>
+        <button onClick={() => nav(`/task/${taskId}/monitor`)} className="text-xs text-rc-muted hover:text-rc-text">← Back to Monitor</button>
+        <div className="rounded bg-rc-code/50 border border-rc-border p-2 text-[10px] text-rc-muted leading-relaxed">
+          <span className="font-semibold text-rc-text">Knowledge Graph</span> — tracks what agents learned during this run. Nodes are findings, decisions, dead ends, and evidence. Edges show relationships. Click nodes for details.
+        </div>
         <div>
           <h3 className="text-[10px] uppercase tracking-widest text-rc-muted mb-2">Score</h3>
           {kg?.metadata.bestScore != null && (
@@ -191,6 +231,21 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
             ))}
           </div>
         </div>
+        {availableStages.length > 1 && (
+          <div>
+            <h3 className="text-[10px] uppercase tracking-widest text-rc-muted mb-2">Stage / Iteration</h3>
+            <select
+              value={selectedStageFilter}
+              onChange={e => setSelectedStageFilter(e.target.value)}
+              className="w-full text-xs bg-rc-code border border-rc-border rounded px-2 py-1 text-rc-text"
+            >
+              <option value="all">All stages</option>
+              {availableStages.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <div>
           <h3 className="text-[10px] uppercase tracking-widest text-rc-muted mb-2">Nodes ({visibleNodes.length})</h3>
           <div className="space-y-1">
@@ -239,7 +294,7 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
                     fill={color + "22"} stroke={color} strokeWidth={selected ? 2.5 : 1.5}
                     filter={selected ? "url(#glow)" : undefined} />
                   <text y={-6} textAnchor="middle" fontSize={14} fill="#fff">{NODE_ICONS[n.type]}</text>
-                  <text y={12} textAnchor="middle" fontSize={10} fill="#e1e4e8">{truncate(n.label)}</text>
+                  <text y={12} textAnchor="middle" fontSize={10} fill="#e1e4e8">{truncate(nodeDisplayLabel(n))}</text>
                   {n.score != null && (
                     <text y={24} textAnchor="middle" fontSize={9} fill="#3fb950">{n.score}</text>
                   )}
@@ -253,7 +308,7 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
           {kg && visibleNodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="rounded-lg border border-rc-border bg-rc-card/90 px-4 py-3 text-xs text-rc-muted">
-                No nodes match the current time/type filters.
+                No nodes match the current type/stage filters.
               </div>
             </div>
           )}
@@ -261,9 +316,6 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
 
         {/* Footer */}
         <div className="border-t border-rc-border bg-rc-card px-4 py-2 flex items-center gap-4 text-xs text-rc-muted">
-          <span>Time:</span>
-          <input type="range" min={0} max={100} value={timeSlider} onChange={e => setTimeSlider(Number(e.target.value))} className="w-48" />
-          <span>{timeSlider}%</span>
           <span>Nodes: <b className="text-rc-text">{visibleNodes.length}</b></span>
           <span>Edges: <b className="text-rc-text">{visibleEdges.length}</b></span>
           <button onClick={() => setShowAddDialog(true)} className="ml-auto text-rc-accent hover:underline">+ Add hint</button>
@@ -313,7 +365,6 @@ export default function KnowledgeGraph({ taskId }: { taskId: string }) {
               }`}>
                 <span className="text-rc-muted">{new Date(evt.timestamp).toLocaleTimeString()}</span>
                 {' '}{evt.inputSummary || evt.type}
-                {evt.tokensIn ? <span className="text-rc-muted ml-1">({evt.tokensIn}tok)</span> : null}
               </div>
             ))}
             {traceEvents.length === 0 && <p className="text-rc-muted text-xs">No trace events yet</p>}

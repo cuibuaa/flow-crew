@@ -1,5 +1,6 @@
 import { appendFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { runDir, stageDir } from './store.js';
 
 export type TraceEventType = 'llm_call' | 'tool_use' | 'web_search' | 'file_read' | 'file_write' | 'kg_update';
 
@@ -17,12 +18,12 @@ export interface TraceEvent {
 }
 
 function tracePath(projectDir: string, runId: string, stageId: string): string {
-  return join(projectDir, '.fc', 'runs', runId, 'stages', stageId, 'trace.jsonl');
+  return join(stageDir(projectDir, runId, stageId), 'trace.jsonl');
 }
 
 export function appendTraceEvent(projectDir: string, runId: string, stageId: string, event: TraceEvent): void {
   const p = tracePath(projectDir, runId, stageId);
-  mkdirSync(join(projectDir, '.fc', 'runs', runId, 'stages', stageId), { recursive: true });
+  mkdirSync(stageDir(projectDir, runId, stageId), { recursive: true });
   appendFileSync(p, JSON.stringify(event) + '\n', 'utf-8');
 }
 
@@ -37,7 +38,7 @@ export function readTraceEvents(projectDir: string, runId: string, stageId: stri
 }
 
 export function readAllTraceEvents(projectDir: string, runId: string): TraceEvent[] {
-  const stagesDir = join(projectDir, '.fc', 'runs', runId, 'stages');
+  const stagesDir = join(runDir(projectDir, runId), 'stages');
   if (!existsSync(stagesDir)) return [];
   const events: TraceEvent[] = [];
   try {

@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult, DiscussOpts, ChildProcess, InteractiveSession } from './base.js';
-import { execWithTimeout, execWithStreaming, tryImportPty, spawnFallbackInteractive } from './base.js';
+import { execWithTimeout, execWithStdin, execWithStreaming, tryImportPty, spawnFallbackInteractive } from './base.js';
 
 /** Parse token usage from claude output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -32,6 +32,7 @@ function parseTokens(output: string): { tokens_in?: number; tokens_out?: number 
  *   --dangerously-skip-permissions: no approval prompts
  *   --output-format text|json|stream-json: output format
  *   --model sonnet|opus: model selection
+ *   --effort low|medium|high|xhigh|max: reasoning effort level
  *   --system-prompt "text": override system prompt
  *   --append-system-prompt "text": append to default system prompt
  *   --max-turns N: limit agentic turns
@@ -42,21 +43,94 @@ export class ClaudeAdapter implements Adapter {
     const args = [
       '-p',
       '--dangerously-skip-permissions',
-      '--output-format', 'text',
+      '--output-format', 'stream-json',
+      '--verbose',
     ];
     if (role.model && role.model !== 'default') args.push('--model', role.model);
-    if (role.prompt) args.push('--append-system-prompt', role.prompt);
-    args.push(prompt);
+    if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
 
-    const result = await execWithTimeout('claude', args, {
+    // Write system prompt to file to avoid ARG_MAX on long role prompts
+    const stageDir = join(opts.runDir, 'stages', opts.stageId);
+    mkdirSync(stageDir, { recursive: true });
+    if (role.prompt) {
+      const systemPromptPath = join(stageDir, 'system_prompt.md');
+      writeFileSync(systemPromptPath, role.prompt, 'utf-8');
+      args.push('--append-system-prompt-file', systemPromptPath);
+    }
+
+    // Use stream-json for live output visibility — parse text from JSON stream
+    const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
+    mkdirSync(stageDir, { recursive: true });
+
+    let lineBuf = '';
+    let extractedText = '';
+    // Track whether the `claude` CLI has emitted its terminal {"type":"result"}
+    // event. Upstream the CLI sometimes fails to close its stdio pipes after
+    // emitting this, which would leave our scheduler awaiting the child
+    // forever. When we see the event, we schedule a force-kill after a short
+    // grace period so the stage doesn't hang for the full stage timeout.
+    let resultReceived = false;
+    let resultIsSuccess = false;
+    let childKill: (() => void) | null = null;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    const POST_RESULT_GRACE_MS = 5000;
+    const result = await execWithStdin('claude', args, prompt, {
       cwd: opts.workDir,
       timeout_ms: opts.timeout_ms,
-      liveLogPath: join(opts.runDir, 'stages', opts.stageId, 'live.log'),
+      liveLogPath, // raw stream-json goes to live.log for debugging
+      onChild: ({ kill }) => { childKill = kill; },
+      onStdout: (chunk: string) => {
+        // Parse stream-json lines and extract text content for clean live output
+        lineBuf += chunk;
+        const lines = lineBuf.split('\n');
+        lineBuf = lines.pop()!;
+        for (const line of lines) {
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line);
+            let text = '';
+            if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
+              text = parsed.content;
+            } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+              text = parsed.delta.text;
+            } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
+              text = parsed.result;
+            }
+            // Detect terminal result event: schedule a force-kill if the CLI
+            // doesn't exit gracefully within the grace period.
+            if (parsed.type === 'result' && !resultReceived) {
+              resultReceived = true;
+              resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
+              if (!killTimer) {
+                killTimer = setTimeout(() => {
+                  if (childKill) childKill();
+                }, POST_RESULT_GRACE_MS);
+              }
+            }
+            if (text) {
+              extractedText += text;
+              try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
+            }
+          } catch { /* non-JSON line, skip */ }
+        }
+      },
     });
+    if (killTimer) clearTimeout(killTimer);
+
+    // Use extracted text as the output (clean, no JSON wrappers)
+    const finalOutput = extractedText || result.output;
     const tokens = parseTokens(result.output);
-    if (tokens.tokens_in !== undefined) result.tokens_in = tokens.tokens_in;
-    if (tokens.tokens_out !== undefined) result.tokens_out = tokens.tokens_out;
-    return result;
+    // Override exit code when the CLI emitted a successful result event but we
+    // had to force-kill its hung process to recover. The actual work succeeded;
+    // the non-zero code is just a stdio-cleanup artifact upstream.
+    const overrideExitCode = result.exitCode !== 0 && resultReceived && resultIsSuccess;
+    return {
+      ...result,
+      output: finalOutput,
+      exitCode: overrideExitCode ? 0 : result.exitCode,
+      tokens_in: tokens.tokens_in,
+      tokens_out: tokens.tokens_out,
+    };
   }
 
   async discuss(message: string, role: AgentConfig, opts: DiscussOpts): Promise<RunResult> {
@@ -69,7 +143,12 @@ export class ClaudeAdapter implements Adapter {
       '--output-format', 'stream-json',
     ];
     if (role.model && role.model !== 'default') args.push('--model', role.model);
-    if (role.prompt) args.push('--append-system-prompt', role.prompt);
+    if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
+    if (role.prompt) {
+      const spPath = join(opts.sessionDir, 'system_prompt.md');
+      writeFileSync(spPath, role.prompt, 'utf-8');
+      args.push('--append-system-prompt-file', spPath);
+    }
     if (hasSession) args.push('-c');
     args.push(message);
 
@@ -111,7 +190,12 @@ export class ClaudeAdapter implements Adapter {
       '--output-format', 'stream-json',
     ];
     if (role.model && role.model !== 'default') args.push('--model', role.model);
-    if (role.prompt) args.push('--append-system-prompt', role.prompt);
+    if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
+    if (role.prompt) {
+      const spPath = join(opts.sessionDir, 'system_prompt.md');
+      writeFileSync(spPath, role.prompt, 'utf-8');
+      args.push('--append-system-prompt-file', spPath);
+    }
     if (hasSession) args.push('-c');
     args.push(message);
     return spawn('claude', args, { cwd: opts.sessionDir, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -122,7 +206,12 @@ export class ClaudeAdapter implements Adapter {
     const pty = await tryImportPty();
     const args = ['--dangerously-skip-permissions'];
     if (role.model && role.model !== 'default') args.push('--model', role.model);
-    if (role.prompt) args.push('--append-system-prompt', role.prompt);
+    if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
+    if (role.prompt) {
+      const spPath = join(opts.sessionDir, 'system_prompt.md');
+      writeFileSync(spPath, role.prompt, 'utf-8');
+      args.push('--append-system-prompt-file', spPath);
+    }
 
     if (pty) {
       const proc = pty.spawn('claude', args, {

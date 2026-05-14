@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { runDir } from './store.js';
 
 export type KGNodeType = 'goal' | 'approach' | 'finding' | 'result' | 'insight' | 'dead_end' | 'user_hint';
 export type KGEdgeType = 'explored_by' | 'found_that' | 'measured_as' | 'sourced_from' | 'supports' | 'contradicts' | 'combines_with' | 'depends_on';
@@ -52,7 +53,7 @@ function emptyGraph(): KnowledgeGraph {
 }
 
 export function kgPath(projectDir: string, runId: string): string {
-  return join(projectDir, '.fc', 'runs', runId, 'knowledge_graph.json');
+  return join(runDir(projectDir, runId), 'knowledge_graph.json');
 }
 
 export function readKG(projectDir: string, runId: string): KnowledgeGraph {
@@ -63,7 +64,7 @@ export function readKG(projectDir: string, runId: string): KnowledgeGraph {
 
 export function writeKG(projectDir: string, runId: string, kg: KnowledgeGraph): void {
   const p = kgPath(projectDir, runId);
-  mkdirSync(join(projectDir, '.fc', 'runs', runId), { recursive: true });
+  mkdirSync(runDir(projectDir, runId), { recursive: true });
   kg.metadata.updatedAt = new Date().toISOString();
   atomicWrite(p, JSON.stringify(kg, null, 2));
 }

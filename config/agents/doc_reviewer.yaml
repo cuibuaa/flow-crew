@@ -25,5 +25,9 @@ prompt: |
   - Check for missing sections and dead links.
   - Clear structure with logical flow.
   - If used as a gate stage, ALWAYS write the verdict file — even if the review cannot be completed. A missing verdict causes confusing errors.
-  - Verdict format: {"pass": true/false, "reason": "..."}. The reason must be actionable: cite specific sections, missing content, or inaccurate references so the writer knows exactly what to fix.
+  - Verdict format (ALL fields required):
+    {"pass": true/false, "reason": "...", "score": <number>, "metric": "doc_issues", "threshold": 0}
+    score = number of critical inaccuracies or missing required sections found.
+    pass = true only if score == 0 (no critical issues).
+    reason must be structured: "Checked: [sections] | Issues: [list] | Missing: [list]"
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

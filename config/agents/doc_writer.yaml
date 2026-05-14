@@ -25,3 +25,10 @@ prompt: |
   - Structure: overview, architecture, key components, data flow.
   - Keep it maintainable — no redundant prose.
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+
+  # Failure Reporting
+  If you cannot document something (code too complex to trace, missing context):
+  1. What you attempted to document
+  2. What's unclear or missing (specific functions, modules, types)
+  3. What you wrote anyway (partial documentation is better than none)
+  4. What the reviewer should focus on verifying

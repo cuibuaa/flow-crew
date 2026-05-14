@@ -3,8 +3,10 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, unlinkSync, renameSync, openSync, readSync, closeSync } from "node:fs";
 import { join, extname } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { listRuns, readRunState, readStageInput, createRun, writeRunState } from "./store.js";
+import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot } from "./store.js";
 import type { StoreState } from "./store.js";
 import { deleteRunIndex, readRunIndexRecordsByCampaign } from './run-index.js';
 import {
@@ -23,6 +25,10 @@ import { readAttemptSummaryRefreshState } from "./run-events.js";
 import { readKG, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
 import { readTraceEvents, readAllTraceEvents, summarizeTrace } from './trace.js';
 import { z } from "zod";
+import pino from "pino";
+import type { KGNodeType, KGEdgeType } from './knowledge-graph.js';
+
+const log = pino({ name: 'dashboard' });
 
 // --- Dynamic adapter loading ---
 let _cachedResolvedAdapter: Adapter | null = null;
@@ -34,7 +40,7 @@ async function resolveAdapter(configDir: string): Promise<Adapter> {
     const mtime = statSync(defaultsPath).mtimeMs;
     if (_cachedResolvedAdapter && mtime === _cachedAdapterMtime) return _cachedResolvedAdapter;
     _cachedAdapterMtime = mtime;
-  } catch {
+  } catch { /* non-critical */
     if (_cachedResolvedAdapter) return _cachedResolvedAdapter;
   }
   const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, "utf-8")) as Record<string, unknown> : {};
@@ -46,7 +52,7 @@ async function resolveAdapter(configDir: string): Promise<Adapter> {
   const { execSync } = await import('node:child_process');
   const cliCmd = cliMap[name];
   if (cliCmd) {
-    try { execSync(`which ${cliCmd}`, { stdio: 'ignore' }); } catch {
+    try { execSync(`which ${cliCmd}`, { stdio: 'ignore' }); } catch { /* non-critical */
       // Configured adapter not found — try to find any available one
       const configured = name;
       let found = false;
@@ -57,7 +63,7 @@ async function resolveAdapter(configDir: string): Promise<Adapter> {
       if (!found) {
         throw new Error(`Configured adapter "${configured}" (${cliCmd}) not found and no fallback available. Install Codex or Claude. See \`flowcrew doctor\` for details.`);
       }
-      console.warn(`⚠️  Configured adapter "${configured}" not found — using "${name}" instead`);
+      log.warn(`Configured adapter "${configured}" not found — using "${name}" instead`);
     }
   }
 
@@ -79,7 +85,7 @@ function loadProjectDefaults(configDir: string): { model: string; reasoning_effo
   } catch { return { model: 'default', reasoning_effort: 'default' }; }
 }
 
-const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string() });
+const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string(), adapter: z.string().optional() });
 
 function parseAgentConfig(raw: unknown, configDir?: string): AgentConfig {
   const defaults = loadProjectDefaults(configDir ?? join(process.cwd(), 'config'));
@@ -94,12 +100,74 @@ function parseAgentConfig(raw: unknown, configDir?: string): AgentConfig {
 const _stageRolesCache = new Map<string, { mtime: number; roles: Record<string, { role: string; dependsOn: string[]; isGate?: boolean }> }>();
 const DEFAULT_STAGE_OUTPUT_TAIL_BYTES = 200 * 1024;
 
+// --- Performance: task list cache (P0) ---
+let _taskListCache: { data: unknown[]; timestamp: number; runsDir: string; dirMtime: number } | null = null;
+const TASK_LIST_CACHE_TTL_MS = 5_000; // 5s TTL
+
+function invalidateTaskListCache(): void {
+  _taskListCache = null;
+}
+
+function isTaskListCacheValid(runsDir: string): boolean {
+  if (!_taskListCache || _taskListCache.runsDir !== runsDir) return false;
+  if ((Date.now() - _taskListCache.timestamp) >= TASK_LIST_CACHE_TTL_MS) return false;
+  // Also check if any run.json was modified since cache was built
+  try {
+    const dirMtime = statSync(runsDir).mtimeMs;
+    if (dirMtime !== _taskListCache.dirMtime) return false;
+  } catch { /* non-critical */ return false; }
+  return true;
+}
+
+// --- Performance: SSE mtime tracking (P0) ---
+const _sseRunMtimes = new Map<string, number>();
+
 function parseTailBytes(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return DEFAULT_STAGE_OUTPUT_TAIL_BYTES;
   if (value === 'full' || value === '0') return undefined;
   const n = Number(Array.isArray(value) ? value[0] : value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_STAGE_OUTPUT_TAIL_BYTES;
   return Math.min(Math.floor(n), 5 * 1024 * 1024);
+}
+
+// Parse Claude stream-json into human-readable output for live display.
+// Falls through to raw text for non-JSON lines (codex stdout) or JSON lines
+// that don't match a known Claude stream-json type — so any adapter's
+// live.log is renderable without a per-adapter parser.
+function parseStreamJsonToText(raw: string, state?: { lineBuf: string }): string {
+  const buf = state || { lineBuf: '' };
+  buf.lineBuf += raw;
+  const lines = buf.lineBuf.split('\n');
+  buf.lineBuf = lines.pop()!; // keep incomplete last line
+  const output: string[] = [];
+  for (const line of lines) {
+    if (!line.trim()) { output.push('\n'); continue; }
+    let handled = false;
+    try {
+      const parsed = JSON.parse(line);
+      // Text content from assistant
+      if (parsed.type === 'assistant' && parsed.message?.content) {
+        for (const block of parsed.message.content) {
+          if (block.type === 'text' && block.text) output.push(block.text);
+          if (block.type === 'tool_use') {
+            const name = block.name || 'tool';
+            const desc = block.input?.description || block.input?.command || block.input?.file_path || '';
+            output.push(`\n[${name}] ${typeof desc === 'string' ? desc.slice(0, 100) : ''}\n`);
+          }
+        }
+        handled = true;
+      }
+      // Tool results
+      if (parsed.type === 'tool_result' || parsed.type === 'system') {
+        if (parsed.subtype === 'task_started') {
+          output.push(`\n[Agent] ${parsed.description || 'subtask started'}\n`);
+        }
+        handled = true;
+      }
+    } catch { /* not JSON */ }
+    if (!handled) output.push(line + '\n');
+  }
+  return output.join('');
 }
 
 function readTextTail(filePath: string, tailBytes?: number): { content: string; totalBytes: number; truncated: boolean; tailBytes?: number } {
@@ -145,16 +213,117 @@ function hasLiveDirectRunner(projectDir: string, runId: string): boolean {
       if (cmdline.includes('.fc/direct-') && environ.split('\0').includes(`RUN_ID=${runId}`)) {
         return true;
       }
-    } catch {
+    } catch { /* non-critical */
       // Stale PID files or inaccessible /proc entries are treated as not alive.
     }
   }
   return false;
 }
 
+/**
+ * Checks whether the scheduler subprocess for a run is still alive by validating
+ * the scheduler.pid file written by runWorkflow. Survives dashboard restarts so
+ * the startup-recovery sweep doesn't mislabel live runs as failed.
+ */
+export function hasLiveScheduler(_projectDir: string, runId: string): boolean {
+  try {
+    const pidPath = join(runsRoot(), runId, 'scheduler.pid');
+    if (!existsSync(pidPath)) return false;
+    const pid = readFileSync(pidPath, 'utf-8').trim();
+    if (!/^\d+$/.test(pid)) return false;
+    // /proc/<pid> is the canonical Linux liveness probe; FlowCrew is WSL/Linux only.
+    return existsSync(`/proc/${pid}`);
+  } catch { /* non-critical */
+    return false;
+  }
+}
+
+function markDetachedRunFailed(projectDir: string, runId: string, reason: string): void {
+  try {
+    const state = readRunState(projectDir, runId);
+    if (state.status !== 'running') return;
+    state.status = 'failed';
+    state.failureReason = reason;
+    state.completedAt = new Date().toISOString();
+    for (const [, stage] of Object.entries(state.stages)) {
+      if (stage.status === 'running') stage.status = 'failed';
+    }
+    writeRunState(projectDir, runId, state);
+  } catch (err) {
+    log.warn({ err, runId, reason }, 'Could not mark detached scheduler run failed');
+  }
+}
+
+/**
+ * Spawn a fully-detached `flowcrew quick --existing-run-id <id>` child process
+ * for a dashboard-initiated execute/rerun/approve. The scheduler then lives
+ * outside the daemon's process, so daemon restarts no longer kill in-flight
+ * runs. The child writes scheduler.pid, captures its own logs, and `unref()`
+ * lets the daemon exit independently if needed.
+ */
+function spawnDetachedRun(opts: {
+  runId: string;
+  projectDir: string;
+  campaignId?: string | undefined;
+  supervise?: boolean | undefined;
+  workflow?: string | undefined;
+  maxIterations?: number | undefined;
+  timeoutMs?: number | undefined;
+  adapter?: string | undefined;
+}): void {
+  const cliPath = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const args: string[] = ['quick', '--existing-run-id', opts.runId, '--project', opts.projectDir];
+  if (opts.workflow) args.push('--workflow', opts.workflow);
+  if (typeof opts.maxIterations === 'number') args.push('--max-iterations', String(opts.maxIterations));
+  if (typeof opts.timeoutMs === 'number') args.push('--timeout', String(opts.timeoutMs));
+  if (opts.adapter) args.push('--adapter', opts.adapter);
+  if (opts.supervise === false) args.push('--no-supervise');
+  if (opts.campaignId) args.push('--campaign', opts.campaignId);
+  const logDir = join(opts.projectDir, '.fc', 'logs');
+  try { mkdirSync(logDir, { recursive: true }); } catch { /* non-critical */ }
+  const logPath = join(logDir, `run-${opts.runId}.log`);
+  let logFd = -1;
+  try {
+    logFd = openSync(logPath, 'a');
+  } catch {
+    logFd = -1;
+  }
+  let child;
+  try {
+    child = spawn(process.execPath, [cliPath, ...args], {
+      detached: true,
+      stdio: ['ignore', logFd >= 0 ? logFd : 'ignore', logFd >= 0 ? logFd : 'ignore'],
+      cwd: opts.projectDir,
+      env: { ...process.env },
+    });
+  } catch (err) {
+    if (logFd >= 0) try { closeSync(logFd); } catch { /* ignore */ }
+    const reason = `Detached scheduler failed to spawn: ${err instanceof Error ? err.message : String(err)}`;
+    markDetachedRunFailed(opts.projectDir, opts.runId, reason);
+    throw err;
+  }
+  if (logFd >= 0) try { closeSync(logFd); } catch { /* ignore */ }
+  child.once('error', (err) => {
+    markDetachedRunFailed(opts.projectDir, opts.runId, `Detached scheduler failed: ${err.message}`);
+  });
+  child.once('exit', (code, signal) => {
+    if ((code ?? 0) !== 0 || signal) {
+      markDetachedRunFailed(opts.projectDir, opts.runId, `Detached scheduler exited early: code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+    }
+  });
+  const watchdog = setTimeout(() => {
+    if (!hasLiveScheduler(opts.projectDir, opts.runId)) {
+      markDetachedRunFailed(opts.projectDir, opts.runId, 'Detached scheduler did not start within 10s');
+    }
+  }, 10_000);
+  watchdog.unref?.();
+  child.unref();
+  log.info({ runId: opts.runId, pid: child.pid, logPath }, 'Spawned detached scheduler');
+}
+
 function listRecentRunIdsForStartup(projectDir: string, limit = 50): string[] {
   try {
-    const root = join(projectDir, '.fc', 'runs');
+    const root = runsRoot();
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
@@ -162,14 +331,38 @@ function listRecentRunIdsForStartup(projectDir: string, limit = 50): string[] {
       .filter((name) => /^\d{4}-\d{2}-\d{2}T/.test(name))
       .sort()
       .slice(-limit);
-  } catch {
+  } catch { /* non-critical */
     return [];
   }
 }
 
+export function performStartupRecovery(projectDir: string, limit = 50): void {
+  try {
+    const runIds = Number.isFinite(limit) && limit > 0
+      ? listRecentRunIdsForStartup(projectDir, limit)
+      : [];
+    for (const id of runIds) {
+      try {
+        const state = readRunState(projectDir, id);
+        if (state.status === 'running') {
+          if (hasLiveDirectRunner(projectDir, id)) continue;
+          if (hasLiveScheduler(projectDir, id)) continue;
+          state.status = 'failed';
+          state.failureReason = 'Server restarted while task was running';
+          state.completedAt = new Date().toISOString();
+          for (const [, s] of Object.entries(state.stages)) {
+            if (s.status === 'running') s.status = 'failed';
+          }
+          writeRunState(projectDir, id, state);
+        }
+      } catch { /* skip unreadable runs */ }
+    }
+  } catch { /* no runs dir */ }
+}
+
 function loadStageRoles(projectDir: string, runId: string): Record<string, { role: string; dependsOn: string[]; isGate?: boolean }> {
   try {
-    const wfPath = join(projectDir, '.fc', 'runs', runId, 'workflow.yaml');
+    const wfPath = join(runsRoot(), runId, 'workflow.yaml');
     const mtime = statSync(wfPath).mtimeMs;
     const cached = _stageRolesCache.get(runId);
     if (cached && cached.mtime === mtime) return cached.roles;
@@ -186,13 +379,13 @@ function loadStageRoles(projectDir: string, runId: string): Record<string, { rol
     }
     _stageRolesCache.set(runId, { mtime, roles: map });
     return map;
-  } catch {
+  } catch { /* non-critical */
     return {};
   }
 }
 
 export function buildCampaignContext(projectDir: string, campaignId: string, currentRunId: string, campaignDisplayName?: string): string {
-  const runsDir = join(projectDir, '.fc', 'runs');
+  const runsDir = runsRoot();
   const targetCampaignStorageKey = resolveCampaignStorageKey({ campaignId }) ?? campaignId;
 
   const entries = readCampaignEntries(projectDir, targetCampaignStorageKey);
@@ -279,7 +472,7 @@ export function buildCampaignContext(projectDir: string, campaignId: string, cur
       try {
         const brief = readFileSync(s.briefPath, 'utf-8');
         ctx += `## Run ${s.runId.slice(0, 8)} — Seq ${s.campaignSeq ?? '?'} / Iteration ${s.currentIteration ?? 1}\n\n${brief}\n\n`;
-      } catch {
+      } catch { /* non-critical */
         ctx += `- Run ${s.runId.slice(0, 8)}: ${s.taskDescription ?? 'no description'}\n`;
       }
     } else {
@@ -319,7 +512,7 @@ export function injectInitialTuiMessage(session: import('./adapters/base.js').In
 const _bestScoreCache = new Map<string, { mtime: number; bestScore?: number; metricName?: string }>();
 
 function readBestScore(projectDir: string, runId: string): { bestScore?: number; metricName?: string } {
-  const runPath = join(projectDir, '.fc', 'runs', runId);
+  const runPath = join(runsRoot(), runId);
   // Use run.json mtime as cache key — it changes whenever the run state updates
   try {
     const mtime = statSync(join(runPath, 'run.json')).mtimeMs;
@@ -482,16 +675,29 @@ function readExecutionDefaults(configDir?: string): { timeoutMs: number; maxIter
       stageTechnicalRetries: typeof defaults.default_stage_technical_retries === 'number' ? defaults.default_stage_technical_retries : 1,
     };
     return _cachedExecutionDefaults;
-  } catch {
+  } catch { /* non-critical */
     return _cachedExecutionDefaults ?? { timeoutMs: 300000, maxIterations: 3, gateRetryLoops: 1, stageTechnicalRetries: 1 };
   }
+}
+
+function extractTaskTitle(desc?: string): string {
+  if (!desc) return '';
+  // Find first non-empty line, strip markdown heading markers, truncate
+  const lines = desc.split('\n');
+  for (const line of lines) {
+    const trimmed = line.replace(/^#+\s*/, '').trim();
+    if (trimmed && trimmed.length > 2) {
+      return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
+    }
+  }
+  return desc.slice(0, 80);
 }
 
 function stateToTask(state: StoreState, projectDir: string, configDir?: string, opts?: { includeIterationLog?: boolean }): TaskShape {
   const defaults = readExecutionDefaults(configDir);
   // Fast path: use stored campaign fields directly to avoid O(n) listCampaigns scan per task
   const campaign = state.campaignStorageKey
-    ? { id: state.campaignId ?? state.campaignStorageKey, name: state.campaignName ?? state.campaignId ?? state.campaignStorageKey, storageKey: state.campaignStorageKey }
+    ? { id: state.campaignId ?? state.campaignStorageKey, name: extractTaskTitle(state.campaignName) || state.campaignId || state.campaignStorageKey, storageKey: state.campaignStorageKey }
     : state.campaignId || state.campaignName
       ? resolveCampaignSelection(projectDir, { campaignId: state.campaignId, campaignStorageKey: state.campaignStorageKey, campaignName: state.campaignName })
       : undefined;
@@ -527,7 +733,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
   const { bestScore, metricName } = readBestScore(projectDir, state.runId);
   const task: TaskShape = {
     id: state.runId,
-    name: state.taskDescription || state.workflowName,
+    name: extractTaskTitle(state.taskDescription) || state.workflowName,
     type: '',
     workflow: state.workflowName,
     status: state.status === 'complete' ? 'completed' : state.status,
@@ -561,7 +767,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
   };
   if (state.dispatchedStages) task.dispatchedStages = state.dispatchedStages;
   if (opts?.includeIterationLog) {
-    const logPath = join(projectDir, '.fc', 'runs', state.runId, 'iteration_log.md');
+    const logPath = join(runsRoot(), state.runId, 'iteration_log.md');
     try { task.iterationLog = readFileSync(logPath, 'utf-8'); } catch { /* not found */ }
   }
   return task;
@@ -595,27 +801,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // Startup recovery: mark stale running tasks as failed
   // Tasks awaiting_approval are preserved — they're waiting for user input, not actively running
-  try {
-    const startupRecoveryLimit = Number(process.env.FLOWCREW_STARTUP_RECOVERY_LIMIT ?? 50);
-    const runIds = Number.isFinite(startupRecoveryLimit) && startupRecoveryLimit > 0
-      ? listRecentRunIdsForStartup(projectDir, startupRecoveryLimit)
-      : [];
-    for (const id of runIds) {
-      try {
-        const state = readRunState(projectDir, id);
-	        if (state.status === 'running') {
-	          if (hasLiveDirectRunner(projectDir, id)) continue;
-	          state.status = 'failed';
-	          state.failureReason = 'Server restarted while task was running';
-          state.completedAt = new Date().toISOString();
-          for (const [, s] of Object.entries(state.stages)) {
-            if (s.status === 'running') s.status = 'failed';
-          }
-          writeRunState(projectDir, id, state);
-        }
-      } catch { /* skip unreadable runs */ }
-    }
-  } catch { /* no runs dir */ }
+  performStartupRecovery(projectDir, Number(process.env.FLOWCREW_STARTUP_RECOVERY_LIMIT ?? 50));
 
   // Runtime stale task recovery: periodically check active executions for tasks stuck in "running"
   // with no run.json updates for longer than the configured timeout + buffer.
@@ -624,7 +810,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   const staleTimer = setInterval(() => {
     for (const id of activeExecutions) {
       try {
-        const runJsonPath = join(projectDir, '.fc', 'runs', id, 'run.json');
+        const runJsonPath = join(runsRoot(), id, 'run.json');
         const mtime = statSync(runJsonPath).mtimeMs;
         const age = Date.now() - mtime;
         if (age < 5 * 60_000) continue;
@@ -729,7 +915,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (req, reply) => {
     try {
       return stateToApi(readRunState(projectDir, req.params.runId), projectDir);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
   });
@@ -737,7 +923,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { runId: string; stageId: string } }>(
     "/api/runs/:runId/stages/:stageId/input",
     async (req, reply) => {
-      const p = join(projectDir, '.fc', 'runs', req.params.runId, 'stages', req.params.stageId, 'input.md');
+      const p = join(runsRoot(), req.params.runId, 'stages', req.params.stageId, 'input.md');
       if (!existsSync(p)) return reply.code(404).send("not found");
       reply.type("text/markdown").send(readStageInput(projectDir, req.params.runId, req.params.stageId));
     },
@@ -746,7 +932,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { runId: string; stageId: string }; Querystring: { tailBytes?: string } }>(
     "/api/runs/:runId/stages/:stageId/output",
     async (req, reply) => {
-      const p = join(projectDir, '.fc', 'runs', req.params.runId, 'stages', req.params.stageId, 'output.md');
+      const p = join(runsRoot(), req.params.runId, 'stages', req.params.stageId, 'output.md');
       if (!existsSync(p)) return reply.code(404).send("not found");
       return sendStageOutput(reply, p, parseTailBytes(req.query.tailBytes));
     },
@@ -754,15 +940,22 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // ===================== Task endpoints =====================
 
-  // 1. GET /api/tasks
+  // 1. GET /api/tasks (cached for performance — avoids re-reading all run.json files)
   app.get<{ Querystring: { limit?: string } }>("/api/tasks", async (req) => {
-    const ids = listRuns(projectDir);
     const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit ?? '50', 10) || 50));
-    // Return most recent runs first (IDs are timestamp-based, so reverse sort gives newest first)
+    const runsDir = runsRoot();
+    if (isTaskListCacheValid(runsDir)) {
+      return _taskListCache!.data.slice(0, limit);
+    }
+    const ids = listRuns(projectDir);
     const recent = ids.reverse().slice(0, limit);
-    return recent.map((id) => {
-      try { return stateToTask(readRunState(projectDir, id), projectDir, configDir); } catch { return null; }
+    const data = recent.map((id) => {
+      try { return stateToTask(readRunState(projectDir, id), projectDir, configDir); } catch { /* non-critical */ return null; }
     }).filter(Boolean);
+    let dirMtime = 0;
+    try { dirMtime = statSync(runsDir).mtimeMs; } catch { /* non-critical */ }
+    _taskListCache = { data, timestamp: Date.now(), runsDir, dirMtime };
+    return data;
   });
 
   // 2. POST /api/tasks
@@ -798,7 +991,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
     writeRunState(projectDir, runId, state);
     if (planFile) {
-      const runPath = join(projectDir, '.fc', 'runs', runId);
+      const runPath = join(runsRoot(), runId);
       mkdirSync(runPath, { recursive: true });
       writeFileSync(join(runPath, 'task_brief.md'), planFile, 'utf-8');
     }
@@ -809,14 +1002,14 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
     try {
       return stateToTask(readRunState(projectDir, req.params.id), projectDir, configDir, { includeIterationLog: true });
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
   });
 
   // GET /api/tasks/:id/iteration-log
   app.get<{ Params: { id: string } }>("/api/tasks/:id/iteration-log", async (req, reply) => {
-    const logPath = join(projectDir, '.fc', 'runs', req.params.id, 'iteration_log.md');
+    const logPath = join(runsRoot(), req.params.id, 'iteration_log.md');
     if (!existsSync(logPath)) return reply.code(404).send({ error: 'not found' });
     reply.type('text/markdown').send(readFileSync(logPath, 'utf-8'));
   });
@@ -826,7 +1019,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
     const { plan, discussion, name, workflow } = req.body ?? {};
@@ -843,7 +1036,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
     const body = req.body ?? {};
@@ -885,18 +1078,30 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   // GET /api/tasks/:id/dispatch
+  // GET /api/tasks/:id/supervisor — returns supervisor activity (or null if no supervisor)
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/supervisor", async (req, reply) => {
+    const p = join(runsRoot(), req.params.id, 'supervisor_state.json');
+    if (!existsSync(p)) return reply.send({ enabled: false });
+    try {
+      const data = JSON.parse(readFileSync(p, 'utf-8'));
+      return reply.send({ enabled: true, ...data });
+    } catch {
+      return reply.send({ enabled: false });
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/api/tasks/:id/dispatch", async (req, reply) => {
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
     if (state.status === 'awaiting_approval' && state.dispatchedStages) {
       return { stages: state.dispatchedStages, status: state.status };
     }
     // Also try reading dispatch.yaml file directly
-    const dispatchPath = join(projectDir, '.fc', 'runs', req.params.id, 'dispatch.yaml');
+    const dispatchPath = join(runsRoot(), req.params.id, 'dispatch.yaml');
     if (existsSync(dispatchPath)) {
       try {
         let items = parseYaml(readFileSync(dispatchPath, 'utf-8'));
@@ -923,7 +1128,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
     if (state.status !== 'awaiting_approval') {
@@ -944,35 +1149,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     // If no active execution loop (e.g. server restarted while awaiting approval),
     // resume workflow execution so the task doesn't get stuck.
     if (!activeExecutions.has(req.params.id)) {
-      const workflowName = state.workflowName || 'default';
-      const yamlPath = join(configDir, 'workflows', `${workflowName}.yaml`);
-      if (existsSync(yamlPath)) {
-        try {
-          const { config, raw } = loadWorkflow(yamlPath);
-          const agents = new Map<string, AgentConfig>();
-          try {
-            const allFiles = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
-            for (const f of allFiles) {
-              const parsed = parseYaml(readFileSync(join(agentsDir, f), 'utf-8'));
-              agents.set(f.replace('.yaml', ''), parseAgentConfig(parsed, configDir));
-            }
-          } catch { /* ignore */ }
-          const adapter = await resolveAdapter(configDir);
-          activeExecutions.add(req.params.id);
-          runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, req.params.id, state.taskDescription).catch((err) => {
-            console.error('Workflow resumed after approve failed:', err);
-            try {
-              const s = readRunState(projectDir, req.params.id);
-              if (s.status === 'running') {
-                s.status = 'failed';
-                s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`;
-                s.completedAt = new Date().toISOString();
-                writeRunState(projectDir, req.params.id, s);
-              }
-            } catch { /* ignore */ }
-          }).finally(() => activeExecutions.delete(req.params.id));
-        } catch { /* best effort — the polling loop may still pick it up */ }
-      }
+      spawnDetachedRun({
+        runId: req.params.id,
+        projectDir,
+        campaignId: state.campaignId,
+        supervise: state.supervise ?? true,
+        workflow: state.workflowName || 'default',
+      });
     }
 
     return { ok: true };
@@ -982,7 +1165,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { id: string; stageId: string }; Querystring: { tailBytes?: string } }>(
     "/api/tasks/:id/stages/:stageId/output",
     async (req, reply) => {
-      const p = join(projectDir, '.fc', 'runs', req.params.id, 'stages', req.params.stageId, 'output.md');
+      const p = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'output.md');
       if (!existsSync(p)) return reply.code(404).send("not found");
       return sendStageOutput(reply, p, parseTailBytes(req.query.tailBytes));
     },
@@ -993,7 +1176,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
     if (state.status === 'running') {
@@ -1015,7 +1198,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       );
       for (const sid of dispatchedIds) {
         delete state.stages[sid];
-        const stageDir = join(projectDir, '.fc', 'runs', req.params.id, 'stages', sid);
+        const stageDir = join(runsRoot(), req.params.id, 'stages', sid);
         if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
       }
       state.dispatchedStages = undefined;
@@ -1040,7 +1223,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       state.startedAt = new Date().toISOString();
       state.campaignIteration = state.campaignId || state.campaignStorageKey ? 1 : undefined;
       // Clean stale artifacts
-      const runPath = join(projectDir, '.fc', 'runs', req.params.id);
+      const runPath = join(runsRoot(), req.params.id);
       const dp = join(runPath, 'dispatch.yaml');
       if (existsSync(dp)) unlinkSync(dp);
       const ts = join(runPath, 'tech_solution.md');
@@ -1078,7 +1261,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(409).send({ error: 'task already finished — use rerun instead' });
     }
     // Warn if no task brief and no task description — planner will get an empty prompt
-    const briefPath = join(projectDir, '.fc', 'runs', req.params.id, 'task_brief.md');
+    const briefPath = join(runsRoot(), req.params.id, 'task_brief.md');
     if (!state.taskDescription?.trim() && !existsSync(briefPath)) {
       return reply.code(400).send({ error: 'No task description or task brief found. Complete the discussion first.' });
     }
@@ -1087,45 +1270,18 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!existsSync(yamlPath)) {
       return reply.code(404).send({ error: `workflow not found: ${workflowName}` });
     }
-    const { config, raw } = loadWorkflow(yamlPath);
-    const roles = [...new Set(config.stages.map((s) => s.role))];
-    const agents = new Map<string, AgentConfig>();
-    for (const role of roles) {
-      const agentPath = join(agentsDir, `${role}.yaml`);
-      if (!existsSync(agentPath)) continue;
-      const parsed = parseYaml(readFileSync(agentPath, 'utf-8'));
-      agents.set(role, parseAgentConfig(parsed, configDir));
-    }
-    // Bug 3: preload all agent configs so dispatched roles are available
-    try {
-      const allFiles = readdirSync(agentsDir).filter((f) => f.endsWith('.yaml'));
-      for (const f of allFiles) {
-        const name = f.replace('.yaml', '');
-        if (agents.has(name)) continue;
-        const parsed = parseYaml(readFileSync(join(agentsDir, f), 'utf-8'));
-        agents.set(name, parseAgentConfig(parsed, configDir));
-      }
-    } catch { /* agents dir may not exist */ }
-    let adapter: Adapter;
-    try {
-      adapter = await resolveAdapter(configDir);
-    } catch (err) {
-      return reply.code(503).send({ error: err instanceof Error ? err.message : 'Adapter not available' });
-    }
-    const taskDescription = state.taskDescription || 'task';
-    activeExecutions.add(req.params.id);
-    runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, req.params.id, taskDescription).catch((err) => {
-      console.error('Workflow execution failed:', err);
-      try {
-        const s = readRunState(projectDir, req.params.id);
-        if (s.status === 'running') {
-          s.status = 'failed';
-          s.failureReason = `Workflow execution error: ${err instanceof Error ? err.message : String(err)}`;
-          s.completedAt = new Date().toISOString();
-          writeRunState(projectDir, req.params.id, s);
-        }
-      } catch { /* ignore */ }
-    }).finally(() => activeExecutions.delete(req.params.id));
+    state.status = 'running';
+    state.completedAt = undefined;
+    state.failureReason = undefined;
+    state.startedAt = state.startedAt ?? new Date().toISOString();
+    writeRunState(projectDir, req.params.id, state);
+    spawnDetachedRun({
+      runId: req.params.id,
+      projectDir,
+      campaignId: state.campaignId,
+      supervise: state.supervise ?? true,
+      workflow: workflowName,
+    });
     return { ok: true };
   });
 
@@ -1158,7 +1314,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     // Remove from active executions so the background loop stops cleanly
     activeExecutions.delete(id);
     // Remove run directory
-    const runPath = join(projectDir, '.fc', 'runs', id);
+    const runPath = join(runsRoot(), id);
     try { rmSync(runPath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { deleteRunIndex(projectDir, id); } catch { /* index is best-effort */ }
     return { ok: true };
@@ -1245,7 +1401,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     // Then, also remove stages not in workflow.yaml base stages
     // (exclude dispatched IDs from the base set since workflow.yaml may include them)
     const baseStageIds = new Set<string>();
-    const wfPath = join(projectDir, '.fc', 'runs', id, 'workflow.yaml');
+    const wfPath = join(runsRoot(), id, 'workflow.yaml');
     try {
       const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
       if (Array.isArray(wf.stages)) {
@@ -1270,7 +1426,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     state.dispatchedStages = undefined;
 
     // Clear stale artifacts from previous run
-    const runPath = join(projectDir, '.fc', 'runs', id);
+    const runPath = join(runsRoot(), id);
     // Remove dispatched stage directories entirely
     for (const sid of dispatchedIds) {
       const stageDir = join(runPath, 'stages', sid);
@@ -1302,7 +1458,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     } catch { /* ignore */ }
 
     // Check if task_brief.md exists to decide route
-    const briefPath = join(projectDir, '.fc', 'runs', id, 'task_brief.md');
+    const briefPath = join(runsRoot(), id, 'task_brief.md');
     if (existsSync(briefPath)) {
       // Trigger workflow (same pattern as stage-level rerun)
       const workflowName = state.workflowName || 'default';
@@ -1316,37 +1472,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       }
       state.status = 'running';
       writeRunState(projectDir, id, state);
-      try {
-        const { config, raw } = loadWorkflow(yamlPath);
-        const agents = new Map<string, AgentConfig>();
-        try {
-          const allFiles = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
-          for (const f of allFiles) {
-            const parsed = parseYaml(readFileSync(join(agentsDir, f), 'utf-8'));
-            agents.set(f.replace('.yaml', ''), parseAgentConfig(parsed, configDir));
-          }
-        } catch { /* agents dir may not exist */ }
-        const adapter = await resolveAdapter(configDir);
-        const taskDescription = state.taskDescription || 'task';
-        activeExecutions.add(id);
-        runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, id, taskDescription).catch((err) => {
-          console.error('Workflow execution failed on rerun:', err);
-          try {
-            const s = readRunState(projectDir, id);
-            if (s.status === 'running') {
-              s.status = 'failed';
-              s.failureReason = `Workflow execution error: ${err instanceof Error ? err.message : String(err)}`;
-              s.completedAt = new Date().toISOString();
-              writeRunState(projectDir, id, s);
-            }
-          } catch { /* ignore */ }
-        }).finally(() => activeExecutions.delete(id));
-      } catch (err) {
-        state.status = 'failed';
-        state.failureReason = `Workflow load error: ${err instanceof Error ? err.message : String(err)}`;
-        state.completedAt = new Date().toISOString();
-        writeRunState(projectDir, id, state);
-      }
+      spawnDetachedRun({
+        runId: id,
+        projectDir,
+        campaignId: state.campaignId,
+        supervise: state.supervise ?? true,
+        workflow: workflowName,
+      });
       return { ok: true, route: 'monitor' };
     } else {
       // Clean discuss session directory so new discussion starts fresh
@@ -1372,7 +1504,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
 
     // Build StageConfig[] from workflow.yaml for dependency graph
-    const wfPath = join(projectDir, '.fc', 'runs', id, 'workflow.yaml');
+    const wfPath = join(runsRoot(), id, 'workflow.yaml');
     let stages: StageConfig[] = [];
     try {
       const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
@@ -1396,19 +1528,19 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       // Remove dispatched stages from state and clean up their directories
       for (const sid of dispatchedIds) {
         delete state.stages[sid];
-        const stageDir = join(projectDir, '.fc', 'runs', id, 'stages', sid);
+        const stageDir = join(runsRoot(), id, 'stages', sid);
         if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
-        const vp = join(projectDir, '.fc', 'runs', id, `verdict_${sid}.json`);
+        const vp = join(runsRoot(), id, `verdict_${sid}.json`);
         if (existsSync(vp)) unlinkSync(vp);
       }
       state.dispatchedStages = undefined;
       // Clear dispatch.yaml so planner starts fresh
-      const dp = join(projectDir, '.fc', 'runs', id, 'dispatch.yaml');
+      const dp = join(runsRoot(), id, 'dispatch.yaml');
       if (existsSync(dp)) unlinkSync(dp);
       // Clear planner artifacts so it starts fresh
-      const techSolPath = join(projectDir, '.fc', 'runs', id, 'tech_solution.md');
+      const techSolPath = join(runsRoot(), id, 'tech_solution.md');
       if (existsSync(techSolPath)) unlinkSync(techSolPath);
-      const iterLogPath = join(projectDir, '.fc', 'runs', id, 'iteration_log.md');
+      const iterLogPath = join(runsRoot(), id, 'iteration_log.md');
       if (existsSync(iterLogPath)) unlinkSync(iterLogPath);
       // Reset iteration state so planner and auto-approve logic start fresh
       state.currentIteration = 1;
@@ -1426,7 +1558,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
 
     // Reset target + downstream
-    const runPath = join(projectDir, '.fc', 'runs', id);
+    const runPath = join(runsRoot(), id);
     for (const sid of resetIds) {
       if (!state.stages[sid]) continue; // already removed (dispatched stage cleanup above)
       state.stages[sid] = { status: 'pending', retries: 0 };
@@ -1477,7 +1609,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       } catch { /* ignore */ }
       const adapter = await resolveAdapter(configDir);
       activeExecutions.add(id);
-      runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, id, state.taskDescription).catch((err) => { console.error('Workflow failed:', err); try { const s = readRunState(projectDir, id); if (s.status === 'running') { s.status = 'failed'; s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`; s.completedAt = new Date().toISOString(); writeRunState(projectDir, id, s); } } catch {} }).finally(() => activeExecutions.delete(id));
+      runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, id, state.taskDescription, true, state.supervise ?? true).catch((err) => { log.error({ err }, 'Workflow failed'); try { const s = readRunState(projectDir, id); if (s.status === 'running') { s.status = 'failed'; s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`; s.completedAt = new Date().toISOString(); writeRunState(projectDir, id, s); } } catch {} }).finally(() => activeExecutions.delete(id));
     } catch (err) {
       state.status = 'failed';
       state.failureReason = `Workflow load error: ${err instanceof Error ? err.message : String(err)}`;
@@ -1503,7 +1635,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(400).send({ error: 'stage is not a gate — use rerun instead' });
     }
 
-    const runPath = join(projectDir, '.fc', 'runs', id);
+    const runPath = join(runsRoot(), id);
     // Clear verdict
     const vp = join(runPath, `verdict_${stageId}.json`);
     if (existsSync(vp)) unlinkSync(vp);
@@ -1553,7 +1685,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       } catch { /* ignore */ }
       const adapter = await resolveAdapter(configDir);
       activeExecutions.add(id);
-      runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, id, state.taskDescription).catch((err) => { console.error('Workflow failed:', err); try { const s = readRunState(projectDir, id); if (s.status === 'running') { s.status = 'failed'; s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`; s.completedAt = new Date().toISOString(); writeRunState(projectDir, id, s); } } catch {} }).finally(() => activeExecutions.delete(id));
+      runWorkflow(config, raw, projectDir, adapter, agents, undefined, agentsDir, id, state.taskDescription, true, state.supervise ?? true).catch((err) => { log.error({ err }, 'Workflow failed'); try { const s = readRunState(projectDir, id); if (s.status === 'running') { s.status = 'failed'; s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`; s.completedAt = new Date().toISOString(); writeRunState(projectDir, id, s); } } catch {} }).finally(() => activeExecutions.delete(id));
     } catch (err) {
       state.status = 'failed';
       state.failureReason = `Workflow load error: ${err instanceof Error ? err.message : String(err)}`;
@@ -1577,7 +1709,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         // Merge detailed fields from status.json but keep run.json status as authoritative
         let detailed = s;
         try {
-          const fromDisk = JSON.parse(readFileSync(join(projectDir, '.fc', 'runs', req.params.id, 'stages', req.params.stageId, 'status.json'), 'utf-8'));
+          const fromDisk = JSON.parse(readFileSync(join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'status.json'), 'utf-8'));
           detailed = { ...s, ...fromDisk, status: s.status };
         } catch { /* use run state */ }
         return {
@@ -1594,7 +1726,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           tokens_out: detailed.tokens_out ?? 0,
           error: detailed.error,
         };
-      } catch {
+      } catch { /* non-critical */
         return reply.code(404).send({ error: "not found" });
       }
     },
@@ -1612,12 +1744,21 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         'Access-Control-Allow-Origin': '*',
       });
 
-      const logPath = join(projectDir, '.fc', 'runs', req.params.id, 'stages', req.params.stageId, 'live.log');
+      // Prefer live.log.txt (clean text extracted from stream-json) over raw live.log
+      const txtPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'live.log.txt');
+      const rawPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'live.log');
+      let logPath = existsSync(txtPath) ? txtPath : rawPath;
       let byteOffset = 0;
       let stageFinished = false;
+      const streamParseState = { lineBuf: '' };
 
       const send = () => {
         if (stageFinished) return;
+        // Switch to .txt if it appears (Claude adapter creates it mid-execution)
+        if (logPath === rawPath && existsSync(txtPath)) {
+          logPath = txtPath;
+          byteOffset = 0;
+        }
         try {
           const stat = statSync(logPath);
           if (stat.size > byteOffset) {
@@ -1631,16 +1772,22 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
             }
             byteOffset = stat.size;
             let newContent = buf.toString('utf-8');
-            // Issue 14: normalize line endings for xterm (\n → \r\n)
-            newContent = newContent.replace(/\r?\n/g, '\r\n');
-            reply.raw.write(`data: ${JSON.stringify(newContent)}\n\n`);
+            // If reading raw stream-json (live.log), parse it into readable text
+            if (logPath === rawPath) {
+              newContent = parseStreamJsonToText(newContent, streamParseState);
+            }
+            if (newContent) {
+              // Normalize line endings for xterm (\n → \r\n)
+              newContent = newContent.replace(/\r?\n/g, '\r\n');
+              reply.raw.write(`data: ${JSON.stringify(newContent)}\n\n`);
+            }
           }
-        } catch {
+        } catch { /* non-critical */
           // live.log doesn't exist yet — that's fine
         }
         // Stop polling once the stage is no longer running (use per-stage status.json — much smaller than run.json)
         try {
-          const statusPath = join(projectDir, '.fc', 'runs', req.params.id, 'stages', req.params.stageId, 'status.json');
+          const statusPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'status.json');
           const raw = readFileSync(statusPath, 'utf-8');
           const ss = JSON.parse(raw) as { status?: string };
           if (ss.status && ss.status !== 'running' && ss.status !== 'pending') {
@@ -1686,7 +1833,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { id: string } }>(
     "/api/tasks/:id/events",
     async (req, reply) => {
-      const runPath = join(projectDir, '.fc', 'runs', req.params.id, 'run.json');
+      const runPath = join(runsRoot(), req.params.id, 'run.json');
       if (!existsSync(runPath)) return reply.code(404).send({ error: 'not found' });
 
       reply.hijack();
@@ -1699,20 +1846,25 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
       let lastPayload = '';
       let terminalSent = false;
+      let lastMtime = 0;
       const send = () => {
         if (terminalSent) return;
         try {
+          // P0: Check mtime before expensive full read
+          const mtime = statSync(runPath).mtimeMs;
+          if (mtime === lastMtime && lastPayload) return; // no change since last check
+          lastMtime = mtime;
           const state = readRunState(projectDir, req.params.id);
           const payload = JSON.stringify(stateToTask(state, projectDir, configDir));
           if (payload === lastPayload) return;
           lastPayload = payload;
+          invalidateTaskListCache(); // task changed, bust list cache
           reply.raw.write(`data: ${payload}\n\n`);
-          // Stop polling once a terminal state has been sent to the client
           if (state.status === 'complete' || state.status === 'failed') {
             terminalSent = true;
             clearInterval(interval);
           }
-        } catch {
+        } catch { /* non-critical */
           // Task disappeared (deleted) — stop polling to avoid resource leak
           terminalSent = true;
           clearInterval(interval);
@@ -1750,6 +1902,31 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     return entries;
   });
 
+  // POST /api/campaigns/rename — rename a campaign (POST because campaign IDs can be very long)
+  app.post<{ Body: { campaignId: string; name: string } }>("/api/campaigns/rename", async (req, reply) => {
+    const campaignId = req.body?.campaignId;
+    const newName = req.body?.name;
+    if (!campaignId || !newName) return reply.code(400).send({ error: 'campaignId and name are required' });
+    const root = runsRoot();
+    let updated = 0;
+    try {
+      for (const runId of readdirSync(root)) {
+        const runJsonPath = join(root, runId, 'run.json');
+        if (!existsSync(runJsonPath)) continue;
+        try {
+          const state = JSON.parse(readFileSync(runJsonPath, 'utf-8'));
+          if (state.campaignId === campaignId || state.campaignStorageKey === campaignId) {
+            state.campaignName = newName;
+            writeFileSync(runJsonPath, JSON.stringify(state, null, 2), 'utf-8');
+            updated++;
+          }
+        } catch { /* non-critical */ }
+      }
+    } catch { /* non-critical */ }
+    invalidateTaskListCache();
+    return { ok: true, updated, name: newName };
+  });
+
   // ===================== Agent endpoints =====================
 
   // 8. GET /api/agents
@@ -1777,7 +1954,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const filePath = join(agentsDir, `${req.params.name}.yaml`);
     try {
       reply.type('text/yaml').send(readFileSync(filePath, 'utf-8'));
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: 'not found' });
     }
   });
@@ -1788,7 +1965,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { id: string } }>('/api/tasks/:id/knowledge-graph', async (req, reply) => {
     try {
       return readKG(projectDir, req.params.id);
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: 'not found' });
     }
   });
@@ -1796,11 +1973,11 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   // POST /api/tasks/:id/knowledge-graph/nodes
   app.post<{ Params: { id: string }; Body: { type: string; label: string; details?: string; source?: string; score?: number } }>('/api/tasks/:id/knowledge-graph/nodes', async (req, reply) => {
     try {
-      const { type, label, details, source, score } = req.body ?? {} as any;
+      const { type, label, details, source, score } = req.body;
       if (!type || !label) return reply.code(400).send({ error: 'type and label required' });
-      const node = addNode(projectDir, req.params.id, { type: type as any, label, details, source, score });
+      const node = addNode(projectDir, req.params.id, { type: type as KGNodeType, label, details, source, score });
       return node;
-    } catch {
+    } catch { /* non-critical */
       return reply.code(500).send({ error: 'failed to add node' });
     }
   });
@@ -1809,7 +1986,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.patch<{ Params: { id: string; nodeId: string }; Body: { type?: string; label?: string; details?: string; score?: number } }>('/api/tasks/:id/knowledge-graph/nodes/:nodeId', async (req, reply) => {
     try {
       const updates: any = {};
-      const body = req.body ?? {} as any;
+      const body = req.body;
       if (body.type !== undefined) updates.type = body.type;
       if (body.label !== undefined) updates.label = body.label;
       if (body.details !== undefined) updates.details = body.details;
@@ -1817,7 +1994,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       const node = updateNode(projectDir, req.params.id, req.params.nodeId, updates);
       if (!node) return reply.code(404).send({ error: 'node not found' });
       return node;
-    } catch {
+    } catch { /* non-critical */
       return reply.code(500).send({ error: 'failed to update node' });
     }
   });
@@ -1828,7 +2005,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       const removed = removeNode(projectDir, req.params.id, req.params.nodeId);
       if (!removed) return reply.code(404).send({ error: 'node not found' });
       return { ok: true };
-    } catch {
+    } catch { /* non-critical */
       return reply.code(500).send({ error: 'failed to remove node' });
     }
   });
@@ -1836,11 +2013,11 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   // POST /api/tasks/:id/knowledge-graph/edges
   app.post<{ Params: { id: string }; Body: { from: string; to: string; type: string; label?: string } }>('/api/tasks/:id/knowledge-graph/edges', async (req, reply) => {
     try {
-      const { from, to, type, label } = req.body ?? {} as any;
+      const { from, to, type, label } = req.body;
       if (!from || !to || !type) return reply.code(400).send({ error: 'from, to, and type required' });
-      const edge = addEdge(projectDir, req.params.id, { from, to, type: type as any, label });
+      const edge = addEdge(projectDir, req.params.id, { from, to, type: type as KGEdgeType, label });
       return edge;
-    } catch {
+    } catch { /* non-critical */
       return reply.code(500).send({ error: 'failed to add edge' });
     }
   });
@@ -1853,7 +2030,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       const events = readAllTraceEvents(projectDir, req.params.id);
       const summary = summarizeTrace(events);
       return { events, summary };
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: 'not found' });
     }
   });
@@ -1863,7 +2040,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     try {
       const events = readTraceEvents(projectDir, req.params.id, req.params.stageId);
       return { events, summary: summarizeTrace(events) };
-    } catch {
+    } catch { /* non-critical */
       return reply.code(404).send({ error: 'not found' });
     }
   });
@@ -1874,7 +2051,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.post<{ Params: { id: string }; Body: { name: string; workflow?: string; budget?: { totalTokens?: number; totalTimeMs?: number } } }>('/api/tasks/:id/subtasks', async (req, reply) => {
     try {
       const parentState = readRunState(projectDir, req.params.id);
-      const { name, workflow, budget } = req.body ?? {} as any;
+      const { name, workflow, budget } = req.body;
       if (!name) return reply.code(400).send({ error: 'name required' });
       const workflowName = workflow || parentState.workflowName || 'default';
       const wfPath = join(configDir, 'workflows', `${workflowName}.yaml`);
@@ -1912,7 +2089,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       }
       writeRunState(projectDir, runId, state);
       return { id: runId, parentTaskId: req.params.id };
-    } catch {
+    } catch { /* non-critical */
       return reply.code(500).send({ error: 'failed to create sub-task' });
     }
   });
@@ -2024,7 +2201,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Querystring: { taskId: string } }>('/api/discuss/ws', { websocket: true }, async (socket, req) => {
     try {
     const taskId = req.query.taskId;
-    const runDir = join(projectDir, '.fc', 'runs', taskId);
+    const runDir = join(runsRoot(), taskId);
     const sessionDir = join(runDir, 'discuss');
     mkdirSync(sessionDir, { recursive: true });
 
@@ -2127,11 +2304,15 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         }
       } catch { /* no run state yet */ }
 
+      let ptyBufferBytes = 0;
+      const PTY_BUFFER_MAX_BYTES = 2 * 1024 * 1024; // 2MB cap
       session.onData((data: string) => {
         ptyEntry!.outputBuffer.push(data);
-        // Cap buffer to prevent unbounded memory growth during long sessions
-        if (ptyEntry!.outputBuffer.length > 5000) {
-          ptyEntry!.outputBuffer.splice(0, ptyEntry!.outputBuffer.length - 5000);
+        ptyBufferBytes += data.length;
+        // Cap buffer by total bytes to prevent unbounded memory growth
+        while (ptyBufferBytes > PTY_BUFFER_MAX_BYTES && ptyEntry!.outputBuffer.length > 1) {
+          const removed = ptyEntry!.outputBuffer.shift()!;
+          ptyBufferBytes -= removed.length;
         }
         // Send to active socket only — avoids duplicate sends on reconnect
         const sock = ptyEntry!.activeSocket;
@@ -2286,6 +2467,17 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
   });
 
+  // 12b. GET /api/tasks/:id/summary
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/summary", async (req, reply) => {
+    const summaryPath = join(runsRoot(), req.params.id, 'summary.md');
+    if (!existsSync(summaryPath)) {
+      const progressPath = join(runsRoot(), req.params.id, 'progress.md');
+      if (existsSync(progressPath)) return { content: readFileSync(progressPath, 'utf-8'), runId: req.params.id };
+      return reply.code(404).send({ error: 'No summary available yet. Summary is generated after run completes.' });
+    }
+    return { content: readFileSync(summaryPath, 'utf-8'), runId: req.params.id };
+  });
+
   // 13. GET /api/settings
   app.get("/api/settings", async () => {
     const defaultsPath = join(configDir, 'defaults.yaml');
@@ -2295,6 +2487,24 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter((f) => f.endsWith('.yaml')) : [];
     const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter((f) => f.endsWith('.md')) : [];
     return { projectDir, adapter: defaults.adapter ?? 'codex', workflows, skills, port, ...defaults };
+  });
+
+  // 13b. PATCH /api/settings — persist settings changes to defaults.yaml
+  app.patch<{ Body: Record<string, unknown> }>("/api/settings", async (req, reply) => {
+    const defaultsPath = join(configDir, 'defaults.yaml');
+    let existing: Record<string, unknown> = {};
+    if (existsSync(defaultsPath)) {
+      try { existing = parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>; } catch { /* non-critical */ }
+    }
+    const updates = req.body ?? {};
+    const allowedKeys = ['adapter', 'model', 'reasoning_effort', 'default_timeout_ms', 'default_max_iterations', 'default_gate_retry_loops', 'default_stage_technical_retries'];
+    for (const key of allowedKeys) {
+      if (key in updates) existing[key] = updates[key];
+    }
+    const { stringify } = await import('yaml');
+    writeFileSync(defaultsPath, stringify(existing), 'utf-8');
+    log.info({ keys: Object.keys(updates).filter(k => allowedKeys.includes(k)) }, 'Settings updated');
+    return { ok: true };
   });
 
   try {

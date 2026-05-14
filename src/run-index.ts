@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { StoreState } from './store.js';
 
 const require = createRequire(import.meta.url);
@@ -32,12 +33,13 @@ export interface RunIndexRecord {
 
 const rebuildAttempted = new Set<string>();
 
-function runsRoot(projectDir: string): string {
-  return join(projectDir, '.fc', 'runs');
+function runsRoot(_projectDir: string): string {
+  return join(homedir(), '.fc', 'runs');
 }
 
-function dbPath(projectDir: string): string {
-  return join(projectDir, '.fc', 'run-index.sqlite');
+function dbPath(_projectDir: string): string {
+  const { homedir } = require('node:os') as typeof import('node:os');
+  return join(homedir(), '.fc', 'run-index.sqlite');
 }
 
 function listRunDirectories(projectDir: string): string[] {
@@ -47,7 +49,7 @@ function listRunDirectories(projectDir: string): string[] {
       .map((entry) => entry.name)
       .filter((name) => /^\d{4}-\d{2}-\d{2}T/.test(name))
       .sort();
-  } catch {
+  } catch { /* non-critical */
     return [];
   }
 }
@@ -55,7 +57,7 @@ function listRunDirectories(projectDir: string): string[] {
 function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | null {
   try {
     return require('node:sqlite') as { DatabaseSync: new (path: string) => DatabaseSync };
-  } catch {
+  } catch { /* non-critical */
     return null;
   }
 }
@@ -63,7 +65,8 @@ function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | nu
 function openDb(projectDir: string): DatabaseSync | null {
   const sqlite = loadSqlite();
   if (!sqlite) return null;
-  mkdirSync(join(projectDir, '.fc'), { recursive: true });
+  const { homedir } = require('node:os') as typeof import('node:os');
+  mkdirSync(join(homedir(), '.fc'), { recursive: true });
   const db = new sqlite.DatabaseSync(dbPath(projectDir));
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -240,11 +243,11 @@ export function rebuildRunIndex(projectDir: string): number {
             Date.now(),
           );
           count++;
-        } catch {
+        } catch { /* non-critical */
           // Ignore incomplete or corrupt run directories.
         }
       }
-    } catch {
+    } catch { /* non-critical */
       // No runs directory yet.
     }
     db.exec('COMMIT');
@@ -258,7 +261,6 @@ export function rebuildRunIndex(projectDir: string): number {
 }
 
 function ensureIndexSeeded(projectDir: string): void {
-  if (rebuildAttempted.has(projectDir)) return;
   const db = openDb(projectDir);
   if (!db) return;
   try {
@@ -269,15 +271,16 @@ function ensureIndexSeeded(projectDir: string): void {
     const latestIndexedRunId = typeof latest?.run_id === 'string' ? latest.run_id : undefined;
     const latestRunDir = runDirs.at(-1);
     if (indexedCount !== runDirs.length || latestIndexedRunId !== latestRunDir) {
-      rebuildAttempted.add(projectDir);
-      db.close();
-      rebuildRunIndex(projectDir);
-      return;
+      if (!rebuildAttempted.has(projectDir)) {
+        rebuildAttempted.add(projectDir);
+        db.close();
+        rebuildRunIndex(projectDir);
+        return;
+      }
     }
   } finally {
     try { db.close(); } catch { /* already closed */ }
   }
-  rebuildAttempted.add(projectDir);
 }
 
 export function listRunIdsFromIndex(projectDir: string): string[] | null {

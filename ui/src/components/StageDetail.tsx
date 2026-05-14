@@ -100,9 +100,6 @@ export default function StageDetail() {
           {detail?.error && (
             <span className="text-xs text-rose-300 font-mono bg-rose-400/10 px-1.5 py-0.5 rounded-input">{detail.error}</span>
           )}
-          {detail && (detail.tokens_in > 0 || detail.tokens_out > 0) && (
-            <span className="text-xs text-rc-muted font-mono bg-rc-code px-1.5 py-0.5 rounded-input">{(detail.tokens_in + detail.tokens_out).toLocaleString()} tokens</span>
-          )}
         </div>
         <button onClick={() => nav(`/task/${id}/monitor`)} className="btn-ghost px-3 py-1.5 text-sm border border-rc-border">← Back to Monitor</button>
       </div>

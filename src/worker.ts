@@ -1,8 +1,10 @@
 // Module: worker
-import { appendFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { buildStagePrompt } from './handoff.js';
+import { loadProjectDefaults } from './config.js';
+import { loadAdapterByName } from './scheduler.js';
 import {
   writeStageInput,
   writeStageOutput,
@@ -42,6 +44,13 @@ const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
 function isAdapterError(output: string): boolean {
   return ADAPTER_ERROR_PATTERNS.some(p => output.includes(p));
+}
+
+function inferAdapterName(adapter: Adapter): string | undefined {
+  const name = adapter.constructor?.name;
+  if (!name) return undefined;
+  const lower = name.toLowerCase();
+  return lower.endsWith('adapter') ? lower.slice(0, -'adapter'.length) : lower;
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fc', '.next', '.cache', 'coverage', '__pycache__', '.venv', 'venv', '.tox', 'target', 'out', '.gradle']);
@@ -114,13 +123,71 @@ export async function runStage(
   };
   writeStageStatus(opts.projectDir, opts.runId, opts.stageId, running);
 
-  const resolvedRole = { ...opts.role, prompt: opts.role.prompt
+  // Auto-prepend task brief to the role's system prompt so the brief sits in
+  // a stable prefix position across stages. This:
+  //   - Frees `prompt_template` in dispatch.yaml from having to repeat the brief;
+  //   - Anthropic prompt caching can deduplicate the brief across stages of the
+  //     same role (cache_read_input_tokens benefits) because the system prompt
+  //     prefix is byte-identical;
+  //   - Codex `developer_instructions` similarly benefits from auto-caching.
+  // The brief lives at <run_dir>/task_brief.md and is written by the dispatcher
+  // (cli.ts cmdQuick or the dashboard). If absent, we skip prepending.
+  let resolvedSystemPrompt = opts.role.prompt
     .replace(/\{available_roles\}/g, opts.availableRoles ?? '')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
     .replace(/\{run_dir\}/g, opts.runDir)
     .replace(/\{project\}/g, opts.projectDir)
-    .replace(/\{default_timeout_ms\}/g, getDefaultTimeout(opts.projectDir))
-  };
+    .replace(/\{default_timeout_ms\}/g, getDefaultTimeout(opts.projectDir));
+  try {
+    const taskBriefPath = join(opts.runDir, 'task_brief.md');
+    if (existsSync(taskBriefPath)) {
+      const brief = readFileSync(taskBriefPath, 'utf-8').trim();
+      if (brief) {
+        resolvedSystemPrompt = `# Task Brief\n\n${brief}\n\n---\n\n${resolvedSystemPrompt}`;
+      }
+    }
+  } catch { /* non-critical */ }
+
+  // Bug ② fix — planner-only: inject the most-recent archived supervisor
+  // guidance from a prior iteration so cross-iteration GUIDE signals still
+  // reach the planner even after the iteration-boundary archive in
+  // scheduler.ts emptied `supervisor_guidance.md`. Safe by default: missing
+  // history dir or empty archive file results in no injection.
+  if (opts.role.name === 'planner') {
+    try {
+      const historyDir = join(opts.runDir, 'guidance_history');
+      if (existsSync(historyDir)) {
+        const archives = readdirSync(historyDir)
+          .filter((f) => /^iter_\d+\.md$/.test(f))
+          .sort((a, b) => {
+            const na = parseInt(a.match(/\d+/)![0], 10);
+            const nb = parseInt(b.match(/\d+/)![0], 10);
+            return na - nb;
+          });
+        if (archives.length > 0) {
+          const latest = archives[archives.length - 1];
+          const prev = readFileSync(join(historyDir, latest), 'utf-8').trim();
+          if (prev) {
+            resolvedSystemPrompt = `# Previous iteration's supervisor guidance (cumulative)\n\nThe lines below were emitted by the supervisor across the prior iteration. They represent observations and course-corrections from before this re-plan. Use them to inform this iteration's plan — especially any "do not do X" constraints.\n\n${prev}\n\n---\n\n${resolvedSystemPrompt}`;
+          }
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+
+  // Snapshot the current run-level supervisor guidance (if any) into this
+  // stage's directory so we have an audit trail of what the stage saw when
+  // it started, even if the live file is later appended to or archived.
+  try {
+    const guidancePath = join(opts.runDir, 'supervisor_guidance.md');
+    if (existsSync(guidancePath)) {
+      const stageDirPath = join(opts.runDir, 'stages', opts.stageId);
+      mkdirSync(stageDirPath, { recursive: true });
+      copyFileSync(guidancePath, join(stageDirPath, 'guidance_consumed.md'));
+    }
+  } catch { /* non-critical */ }
+
+  const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const beforeSnapshot = snapshotMtimes(opts.projectDir, [kgPath]);
@@ -132,7 +199,7 @@ export async function runStage(
     stageId: opts.stageId,
   });
 
-  // Adapter error detection + exponential backoff retry
+  // Adapter error detection + exponential backoff retry on the SAME adapter
   if (result.exitCode !== 0 && isAdapterError(result.output)) {
     const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
     for (let attempt = 0; attempt < ADAPTER_RETRY_DELAYS.length; attempt++) {
@@ -147,6 +214,39 @@ export async function runStage(
       });
       if (result.exitCode === 0 || !isAdapterError(result.output)) break;
     }
+
+    // Final escape hatch: if same-adapter retries still hit a rate-limit /
+    // capacity error, automatically fall back to the project's default
+    // adapter+model (from defaults.yaml). Only triggers when the default
+    // adapter differs from the role's primary, so we don't pointlessly retry
+    // the same one. Runs once — no further retry on the fallback.
+    if (result.exitCode !== 0 && isAdapterError(result.output)) {
+      try {
+        const projectDefaults = loadProjectDefaults(opts.projectDir);
+        const primaryName = opts.role.adapter ?? inferAdapterName(adapter) ?? projectDefaults.adapter;
+        const fallbackName = projectDefaults.adapter;
+        if (fallbackName && fallbackName !== primaryName) {
+          try { appendFileSync(liveLogPath, `\n↩︎ Same-adapter retries exhausted (${primaryName}). Falling back to defaults.yaml adapter=${fallbackName} model=${projectDefaults.model}…\n`); } catch { /* ignore */ }
+          const fallbackAdapter = await loadAdapterByName(fallbackName);
+          const fallbackRole: AgentConfig = {
+            ...resolvedRole,
+            adapter: fallbackName,
+            model: projectDefaults.model,
+            reasoning_effort: projectDefaults.reasoning_effort,
+          };
+          result = await fallbackAdapter.run(prompt, fallbackRole, {
+            timeout_ms: opts.timeout_ms,
+            workDir: opts.projectDir,
+            runDir: opts.runDir,
+            stageId: opts.stageId,
+          });
+          try { appendFileSync(liveLogPath, `\n↪︎ Fallback ${fallbackName} returned exit=${result.exitCode}.\n`); } catch { /* ignore */ }
+        }
+      } catch (err) {
+        try { appendFileSync(liveLogPath, `\n⚠️  Cross-adapter fallback failed to load: ${err instanceof Error ? err.message : String(err)}\n`); } catch { /* ignore */ }
+      }
+    }
+
     if (result.exitCode !== 0 && isAdapterError(result.output)) {
       result.adapterError = true;
     }

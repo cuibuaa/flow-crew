@@ -1,4 +1,4 @@
-default_timeout_ms: 1800000
+default_timeout_ms: 3600000
 default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1
@@ -6,7 +6,6 @@ adapter: codex
 model: default
 reasoning_effort: default
 paths:
-  runs: .fc/runs
   agents: config/agents
   workflows: config/workflows
 campaign_triggers:

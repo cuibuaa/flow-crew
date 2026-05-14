@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoreState } from './store.js';
+import { homedir } from 'node:os';
 import { readRunIndexRecords, recordToPartialState } from './run-index.js';
 
 export interface CampaignHistoryEntry {
@@ -46,8 +47,8 @@ export interface CampaignSelection {
   storageKey: string;
 }
 
-function runsRoot(projectDir: string): string {
-  return join(projectDir, '.fc', 'runs');
+function runsRoot(_projectDir: string): string {
+  return join(homedir(), '.fc', 'runs');
 }
 
 function campaignsRoot(projectDir: string): string {
@@ -96,7 +97,7 @@ function readRunStates(projectDir: string): StoreState[] {
   let runIds: string[];
   try {
     runIds = readdirSync(runsRoot(projectDir));
-  } catch {
+  } catch { /* non-critical */
     return [];
   }
 
@@ -105,7 +106,7 @@ function readRunStates(projectDir: string): StoreState[] {
     try {
       const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
       states.push(JSON.parse(raw) as StoreState);
-    } catch {
+    } catch { /* non-critical */
       // Incomplete or corrupt run directories should not hide valid campaigns.
     }
   }
@@ -189,12 +190,12 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
           if (!previous || normalized.timestamp >= previous.timestamp) {
             byRunIteration.set(key, normalized);
           }
-        } catch {
+        } catch { /* non-critical */
           // Ignore malformed lines.
         }
       }
     }
-  } catch {
+  } catch { /* non-critical */
     return [];
   }
   const entries = [...byRunIteration.values()];
@@ -249,12 +250,12 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
           const campaign = normalizeEntryCampaign(fileStem, parsed);
           if (!campaign || typeof parsed.runId !== 'string') continue;
           upsert(campaign, parsed.runId, typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined, typeof parsed.score === 'number' ? parsed.score : undefined);
-        } catch {
+        } catch { /* non-critical */
           // Ignore malformed lines.
         }
       }
     }
-  } catch {
+  } catch { /* non-critical */
     // No campaign history yet.
   }
 

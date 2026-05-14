@@ -1,12 +1,14 @@
 import { startDashboard } from "./dashboard.js";
+import pino from "pino";
 
-// Prevent server crash on non-fatal errors (e.g., ERR_HTTP_HEADERS_SENT from SSE streams)
+const log = pino({ name: 'flowcrew' });
+
 process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
   if (err.code === 'ERR_HTTP_HEADERS_SENT') {
-    console.error('[non-fatal] Headers already sent — ignoring:', err.message);
+    log.warn({ err: err.message }, 'Non-fatal: headers already sent');
     return;
   }
-  console.error('[fatal] Uncaught exception:', err);
+  log.fatal({ err }, 'Uncaught exception');
   process.exit(1);
 });
 

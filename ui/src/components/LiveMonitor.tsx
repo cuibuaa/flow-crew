@@ -182,121 +182,6 @@ function statusBadgeTone(status: Stage["status"]): string {
   }
 }
 
-function verdictTone(verdict: "active" | "blocked" | "settled" | "warning"): string {
-  switch (verdict) {
-    case "active":
-      return "border-sky-400/35 bg-sky-500/10 text-sky-100";
-    case "blocked":
-      return "border-rose-400/35 bg-rose-500/10 text-rose-100";
-    case "warning":
-      return "border-amber-300/35 bg-amber-400/10 text-amber-100";
-    default:
-      return "border-emerald-400/35 bg-emerald-500/10 text-emerald-100";
-  }
-}
-
-function parseIterationLog(task: Task): Array<{ iteration: number; verdicts: Array<{ stageId: string; state: string }> }> {
-  return (task.iterationLog ?? "")
-    .split(/^# Iteration /m)
-    .map((chunk) => chunk.trim())
-    .filter(Boolean)
-    .map((chunk) => {
-      const [header, ...rest] = chunk.split("\n");
-      const iteration = Number.parseInt(header.match(/\d+/)?.[0] ?? `${task.currentIteration}`, 10);
-      const verdicts = rest
-        .filter((line) => line.startsWith("## "))
-        .map((line) => line.replace(/^##\s*/, ""))
-        .map((entry) => {
-          const match = entry.match(/^(.+?)\s+\((.+)\)$/);
-          return {
-            stageId: match?.[1]?.trim() ?? entry.trim(),
-            state: match?.[2]?.trim() ?? "observed",
-          };
-        });
-      return { iteration, verdicts };
-    });
-}
-
-interface AttemptInsight {
-  title: string;
-  verdict: "active" | "blocked" | "settled" | "warning";
-  headline: string;
-  evidence: string[];
-}
-
-function buildAttemptInsights(task: Task): AttemptInsight[] {
-  const stageById = new Map(task.stages.map((stage) => [stage.id, stage]));
-  const parsed = parseIterationLog(task);
-  const artifactStages = task.stages.filter((stage) => (stage.artifacts?.length ?? 0) > 0);
-  const retriedStages = task.stages.filter((stage) => stage.retries > 0);
-
-  if (parsed.length === 0) {
-    const failed = task.stages.filter((stage) => stage.status === "failed");
-    const running = task.stages.filter((stage) => stage.status === "running");
-    const settled = task.stages.filter((stage) => stage.status === "complete");
-    const verdict = failed.length > 0 ? "blocked" : running.length > 0 ? "active" : "settled";
-    const headline = failed.length > 0
-      ? `${joinLabels(failed.map((stage) => stage.id))} needs intervention`
-      : running.length > 0
-        ? `${joinLabels(running.map((stage) => stage.id))} is still executing`
-        : `${pluralize(settled.length, "stage")} settled cleanly`;
-    const evidence = [
-      `${pluralize(retriedStages.length, "stage")} retried`,
-      `${pluralize(artifactStages.length, "stage")} emitted artifacts`,
-    ];
-    if (task.campaignAlert) evidence.unshift(task.campaignAlert.message);
-    return [{
-      title: `Attempt ${task.currentIteration}`,
-      verdict,
-      headline,
-      evidence,
-    }];
-  }
-
-  return parsed.slice(-4).reverse().map((attempt) => {
-    const failed = attempt.verdicts.filter((entry) => /fail/i.test(entry.state));
-    const active = attempt.verdicts.filter((entry) => /run|progress|active/i.test(entry.state));
-    const settled = attempt.verdicts.filter((entry) => /complete|pass|done/i.test(entry.state));
-    const verdict = task.campaignAlert?.iteration === attempt.iteration
-      ? "warning"
-      : failed.length > 0
-        ? "blocked"
-        : active.length > 0
-          ? "active"
-          : "settled";
-
-    const headline = task.campaignAlert?.iteration === attempt.iteration
-      ? `Campaign monitor escalated after iteration ${attempt.iteration}`
-      : failed.length > 0
-        ? `${joinLabels(failed.map((entry) => entry.stageId))} blocked the run`
-        : active.length > 0
-          ? `${joinLabels(active.map((entry) => entry.stageId))} carried the next pass`
-          : settled.length > 0
-            ? `${pluralize(settled.length, "stage")} landed without intervention`
-            : "Run state changed without explicit verdict lines";
-
-    const evidence: string[] = [];
-    const retriedInAttempt = attempt.verdicts
-      .flatMap((entry) => {
-        const stage = stageById.get(entry.stageId);
-        return stage && stage.retries > 0 ? [`${stage.id} (attempt ${stage.retries + 1})`] : [];
-      });
-    if (failed.length > 0) evidence.push(`Blocked: ${joinLabels(failed.map((entry) => entry.stageId))}`);
-    if (active.length > 0) evidence.push(`Active: ${joinLabels(active.map((entry) => entry.stageId))}`);
-    if (retriedInAttempt.length > 0) evidence.push(`Retries: ${joinLabels(retriedInAttempt)}`);
-    if (artifactStages.length > 0) evidence.push(`Evidence available from ${pluralize(artifactStages.length, "stage")}`);
-    if (task.campaignAlert?.iteration === attempt.iteration) evidence.push(task.campaignAlert.message);
-    if (evidence.length === 0) evidence.push("No additional evidence recorded");
-
-    return {
-      title: `Attempt ${attempt.iteration}`,
-      verdict,
-      headline,
-      evidence,
-    };
-  });
-}
-
 function buildLineage(stages: Stage[], selectedStageId: string | null): Set<string> {
   if (!selectedStageId) return new Set();
 
@@ -629,6 +514,165 @@ function LiveTerminal({ liveUrl }: { liveUrl: string }) {
   return <div ref={containerRef} className="h-full w-full" />;
 }
 
+function ProgressBrief({ taskId }: { taskId: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [briefTitle, setBriefTitle] = useState('Progress');
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const summaryRes = await fetch(`/api/tasks/${taskId}/summary`);
+        if (summaryRes.ok) {
+          const d = await summaryRes.json();
+          if (active && d?.content) { setContent(d.content); setBriefTitle('Run Summary'); return; }
+        }
+        const progressRes = await fetch(`/api/tasks/${taskId}/progress`);
+        if (progressRes.ok) {
+          const d = await progressRes.json();
+          if (active && d?.content) { setContent(d.content); setBriefTitle('Progress'); }
+        }
+      } catch { /* non-critical */ }
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, [taskId]);
+  if (!content) return null;
+  // Strip the top-level heading (e.g., "# Run Summary") to avoid duplicating the panel title
+  const stripped = content.replace(/^#\s+[^\n]+\n*/, '');
+  const sections = stripped.split(/^## /m).filter(Boolean).map(s => s.trim());
+  return (
+    <section className="glass-panel rounded-card p-3 space-y-2">
+      <button onClick={() => setOpen(!open)} className="flex items-center gap-2 w-full text-left">
+        <span className="text-xs font-semibold text-rc-text">{briefTitle}</span>
+        <span className="text-[10px] text-rc-muted">{open ? '▼' : '▶'}</span>
+      </button>
+      {open && (
+        <div className="space-y-2 text-xs text-rc-text-secondary max-h-80 overflow-auto pr-1">
+          {sections.map((sec, i) => {
+            const [heading, ...lines] = sec.split('\n');
+            return (
+              <div key={i}>
+                {heading && <div className="font-medium text-rc-text text-[11px]">{heading.replace(/^#\s*/, '')}</div>}
+                {lines.filter(l => l.trim()).map((line, j) => (
+                  <div key={j} className="pl-2 text-[11px] leading-relaxed">{line}</div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface SupervisorAction {
+  tick: number;
+  timestamp: string;
+  runningStages: string[];
+  verdict: 'WAIT' | 'GUIDE' | 'ABORT' | 'REPLAN' | 'DONE';
+  targetStage: string | null;
+  reason: string;
+  guidance: string | null;
+}
+
+interface SupervisorState {
+  enabled: boolean;
+  runId?: string;
+  startedAt?: string;
+  stoppedAt?: string | null;
+  assessmentCount?: number;
+  iterationAssessmentCount?: number;
+  maxAssessmentsPerIteration?: number;
+  currentIteration?: number;
+  basePollIntervalMs?: number;
+  effectivePollIntervalMs?: number;
+  consecutiveWaits?: number;
+  tickCount?: number;
+  actions?: SupervisorAction[];
+}
+
+function verdictBadgeTone(v: SupervisorAction['verdict']): string {
+  switch (v) {
+    case 'WAIT': return 'bg-slate-500/15 text-slate-200 border-slate-500/40';
+    case 'GUIDE': return 'bg-amber-500/15 text-amber-200 border-amber-400/40';
+    case 'ABORT': return 'bg-rose-500/15 text-rose-200 border-rose-400/40';
+    case 'REPLAN': return 'bg-sky-500/15 text-sky-200 border-sky-400/40';
+    case 'DONE': return 'bg-emerald-500/15 text-emerald-200 border-emerald-400/40';
+    default: return 'bg-rc-card text-rc-text-secondary border-rc-border';
+  }
+}
+
+function SupervisorPane({ taskId }: { taskId: string }) {
+  const [state, setState] = useState<SupervisorState | null>(null);
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/supervisor`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (active) setState(d);
+      } catch { /* non-critical */ }
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, [taskId]);
+
+  if (!state?.enabled) return null;
+  const actions = state.actions ?? [];
+  const base = state.basePollIntervalMs ?? 30000;
+  const effective = state.effectivePollIntervalMs ?? base;
+  const backedOff = effective > base;
+  const intervalLabel = `${Math.round(effective / 1000)}s` + (backedOff ? ` (backed off from ${Math.round(base / 1000)}s)` : '');
+  const stopped = !!state.stoppedAt;
+  const nonWaitCount = actions.filter(a => a.verdict !== 'WAIT').length;
+
+  return (
+    <section className="glass-panel rounded-card p-3 space-y-2" data-testid="supervisor-pane">
+      <button onClick={() => setOpen(!open)} className="flex items-center gap-2 w-full text-left">
+        <span className="text-xs font-semibold text-rc-text">🧭 Supervisor</span>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${stopped ? 'border-slate-500/40 text-slate-300' : 'border-emerald-400/40 text-emerald-200 bg-emerald-500/10'}`}>
+          {stopped ? 'stopped' : 'monitoring'}
+        </span>
+        <span className="ml-auto text-[10px] text-rc-muted">{open ? '▼' : '▶'}</span>
+      </button>
+      {open && (
+        <div className="space-y-2 text-[11px] text-rc-text-secondary">
+          <div className="grid grid-cols-2 gap-1 text-[10px]">
+            <div><span className="text-rc-muted">Iter {state.currentIteration ?? '?'} budget:</span> <span className="text-rc-text">{state.iterationAssessmentCount ?? 0}{state.maxAssessmentsPerIteration ? ` / ${state.maxAssessmentsPerIteration}` : ''}</span></div>
+            <div><span className="text-rc-muted">Run total:</span> <span className="text-rc-text">{state.assessmentCount ?? 0}</span></div>
+            <div><span className="text-rc-muted">Interventions:</span> <span className="text-rc-text">{nonWaitCount}</span></div>
+            <div><span className="text-rc-muted">Poll interval:</span> <span className="text-rc-text">{intervalLabel}</span></div>
+          </div>
+          {actions.length === 0 ? (
+            <div className="text-rc-muted italic">No assessments yet.</div>
+          ) : (
+            <ol className="space-y-1 max-h-64 overflow-auto pr-1">
+              {[...actions].reverse().map((a) => (
+                <li key={`${a.tick}-${a.timestamp}`} className="border border-rc-border rounded px-2 py-1 bg-rc-code/40">
+                  <div className="flex items-center gap-1.5 text-[10px]">
+                    <span className={`px-1.5 py-0.5 rounded border ${verdictBadgeTone(a.verdict)}`}>{a.verdict}</span>
+                    {a.targetStage && <span className="text-rc-muted">→ {a.targetStage}</span>}
+                    <span className="ml-auto text-rc-muted">tick {a.tick}</span>
+                  </div>
+                  <div className="mt-1 text-[10px] text-rc-text-secondary leading-snug">{a.reason}</div>
+                  {a.guidance && (
+                    <div className="mt-1 text-[10px] text-amber-200 leading-snug border-l-2 border-amber-400/40 pl-2">{a.guidance}</div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RunOverview({
   task,
   selectedStage,
@@ -654,7 +698,12 @@ function RunOverview({
   return (
     <section className="glass-panel rounded-card p-4 space-y-4" data-testid="monitor-summary">
       <div className="space-y-1">
-        <h3 className="text-sm font-semibold text-rc-text">Run Summary</h3>
+        <h3 className="text-sm font-semibold text-rc-text flex items-center gap-2">
+          Run Summary
+          {(task as any).supervise && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-400/30">SUPERVISED</span>
+          )}
+        </h3>
         <p className="text-sm text-rc-text-secondary">
           {task.campaignId ? `${task.campaignName ?? task.campaignId} #${task.campaignSeq ?? "?"} • ` : ""}
           Iteration {task.currentIteration}/{task.maxIterations}
@@ -727,40 +776,6 @@ function RunOverview({
           </button>
         </div>
       )}
-    </section>
-  );
-}
-
-function AttemptsSummary({ task }: { task: Task }) {
-  const attempts = useMemo(() => buildAttemptInsights(task), [task]);
-
-  return (
-    <section className="glass-panel rounded-card p-4 space-y-3" data-testid="attempts-summary">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-rc-text">AI-derived Attempts</h3>
-        <span className="text-xs font-mono text-rc-muted">{task.currentIteration}/{task.maxIterations}</span>
-      </div>
-
-      <div className="space-y-3">
-        {attempts.map((attempt) => (
-          <article key={`${attempt.title}-${attempt.headline}`} className="rounded-card border border-rc-border bg-rc-code/55 px-3 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.24em] text-rc-muted">{attempt.title}</div>
-              <span className={`rounded-input border px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] ${verdictTone(attempt.verdict)}`}>
-                {attempt.verdict}
-              </span>
-            </div>
-            <div className="mt-2 text-sm text-rc-text">{attempt.headline}</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {attempt.evidence.map((entry) => (
-                <span key={entry} className="rounded-input border border-rc-border bg-rc-card/70 px-2 py-1 text-[11px] text-rc-text-secondary">
-                  {entry}
-                </span>
-              ))}
-            </div>
-          </article>
-        ))}
-      </div>
     </section>
   );
 }
@@ -1036,12 +1051,6 @@ function ActivityPane({
                 <div className="text-[10px] uppercase tracking-[0.22em] text-rc-muted">Attempts</div>
                 <div className="mt-2 font-mono text-sm text-rc-text">{stage.retries + 1}</div>
               </div>
-              <div className="rounded-card border border-rc-border bg-rc-code/65 p-3">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-rc-muted">Tokens</div>
-                <div className="mt-2 font-mono text-sm text-rc-text">
-                  {(stage.tokens_in || stage.tokens_out) ? `${((stage.tokens_in ?? 0) + (stage.tokens_out ?? 0)).toLocaleString()}` : "—"}
-                </div>
-              </div>
             </div>
 
             <div className="rounded-card border border-rc-border bg-rc-card/80 p-4">
@@ -1237,10 +1246,11 @@ export default function LiveMonitor() {
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto lg-wide:w-[38%]">
         <RunOverview task={task} selectedStage={selectedStage} health={selectedStage ? healthMap.get(selectedStage.id) : undefined} onRerun={handleRerun} onCancel={handleCancel} onBackToDiscussion={() => nav(`/task/${id}/discuss`)} />
-        <button onClick={() => nav(`/task/${id}/knowledge-graph`)} className="btn-ghost border border-rc-border px-4 py-2 text-xs w-full text-left">
-          🧠 Knowledge Graph
+        <SupervisorPane taskId={id!} />
+        <ProgressBrief taskId={id!} />
+        <button onClick={() => nav(`/task/${id}/knowledge-graph`)} className="btn-ghost border border-rc-border px-4 py-2 text-xs w-full text-left" title="View findings, decisions, dead ends, and evidence collected during this run">
+          🧠 Knowledge Graph — decisions, findings &amp; evidence
         </button>
-        <AttemptsSummary task={task} />
       </div>
     </div>
   );
