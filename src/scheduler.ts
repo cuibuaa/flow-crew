@@ -27,6 +27,30 @@ const DEFAULT_GATE_RETRY_LOOPS = 1;
 const DEFAULT_MAX_ITERATIONS = 3;
 const DEFAULT_STAGE_TECHNICAL_RETRIES = 1;
 
+/**
+ * Build the retry preamble injected before the resolved prompt on attempt >= 2.
+ * Distinguishes supervisor-abort failures from true wall-clock timeouts by
+ * reading the previous attempt's status.error string written by worker.ts.
+ */
+function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: string, stageId: string): string {
+  const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
+  let prevError: string | undefined;
+  try {
+    const statusRaw = readFileSync(join(runDirPath, 'stages', stageId, 'status.json'), 'utf-8');
+    const status = JSON.parse(statusRaw) as { error?: string };
+    prevError = status.error;
+  } catch { /* status not readable; fall through to generic message */ }
+  let cause: string;
+  if (prevError && prevError.startsWith('aborted by supervisor')) {
+    cause = `Previous attempt was ${prevError}. The supervisor judged that the previous attempt was stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this attempt, and START making file edits within a few minutes; do NOT spend the whole attempt only inspecting code.`;
+  } else if (prevError && prevError.startsWith('adapter connection failed')) {
+    cause = `Previous attempt failed with an adapter connection error (transient). Retry the same plan.`;
+  } else {
+    cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
+  }
+  return `RETRY (attempt ${retries + 1}): ${cause} Read partial output at ${partialPath} and continue from where you left off. Do not start over.`;
+}
+
 /** Load project defaults from config/defaults.yaml */
 type ProjectDefaults = { timeout_ms: number; max_iterations: number; model: string; reasoning_effort: string; gate_retry_loops: number; stage_technical_retries: number };
 
@@ -1248,6 +1272,36 @@ export async function runWorkflow(
       return state;
     }
 
+    // Honor supervisor DONE: if `signals/goal_met.json` exists at the top of
+    // any iteration after the first, the supervisor has judged the original
+    // goal fully met by prior-iteration evidence. Mark the run complete and
+    // exit the loop instead of burning more iterations on incremental gains.
+    // Iteration 1 cannot reference prior evidence, so we skip the check there.
+    if (iteration > 1) {
+      const goalMetPath = join(runDir(projectDir, runId), 'signals', 'goal_met.json');
+      if (existsSync(goalMetPath)) {
+        let goalReason = 'Supervisor signaled DONE (signals/goal_met.json present)';
+        try {
+          const sig = JSON.parse(readFileSync(goalMetPath, 'utf-8')) as { reason?: string };
+          if (sig.reason) goalReason = `Supervisor DONE: ${sig.reason}`;
+        } catch { /* malformed; keep generic reason */ }
+        state.status = 'complete';
+        state.completedAt = new Date().toISOString();
+        writeRunState(projectDir, runId, state);
+        writeCampaignEntry(projectDir, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'run_completed',
+          runId,
+          timestamp: state.completedAt,
+          iteration,
+          detail: goalReason,
+        });
+        log.info({ runId, iteration, goalReason }, 'Supervisor DONE acknowledged; stopping iteration loop early');
+        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+        return state;
+      }
+    }
+
     // Bug ② fix: archive the previous iteration's accumulated supervisor
     // guidance so this iteration starts with an empty `supervisor_guidance.md`.
     // The archived file under `guidance_history/iter_${N-1}.md` is later
@@ -1774,7 +1828,7 @@ async function executeSingleStage(
       role: agent,
       dependsOn: stage.depends_on ?? [],
       promptTemplate: retries > 0
-        ? `RETRY (attempt ${retries + 1}): Previous attempt timed out after ${Math.ceil(timeout / 1000)}s. Read partial output at ${runDirPath}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`
+        ? `${buildRetryPreamble(retries, timeout, runDirPath, stage.id)}\n\n${resolvedPrompt}`
         : resolvedPrompt,
       timeout_ms: timeout,
       projectDir,
@@ -2067,10 +2121,9 @@ async function executeIteration(
         if (kgSummary) resolvedPrompt = kgSummary + '\n\n' + resolvedPrompt;
       } catch { /* no KG yet */ }
 
-      // Prepend timeout retry context if this is a retry after timeout
+      // Prepend retry context if this is a retry (timeout or supervisor abort)
       if (currentRetries > 0) {
-        const timeoutSec = Math.ceil(timeout / 1000);
-        resolvedPrompt = `RETRY (attempt ${currentRetries + 1}): Previous attempt timed out after ${timeoutSec}s. Read partial output at ${runDirPath}/stages/${stage.id}/output.md and continue from where you left off. Do not start over.\n\n${resolvedPrompt}`;
+        resolvedPrompt = `${buildRetryPreamble(currentRetries, timeout, runDirPath, stage.id)}\n\n${resolvedPrompt}`;
       }
 
       if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);

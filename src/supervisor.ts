@@ -24,7 +24,9 @@ interface SupervisorAction {
   runningStages: string[];
 }
 
-const SUPERVISOR_SYSTEM_PROMPT = `You are a workflow supervisor monitoring agent progress toward a goal.
+function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
+  const stuckMinutes = Math.max(1, Math.round(stuckThresholdMs / 60_000));
+  return `You are a workflow supervisor monitoring agent progress toward a goal.
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
@@ -41,8 +43,9 @@ Rules:
 - Default to WAIT when agents are making progress toward the goal.
 - GUIDE only when you see a concrete wrong direction (not just slow progress).
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
-- ABORT only if a stage has been running for 5+ minutes with no new output (truly stuck).
+- ABORT only if a stage has been running for ${stuckMinutes}+ minutes with no new output (truly stuck). Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT abort based on stdout silence alone if you can see file/artifact activity in the snapshot.
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
+}
 
 export class Supervisor {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -588,7 +591,7 @@ export class Supervisor {
       model: this.config.model,
       reasoning_effort: this.config.reasoningEffort,
       tools: [],
-      prompt: SUPERVISOR_SYSTEM_PROMPT,
+      prompt: buildSupervisorSystemPrompt(this.config.stuckThresholdMs),
     };
 
     let result: RunResult;

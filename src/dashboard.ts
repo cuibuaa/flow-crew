@@ -1151,7 +1151,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!activeExecutions.has(req.params.id)) {
       spawnDetachedRun({
         runId: req.params.id,
-        projectDir,
+        projectDir: state.projectDir ?? projectDir,
         campaignId: state.campaignId,
         supervise: state.supervise ?? true,
         workflow: state.workflowName || 'default',
@@ -1277,7 +1277,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     writeRunState(projectDir, req.params.id, state);
     spawnDetachedRun({
       runId: req.params.id,
-      projectDir,
+      projectDir: state.projectDir ?? projectDir,
       campaignId: state.campaignId,
       supervise: state.supervise ?? true,
       workflow: workflowName,
@@ -1474,7 +1474,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       writeRunState(projectDir, id, state);
       spawnDetachedRun({
         runId: id,
-        projectDir,
+        projectDir: state.projectDir ?? projectDir,
         campaignId: state.campaignId,
         supervise: state.supervise ?? true,
         workflow: workflowName,

@@ -79,6 +79,7 @@ export class ClaudeAdapter implements Adapter {
       timeout_ms: opts.timeout_ms,
       liveLogPath, // raw stream-json goes to live.log for debugging
       onChild: ({ kill }) => { childKill = kill; },
+      abortSignal: opts.abortSignal,
       onStdout: (chunk: string) => {
         // Parse stream-json lines and extract text content for clean live output
         lineBuf += chunk;

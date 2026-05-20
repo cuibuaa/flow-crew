@@ -19,6 +19,10 @@ export interface RunOpts {
   workDir: string;
   runDir: string;
   stageId: string;
+  /** When triggered, the spawned child process group is SIGKILLed and the adapter returns
+   *  exitCode=137 ("Aborted by supervisor"). Used by worker.ts to honor supervisor ABORT
+   *  verdicts that previously only wrote a signal file with no consumer. */
+  abortSignal?: AbortSignal;
 }
 
 export interface DiscussOpts {
@@ -62,6 +66,7 @@ type ExecOpts = {
   liveLogPath?: string;
   onStdout?: (text: string) => void;
   env?: NodeJS.ProcessEnv;
+  abortSignal?: AbortSignal;
 };
 
 function killChild(child: ChildProcess): void {
@@ -89,18 +94,33 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       env: { ...process.env, ...opts.env },
     });
     const chunks: Buffer[] = [];
+    let aborted = false;
     const timer = setTimeout(() => {
       timedOut = true;
       killChild(child);
     }, Math.max(1, opts.timeout_ms));
 
+    // Honor cancellation via AbortSignal (worker.ts polls signals/abort_<stageId>.json
+    // and aborts the controller it owns; we then SIGKILL the child process group).
+    const onAbort = () => {
+      aborted = true;
+      killChild(child);
+    };
+    if (opts.abortSignal) {
+      if (opts.abortSignal.aborted) onAbort();
+      else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const finish = (code: number | null, output?: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
       resolve({
-        output: output ?? Buffer.concat(chunks).toString('utf-8'),
-        exitCode: timedOut ? 124 : code ?? 1,
+        output: aborted
+          ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage aborted by supervisor]\n')
+          : (output ?? Buffer.concat(chunks).toString('utf-8')),
+        exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
         duration_ms: Date.now() - start,
         timedOut,
       });
@@ -128,7 +148,7 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
 export function execWithTimeout(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv },
+  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; abortSignal?: AbortSignal },
 ): Promise<RunResult> {
   return execChild(cmd, args, opts);
 }
@@ -146,6 +166,7 @@ export function execWithStdin(
     /** Invoked once the child is spawned, gives caller a kill handle (e.g. to
      *  force-exit a hung subprocess after detecting a success event in stdout). */
     onChild?: (handles: { kill: () => void }) => void;
+    abortSignal?: AbortSignal;
   },
 ): Promise<RunResult> {
   const start = Date.now();
@@ -155,6 +176,7 @@ export function execWithStdin(
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
+    let aborted = false;
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -164,6 +186,11 @@ export function execWithStdin(
     });
     if (opts.onChild) opts.onChild({ kill: () => killChild(child) });
     const timer = setTimeout(() => { timedOut = true; killChild(child); }, Math.max(1, opts.timeout_ms));
+    const onAbort = () => { aborted = true; killChild(child); };
+    if (opts.abortSignal) {
+      if (opts.abortSignal.aborted) onAbort();
+      else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
     child.stdin!.write(stdin);
     child.stdin!.end();
     const chunks: Buffer[] = [];
@@ -171,9 +198,10 @@ export function execWithStdin(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
       resolve({
-        output: Buffer.concat(chunks).toString('utf-8'),
-        exitCode: timedOut ? 124 : code ?? 1,
+        output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage aborted by supervisor]\n' : ''),
+        exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
         duration_ms: Date.now() - start,
         timedOut,
       });
@@ -195,7 +223,7 @@ export function execWithStdin(
 export function execWithStreaming(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void; env?: NodeJS.ProcessEnv },
+  opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void; env?: NodeJS.ProcessEnv; abortSignal?: AbortSignal },
 ): Promise<RunResult> {
   return execChild(cmd, args, { ...opts, onStdout: opts.onChunk });
 }

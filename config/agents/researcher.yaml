@@ -1,8 +1,5 @@
 name: researcher
 description: "Research analyst who gathers external knowledge. Use for: literature review, finding papers, repos, docs, benchmarks, best practices."
-adapter: claude
-model: claude-opus-4-7
-reasoning_effort: xhigh
 tools:
 - read
 - write

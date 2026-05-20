@@ -35,6 +35,8 @@ export interface SupervisorConfig {
   maxAssessmentsPerIteration: number;
   tailBytes: number;
   minDeltaBytes: number;
+  /** Minimum idle duration (ms) before the supervisor is allowed to ABORT a stuck stage. Injected into the supervisor system prompt. */
+  stuckThresholdMs: number;
 }
 
 // --- Defaults ---
@@ -70,6 +72,10 @@ const DEFAULT_SUPERVISOR: SupervisorConfig = {
   maxAssessmentsPerIteration: 50,
   tailBytes: 16384,
   minDeltaBytes: 200,
+  // 10-min idle threshold before supervisor is allowed to ABORT. Codex agents
+  // often spend several minutes silently editing files via tool calls; the
+  // older 5-min default produced false-positive aborts mid-implementation.
+  stuckThresholdMs: 600_000,
 };
 
 // --- Cache ---
@@ -144,6 +150,7 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
     maxAssessmentsPerIteration: (sup.max_assessments_per_iteration as number) ?? DEFAULT_SUPERVISOR.maxAssessmentsPerIteration,
     tailBytes: (sup.tail_bytes as number) ?? DEFAULT_SUPERVISOR.tailBytes,
     minDeltaBytes: (sup.min_delta_bytes as number) ?? DEFAULT_SUPERVISOR.minDeltaBytes,
+    stuckThresholdMs: (sup.stuck_threshold_ms as number) ?? DEFAULT_SUPERVISOR.stuckThresholdMs,
   };
 }
 

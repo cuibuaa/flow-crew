@@ -1,8 +1,5 @@
 name: planner
 description: 'Planner who analyzes tasks and freely composes a stage plan using whichever roles + skills fit best. Use for: task breakdown, dispatch planning, stage shape selection.'
-adapter: claude
-model: claude-opus-4-7
-reasoning_effort: xhigh
 tools:
 - read
 - write

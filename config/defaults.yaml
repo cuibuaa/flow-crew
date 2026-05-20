@@ -14,3 +14,11 @@ campaign_triggers:
   plateau_after: 3
   plateau_threshold: 5
   repeated_failure_after: 3
+
+supervisor:
+  # Minimum idle duration (ms) before the supervisor is allowed to ABORT a stuck
+  # stage. Injected into the supervisor's system prompt so the LLM judge applies
+  # this floor when deciding WAIT vs ABORT. Default 10 min: codex agents often
+  # spend several minutes silently editing files via tool calls; a shorter window
+  # produces false-positive aborts mid-implementation.
+  stuck_threshold_ms: 600000

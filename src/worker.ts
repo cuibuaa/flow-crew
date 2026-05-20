@@ -1,5 +1,5 @@
 // Module: worker
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { buildStagePrompt } from './handoff.js';
@@ -192,12 +192,57 @@ export async function runStage(
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const beforeSnapshot = snapshotMtimes(opts.projectDir, [kgPath]);
 
-  let result = await adapter.run(prompt, resolvedRole, {
-    timeout_ms: opts.timeout_ms,
-    workDir: opts.projectDir,
-    runDir: opts.runDir,
-    stageId: opts.stageId,
-  });
+  // Abort signal poller: supervisor writes signals/abort_<stageId>.json when it
+  // emits an ABORT verdict. Worker polls it every 2s and triggers an
+  // AbortController that the adapter forwards to the spawned child process.
+  // exit code 137 + "[stage aborted by supervisor]" in output signals the
+  // supervisor cancellation to downstream stages and the gate.
+  //
+  // Stale-signal cleanup: a prior attempt may have left the file behind. Without
+  // this, retry attempt 2 would self-abort within 2 seconds of starting (read
+  // the stale signal and kill itself). Only clean on retries; on the FIRST
+  // attempt any present signal is fresh and must be honored.
+  const abortController = new AbortController();
+  const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
+  let supervisorAborted = false;
+  let abortReason = '';
+  if (opts.retries > 0) {
+    try {
+      if (existsSync(abortSignalPath)) unlinkSync(abortSignalPath);
+    } catch { /* non-critical */ }
+  }
+  const abortPollTimer = setInterval(() => {
+    try {
+      if (existsSync(abortSignalPath) && !abortController.signal.aborted) {
+        // Capture reason BEFORE triggering abort so error attribution is accurate.
+        try {
+          const sig = JSON.parse(readFileSync(abortSignalPath, 'utf-8')) as { reason?: string };
+          abortReason = (sig.reason ?? '').slice(0, 240);
+        } catch { /* signal file malformed; proceed with empty reason */ }
+        supervisorAborted = true;
+        abortController.abort();
+        try {
+          appendFileSync(
+            join(opts.runDir, 'stages', opts.stageId, 'live.log'),
+            `\nSupervisor ABORT signal observed at ${abortSignalPath}; killing stage child process.\n`,
+          );
+        } catch { /* ignore */ }
+      }
+    } catch { /* non-critical */ }
+  }, 2000);
+
+  let result: RunResult;
+  try {
+    result = await adapter.run(prompt, resolvedRole, {
+      timeout_ms: opts.timeout_ms,
+      workDir: opts.projectDir,
+      runDir: opts.runDir,
+      stageId: opts.stageId,
+      abortSignal: abortController.signal,
+    });
+  } finally {
+    clearInterval(abortPollTimer);
+  }
 
   // Adapter error detection + exponential backoff retry on the SAME adapter
   if (result.exitCode !== 0 && isAdapterError(result.output)) {
@@ -252,9 +297,15 @@ export async function runStage(
     }
   }
 
-  // Detect timeout: exit 124 (timeout signal) or 137 (SIGKILL), or duration >= timeout
-  const timedOut = result.exitCode === 124 || result.exitCode === 137 ||
-    (result.duration_ms >= opts.timeout_ms && result.exitCode !== 0);
+  // Detect timeout: exit 124 (timeout signal), or duration >= timeout. exit 137
+  // (SIGKILL) is ambiguous; the adapter sends it for BOTH true wall-clock
+  // timeouts and supervisor-initiated aborts. Distinguish them via the
+  // `supervisorAborted` flag captured by the abort poller above.
+  const timedOut = !supervisorAborted && (
+    result.exitCode === 124 ||
+    result.exitCode === 137 ||
+    (result.duration_ms >= opts.timeout_ms && result.exitCode !== 0)
+  );
   if (timedOut) result.timedOut = true;
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output);
@@ -268,7 +319,15 @@ export async function runStage(
     retries: opts.retries,
     startedAt: running.startedAt,
     completedAt: new Date().toISOString(),
-    error: result.exitCode !== 0 ? (result.adapterError ? 'adapter connection failed' : result.timedOut ? `timed out after ${Math.round(opts.timeout_ms / 1000)}s` : `Exit code ${result.exitCode}`) : undefined,
+    error: result.exitCode !== 0
+      ? (
+        supervisorAborted
+          ? (abortReason ? `aborted by supervisor: ${abortReason}` : 'aborted by supervisor')
+          : result.adapterError ? 'adapter connection failed'
+          : result.timedOut ? `timed out after ${Math.round(opts.timeout_ms / 1000)}s`
+          : `Exit code ${result.exitCode}`
+      )
+      : undefined,
     tokens_in: result.tokens_in,
     tokens_out: result.tokens_out,
     kgChanged: artifacts.some(a => a.endsWith('knowledge_graph.json')),

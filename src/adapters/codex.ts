@@ -98,6 +98,7 @@ export class CodexAdapter implements Adapter {
       timeout_ms: opts.timeout_ms,
       liveLogPath: join(opts.runDir, 'stages', opts.stageId, 'live.log'),
       env: { CODEX_HOME: codexHome },
+      abortSignal: opts.abortSignal,
     });
     const tokens = parseTokens(result.output);
     if (tokens.tokens_in !== undefined) result.tokens_in = tokens.tokens_in;
