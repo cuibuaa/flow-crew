@@ -2,6 +2,10 @@ node_modules/
 dist/
 .fc/
 *.log
+
+# Skill install artifacts — canonical source is skills/, these are local installs
+.claude/
+.codex/
 .tmp_*
 NUL
 npm-debug.log*

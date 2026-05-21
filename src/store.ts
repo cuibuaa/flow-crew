@@ -26,11 +26,43 @@ export interface CampaignTriggers {
   repeatedFailureAfter?: number;
 }
 
+/**
+ * Terminal-state config parsed from a task brief's `---` YAML frontmatter.
+ *
+ * Each top-level key is a status string (e.g. "shipped", "ceiling_hit",
+ * "escalated"). When a file at one of `paths` exists at the start of an
+ * iteration, the scheduler runs the optional `floor` check; if the floor is
+ * satisfied, the run terminates with state.status set to that key.
+ *
+ * The floor exists so an agent cannot prematurely declare a negative verdict
+ * (e.g. write ceiling_report.md after one stage) — a real ceiling result must
+ * pass a minimum-effort gate the brief writer specifies.
+ */
+export interface TerminalStateFloor {
+  /** Distinct stage_N_verdict.md files required under docs/.../ for the brief's research dir. */
+  minAttemptedStages?: number;
+  /** Total seconds of wall time since run started. */
+  minWallMinutes?: number;
+}
+export interface TerminalStateEntry {
+  /** File paths (relative to projectDir) that, when present, signal this status. */
+  paths: string[];
+  /** Optional floor — if specified, all conditions must be met before terminating. */
+  floor?: TerminalStateFloor;
+  /** Optional glob to count attempted research stages for floor.minAttemptedStages. */
+  stageGlob?: string;
+}
+export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
+
 export interface StoreState {
   runId: string;
   workflowName: string;
   projectDir: string;
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval';
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated';
+  /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
+  terminalStates?: TerminalStatesConfig;
+  /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
+  terminalArtifact?: string;
   stages: Record<string, StageStatus>;
   startedAt: string;
   completedAt?: string;

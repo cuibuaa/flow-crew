@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { Adapter, AgentConfig } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
 import { createRun, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir } from './store.js';
-import type { StoreState, StageStatus } from './store.js';
+import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry } from './store.js';
 import { runStage } from './worker.js';
 import {
   canonicalCampaignId,
@@ -26,6 +26,121 @@ const log = pino({ name: 'scheduler' });
 const DEFAULT_GATE_RETRY_LOOPS = 1;
 const DEFAULT_MAX_ITERATIONS = 3;
 const DEFAULT_STAGE_TECHNICAL_RETRIES = 1;
+
+/**
+ * Parse `---` YAML frontmatter from the top of a task brief. Used to extract
+ * `terminal_states` config that tells the scheduler which file paths signal a
+ * legitimate completion (so a research-exploration brief can declare
+ * ceiling_report.md as a valid terminal state instead of being treated as
+ * "goal metric not met → retry forever").
+ *
+ * Accepted shapes inside `terminal_states`:
+ *   shipped: docs/.../ship_report.md                    (string → single path)
+ *   shipped: [docs/a.md, docs/b.md]                     (array → multiple paths)
+ *   ceiling_hit:                                        (object → with floor)
+ *     paths: [docs/.../ceiling_report.md]
+ *     floor: { min_attempted_stages: 4, min_wall_minutes: 60 }
+ *     stage_glob: docs/v8_research/stage_*_verdict.md   (used to count attempted stages)
+ *
+ * Returns the stripped brief (with frontmatter removed so the planner doesn't
+ * see internal config) plus the parsed config. Briefs without frontmatter,
+ * with malformed YAML, or with unknown shapes are passed through unchanged.
+ */
+export function parseBriefFrontmatter(brief: string): { terminalStates?: TerminalStatesConfig; stripped: string } {
+  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return { stripped: brief };
+  const open = brief.indexOf('\n', 3) + 1;
+  const closeIdx = brief.indexOf('\n---', open);
+  if (closeIdx < 0) return { stripped: brief };
+  const fm = brief.slice(open, closeIdx);
+  // Find the newline that ends the closing fence so we can slice past it
+  const afterFence = brief.indexOf('\n', closeIdx + 4);
+  const stripped = afterFence < 0 ? '' : brief.slice(afterFence + 1);
+  let parsed: unknown;
+  try { parsed = parseYaml(fm); } catch { return { stripped: brief }; }
+  if (!parsed || typeof parsed !== 'object') return { stripped };
+  const raw = (parsed as Record<string, unknown>).terminal_states;
+  if (!raw || typeof raw !== 'object') return { stripped };
+  const ts: TerminalStatesConfig = {};
+  for (const [status, val] of Object.entries(raw as Record<string, unknown>)) {
+    let entry: TerminalStateEntry | null = null;
+    if (typeof val === 'string') entry = { paths: [val] };
+    else if (Array.isArray(val)) {
+      const paths = val.filter((x): x is string => typeof x === 'string');
+      if (paths.length > 0) entry = { paths };
+    } else if (val && typeof val === 'object') {
+      const v = val as Record<string, unknown>;
+      const paths = Array.isArray(v.paths)
+        ? (v.paths as unknown[]).filter((x): x is string => typeof x === 'string')
+        : typeof v.path === 'string' ? [v.path] : [];
+      if (paths.length === 0) continue;
+      entry = { paths };
+      if (v.floor && typeof v.floor === 'object') {
+        const f = v.floor as Record<string, unknown>;
+        entry.floor = {};
+        if (typeof f.min_attempted_stages === 'number') entry.floor.minAttemptedStages = f.min_attempted_stages;
+        if (typeof f.min_wall_minutes === 'number') entry.floor.minWallMinutes = f.min_wall_minutes;
+      }
+      if (typeof v.stage_glob === 'string') entry.stageGlob = v.stage_glob;
+    }
+    if (entry) ts[status] = entry;
+  }
+  if (Object.keys(ts).length === 0) return { stripped };
+  return { terminalStates: ts, stripped };
+}
+
+/**
+ * Evaluate the optional `floor` on a terminal-state entry. Returns passed=true
+ * when no floor is configured or all floor conditions are satisfied; otherwise
+ * returns passed=false with a human-readable reason for the supervisor hint.
+ *
+ * Two condition types are supported (extensible):
+ *   - minWallMinutes: total wall time since run start
+ *   - minAttemptedStages: count of files matching `stage_glob` (or inferred
+ *     `<terminalDir>/stage_*_verdict.md` when not provided)
+ */
+function evaluateTerminalFloor(
+  state: StoreState,
+  entry: TerminalStateEntry,
+  projectDir: string,
+): { passed: boolean; reason?: string } {
+  if (!entry.floor) return { passed: true };
+  const { floor, stageGlob, paths } = entry;
+  if (floor.minWallMinutes !== undefined) {
+    const startedAt = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
+    const elapsedMin = (Date.now() - startedAt) / 60000;
+    if (elapsedMin < floor.minWallMinutes) {
+      return { passed: false, reason: `wall time ${elapsedMin.toFixed(1)} min < required ${floor.minWallMinutes} min` };
+    }
+  }
+  if (floor.minAttemptedStages !== undefined) {
+    let glob = stageGlob;
+    if (!glob && paths.length > 0) {
+      const first = paths[0];
+      const dir = first.includes('/') ? first.substring(0, first.lastIndexOf('/')) : '.';
+      glob = `${dir}/stage_*_verdict.md`;
+    }
+    const matches = glob ? countGlobMatches(projectDir, glob) : 0;
+    if (matches < floor.minAttemptedStages) {
+      return { passed: false, reason: `only ${matches} stage verdict file(s) match '${glob}'; need ${floor.minAttemptedStages}` };
+    }
+  }
+  return { passed: true };
+}
+
+function countGlobMatches(projectDir: string, glob: string): number {
+  const slash = glob.lastIndexOf('/');
+  const dir = slash >= 0 ? glob.substring(0, slash) : '.';
+  const pattern = slash >= 0 ? glob.substring(slash + 1) : glob;
+  // Convert simple `*` glob to anchored regex (escape dots, expand stars)
+  const re = new RegExp('^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
+  try {
+    const fullDir = join(projectDir, dir);
+    if (!existsSync(fullDir)) return 0;
+    return readdirSync(fullDir).filter((f) => re.test(f)).length;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * Build the retry preamble injected before the resolved prompt on attempt >= 2.
@@ -1226,11 +1341,24 @@ export async function runWorkflow(
     writeRunState(projectDir, runId, initState);
   }
 
-  // Use full task brief as taskDescription for template substitution in dispatched stages
+  // Use full task brief as taskDescription for template substitution in dispatched stages.
+  // Also parse `---` YAML frontmatter for terminal_states config (research-exploration
+  // briefs declare ceiling_report.md / escalation_note.md as valid completions).
+  // The frontmatter is stripped from the brief before it reaches stage prompts so the
+  // planner doesn't waste tokens reading scheduler-internal config.
   const briefPath = join(runDirPath, 'task_brief.md');
   if (existsSync(briefPath)) {
     const briefContent = readFileSync(briefPath, 'utf-8').trim();
-    if (briefContent) taskDescription = briefContent;
+    if (briefContent) {
+      const { terminalStates, stripped } = parseBriefFrontmatter(briefContent);
+      taskDescription = stripped || briefContent;
+      if (terminalStates) {
+        const s = readRunState(projectDir, runId);
+        s.terminalStates = terminalStates;
+        writeRunState(projectDir, runId, s);
+        log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
+      }
+    }
   }
 
   const resolvedAgentsDir = agentsDir ?? join(projectDir, 'config', 'agents');
@@ -1301,6 +1429,52 @@ export async function runWorkflow(
         log.info({ runId, iteration, goalReason }, 'Supervisor DONE acknowledged; stopping iteration loop early');
         await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
         return state;
+      }
+    }
+
+    // Terminal-state check (brief frontmatter): a research-exploration brief can
+    // declare which file paths under projectDir signal a legitimate completion.
+    // Each entry may carry an optional `floor` (min stages attempted, min wall
+    // time) that must be satisfied — this prevents an agent from prematurely
+    // declaring ceiling_report.md after a single stage. When the floor is unmet,
+    // we leave a hint in supervisor_guidance.md and continue the loop instead of
+    // terminating, so the next planner iteration sees a clear directive.
+    if (state.terminalStates) {
+      let terminated = false;
+      for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
+        if (terminated) break;
+        for (const path of entry.paths) {
+          if (!existsSync(join(projectDir, path))) continue;
+          const floorCheck = evaluateTerminalFloor(state, entry, projectDir);
+          if (floorCheck.passed) {
+            state.status = terminalStatus as StoreState['status'];
+            state.terminalArtifact = path.split('/').pop();
+            state.completedAt = new Date().toISOString();
+            writeRunState(projectDir, runId, state);
+            writeCampaignEntry(projectDir, state);
+            recordRunEvent(projectDir, runId, {
+              type: 'run_completed',
+              runId,
+              timestamp: state.completedAt,
+              iteration,
+              detail: `Terminal state '${terminalStatus}' reached via ${path}`,
+            });
+            log.info({ runId, iteration, terminalStatus, path }, 'Terminal-state file detected; ending iteration loop');
+            await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+            return state;
+          }
+          // Floor not met — append a one-time hint to supervisor_guidance.md so the
+          // next planner iteration sees it. Skip if we already wrote this hint
+          // (idempotent across iterations to avoid spamming).
+          const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
+          const hintBody = `\n\n${hintMarker}\n${path} exists but does not meet the floor for terminal status '${terminalStatus}': ${floorCheck.reason}. Continue planned work for the brief OR write escalation_note.md with a clear blocker plus 2-3 candidate options.\n`;
+          try {
+            const guidancePath = join(runDirPath, 'supervisor_guidance.md');
+            const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+            if (!prior.includes(hintMarker)) writeFileSync(guidancePath, prior + hintBody, 'utf-8');
+          } catch { /* non-critical */ }
+          log.warn({ runId, iteration, terminalStatus, path, reason: floorCheck.reason }, 'Terminal-state file exists but floor unmet; continuing');
+        }
       }
     }
 
