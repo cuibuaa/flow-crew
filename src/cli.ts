@@ -340,6 +340,7 @@ async function cmdQuick() {
   let supervise = true; // supervisor brain on by default; opt out with --no-supervise
   let campaignArg: string | undefined; // --campaign <name> wins over defaults.yaml; --no-campaign forces undefined
   let campaignDisabled = false;
+  let inheritCampaignContext = true; // --no-inherit-campaign stays attached but skips prior-phase context injection
   let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
   const taskParts: string[] = [];
 
@@ -355,6 +356,7 @@ async function cmdQuick() {
     if (args[i] === '--no-supervise') { supervise = false; continue; }
     if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; continue; }
     if (args[i] === '--no-campaign') { campaignDisabled = true; continue; }
+    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; continue; }
     if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
     if (args[i] === '--existing-run-id' && args[i + 1]) { existingRunId = args[++i]; continue; }
     if (args[i] === '-') { task = readFileSync(0, 'utf-8').trim(); continue; }
@@ -392,6 +394,7 @@ async function cmdQuick() {
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
     console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug(basename(projectDir)))');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
+    console.error('  --no-inherit-campaign   Stay in campaign but skip injecting prior-phase context into planner prompts');
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
     console.error('  -                       Read task from stdin');
@@ -462,6 +465,9 @@ async function cmdQuick() {
     ? undefined
     : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
+  if (resolvedCampaign && !inheritCampaignContext) {
+    console.log(`Campaign context: not inherited (--no-inherit-campaign)`);
+  }
   console.log(`Auto-approve: true\n`);
 
   // Live progress reporter
@@ -488,7 +494,7 @@ async function cmdQuick() {
     } catch { /* non-critical */ }
   }, 2000);
 
-  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign);
+  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext);
   clearInterval(progressTimer);
 
   // Desktop notification

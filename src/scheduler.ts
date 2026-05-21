@@ -1159,6 +1159,7 @@ export async function runWorkflow(
   autoApprove?: boolean,
   supervise?: boolean,
   campaignId?: string,
+  inheritCampaignContext: boolean = true,
 ): Promise<StoreState> {
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
@@ -1221,6 +1222,7 @@ export async function runWorkflow(
       initState.campaignName = campaignId;
       initState.campaignStorageKey = resolveCampaignStorageKey({ campaignId });
     }
+    if (inheritCampaignContext === false) initState.inheritCampaignContext = false;
     writeRunState(projectDir, runId, initState);
   }
 
@@ -2060,13 +2062,16 @@ async function executeIteration(
         if (existsSync(iterLogPath)) {
           resolvedPrompt += `\n\nRead ${runDirPath}/iteration_log.md for previous iteration results. Fix the issues identified there.`;
         }
-        // Campaign context: prepend history of previous runs
+        // Campaign context: prepend history of previous runs.
+        // Skipped when state.inheritCampaignContext === false (set via --no-inherit-campaign)
+        // — the run stays attached to the campaign for telemetry, but the planner gets a
+        // clean prompt so it can't be misled by terminal phases from a different task arc.
         const campaignStorageKey = resolveCampaignStorageKey({
           campaignId: state.campaignId,
           campaignStorageKey: state.campaignStorageKey,
           campaignName: state.campaignName,
         });
-        if (campaignStorageKey) {
+        if (campaignStorageKey && state.inheritCampaignContext !== false) {
           const entries = readCampaignEntries(projectDir, campaignStorageKey);
           if (entries.length > 0) {
             const scoredEntries = collapseEntriesForHealth(entries);

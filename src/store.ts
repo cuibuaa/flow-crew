@@ -52,6 +52,11 @@ export interface StoreState {
   campaignName?: string;
   campaignSeq?: number;
   campaignIteration?: number;
+  // When false, the run stays attached to its campaign for downstream telemetry,
+  // but the scheduler skips injecting prior-phase context into stage prompts.
+  // Used to escape inherited "fail-closed / phase-N continue" mindsets when the
+  // current task has fundamentally pivoted from the campaign's recent history.
+  inheritCampaignContext?: boolean;
   campaignAlert?: {
     type: 'regression' | 'plateau' | 'repeated_failure';
     action: 'inject_researcher';
