@@ -612,29 +612,38 @@ export class Supervisor {
       return null;
     }
 
-    // Parse JSON from output (may contain extra text, find the JSON object)
-    try {
-      const jsonMatch = result.output.match(/\{[^}]*"verdict"[^}]*\}/);
-      if (!jsonMatch) {
-        log.warn('No JSON found in supervisor response');
-        return null;
-      }
-      const parsed = JSON.parse(jsonMatch[0]);
-      const verdict = parsed.verdict as string;
-      if (!['WAIT', 'GUIDE', 'ABORT', 'REPLAN', 'DONE'].includes(verdict)) {
-        log.warn({ verdict }, 'Invalid supervisor verdict');
-        return null;
-      }
-      return {
-        verdict: verdict as SupervisorVerdict,
-        targetStage: parsed.target_stage ?? null,
-        reason: parsed.reason ?? '',
-        guidance: parsed.guidance ?? null,
-      };
-    } catch { /* non-critical */
-      log.warn('Failed to parse supervisor JSON response');
+    // Parse JSON from output. Codex echoes the prompt before its response, so
+    // `output` typically contains: [prompt with possibly a JSON template that
+    // also has "verdict"] then [the real response]. Single-match regex picked
+    // the prompt-echoed template (with placeholders like <number>) and failed
+    // to JSON.parse — silently killing the supervisor for the entire run.
+    //
+    // Fix: collect ALL `{...verdict...}` matches, scan LAST-TO-FIRST (real
+    // response is at the end of output, templates appear earlier in the
+    // prompt), and accept the first one that both parses as JSON and carries a
+    // legal verdict string. If none parse, log a tail preview for debugging.
+    const matches = [...result.output.matchAll(/\{[^}]*"verdict"[^}]*\}/g)];
+    if (matches.length === 0) {
+      log.warn({ outputPreview: result.output.slice(-500) }, 'No JSON with "verdict" found in supervisor response');
       return null;
     }
+    const validVerdicts = ['WAIT', 'GUIDE', 'ABORT', 'REPLAN', 'DONE'];
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const candidate = matches[i][0];
+      try {
+        const parsed = JSON.parse(candidate);
+        const verdict = parsed.verdict as string;
+        if (!validVerdicts.includes(verdict)) continue;
+        return {
+          verdict: verdict as SupervisorVerdict,
+          targetStage: parsed.target_stage ?? null,
+          reason: parsed.reason ?? '',
+          guidance: parsed.guidance ?? null,
+        };
+      } catch { /* try the next earlier match */ }
+    }
+    log.warn({ matchCount: matches.length, outputPreview: result.output.slice(-500) }, 'All supervisor JSON candidates failed to parse');
+    return null;
   }
 
   private async act(assessment: SupervisorAssessment): Promise<void> {
