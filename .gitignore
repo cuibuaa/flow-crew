@@ -11,6 +11,9 @@ NUL
 npm-debug.log*
 coverage/
 .vitest/
+test-results/
+ui_mocks/
+playwright.config.ts
 .env
 .env.*
 !.env.example
@@ -20,7 +23,8 @@ Thumbs.db
 .idea/
 *.tsbuildinfo
 ui/*.d.ts.map
-docs/
+docs/*
+docs/framework_campaign/
 tests/
 ui/tests/
 design/

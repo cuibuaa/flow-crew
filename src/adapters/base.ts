@@ -25,14 +25,6 @@ export interface RunOpts {
   abortSignal?: AbortSignal;
 }
 
-export interface DiscussOpts {
-  workDir: string;
-  sessionDir: string;
-  onChunk?: (text: string) => void;
-  cols?: number;
-  rows?: number;
-}
-
 export interface AgentConfig {
   name: string;
   description: string;
@@ -46,18 +38,6 @@ export interface AgentConfig {
 
 export interface Adapter {
   run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult>;
-  discuss(message: string, role: AgentConfig, opts: DiscussOpts): Promise<RunResult>;
-  spawnDiscuss(message: string, role: AgentConfig, opts: DiscussOpts): ChildProcess;
-  /** Spawn an interactive session with PTY. Returns a uniform interface. */
-  spawnInteractive(role: AgentConfig, opts: DiscussOpts): Promise<InteractiveSession>;
-}
-
-export interface InteractiveSession {
-  onData: (cb: (data: string) => void) => void;
-  write: (data: string) => void;
-  resize: (cols: number, rows: number) => void;
-  kill: () => void;
-  onExit: (cb: (exitCode: number) => void) => void;
 }
 
 type ExecOpts = {
@@ -218,67 +198,4 @@ export function execWithStdin(
     child.on('close', (code) => finish(code));
     child.on('error', () => finish(1));
   });
-}
-
-export function execWithStreaming(
-  cmd: string,
-  args: string[],
-  opts: { cwd: string; timeout_ms: number; onChunk: (text: string) => void; env?: NodeJS.ProcessEnv; abortSignal?: AbortSignal },
-): Promise<RunResult> {
-  return execChild(cmd, args, { ...opts, onStdout: opts.onChunk });
-}
-
-/**
- * Try to import node-pty. Returns null if unavailable (e.g. missing native build).
- * Callers should fall back to a raw child_process-based session.
- */
-export async function tryImportPty(): Promise<typeof import('node-pty') | null> {
-  try {
-    return await import('node-pty');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Fallback interactive session using a raw child_process when node-pty is unavailable.
- * Provides the same InteractiveSession interface but without true PTY support.
- */
-export function spawnFallbackInteractive(
-  cmd: string,
-  args: string[],
-  opts: { cwd: string; env?: NodeJS.ProcessEnv },
-): InteractiveSession {
-  const child = spawn(cmd, args, {
-    cwd: opts.cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: opts.env ?? process.env,
-  });
-  const dataCallbacks: Array<(data: string) => void> = [];
-  const exitCallbacks: Array<(code: number) => void> = [];
-  child.stdout?.on('data', (d: Buffer) => {
-    const text = d.toString('utf-8');
-    for (const cb of dataCallbacks) cb(text);
-  });
-  child.stderr?.on('data', (d: Buffer) => {
-    const text = d.toString('utf-8');
-    for (const cb of dataCallbacks) cb(text);
-  });
-  child.on('close', (code) => {
-    for (const cb of exitCallbacks) cb(code ?? 1);
-  });
-  child.on('error', (err) => {
-    const msg = err.message.includes('ENOENT')
-      ? `Command not found: ${cmd}. Install the adapter CLI and try again.`
-      : err.message;
-    for (const cb of dataCallbacks) cb(`\r\n\x1b[31m${msg}\x1b[0m\r\n`);
-    for (const cb of exitCallbacks) cb(1);
-  });
-  return {
-    onData: (cb) => { dataCallbacks.push(cb); },
-    write: (data) => { child.stdin?.write(data); },
-    resize: () => { /* no-op for raw child_process */ },
-    kill: () => { try { child.kill('SIGKILL'); } catch { /* already exited */ } },
-    onExit: (cb) => { exitCallbacks.push(cb); },
-  };
 }

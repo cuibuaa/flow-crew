@@ -7,6 +7,7 @@ import { readRunIndexRecords, recordToPartialState } from './run-index.js';
 export interface CampaignHistoryEntry {
   seq: number;
   runId: string;
+  kind?: string;
   iteration?: number;
   score?: number;
   metric?: string;
@@ -14,6 +15,7 @@ export interface CampaignHistoryEntry {
   pass: boolean;
   status?: string;
   timestamp: string;
+  workflow?: string;
   campaignId?: string;
   campaignStorageKey?: string;
   campaignName?: string;
@@ -23,6 +25,9 @@ export interface CampaignHistoryEntry {
   outcome?: string;
   artifactSummary?: string;
   reason?: string;
+  workflowSatisfied?: boolean;
+  terminalStudyComplete?: boolean;
+  modelSuccess?: boolean;
 }
 
 export interface CampaignSummaryRecord {
@@ -53,6 +58,15 @@ function runsRoot(_projectDir: string): string {
 
 function campaignsRoot(projectDir: string): string {
   return join(projectDir, '.fc', 'campaigns');
+}
+
+function globalCampaignsRoot(): string {
+  return join(homedir(), '.fc', 'campaigns');
+}
+
+function campaignHistoryRoots(projectDir: string): string[] {
+  const roots = [campaignsRoot(projectDir), globalCampaignsRoot()];
+  return [...new Set(roots)];
 }
 
 export function cleanCampaignName(value?: string): string | undefined {
@@ -143,10 +157,23 @@ function normalizeEntryCampaign(fileStem: string, entry: Partial<CampaignHistory
   };
 }
 
-export function readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[] {
-  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
-  if (!targetStorageKey) return [];
-  const byRunIteration = new Map<string, CampaignHistoryEntry>();
+function campaignEntryTimestamp(entry: Partial<CampaignHistoryEntry> & { ts?: unknown }): string | undefined {
+  if (typeof entry.timestamp === 'string') return entry.timestamp;
+  if (typeof entry.ts === 'string') return entry.ts;
+  return undefined;
+}
+
+function runBelongsToProject(projectDir: string, runId: string): boolean {
+  try {
+    const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
+    const state = JSON.parse(raw) as Partial<StoreState>;
+    return state.projectDir === projectDir;
+  } catch { /* non-critical */
+    return false;
+  }
+}
+
+function hasProjectCampaignHistory(projectDir: string, targetStorageKey: string): boolean {
   try {
     for (const file of readdirSync(campaignsRoot(projectDir)).filter((name) => name.endsWith('.jsonl'))) {
       const fileStem = file.replace(/\.jsonl$/, '');
@@ -155,8 +182,49 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
         try {
           const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry>;
           const ref = normalizeEntryCampaign(fileStem, parsed);
+          if (ref?.storageKey === targetStorageKey) return true;
+        } catch { /* non-critical */
+          // Ignore malformed lines.
+        }
+      }
+    }
+  } catch { /* non-critical */
+    return false;
+  }
+  return false;
+}
+
+export function readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[] {
+  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
+  if (!targetStorageKey) return [];
+  const byRunIteration = new Map<string, CampaignHistoryEntry>();
+  const projectHasHistory = hasProjectCampaignHistory(projectDir, targetStorageKey);
+  const globalRoot = globalCampaignsRoot();
+  for (const root of campaignHistoryRoots(projectDir)) {
+    let files: string[];
+    try {
+      files = readdirSync(root).filter((name) => name.endsWith('.jsonl'));
+    } catch { /* non-critical */
+      continue;
+    }
+    for (const file of files) {
+      const fileStem = file.replace(/\.jsonl$/, '');
+      let rawLines: string[];
+      try {
+        rawLines = readFileSync(join(root, file), 'utf-8').split('\n').filter(Boolean);
+      } catch { /* non-critical */
+        continue;
+      }
+      for (let index = 0; index < rawLines.length; index += 1) {
+        const line = rawLines[index];
+        try {
+          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry> & { ts?: unknown };
+          const ref = normalizeEntryCampaign(fileStem, parsed);
           if (!ref || ref.storageKey !== targetStorageKey) continue;
-          if (typeof parsed.seq !== 'number' || typeof parsed.runId !== 'string') continue;
+          if (typeof parsed.runId !== 'string') continue;
+          if (root === globalRoot && projectHasHistory && !runBelongsToProject(projectDir, parsed.runId)) continue;
+          const hasSeq = typeof parsed.seq === 'number';
+          const kind = typeof parsed.kind === 'string' ? parsed.kind : undefined;
           const hasScore = typeof parsed.score === 'number'
             && Number.isFinite(parsed.score)
             && typeof parsed.metric === 'string';
@@ -164,17 +232,21 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
             || typeof parsed.phaseComplete === 'boolean'
             || typeof parsed.nextPhase === 'string'
             || typeof parsed.outcome === 'string';
-          if (!hasScore && !hasPhase) continue;
+          const hasEnvelope = kind === 'task_started' || kind === 'task_ended';
+          if (!hasScore && !hasPhase && !hasEnvelope) continue;
+          const timestamp = campaignEntryTimestamp(parsed) ?? new Date(0).toISOString();
           const normalized: CampaignHistoryEntry = {
-            seq: parsed.seq,
+            seq: hasSeq ? parsed.seq as number : index + 1,
             runId: parsed.runId,
+            kind,
             iteration: typeof parsed.iteration === 'number' ? parsed.iteration : undefined,
             score: hasScore ? parsed.score : undefined,
             metric: hasScore ? parsed.metric : undefined,
             gate: typeof parsed.gate === 'string' ? parsed.gate : undefined,
             pass: parsed.pass === true,
             status: typeof parsed.status === 'string' ? parsed.status : undefined,
-            timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : new Date(0).toISOString(),
+            timestamp,
+            workflow: typeof parsed.workflow === 'string' ? parsed.workflow : undefined,
             campaignId: ref.id,
             campaignStorageKey: ref.storageKey,
             campaignName: ref.name,
@@ -184,8 +256,25 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
             outcome: typeof parsed.outcome === 'string' ? parsed.outcome : undefined,
             artifactSummary: typeof parsed.artifactSummary === 'string' ? parsed.artifactSummary : undefined,
             reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+            workflowSatisfied: parsed.workflowSatisfied === true ? true : undefined,
+            terminalStudyComplete: parsed.terminalStudyComplete === true ? true : undefined,
+            modelSuccess: typeof parsed.modelSuccess === 'boolean' ? parsed.modelSuccess : undefined,
           };
-          const key = `${normalized.runId}::${normalized.iteration ?? 1}::${hasScore ? 'score' : 'phase'}`;
+          if (!normalized.terminalStudyComplete && normalized.gate === 'btc_transfer_multiphase_gate') {
+            try {
+              const evidence = JSON.parse(readFileSync(join(runsRoot(projectDir), normalized.runId, `verdict_${normalized.gate}.json`), 'utf-8'));
+              if (evidence?.study_complete === true
+                && evidence?.model_success === false
+                && evidence?.reason === 'study_complete_without_model_success') {
+                normalized.pass = true;
+                normalized.workflowSatisfied = true;
+                normalized.terminalStudyComplete = true;
+                normalized.modelSuccess = false;
+                normalized.outcome = 'study_complete_without_model_success';
+              }
+            } catch { /* optional historical evidence */ }
+          }
+          const key = `${normalized.runId}::${normalized.iteration ?? 1}::${hasScore ? 'score' : hasEnvelope ? kind : 'phase'}`;
           const previous = byRunIteration.get(key);
           if (!previous || normalized.timestamp >= previous.timestamp) {
             byRunIteration.set(key, normalized);
@@ -195,8 +284,6 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
         }
       }
     }
-  } catch { /* non-critical */
-    return [];
   }
   const entries = [...byRunIteration.values()];
   entries.sort((a, b) => {
@@ -240,23 +327,32 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
     upsert(campaign, state.runId, state.startedAt);
   }
 
-  try {
-    for (const file of readdirSync(campaignsRoot(projectDir)).filter((name) => name.endsWith('.jsonl'))) {
+  for (const root of campaignHistoryRoots(projectDir)) {
+    let files: string[];
+    try {
+      files = readdirSync(root).filter((name) => name.endsWith('.jsonl'));
+    } catch { /* non-critical */
+      continue;
+    }
+    for (const file of files) {
       const fileStem = file.replace(/\.jsonl$/, '');
-      const lines = readFileSync(join(campaignsRoot(projectDir), file), 'utf-8').split('\n').filter(Boolean);
+      let lines: string[];
+      try {
+        lines = readFileSync(join(root, file), 'utf-8').split('\n').filter(Boolean);
+      } catch { /* non-critical */
+        continue;
+      }
       for (const line of lines) {
         try {
-          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry>;
+          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry> & { ts?: unknown };
           const campaign = normalizeEntryCampaign(fileStem, parsed);
           if (!campaign || typeof parsed.runId !== 'string') continue;
-          upsert(campaign, parsed.runId, typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined, typeof parsed.score === 'number' ? parsed.score : undefined);
+          upsert(campaign, parsed.runId, campaignEntryTimestamp(parsed), typeof parsed.score === 'number' ? parsed.score : undefined);
         } catch { /* non-critical */
           // Ignore malformed lines.
         }
       }
     }
-  } catch { /* non-critical */
-    // No campaign history yet.
   }
 
   return [...summaries.values()]
@@ -357,5 +453,5 @@ export function campaignExists(projectDir: string, campaignId: string): boolean 
   const storageKey = resolveCampaignStorageKey({ campaignId });
   if (!storageKey) return false;
   if (listCampaigns(projectDir).some((campaign) => campaign.storageKey === storageKey)) return true;
-  return existsSync(join(campaignsRoot(projectDir), `${storageKey}.jsonl`));
+  return campaignHistoryRoots(projectDir).some((root) => existsSync(join(root, `${storageKey}.jsonl`)));
 }

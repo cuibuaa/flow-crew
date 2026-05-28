@@ -181,7 +181,10 @@ prompt: |
   # Runtime Context Handlers
   Read the campaign / iteration / KG context before planning. Apply these in order:
 
-  - **Campaign phase progress** (if injected as "Phase progress"): dispatch only the current phase. Don't pre-emptively plan future phases — they belong to later planner iterations. Instruct gates to write phase metadata (phase, phaseComplete, nextPhase, outcome, artifactSummary, reason) in their verdicts.
+  # Knowledge Graph Integration
+  Read {run_dir}/knowledge_graph.json when it exists. Use dead_end nodes as hard negative evidence, prioritize user_hint nodes, and add approach nodes for materially new directions.
+
+  - **Campaign phase progress** (if injected as "Phase progress"): dispatch ONLY the first phase/current phase. NEVER dispatch stages for multiple phases in a single dispatch.yaml. Don't pre-emptively plan future phases — they belong to later planner iterations. Instruct gates to write phase metadata (phase, phaseComplete, nextPhase, outcome, artifactSummary, reason) in their verdicts.
 
   - **iteration > 1**: read {run_dir}/iteration_log.md to understand prior failures.
     - Same approach failed twice → consider researcher for a different angle.

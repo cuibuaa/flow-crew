@@ -52,6 +52,12 @@ export class Supervisor {
   private byteOffsets = new Map<string, number>();
   private lastActionTime = 0;
   private assessmentCount = 0;
+  /** Consecutive failed assessments (null returns from assess()). After a
+   * threshold, the supervisor writes a visible `supervisor_degraded.json`
+   * signal instead of silently producing zero ticks (the Phase E failure mode,
+   * where a JSON-parse bug made the supervisor silently dead for a whole run). */
+  private consecutiveAssessFailures = 0;
+  private static readonly DEGRADED_AFTER_FAILURES = 3;
   private tickCount = 0;
   private actions: SupervisorAction[] = [];
   private stopped = false;
@@ -397,7 +403,29 @@ export class Supervisor {
     }
     const prompt = this.buildAssessmentPrompt(tails, state, runningStages, recentArtifacts) + extraContext;
     const assessment = await this.assess(prompt);
-    if (!assessment) return;
+    if (!assessment) {
+      // Track consecutive failures so a silently-broken supervisor (e.g. an
+      // adapter that keeps returning unparseable output) becomes observable
+      // instead of just emitting zero ticks.
+      this.consecutiveAssessFailures++;
+      if (this.consecutiveAssessFailures >= Supervisor.DEGRADED_AFTER_FAILURES) {
+        try {
+          writeFileSync(join(this.signalDir(), 'supervisor_degraded.json'), JSON.stringify({
+            runId: this.runId,
+            consecutiveFailures: this.consecutiveAssessFailures,
+            timestamp: new Date().toISOString(),
+            note: 'Supervisor assess() returned null repeatedly — it is NOT steering the run. Check adapter output / model availability.',
+          }, null, 2), 'utf-8');
+        } catch { /* non-critical */ }
+        log.warn({ runId: this.runId, consecutiveFailures: this.consecutiveAssessFailures }, 'Supervisor DEGRADED — repeated assessment failures, not steering the run');
+      }
+      return;
+    }
+    // Recovered: a successful assessment clears the degraded state.
+    if (this.consecutiveAssessFailures > 0) {
+      this.consecutiveAssessFailures = 0;
+      try { const p = join(this.signalDir(), 'supervisor_degraded.json'); if (existsSync(p)) unlinkSync(p); } catch { /* non-critical */ }
+    }
 
     this.assessmentCount++;
     this.iterationAssessmentCount++;

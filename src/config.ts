@@ -1,5 +1,6 @@
-import { readFileSync, existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, mkdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 // --- Types ---
@@ -48,17 +49,6 @@ const DEFAULT_PATHS: FlowCrewPaths = {
   docs: 'docs',
 };
 
-const FALLBACK_DEFAULTS: ProjectDefaults = {
-  timeout_ms: 300000,
-  max_iterations: 3,
-  gate_retry_loops: 1,
-  stage_technical_retries: 1,
-  model: 'default',
-  reasoning_effort: 'default',
-  adapter: 'claude',
-  paths: DEFAULT_PATHS,
-};
-
 const DEFAULT_SUPERVISOR: SupervisorConfig = {
   enabled: false,
   adapter: '',
@@ -83,45 +73,84 @@ const DEFAULT_SUPERVISOR: SupervisorConfig = {
 let _cache: ProjectDefaults | null = null;
 let _cacheMtime = 0;
 let _cachePath = '';
+let _sourceDefaultsRaw: Record<string, unknown> | null = null;
 
 function defaultsPath(projectDir?: string): string {
   return join(projectDir ?? process.cwd(), 'config', 'defaults.yaml');
 }
 
-function readRaw(projectDir?: string): Record<string, unknown> {
-  const p = defaultsPath(projectDir);
-  if (!existsSync(p)) return {};
-  try {
-    return parseYaml(readFileSync(p, 'utf-8')) as Record<string, unknown>;
-  } catch { /* expected - optional resource */
-    return {};
+function flowCrewDefaultsPath(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleDir, '..', 'config', 'defaults.yaml'),
+    join(process.cwd(), 'config', 'defaults.yaml'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
   }
+  throw new Error(`FlowCrew default config template not found. Expected one of: ${candidates.join(', ')}`);
+}
+
+function readYamlFile(path: string): Record<string, unknown> {
+  return parseYaml(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+}
+
+function sourceDefaultsRaw(): Record<string, unknown> {
+  if (_sourceDefaultsRaw) return _sourceDefaultsRaw;
+  _sourceDefaultsRaw = readYamlFile(flowCrewDefaultsPath());
+  return _sourceDefaultsRaw;
+}
+
+export function ensureProjectDefaultsFile(projectDir?: string): string {
+  const target = defaultsPath(projectDir);
+  if (existsSync(target)) return target;
+
+  const source = flowCrewDefaultsPath();
+  mkdirSync(dirname(target), { recursive: true });
+  if (resolve(source) !== resolve(target)) {
+    copyFileSync(source, target);
+  }
+  return target;
+}
+
+function readRaw(projectDir?: string): Record<string, unknown> {
+  return readYamlFile(ensureProjectDefaultsFile(projectDir));
+}
+
+function numberValue(raw: Record<string, unknown>, template: Record<string, unknown>, key: string): number {
+  const value = raw[key] ?? template[key];
+  if (typeof value !== 'number') throw new Error(`config/defaults.yaml missing numeric ${key}`);
+  return value;
+}
+
+function stringValue(raw: Record<string, unknown>, template: Record<string, unknown>, key: string): string {
+  const value = raw[key] ?? template[key];
+  if (typeof value !== 'string' || !value) throw new Error(`config/defaults.yaml missing string ${key}`);
+  return value;
 }
 
 // --- Public API: Project Defaults ---
 
 export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
-  const p = defaultsPath(projectDir);
-  try {
-    const mtime = statSync(p).mtimeMs;
-    if (_cache && mtime === _cacheMtime && p === _cachePath) return _cache;
-    _cacheMtime = mtime;
-    _cachePath = p;
-  } catch { /* expected - optional resource */
-    return FALLBACK_DEFAULTS;
-  }
+  const p = ensureProjectDefaultsFile(projectDir);
+  const mtime = statSync(p).mtimeMs;
+  if (_cache && mtime === _cacheMtime && p === _cachePath) return _cache;
+  _cacheMtime = mtime;
+  _cachePath = p;
 
   const raw = readRaw(projectDir);
+  const template = sourceDefaultsRaw();
   const rawPaths = raw.paths as Partial<FlowCrewPaths> | undefined;
+  const templatePaths = template.paths as Partial<FlowCrewPaths> | undefined;
   _cache = {
-    timeout_ms: typeof raw.default_timeout_ms === 'number' ? raw.default_timeout_ms : FALLBACK_DEFAULTS.timeout_ms,
-    max_iterations: typeof raw.default_max_iterations === 'number' ? raw.default_max_iterations : FALLBACK_DEFAULTS.max_iterations,
-    gate_retry_loops: typeof raw.default_gate_retry_loops === 'number' ? raw.default_gate_retry_loops : FALLBACK_DEFAULTS.gate_retry_loops,
-    stage_technical_retries: typeof raw.default_stage_technical_retries === 'number' ? raw.default_stage_technical_retries : FALLBACK_DEFAULTS.stage_technical_retries,
-    model: typeof raw.model === 'string' ? raw.model : FALLBACK_DEFAULTS.model,
-    reasoning_effort: typeof raw.reasoning_effort === 'string' ? raw.reasoning_effort : FALLBACK_DEFAULTS.reasoning_effort,
-    adapter: typeof raw.adapter === 'string' ? raw.adapter : FALLBACK_DEFAULTS.adapter,
-    paths: { ...DEFAULT_PATHS, ...rawPaths },
+    timeout_ms: numberValue(raw, template, 'default_timeout_ms'),
+    max_iterations: numberValue(raw, template, 'default_max_iterations'),
+    gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
+    stage_technical_retries: numberValue(raw, template, 'default_stage_technical_retries'),
+    model: stringValue(raw, template, 'model'),
+    reasoning_effort: stringValue(raw, template, 'reasoning_effort'),
+    adapter: stringValue(raw, template, 'adapter'),
+    paths: { ...DEFAULT_PATHS, ...templatePaths, ...rawPaths },
     campaign: typeof raw.campaign === 'string' && raw.campaign ? raw.campaign : undefined,
   };
   return _cache;
@@ -180,4 +209,5 @@ export function resetConfigCache(): void {
   _cache = null;
   _cacheMtime = 0;
   _cachePath = '';
+  _sourceDefaultsRaw = null;
 }

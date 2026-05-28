@@ -1,29 +1,28 @@
 import Fastify from "fastify";
-import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, unlinkSync, renameSync, openSync, readSync, closeSync } from "node:fs";
-import { join, extname } from "node:path";
+import { join, extname, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot } from "./store.js";
+import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot, extractTaskTitle } from "./store.js";
 import type { StoreState } from "./store.js";
-import { deleteRunIndex, readRunIndexRecordsByCampaign } from './run-index.js';
+import { deleteRunIndex } from './run-index.js';
 import {
-  collapseEntriesForHealth,
   listCampaigns,
   nextCampaignSeq,
   readCampaignEntries,
   resolveCampaignSelection,
-  resolveCampaignStorageKey,
-  summarizeCampaignPhaseProgress,
 } from "./campaigns.js";
-import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema, loadBasePrompt, applyBasePrompt } from "./scheduler.js";
+import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
 import type { StageConfig } from "./scheduler.js";
 import type { AgentConfig, Adapter } from "./adapters/base.js";
 import { readAttemptSummaryRefreshState } from "./run-events.js";
 import { readKG, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
 import { readTraceEvents, readAllTraceEvents, summarizeTrace } from './trace.js';
+import { appendPendingReview, consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
+import { getEdges as getCrossCampaignEdges, getNodes as getCrossCampaignNodes } from './cross-campaign-kg.js';
 import { z } from "zod";
 import pino from "pino";
 import type { KGNodeType, KGEdgeType } from './knowledge-graph.js';
@@ -384,131 +383,6 @@ function loadStageRoles(projectDir: string, runId: string): Record<string, { rol
   }
 }
 
-export function buildCampaignContext(projectDir: string, campaignId: string, currentRunId: string, campaignDisplayName?: string): string {
-  const runsDir = runsRoot();
-  const targetCampaignStorageKey = resolveCampaignStorageKey({ campaignId }) ?? campaignId;
-
-  const entries = readCampaignEntries(projectDir, targetCampaignStorageKey);
-  const campaignName = campaignDisplayName ?? entries[0]?.campaignName ?? campaignId;
-
-  // Find sibling runs
-  interface SiblingRun { runId: string; taskDescription?: string; startedAt?: string; briefPath: string; currentIteration?: number; campaignSeq?: number }
-  const siblings: SiblingRun[] = [];
-  const indexedSiblings = readRunIndexRecordsByCampaign(projectDir, targetCampaignStorageKey);
-  if (indexedSiblings) {
-    for (const rState of indexedSiblings) {
-      if (rState.runId === currentRunId) continue;
-      siblings.push({
-        runId: rState.runId,
-        taskDescription: rState.taskDescription,
-        startedAt: rState.startedAt,
-        briefPath: join(runsDir, rState.runId, 'task_brief.md'),
-        currentIteration: rState.campaignIteration,
-        campaignSeq: rState.campaignSeq,
-      });
-    }
-  } else {
-    try {
-      for (const dir of readdirSync(runsDir)) {
-        if (dir === currentRunId) continue;
-        const runJsonPath = join(runsDir, dir, 'run.json');
-        try {
-          const rState = JSON.parse(readFileSync(runJsonPath, 'utf-8'));
-          const siblingStorageKey = resolveCampaignStorageKey({
-            campaignId: rState.campaignId,
-            campaignStorageKey: rState.campaignStorageKey,
-            campaignName: rState.campaignName,
-          });
-          if (siblingStorageKey === targetCampaignStorageKey) {
-            siblings.push({
-              runId: dir,
-              taskDescription: rState.taskDescription,
-              startedAt: rState.startedAt,
-              briefPath: join(runsDir, dir, 'task_brief.md'),
-              currentIteration: rState.currentIteration,
-              campaignSeq: rState.campaignSeq,
-            });
-          }
-        } catch { /* skip */ }
-      }
-    } catch { /* no runs dir */ }
-  }
-
-  if (entries.length === 0 && siblings.length === 0) return '';
-
-  let ctx = `# Campaign Context\n\nCampaign: ${campaignName}\n\nThis task belongs to a campaign. Use the information below to answer questions about previous explorations — do NOT search the filesystem for this information.\n\n`;
-
-  const scoredEntries = collapseEntriesForHealth(entries);
-  const phaseProgress = summarizeCampaignPhaseProgress(entries);
-
-  // Score history table
-  if (scoredEntries.length > 0) {
-    ctx += '## Score History\n\n| # | Run | Score | Metric | Gate | Pass |\n|---|-----|-------|--------|------|------|\n';
-    for (const e of scoredEntries) {
-      ctx += `| ${e.seq ?? '-'} | ${e.runId?.slice(0, 8) ?? '-'} | ${e.score ?? '-'} | ${e.metric ?? '-'} | ${e.gate ?? '-'} | ${e.pass ? '✅' : '❌'} |\n`;
-    }
-    ctx += '\n';
-  }
-
-  if (phaseProgress.entries.length > 0) {
-    ctx += '## Phase Progress\n\n';
-    ctx += `- Completed phases: ${phaseProgress.completedPhases.length > 0 ? phaseProgress.completedPhases.join(', ') : 'none'}\n`;
-    ctx += `- Current recommended phase: ${phaseProgress.currentPhase ?? 'not specified'}\n`;
-    if (phaseProgress.latest) {
-      ctx += `- Latest: run ${phaseProgress.latest.runId.slice(0, 8)}, iteration ${phaseProgress.latest.iteration ?? 1}, phase ${phaseProgress.latest.phase ?? '-'}, complete ${phaseProgress.latest.phaseComplete === true ? 'true' : 'false'}, next ${phaseProgress.latest.nextPhase ?? '-'}, outcome ${phaseProgress.latest.outcome ?? '-'}\n`;
-      if (phaseProgress.latest.artifactSummary) ctx += `- Artifact summary: ${phaseProgress.latest.artifactSummary}\n`;
-      if (phaseProgress.latest.reason) ctx += `- Reason: ${phaseProgress.latest.reason}\n`;
-    }
-    ctx += '\nPlanner instruction: for multi-phase campaigns, continue from the current recommended phase and avoid dispatching future phases in the same iteration unless explicitly requested.\n\n';
-  }
-
-  // Sort siblings by startedAt descending
-  siblings.sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
-
-  // Recent 2-3: full task brief; older: one-line summary
-  for (let i = 0; i < siblings.length; i++) {
-    const s = siblings[i];
-    if (i < 3) {
-      try {
-        const brief = readFileSync(s.briefPath, 'utf-8');
-        ctx += `## Run ${s.runId.slice(0, 8)} — Seq ${s.campaignSeq ?? '?'} / Iteration ${s.currentIteration ?? 1}\n\n${brief}\n\n`;
-      } catch { /* non-critical */
-        ctx += `- Run ${s.runId.slice(0, 8)}: ${s.taskDescription ?? 'no description'}\n`;
-      }
-    } else {
-      ctx += `- Run ${s.runId.slice(0, 8)}: ${s.taskDescription ?? 'no description'}\n`;
-    }
-  }
-
-  return ctx;
-}
-
-export function buildCampaignContextInjection(campaignContext: string): string {
-  return [
-    'System-provided campaign context for this discussion session.',
-    'Use this background context when answering campaign questions. Do not generate a plan unless the user explicitly asks for plan generation.',
-    '',
-    campaignContext.trim(),
-  ].filter(Boolean).join('\n\n');
-}
-
-export function withCampaignContextPrompt(role: AgentConfig, campaignContext: string): AgentConfig {
-  if (!campaignContext.trim()) return role;
-  return {
-    ...role,
-    prompt: [
-      role.prompt,
-      buildCampaignContextInjection(campaignContext),
-    ].filter(Boolean).join('\n\n'),
-  };
-}
-
-export function injectInitialTuiMessage(session: import('./adapters/base.js').InteractiveSession, message: string): void {
-  if (!message.trim()) return;
-  session.write(`\x1b[200~${message}\x1b[201~`);
-  session.write('\r');
-}
-
 const _bestScoreCache = new Map<string, { mtime: number; bestScore?: number; metricName?: string }>();
 
 function readBestScore(projectDir: string, runId: string): { bestScore?: number; metricName?: string } {
@@ -621,7 +495,6 @@ interface TaskShape {
   tokens: number;
   bestScore?: number;
   metricName?: string;
-  discussion: unknown[];
   plan: unknown[];
   dispatchedStages?: unknown[];
   currentIteration: number;
@@ -643,6 +516,39 @@ interface TaskShape {
   parentTaskId?: string;
   budget?: StoreState['budget'];
   attemptSummaryRefresh?: ReturnType<typeof readAttemptSummaryRefreshState>;
+}
+
+type MetricFormat = 'currency_usd' | 'rating_0_to_10' | 'pct' | 'count' | 'duration_min' | 'raw';
+
+interface WorkspaceMetric {
+  name: string;
+  value: number | null;
+  format: MetricFormat;
+  target?: { min: number; max?: number } | null;
+  sublabel?: string;
+}
+
+interface WorkspaceCampaign {
+  id: string;
+  name: string;
+  status: string;
+  badges: { text: string; kind: string }[];
+  metric: WorkspaceMetric | null;
+  iterations: { label: string; value: number; verdict: string }[] | null;
+  phases: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string }[] | null;
+  brief_revisions: { version: string; reason: string; shipped?: boolean }[] | null;
+  runs: { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[];
+  kg_node_count: number;
+  iterations_done?: number;
+  iterationCount?: number;
+  latest_outcome?: string | null;
+  latestOutcome?: string | null;
+  started_at?: string;
+  projectDir?: string | null;
+  briefDir?: string | null;
+  goal?: unknown;
+  budget?: unknown;
+  config?: unknown;
 }
 
 function normalizeCampaignTriggers(value: unknown): StoreState['campaignTriggers'] | undefined {
@@ -680,18 +586,6 @@ function readExecutionDefaults(configDir?: string): { timeoutMs: number; maxIter
   }
 }
 
-function extractTaskTitle(desc?: string): string {
-  if (!desc) return '';
-  // Find first non-empty line, strip markdown heading markers, truncate
-  const lines = desc.split('\n');
-  for (const line of lines) {
-    const trimmed = line.replace(/^#+\s*/, '').trim();
-    if (trimmed && trimmed.length > 2) {
-      return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
-    }
-  }
-  return desc.slice(0, 80);
-}
 
 function stateToTask(state: StoreState, projectDir: string, configDir?: string, opts?: { includeIterationLog?: boolean }): TaskShape {
   const defaults = readExecutionDefaults(configDir);
@@ -743,7 +637,6 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     tokens: totalTokens,
     bestScore,
     metricName,
-    discussion: state.discussion ?? [],
     plan: state.plan ?? [],
     currentIteration: state.currentIteration ?? 1,
     maxIterations: state.maxIterations ?? defaults.maxIterations,
@@ -775,6 +668,615 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
 
 function isSafeId(id: string): boolean {
   return !id.includes('..') && !id.includes('/') && !id.includes('\\');
+}
+
+function isSafeCampaignVersion(version: string): boolean {
+  return /^v\d+$/.test(version);
+}
+
+function campaignFsRoot(): string {
+  return join(homedir(), '.fc', 'campaigns');
+}
+
+function readJsonFile(filePath: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  } catch { /* non-critical */
+    return null;
+  }
+}
+
+function readJsonlFile(filePath: string): unknown[] {
+  if (!existsSync(filePath)) return [];
+  const out: unknown[] = [];
+  for (const line of readFileSync(filePath, 'utf-8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try { out.push(JSON.parse(trimmed) as unknown); } catch { /* skip malformed audit lines */ }
+  }
+  return out;
+}
+
+function formatDuration(startIso?: string, endIso?: string): string {
+  if (!startIso) return '';
+  const start = Date.parse(startIso);
+  const end = endIso ? Date.parse(endIso) : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '';
+  const minutes = Math.max(0, Math.floor((end - start) / 60000));
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+function deriveMetricFormat(metricName?: string, score?: number | null, _threshold?: number | null): MetricFormat {
+  const name = (metricName ?? '').toLowerCase();
+  if ((name.includes('audience') || name.includes('rating') || name.includes('gate'))
+    && score != null && score >= -1 && score <= 10) {
+    return 'rating_0_to_10';
+  }
+  if (name.includes('pct') || name.includes('percent')) return 'pct';
+  if (name.includes('count') || name.includes('complete') || name.endsWith('_n')) return 'count';
+  if (name.includes('duration') || name.includes('minute') || name.endsWith('_min')) return 'duration_min';
+  if (name.includes('pnl') || name.includes('usd') || name.includes('oos')) return 'currency_usd';
+  if (score != null && Number.isFinite(score)) {
+    if (score > 100) return 'currency_usd';
+    if (score >= 0 && score <= 10) return 'rating_0_to_10';
+  }
+  return 'raw';
+}
+
+function numericValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function readRunStateSafe(projectDir: string, runId: string): StoreState | null {
+  try {
+    return readRunState(projectDir, runId);
+  } catch {
+    return null;
+  }
+}
+
+function campaignStorageAliases(id: string): Set<string> {
+  const aliases = new Set<string>([id]);
+  const normalized = id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (normalized) aliases.add(normalized);
+  return aliases;
+}
+
+function runMatchesCampaign(state: StoreState, id: string): boolean {
+  const aliases = campaignStorageAliases(id);
+  return [state.campaignId, state.campaignStorageKey, state.campaignName]
+    .filter((value): value is string => typeof value === 'string')
+    .some((value) => aliases.has(value) || aliases.has(value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')));
+}
+
+function summarizeRunOutcome(status?: string): string {
+  if (status === 'complete' || status === 'shipped') return 'shipped';
+  if (status === 'running' || status === 'awaiting_approval' || status === 'pending') return status;
+  return status || 'unknown';
+}
+
+function runSummaryFromState(state: StoreState, metric?: number | null): { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string } {
+  const best = readBestScore(state.projectDir, state.runId).bestScore;
+  return {
+    id: state.runId,
+    iter: state.campaignIteration != null || state.currentIteration != null ? `iter ${state.campaignIteration ?? state.currentIteration}` : '',
+    metric: metric ?? best ?? null,
+    summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 90),
+    duration: formatDuration(state.startedAt, state.completedAt),
+    outcome: summarizeRunOutcome(state.status),
+  };
+}
+
+function readCampaignRuns(projectDir: string, id: string): { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[] {
+  const runs: { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[] = [];
+  for (const runId of listRuns(projectDir).reverse()) {
+    const state = readRunStateSafe(projectDir, runId);
+    if (!state || !runMatchesCampaign(state, id)) continue;
+    runs.push(runSummaryFromState(state));
+    if (runs.length >= 12) break;
+  }
+  return runs;
+}
+
+function readStandaloneRuns(projectDir: string): { id: string; projectDir: string; summary: string; duration: string; outcome: string }[] {
+  const out: { id: string; projectDir: string; summary: string; duration: string; outcome: string }[] = [];
+  for (const runId of listRuns(projectDir).reverse()) {
+    const state = readRunStateSafe(projectDir, runId);
+    if (!state) continue;
+    if (state.campaignId || state.campaignStorageKey || state.campaignName) continue;
+    out.push({
+      id: state.runId,
+      projectDir: state.projectDir.split(/[\\/]/).filter(Boolean).at(-1) ?? state.projectDir,
+      summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 80),
+      duration: formatDuration(state.startedAt, state.completedAt),
+      outcome: summarizeRunOutcome(state.status),
+    });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+function stageArtifactCount(projectDir: string, runId: string, stageId: string): number {
+  const dir = join(runsRoot(), runId, 'stages', stageId);
+  try {
+    return readdirSync(dir).filter((name) => name !== 'input.md' && name !== 'output.md' && name !== 'status.json').length;
+  } catch {
+    return 0;
+  }
+}
+
+function readRunEvents(runId: string): { ts: string; event: string; stage?: string; message?: string }[] {
+  const events: { ts: string; event: string; stage?: string; message?: string }[] = [];
+  for (const entry of readJsonlFile(join(runsRoot(), runId, 'events.jsonl'))) {
+    if (!entry || typeof entry !== 'object') continue;
+    const row = entry as Record<string, unknown>;
+    const ts = stringValue(row.ts) ?? stringValue(row.timestamp) ?? '';
+    const event = stringValue(row.event) ?? stringValue(row.type) ?? 'event';
+    const normalized: { ts: string; event: string; stage?: string; message?: string } = { ts, event };
+    const stage = stringValue(row.stage) ?? stringValue(row.stageId);
+    const message = stringValue(row.message) ?? stringValue(row.reason) ?? stringValue(row.status);
+    if (stage !== undefined) normalized.stage = stage;
+    if (message !== undefined) normalized.message = message;
+    events.push(normalized);
+  }
+  return events.slice(-200);
+}
+
+function readStageOutputPreviews(runId: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const stagesDir = join(runsRoot(), runId, 'stages');
+  try {
+    for (const stageId of readdirSync(stagesDir)) {
+      const outputPath = join(stagesDir, stageId, 'output.md');
+      if (!existsSync(outputPath)) continue;
+      out[stageId] = readFileSync(outputPath, 'utf-8').slice(0, 2048);
+    }
+  } catch {
+    // Stage output previews are optional.
+  }
+  return out;
+}
+
+function stateToRunDetail(state: StoreState, projectDir: string) {
+  const roles = loadStageRoles(projectDir, state.runId);
+  const dispatched = new Map<string, Record<string, unknown>>();
+  for (const stage of Array.isArray(state.dispatchedStages) ? state.dispatchedStages : []) {
+    if (stage && typeof stage === 'object' && typeof (stage as Record<string, unknown>).id === 'string') {
+      dispatched.set((stage as Record<string, unknown>).id as string, stage as Record<string, unknown>);
+    }
+  }
+  const stageIds = new Set<string>([
+    ...Object.keys(state.stages),
+    ...Object.keys(roles),
+    ...dispatched.keys(),
+  ]);
+  const stages = [...stageIds].map((id) => {
+    const status = state.stages[id];
+    const dyn = dispatched.get(id);
+    const depends = roles[id]?.dependsOn
+      ?? (Array.isArray(dyn?.depends_on) ? dyn.depends_on.filter((v): v is string => typeof v === 'string') : []);
+    const retryTo = Array.isArray(dyn?.retry_to) ? dyn.retry_to.filter((v): v is string => typeof v === 'string') : [];
+    return {
+      id,
+      role: roles[id]?.role ?? stringValue(dyn?.role) ?? '',
+      depends_on: depends,
+      dependsOn: depends,
+      is_gate: roles[id]?.isGate ?? dyn?.is_gate === true,
+      retry_to: retryTo,
+      status: status?.status ?? 'pending',
+      duration_ms: status?.duration_ms,
+      retries: status?.retries ?? 0,
+      artifact_count: status?.artifacts?.length ?? stageArtifactCount(projectDir, state.runId, id),
+    };
+  });
+  const kg = readKG(projectDir, state.runId);
+  return {
+    runId: state.runId,
+    workflowName: state.workflowName,
+    status: state.status,
+    startedAt: state.startedAt,
+    projectDir: state.projectDir,
+    iteration: state.currentIteration ?? state.campaignIteration,
+    maxIterations: state.maxIterations,
+    completedAt: state.completedAt,
+    duration_min: state.startedAt ? Math.floor((Date.parse(state.completedAt ?? new Date().toISOString()) - Date.parse(state.startedAt)) / 60000) : null,
+    taskDescriptionPreview: (state.taskDescription ?? '').slice(0, 300),
+    campaignId: state.campaignId ?? state.campaignStorageKey,
+    stages,
+    kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
+    events: readRunEvents(state.runId),
+    stage_outputs: readStageOutputPreviews(state.runId),
+  };
+}
+
+function adaptCrossCampaignNode(node: ReturnType<typeof getCrossCampaignNodes>[number]) {
+  const metadata = node.metadata ?? {};
+  const type = node.type;
+  const countsTotal = metadata.counts && typeof metadata.counts === 'object'
+    ? Object.values(metadata.counts).reduce<number>((sum, value) => sum + (typeof value === 'number' ? value : 0), 0)
+    : undefined;
+  const label = type === 'symptom'
+    ? (countsTotal !== undefined ? `x${countsTotal}` : stringValue(metadata.kind) ?? 'symptom')
+    : type === 'diagnosis'
+      ? (stringValue(metadata.rule_signal)?.split('.').at(-1)?.slice(0, 12) ?? 'diagnosis')
+      : type === 'patch'
+        ? `${metadata.brief_version_before ?? '?'}->${metadata.brief_version_after ?? '?'}`
+        : stringValue(metadata.kind)?.slice(0, 10) ?? type;
+  return {
+    id: node.id,
+    type,
+    label,
+    meta: JSON.stringify(metadata).slice(0, 120),
+    campaign: node.campaignId,
+    campaignId: node.campaignId,
+    metadata,
+  };
+}
+
+function adaptCrossCampaignEdge(edge: ReturnType<typeof getCrossCampaignEdges>[number]) {
+  const relToKind: Record<string, string> = {
+    caused_by: 'causal',
+    fixed_by: 'causal',
+    resulted_in: 'causal',
+    related_to: 'similarity',
+  };
+  return {
+    source: edge.from,
+    target: edge.to,
+    from: edge.from,
+    to: edge.to,
+    kind: relToKind[edge.relation] ?? 'causal',
+    relation: edge.relation,
+    weight: edge.weight,
+  };
+}
+
+function campaignDirOr404(id: string): string | null {
+  if (!isSafeId(id)) return null;
+  const dir = join(campaignFsRoot(), id);
+  try {
+    return statSync(dir).isDirectory() ? dir : null;
+  } catch { /* not found */
+    return null;
+  }
+}
+
+function getStringAt(obj: unknown, path: string[]): string | undefined {
+  let cursor: unknown = obj;
+  for (const key of path) {
+    if (!cursor || typeof cursor !== 'object' || !(key in cursor)) return undefined;
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  return typeof cursor === 'string' && cursor.trim() ? cursor : undefined;
+}
+
+function getNumberAt(obj: unknown, path: string[]): number | undefined {
+  let cursor: unknown = obj;
+  for (const key of path) {
+    if (!cursor || typeof cursor !== 'object' || !(key in cursor)) return undefined;
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  return typeof cursor === 'number' && Number.isFinite(cursor) ? cursor : undefined;
+}
+
+function resolveBriefDir(state: Record<string, unknown> | null): string | undefined {
+  const briefDir = getStringAt(state, ['briefDir'])
+    ?? getStringAt(state, ['brief_dir'])
+    ?? getStringAt(state, ['config', 'briefDir'])
+    ?? getStringAt(state, ['config', 'brief_dir'])
+    ?? getStringAt(state, ['campaign', 'briefDir'])
+    ?? getStringAt(state, ['campaign', 'brief_dir']);
+  if (briefDir) return briefDir;
+  const briefPath = getStringAt(state, ['briefPath'])
+    ?? getStringAt(state, ['brief_path'])
+    ?? getStringAt(state, ['config', 'briefPath'])
+    ?? getStringAt(state, ['config', 'brief_path']);
+  return briefPath ? dirname(briefPath) : undefined;
+}
+
+function latestIterationOutcome(iterations: unknown[]): string | undefined {
+  for (let i = iterations.length - 1; i >= 0; i--) {
+    const entry = iterations[i];
+    if (entry && typeof entry === 'object') {
+      const outcome = (entry as Record<string, unknown>).outcome;
+      if (typeof outcome === 'string') return outcome;
+    }
+  }
+  return undefined;
+}
+
+function campaignSummary(id: string, dir: string): WorkspaceCampaign {
+  const state = readJsonFile(join(dir, 'state.json'));
+  const iterations = readJsonlFile(join(dir, 'iteration_log.jsonl'));
+  const stat = statSync(dir);
+  const latest = iterations.at(-1) as Record<string, unknown> | undefined;
+  let status = getStringAt(state, ['status'])
+    ?? getStringAt(state, ['state'])
+    ?? latestIterationOutcome(iterations)
+    ?? 'unknown';
+  // STALE DETECTION: if status='running' but neither state.json nor
+  // iteration_log.jsonl has been touched in >30min, the daemon likely
+  // exited without writing terminal status (framework bug or crash).
+  // Override to 'stale' so the dashboard stops showing it as RUNNING.
+  if (status === 'running') {
+    const STALE_MS = 30 * 60 * 1000;
+    let lastMtime = 0;
+    try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'state.json')).mtimeMs); } catch { /* ignore */ }
+    try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'iteration_log.jsonl')).mtimeMs); } catch { /* ignore */ }
+    if (lastMtime > 0 && Date.now() - lastMtime > STALE_MS) status = 'stale';
+  }
+  const latestScore = numericValue(latest?.score);
+  const latestMetric = stringValue(latest?.metric)
+    ?? getStringAt(state, ['goal', 'metric'])
+    ?? getStringAt(state, ['config', 'goal', 'metric']);
+  const threshold = numericValue(latest?.threshold)
+    ?? getNumberAt(state, ['goal', 'threshold'])
+    ?? getNumberAt(state, ['threshold']);
+  const formattedIterations = iterations
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const row = entry as Record<string, unknown>;
+      const value = numericValue(row.score) ?? numericValue(row.value);
+      if (value == null) return null;
+      const iter = row.iter ?? row.iteration ?? index + 1;
+      const passed = row.pass === true || row.outcome === 'valid_ship' || row.outcome === 'shipped';
+      return {
+        label: `iter ${iter}`,
+        value,
+        verdict: passed ? 'shipped' : threshold != null && value >= threshold ? 'unstable' : 'interim',
+      };
+    })
+    .filter((entry): entry is { label: string; value: number; verdict: string } => entry !== null);
+  const revisionsRaw = readJsonlFile(join(resolveBriefDir(state) ?? '', 'revisions.jsonl'));
+  const briefRevisions = revisionsRaw
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const row = entry as Record<string, unknown>;
+      const to = stringValue(row.to_version) ?? stringValue(row.version) ?? `v${index + 2}`;
+      const reason = stringValue(row.rule) ?? stringValue(row.reason) ?? (row.patch ? JSON.stringify(row.patch).slice(0, 120) : 'revision');
+      return { version: to, reason };
+    })
+    .filter((entry): entry is { version: string; reason: string } => entry !== null);
+  const phaseEntries: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string }[] = [];
+  for (const entry of iterations) {
+    if (!entry || typeof entry !== 'object') continue;
+    const row = entry as Record<string, unknown>;
+    const phase = stringValue(row.phase) ?? stringValue(row.nextPhase);
+    if (!phase) continue;
+    const phaseEntry: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string } = {
+      name: phase,
+      commit_chain: Array.isArray(row.commit_chain) ? row.commit_chain.filter((v): v is string => typeof v === 'string') : [],
+    };
+    const phaseStatus = row.phaseComplete === true ? 'complete' : stringValue(row.outcome) ?? stringValue(row.status);
+    const elapsed = numericValue(row.elapsed_min);
+    const attempt = numericValue(row.iteration) ?? numericValue(row.iter);
+    const commit = stringValue(row.completing_commit);
+    const notes = stringValue(row.reason) ?? stringValue(row.artifactSummary);
+    if (phaseStatus !== undefined) phaseEntry.status = phaseStatus;
+    if (elapsed !== undefined) phaseEntry.elapsed_min = elapsed;
+    if (attempt !== undefined) phaseEntry.attempt = attempt;
+    if (commit !== undefined) phaseEntry.commit = commit;
+    if (notes !== undefined) phaseEntry.notes = notes;
+    phaseEntries.push(phaseEntry);
+  }
+  const kgNodeCount = getCrossCampaignNodes({ campaignId: id }).length;
+  const latestOutcome = latestIterationOutcome(iterations) ?? null;
+  const metric = latestMetric && latestScore != null
+    ? {
+      name: latestMetric,
+      value: latestScore,
+      format: deriveMetricFormat(latestMetric, latestScore, threshold),
+      target: threshold != null ? { min: threshold } : null,
+      sublabel: threshold != null ? `threshold ${threshold}` : undefined,
+    }
+    : null;
+  return {
+    id,
+    name: getStringAt(state, ['name']) ?? id,
+    status,
+    badges: [
+      { text: `${iterations.length} runs`, kind: 'default' },
+      status === 'running' ? { text: 'RUNNING', kind: 'accent' } : null,
+      status === 'shipped' || status === 'valid_ship' ? { text: 'SHIPPED', kind: 'success' } : null,
+    ].filter((badge): badge is { text: string; kind: string } => badge !== null),
+    metric,
+    iterations: formattedIterations.length ? formattedIterations : null,
+    phases: phaseEntries.length ? phaseEntries : null,
+    brief_revisions: briefRevisions.length ? briefRevisions : null,
+    runs: [],
+    kg_node_count: kgNodeCount,
+    iterations_done: iterations.length,
+    iterationCount: iterations.length,
+    started_at: getStringAt(state, ['started_at']) ?? getStringAt(state, ['startedAt']) ?? stat.birthtime.toISOString(),
+    latest_outcome: latestOutcome,
+    latestOutcome,
+    projectDir: getStringAt(state, ['projectDir']) ?? getStringAt(state, ['project_dir']) ?? getStringAt(state, ['config', 'projectDir']) ?? null,
+    briefDir: resolveBriefDir(state) ?? null,
+    goal: (state?.goal ?? (state?.config as Record<string, unknown> | undefined)?.goal ?? null) as unknown,
+    budget: state?.budget ?? (state?.config as Record<string, unknown> | undefined)?.budget ?? {
+      max_iters: getNumberAt(state, ['max_iters']) ?? getNumberAt(state, ['maxIterations']) ?? null,
+    },
+    config: state,
+  };
+}
+
+function campaignFromHistory(projectDir: string, id: string, name?: string): WorkspaceCampaign | null {
+  const entries = readCampaignEntries(projectDir, id);
+  const runs = readCampaignRuns(projectDir, id);
+  if (!entries.length && !runs.length) return null;
+  const latest = entries.at(-1);
+  const scoreEntries = entries.filter((entry) => typeof entry.score === 'number');
+  const latestScore = [...scoreEntries].at(-1);
+  const threshold = undefined;
+  const metric = latestScore?.metric && latestScore.score != null
+    ? {
+      name: latestScore.metric,
+      value: latestScore.score,
+      format: deriveMetricFormat(latestScore.metric, latestScore.score, threshold),
+      target: null,
+      sublabel: undefined,
+    }
+    : null;
+  const iterations = scoreEntries.map((entry) => ({
+    label: `r${entry.seq} i${entry.iteration ?? 1}`,
+    value: entry.score as number,
+    verdict: entry.pass ? 'shipped' : 'interim',
+  }));
+  const phases = entries
+    .filter((entry) => entry.phase || entry.nextPhase || entry.outcome)
+    .map((entry) => ({
+      name: entry.phase ?? entry.nextPhase ?? `seq ${entry.seq}`,
+      status: entry.phaseComplete ? 'complete' : entry.status ?? entry.outcome,
+      elapsed_min: undefined,
+      attempt: entry.iteration,
+      commit: undefined,
+      commit_chain: [],
+      notes: entry.reason ?? entry.artifactSummary,
+    }));
+  // Stale-detect "running" outcome: if last iteration entry is >30min old,
+  // the daemon likely exited without terminal status (framework bug).
+  let rawStatus = entries.some((entry) => entry.pass) ? 'shipped' : runs.some((run) => run.outcome === 'running') ? 'running' : latest?.status ?? 'idle';
+  if (rawStatus === 'running') {
+    const STALE_MS = 30 * 60 * 1000;
+    const lastActivity = latest?.timestamp ? Date.parse(latest.timestamp) || 0 : 0;
+    if (lastActivity > 0 && Date.now() - lastActivity > STALE_MS) rawStatus = 'stale';
+  }
+  const status = rawStatus;
+  return {
+    id,
+    name: name ?? latest?.campaignName ?? id,
+    status,
+    badges: [
+      { text: `${runs.length || entries.length} runs`, kind: 'default' },
+      status === 'shipped' ? { text: 'SHIPPED', kind: 'success' } : null,
+    ].filter((badge): badge is { text: string; kind: string } => badge !== null),
+    metric,
+    iterations: iterations.length ? iterations : null,
+    phases: phases.length ? phases : null,
+    brief_revisions: null,
+    runs,
+    kg_node_count: getCrossCampaignNodes({ campaignId: id }).length,
+    iterations_done: entries.length,
+    iterationCount: entries.length,
+    latest_outcome: latest?.outcome ?? null,
+    latestOutcome: latest?.outcome ?? null,
+    started_at: latest?.timestamp,
+    projectDir: projectDir,
+    briefDir: null,
+    goal: null,
+    budget: null,
+    config: null,
+  };
+}
+
+function listWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
+  const campaigns = new Map<string, WorkspaceCampaign>();
+  try {
+    for (const id of readdirSync(campaignFsRoot())
+      .filter((id) => isSafeId(id))
+    ) {
+      const dir = join(campaignFsRoot(), id);
+      try {
+        if (!statSync(dir).isDirectory()) continue;
+        const campaign = campaignSummary(id, dir);
+        campaign.runs = readCampaignRuns(projectDir, id);
+        campaigns.set(id, campaign);
+      } catch { /* skip */ }
+    }
+  } catch { /* no campaign root */
+    // Optional global campaign directory may not exist.
+  }
+  for (const summary of listCampaigns(projectDir)) {
+    if (campaigns.has(summary.id)) continue;
+    const campaign = campaignFromHistory(projectDir, summary.id, summary.name);
+    if (campaign) campaigns.set(summary.id, campaign);
+  }
+  return [...campaigns.values()].sort((a, b) => (b.started_at ?? '').localeCompare(a.started_at ?? ''));
+}
+
+function getWorkspaceCampaign(projectDir: string, id: string): WorkspaceCampaign | null {
+  const dir = campaignDirOr404(id);
+  if (dir) {
+    const campaign = campaignSummary(id, dir);
+    campaign.runs = readCampaignRuns(projectDir, id);
+    return campaign;
+  }
+  return campaignFromHistory(projectDir, id);
+}
+
+function listM3Campaigns(projectDir?: string) {
+  return projectDir ? listWorkspaceCampaigns(projectDir) : [];
+}
+
+function countBy(items: string[]): { key: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1);
+  return Array.from(counts, ([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
+    .slice(0, 10);
+}
+
+function crossCampaignSummary() {
+  const nodes = getCrossCampaignNodes();
+  const edges = getCrossCampaignEdges();
+  const symptomLabels = nodes
+    .filter((node) => node.type === 'symptom')
+    .map((node) => {
+      const topCount = node.metadata?.counts && typeof node.metadata.counts === 'object'
+        ? Object.entries(node.metadata.counts as Record<string, unknown>)
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+          .sort((a, b) => b[1] - a[1])[0]?.[0]
+        : undefined;
+      return [node.metadata?.kind, topCount].filter(Boolean).join(':') || 'unknown';
+    });
+  const patchLabels = nodes
+    .filter((node) => node.type === 'patch')
+    .map((node) => [node.metadata?.section, node.metadata?.op].filter(Boolean).join(':') || 'unknown');
+  return {
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+    top_symptoms: countBy(symptomLabels),
+    top_patches: countBy(patchLabels),
+  };
+}
+
+function readBriefFileForCampaign(dir: string, version: string): string | null {
+  if (!isSafeCampaignVersion(version)) return null;
+  const state = readJsonFile(join(dir, 'state.json'));
+  const briefDir = resolveBriefDir(state);
+  if (!briefDir) return null;
+  const filePath = join(briefDir, `${version}.md`);
+  try { return readFileSync(filePath, 'utf-8'); } catch { return null; }
+}
+
+function unifiedDiff(fromName: string, fromText: string, toName: string, toText: string): string {
+  const a = fromText.split('\n');
+  const b = toText.split('\n');
+  const dp = Array.from({ length: a.length + 1 }, () => Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const lines = [`--- ${fromName}`, `+++ ${toName}`, '@@ -1 +1 @@'];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      lines.push(` ${a[i++]}`);
+      j++;
+    } else if (j < b.length && (i === a.length || dp[i][j + 1] >= dp[i + 1][j])) {
+      lines.push(`+${b[j++]}`);
+    } else if (i < a.length) {
+      lines.push(`-${a[i++]}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 interface DashboardOptions {
@@ -833,8 +1335,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   const app = Fastify({ logger: false });
 
-  await app.register(websocket);
-
   // CORS
   app.addHook('onSend', async (_req, reply, payload) => {
     if (!reply.raw.headersSent) {
@@ -864,21 +1364,10 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     reply.code(204).send();
   });
 
-  // --- PTY session persistence ---
-  interface PtySession {
-    session: import('./adapters/base.js').InteractiveSession;
-    outputBuffer: string[];
-    alive: boolean;
-    planPolling: boolean;
-    activeSocket: { send: (data: Buffer | Uint8Array) => void } | null;
-    planPollCleanup?: () => void;
-  }
-  const ptySessions = new Map<string, PtySession>();
-
   // --- Static file serving ---
   const uiDist = join(import.meta.dirname ?? '.', '..', 'ui', 'dist');
   if (existsSync(uiDist)) {
-    await app.register(fastifyStatic, { root: uiDist, prefix: '/', wildcard: false });
+    await app.register(fastifyStatic, { root: uiDist, prefix: '/', wildcard: true });
   }
 
   // SPA fallback: non-API, non-file-extension GET requests serve index.html
@@ -914,7 +1403,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (req, reply) => {
     try {
-      return stateToApi(readRunState(projectDir, req.params.runId), projectDir);
+      return stateToRunDetail(readRunState(projectDir, req.params.runId), projectDir);
     } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
@@ -959,9 +1448,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   // 2. POST /api/tasks
-  app.post<{ Body: { name: string; workflow: string; discussion?: unknown[]; plan?: unknown[]; planFile?: string; campaignId?: string; campaignName?: string; campaignSeq?: number } }>("/api/tasks", async (req, reply) => {
+  app.post<{ Body: { name: string; workflow: string; plan?: unknown[]; planFile?: string; campaignId?: string; campaignName?: string; campaignSeq?: number } }>("/api/tasks", async (req, reply) => {
     if (!req.body || typeof req.body !== 'object') return reply.code(400).send({ error: 'missing body' });
-    const { name, workflow, discussion, plan, planFile, campaignId, campaignName } = req.body;
+    const { name, workflow, plan, planFile, campaignId, campaignName } = req.body;
     const workflowName = workflow || 'default';
     if (!isSafeId(workflowName)) {
       return reply.code(400).send({ error: 'invalid workflow name' });
@@ -979,7 +1468,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     state.taskDescription = safeName;
     state.autoApproveRetries = true;
     state.autoApprove = true;
-    if (discussion) state.discussion = discussion;
     if (plan) state.plan = plan;
     const campaign = resolveCampaignSelection(projectDir, { campaignId, campaignName });
     if (campaign) {
@@ -1015,16 +1503,15 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   // 3b. PUT /api/tasks/:id
-  app.put<{ Params: { id: string }; Body: { plan?: unknown[]; discussion?: unknown[]; name?: string; workflow?: string } }>("/api/tasks/:id", async (req, reply) => {
+  app.put<{ Params: { id: string }; Body: { plan?: unknown[]; name?: string; workflow?: string } }>("/api/tasks/:id", async (req, reply) => {
     let state: StoreState;
     try {
       state = readRunState(projectDir, req.params.id);
     } catch { /* non-critical */
       return reply.code(404).send({ error: "not found" });
     }
-    const { plan, discussion, name, workflow } = req.body ?? {};
+    const { plan, name, workflow } = req.body ?? {};
     if (plan !== undefined) state.plan = plan;
-    if (discussion !== undefined) state.discussion = discussion;
     if (name !== undefined) state.taskDescription = typeof name === 'string' ? name : String(name);
     if (workflow && isSafeId(workflow)) state.workflowName = workflow;
     writeRunState(projectDir, req.params.id, state);
@@ -1185,13 +1672,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (activeExecutions.has(req.params.id)) {
       return reply.code(409).send({ error: 'task is already running' });
     }
-    // Kill discussion PTY session — it's no longer needed once execution starts
-    const pty = ptySessions.get(req.params.id);
-    if (pty?.alive) { try { pty.session.kill(); } catch { /* ignore */ } pty.alive = false; }
-    pty?.planPollCleanup?.();
-    ptySessions.delete(req.params.id);
-    // Allow re-execute from awaiting_approval: user went back to discussion,
-    // refined the brief, and wants a fresh plan. Reset dispatched stages.
+    // Allow re-execute from awaiting_approval: user refined the brief and
+    // wants a fresh plan. Reset dispatched stages.
     if (state.status === 'awaiting_approval') {
       const dispatchedIds = new Set(
         (Array.isArray(state.dispatchedStages) ? state.dispatchedStages as { id?: string }[] : []).map(s => s.id).filter((x): x is string => !!x),
@@ -1263,7 +1745,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     // Warn if no task brief and no task description — planner will get an empty prompt
     const briefPath = join(runsRoot(), req.params.id, 'task_brief.md');
     if (!state.taskDescription?.trim() && !existsSync(briefPath)) {
-      return reply.code(400).send({ error: 'No task description or task brief found. Complete the discussion first.' });
+      return reply.code(400).send({ error: 'No task description or task brief found.' });
     }
     const workflowName = state.workflowName || 'default';
     const yamlPath = join(configDir, 'workflows', `${workflowName}.yaml`);
@@ -1290,11 +1772,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   // DELETE /api/tasks/:id
   app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
     const { id } = req.params;
-    // Kill PTY if active
-    const pty = ptySessions.get(id);
-    if (pty?.alive) { try { pty.session.kill(); } catch { /* ignore */ } }
-    pty?.planPollCleanup?.();
-    ptySessions.delete(id);
     _stageRolesCache.delete(id);
     _bestScoreCache.delete(id);
     // Cancel running workflow so background execution stops gracefully
@@ -1328,11 +1805,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (state.status === 'complete' || state.status === 'failed') {
       return { ok: true };
     }
-    // Kill PTY if active and remove from map so rerun gets a clean session
-    const pty = ptySessions.get(id);
-    if (pty?.alive) { try { pty.session.kill(); } catch { /* ignore */ } pty.alive = false; }
-    pty?.planPollCleanup?.();
-    ptySessions.delete(id);
     state.status = 'failed';
     state.failureReason = 'Cancelled by user';
     state.completedAt = new Date().toISOString();
@@ -1362,11 +1834,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (state.status === 'pending') {
       return reply.code(400).send({ error: 'Task has not been executed yet — use execute instead' });
     }
-
-    // Kill PTY session if active
-    const pty = ptySessions.get(id);
-    if (pty?.alive) { try { pty.session.kill(); } catch { /* ignore */ } pty.alive = false; }
-    ptySessions.delete(id);
 
     for (const [, s] of Object.entries(state.stages)) {
       s.status = 'pending';
@@ -1481,12 +1948,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       });
       return { ok: true, route: 'monitor' };
     } else {
-      // Clean discuss session directory so new discussion starts fresh
-      const discussDir = join(runPath, 'discuss');
-      if (existsSync(discussDir)) rmSync(discussDir, { recursive: true, force: true });
       state.status = 'pending';
       writeRunState(projectDir, id, state);
-      return { ok: true, route: 'discuss' };
+      return { ok: true, route: 'pending' };
     }
   });
 
@@ -1883,8 +2347,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // ===================== Campaign endpoints =====================
 
-  // GET /api/campaigns
-  app.get("/api/campaigns", async () => {
+  // Legacy run-campaign endpoints back existing task import/dashboard controls.
+  // M3 owns /api/campaigns for filesystem campaign inspection.
+  app.get("/api/run-campaigns", async () => {
     return listCampaigns(projectDir).map(({ id, name, runCount, bestScore, latestRun }) => ({
       id,
       name,
@@ -1894,16 +2359,14 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }));
   });
 
-  // GET /api/campaigns/:id
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id", async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/run-campaigns/:id", async (req, reply) => {
     if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
     const entries = readCampaignEntries(projectDir, req.params.id);
     if (entries.length === 0) return reply.code(404).send({ error: 'not found' });
     return entries;
   });
 
-  // POST /api/campaigns/rename — rename a campaign (POST because campaign IDs can be very long)
-  app.post<{ Body: { campaignId: string; name: string } }>("/api/campaigns/rename", async (req, reply) => {
+  app.post<{ Body: { campaignId: string; name: string } }>("/api/run-campaigns/rename", async (req, reply) => {
     const campaignId = req.body?.campaignId;
     const newName = req.body?.name;
     if (!campaignId || !newName) return reply.code(400).send({ error: 'campaignId and name are required' });
@@ -1927,6 +2390,175 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     return { ok: true, updated, name: newName };
   });
 
+  app.delete<{ Params: { id: string } }>("/api/run-campaigns/:id", async (req, reply) => {
+    const campaignId = req.params.id;
+    if (!isSafeId(campaignId)) return reply.code(404).send({ error: 'not found' });
+    const historyPath = join(campaignFsRoot(), `${campaignId}.jsonl`);
+    let removedHistory = false;
+    try {
+      if (existsSync(historyPath)) {
+        unlinkSync(historyPath);
+        removedHistory = true;
+      }
+    } catch {
+      return reply.code(500).send({ error: 'failed to remove campaign history' });
+    }
+
+    let orphaned = 0;
+    const root = join(homedir(), '.fc', 'runs');
+    try {
+      for (const runId of readdirSync(root)) {
+        const runJsonPath = join(root, runId, 'run.json');
+        if (!existsSync(runJsonPath)) continue;
+        try {
+          const state = JSON.parse(readFileSync(runJsonPath, 'utf-8')) as StoreState;
+          if (!runMatchesCampaign(state, campaignId)) continue;
+          state.campaignId = '';
+          state.campaign_id = '';
+          state.campaignStorageKey = '';
+          state.campaignName = '';
+          writeFileSync(runJsonPath, JSON.stringify(state, null, 2), 'utf-8');
+          orphaned++;
+        } catch { /* non-critical */ }
+      }
+    } catch { /* no run root */ }
+    invalidateTaskListCache();
+    return { ok: true, orphaned, removedHistory };
+  });
+
+  // GET /api/campaigns
+  app.get("/api/campaigns", async () => {
+    return listM3Campaigns(projectDir);
+  });
+
+  // GET /api/campaigns/:id
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id", async (req, reply) => {
+    const campaign = getWorkspaceCampaign(projectDir, req.params.id);
+    if (!campaign) return reply.code(404).send({ error: 'not found' });
+    return campaign;
+  });
+
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id/iterations", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    return readJsonlFile(join(dir, 'iteration_log.jsonl'));
+  });
+
+  app.get<{ Params: { id: string; version: string } }>("/api/campaigns/:id/brief/:version", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const text = readBriefFileForCampaign(dir, req.params.version);
+    if (text === null) return reply.code(404).send({ error: 'not found' });
+    return reply.type('text/markdown').send(text);
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/campaigns/:id/brief-diff", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const from = req.query.from;
+    const to = req.query.to;
+    if (!from || !to || !isSafeCampaignVersion(from) || !isSafeCampaignVersion(to)) {
+      return reply.code(400).send({ error: 'from and to must be vN versions' });
+    }
+    const fromText = readBriefFileForCampaign(dir, from);
+    const toText = readBriefFileForCampaign(dir, to);
+    if (fromText === null || toText === null) return reply.code(404).send({ error: 'not found' });
+    return reply.type('text/plain').send(unifiedDiff(from, fromText, to, toText));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id/revisions", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const state = readJsonFile(join(dir, 'state.json'));
+    const briefDir = resolveBriefDir(state);
+    return briefDir ? readJsonlFile(join(briefDir, 'revisions.jsonl')) : [];
+  });
+
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id/pending-review", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    return readPendingReviews(req.params.id).map((entry, index) => ({
+      ...entry,
+      index,
+      patchSummary: summarizePatch(entry.patch),
+    }));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id/kg-hints", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const hints = readJsonFile(join(dir, 'kg_hints.json'));
+    return Array.isArray(hints) ? hints : [];
+  });
+
+  app.post<{ Params: { id: string; index: string } }>("/api/campaigns/:id/kg-hints/:index/review", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
+    const hints = readJsonFile(join(dir, 'kg_hints.json'));
+    if (!Array.isArray(hints) || index >= hints.length) return reply.code(404).send({ error: 'hint not found' });
+    const hint = hints[index] as Record<string, unknown>;
+    const suggestedPatch = hint.suggestedPatch && typeof hint.suggestedPatch === 'object'
+      ? (hint.suggestedPatch as Record<string, unknown>)
+      : undefined;
+    const metadata = suggestedPatch?.metadata && typeof suggestedPatch.metadata === 'object'
+      ? suggestedPatch.metadata as Record<string, unknown>
+      : undefined;
+    const patch = metadata
+      ? { type: 'brief_patch', section: metadata.section, op: metadata.op, value: metadata.value }
+      : undefined;
+    const parsedPatch = z.object({
+      type: z.literal('brief_patch'),
+      section: z.string().min(1),
+      op: z.enum(['append', 'replace_value', 'edit']),
+      value: z.string(),
+    }).safeParse(patch);
+    if (!parsedPatch.success) return reply.code(400).send({ error: 'hint does not contain an applicable brief patch' });
+    const state = readJsonFile(join(dir, 'state.json'));
+    appendPendingReview(req.params.id, {
+      reason: `Cross-campaign KG suggestion from ${typeof (hint.symptomNode as Record<string, unknown> | undefined)?.campaignId === 'string' ? (hint.symptomNode as Record<string, unknown>).campaignId : 'prior campaign'}`,
+      severity: 'medium',
+      patch: parsedPatch.data,
+      source: 'cross_campaign_kg',
+      briefDir: resolveBriefDir(state),
+      briefVersion: getStringAt(state, ['briefVersion']) ?? getStringAt(state, ['initialBriefVersion']),
+      rule: typeof hint.reason === 'string' ? hint.reason : undefined,
+    });
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string; index: string }; Body: { decision?: string } }>("/api/campaigns/:id/review/:index", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
+    const decision = req.body?.decision;
+    if (decision !== 'accept' && decision !== 'reject') return reply.code(400).send({ error: 'decision must be accept or reject' });
+    try {
+      return await consumePendingReview(req.params.id, index, decision);
+    } catch (err) {
+      if (err instanceof ReviewConflictError) return reply.code(409).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  app.get("/api/cross-campaign-kg/summary", async () => {
+    return crossCampaignSummary();
+  });
+
+  app.get("/api/cross-campaign-kg/nodes", async () => {
+    return getCrossCampaignNodes().map(adaptCrossCampaignNode);
+  });
+
+  app.get("/api/cross-campaign-kg/edges", async () => {
+    return getCrossCampaignEdges().map(adaptCrossCampaignEdge);
+  });
+
+  app.get("/api/standalone-runs", async () => {
+    return readStandaloneRuns(projectDir);
+  });
+
   // ===================== Agent endpoints =====================
 
   // 8. GET /api/agents
@@ -1940,8 +2572,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           return {
             name: parsed.name ?? f.replace('.yaml', ''),
             description: parsed.description ?? '',
-            model: parsed.model ?? '',
-            tools: parsed.tools ?? [],
+            tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+            adapter: typeof parsed.adapter === 'string' ? parsed.adapter : undefined,
           };
         } catch { return null; }
       }).filter(Boolean);
@@ -2112,335 +2744,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // ===================== Mock endpoints =====================
 
-  // 11. Discuss setup (cached with mtime invalidation)
-  let cachedAdapter: Adapter | null = null;
-  let cachedAgentConfig: AgentConfig | null = null;
-  let cachedAgentConfigMtime = 0;
-  let cachedBaseMdMtime = 0;
-  let cachedSkillContent: string | null = null;
-
-  async function ensureDiscussSetup(): Promise<{ adapter: Adapter; agentConfig: AgentConfig; skillContent: string }> {
-    if (!cachedAdapter) {
-      if (options.adapter) {
-        cachedAdapter = options.adapter;
-      } else {
-        cachedAdapter = await resolveAdapter(configDir);
-      }
-    }
-    // Invalidate agent config cache when discussion.yaml or _base.md change
-    let needsReload = !cachedAgentConfig;
-    if (cachedAgentConfig && !options.agentConfig) {
-      try {
-        const agentMtime = statSync(join(agentsDir, 'discussion.yaml')).mtimeMs;
-        if (agentMtime !== cachedAgentConfigMtime) needsReload = true;
-      } catch { /* file missing — reload to pick up fallback */ needsReload = true; }
-      try {
-        const baseMtime = statSync(join(agentsDir, '_base.md')).mtimeMs;
-        if (baseMtime !== cachedBaseMdMtime) needsReload = true;
-      } catch { /* no _base.md */ }
-    }
-    if (needsReload) {
-      if (options.agentConfig) {
-        cachedAgentConfig = options.agentConfig;
-      } else {
-        const agentPath = join(agentsDir, 'discussion.yaml');
-        let parsed: any;
-        try {
-          parsed = parseYaml(readFileSync(agentPath, 'utf-8'));
-          cachedAgentConfigMtime = statSync(agentPath).mtimeMs;
-        } catch { parsed = null; }
-        if (!parsed) {
-          const fallback = join(agentsDir, 'planner.yaml');
-          try { parsed = parseYaml(readFileSync(fallback, 'utf-8')); } catch { parsed = null; }
-        }
-        if (!parsed) {
-          throw new Error('No agent config found. Run `flowcrew init` to create config/agents/discussion.yaml');
-        }
-        cachedAgentConfig = parseAgentConfig(parsed, configDir);
-        // Apply _base.md prompt to discussion agent (same as scheduler does for all agents)
-        const basePrompt = loadBasePrompt(agentsDir);
-        if (basePrompt) cachedAgentConfig = applyBasePrompt(cachedAgentConfig, basePrompt);
-        try { cachedBaseMdMtime = statSync(join(agentsDir, '_base.md')).mtimeMs; } catch { cachedBaseMdMtime = 0; }
-      }
-    }
-    if (!cachedSkillContent) {
-      cachedSkillContent = options.skillContent ?? (() => { try { return readFileSync(join(configDir, 'skills', 'deep-interview.md'), 'utf-8'); } catch { return ''; } })();
-    }
-    return { adapter: cachedAdapter!, agentConfig: cachedAgentConfig!, skillContent: cachedSkillContent! };
-  }
-
-  // --- Binary framing helpers ---
-  function sendData(socket: { send: (data: Buffer | Uint8Array) => void }, data: string) {
-    const buf = Buffer.from(data, "utf-8");
-    socket.send(Buffer.concat([Buffer.from([0x00]), buf]));
-  }
-  function sendControl(socket: { send: (data: Buffer | Uint8Array) => void }, obj: unknown) {
-    socket.send(Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify(obj))]));
-  }
-  function parseFrame(raw: Buffer): { tag: number; payload: Buffer } {
-    if (raw.length === 0) return { tag: -1, payload: Buffer.alloc(0) };
-    return { tag: raw[0], payload: raw.slice(1) };
-  }
-
-  function isValidTaskBrief(content: string): boolean {
-    const trimmed = content.trim();
-    if (trimmed.length < 50) return false;
-    const requiredMarkers = [
-      /task\s+summary|summary|objective|goals?|overview|purpose|what\s+to\s+(build|do|implement)|description|background|context/i,
-      /requirements?|deliverables?|features?|what\s+we\s+need|expected\s+output|expected\s+behavior/i,
-      /scope|boundaries|out\s+of\s+scope|in\s+scope|target\s+files?|affected\s+files?/i,
-      /constraints?|limitations?|assumptions?|non[- ]?functional|technical\s+notes?|notes?/i,
-      /acceptance\s+criteria|success\s+criteria|done\s+when|definition\s+of\s+done|how\s+to\s+verify|verification|test\s+plan/i,
-    ];
-    // Require at least 2 of 5 sections (lenient to avoid blocking valid briefs)
-    const matched = requiredMarkers.filter((marker) => marker.test(trimmed)).length;
-    return matched >= 2;
-  }
-
-  // 11a. WS /api/discuss/ws — interactive terminal session with reconnect + binary framing
-  app.get<{ Querystring: { taskId: string } }>('/api/discuss/ws', { websocket: true }, async (socket, req) => {
-    try {
-    const taskId = req.query.taskId;
-    const runDir = join(runsRoot(), taskId);
-    const sessionDir = join(runDir, 'discuss');
-    mkdirSync(sessionDir, { recursive: true });
-
-    // WebSocket keepalive: ping every 30s, close if no pong within 10s
-    let pongReceived = true;
-    const pingInterval = setInterval(() => {
-      if (!pongReceived) { try { socket.close(); } catch { /* ignore */ } clearInterval(pingInterval); return; }
-      pongReceived = false;
-      try { socket.ping(); } catch { /* closed */ }
-    }, 30_000);
-    socket.on('pong', () => { pongReceived = true; });
-    socket.on('close', () => { clearInterval(pingInterval); });
-
-    let ptyEntry = ptySessions.get(taskId);
-
-    // Reconnect to existing live session
-    if (ptyEntry && ptyEntry.alive) {
-      // Update active socket reference — old socket's sends will no-op
-      ptyEntry.activeSocket = socket;
-      // Replay buffered output as binary frames
-      for (const chunk of ptyEntry.outputBuffer) {
-        try { sendData(socket, chunk); } catch { /* closed */ }
-      }
-
-      socket.on('message', (raw: Buffer | string) => {
-        const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string, 'binary');
-        const { tag, payload } = parseFrame(buf);
-        if (tag === 0x01) {
-          try {
-            const parsed = JSON.parse(payload.toString());
-            if (parsed.type === 'generate_plan') {
-              startPlanPolling(ptyEntry!, taskId, runDir, socket);
-              return;
-            }
-            if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
-              ptyEntry!.session.resize(Math.min(parsed.cols, 200), Math.min(parsed.rows, 60));
-              return;
-            }
-          } catch { /* malformed */ }
-        } else if (tag === 0x00) {
-          if (ptyEntry!.alive) ptyEntry!.session.write(payload.toString('utf-8'));
-        }
-      });
-
-      socket.on('close', () => {
-        // Clear active socket on disconnect so stale sends don't error
-        if (ptyEntry?.activeSocket === socket) {
-          ptyEntry.activeSocket = null;
-          ptyEntry.planPollCleanup?.();
-        }
-      });
-      return;
-    }
-
-    // New session — deferred PTY spawn (wait for first resize)
-    const oldBuffer = ptyEntry ? ptyEntry.outputBuffer : [];
-
-    let spawned = false;
-
-    async function spawnPty(cols: number, rows: number) {
-      if (spawned) return;
-      spawned = true;
-      let adapter: Adapter;
-      let agentConfig: AgentConfig;
-      try {
-        ({ adapter, agentConfig } = await ensureDiscussSetup());
-      } catch (err) {
-        spawned = false; // allow retry on next resize
-        throw err;
-      }
-      let discussAgent: AgentConfig = agentConfig;
-      try {
-        const runState = readRunState(projectDir, taskId);
-        if (runState.campaignId || runState.campaignStorageKey || runState.campaignName) {
-          const storageKey = runState.campaignStorageKey ?? runState.campaignId ?? runState.campaignName;
-          const campCtx = buildCampaignContext(projectDir, storageKey!, taskId, runState.campaignName ?? runState.campaignId);
-          discussAgent = withCampaignContextPrompt(discussAgent, campCtx);
-        }
-      } catch { /* no run state yet */ }
-      let session: import('./adapters/base.js').InteractiveSession;
-      try {
-        session = await adapter.spawnInteractive(discussAgent, { workDir: projectDir, sessionDir, cols, rows });
-      } catch (err) {
-        spawned = false; // allow retry on next resize
-        throw err;
-      }
-      ptyEntry = { session, outputBuffer: [...oldBuffer], alive: true, planPolling: false, activeSocket: socket };
-      ptySessions.set(taskId, ptyEntry);
-
-      for (const chunk of oldBuffer) {
-        try { sendData(socket, chunk); } catch { /* closed */ }
-      }
-
-      // Inject task name as initial message so the discussion agent has context
-      try {
-        const runState = readRunState(projectDir, taskId);
-        if (runState.taskDescription?.trim()) {
-          // Small delay to let the agent's prompt render first
-          setTimeout(() => injectInitialTuiMessage(session, runState.taskDescription!.trim()), 1500);
-        }
-      } catch { /* no run state yet */ }
-
-      let ptyBufferBytes = 0;
-      const PTY_BUFFER_MAX_BYTES = 2 * 1024 * 1024; // 2MB cap
-      session.onData((data: string) => {
-        ptyEntry!.outputBuffer.push(data);
-        ptyBufferBytes += data.length;
-        // Cap buffer by total bytes to prevent unbounded memory growth
-        while (ptyBufferBytes > PTY_BUFFER_MAX_BYTES && ptyEntry!.outputBuffer.length > 1) {
-          const removed = ptyEntry!.outputBuffer.shift()!;
-          ptyBufferBytes -= removed.length;
-        }
-        // Send to active socket only — avoids duplicate sends on reconnect
-        const sock = ptyEntry!.activeSocket;
-        if (sock) { try { sendData(sock, data); } catch { /* closed */ } }
-      });
-      session.onExit((exitCode) => {
-        ptyEntry!.alive = false;
-        const sock = ptyEntry!.activeSocket;
-        if (sock) { try { sendControl(sock, { type: 'done', exitCode }); } catch { /* closed */ } }
-      });
-    }
-
-    socket.on('message', async (raw: Buffer | string) => {
-      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as string, 'binary');
-      const { tag, payload } = parseFrame(buf);
-      if (tag === 0x01) {
-        let parsed: any;
-        try { parsed = JSON.parse(payload.toString()); } catch { return; }
-        try {
-          if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
-            if (!spawned) {
-              await spawnPty(Math.min(parsed.cols, 200), Math.min(parsed.rows, 60));
-            } else if (ptyEntry?.alive) {
-              ptyEntry.session.resize(Math.min(parsed.cols, 200), Math.min(parsed.rows, 60));
-            }
-            return;
-          }
-          if (parsed.type === 'generate_plan') {
-            if (ptyEntry) startPlanPolling(ptyEntry, taskId, runDir, socket);
-            else try { sendControl(socket, { type: 'brief_not_ready', message: 'Discussion session is still starting. Wait for the terminal to load, then try again.' }); } catch { /* closed */ }
-            return;
-          }
-        } catch (err) {
-          try { sendControl(socket, { type: 'error', message: String(err) }); } catch { /* ignore */ }
-          socket.close();
-        }
-      } else if (tag === 0x00) {
-        if (ptyEntry?.alive) ptyEntry.session.write(payload.toString('utf-8'));
-      }
-    });
-
-    socket.on('close', () => {
-      if (ptyEntry?.activeSocket === socket) {
-        ptyEntry.activeSocket = null;
-        ptyEntry.planPollCleanup?.();
-      }
-    });
-    } catch (err) {
-      try { sendControl(socket, { type: 'error', message: String(err) }); } catch { /* ignore */ }
-      socket.close();
-    }
-  });
-
-  function startPlanPolling(ptyEntry: PtySession, taskId: string, runDir: string, socket: { send: (data: Buffer | Uint8Array) => void }) {
-    if (ptyEntry.planPolling) return;
-    if (!ptyEntry.alive) {
-      try { sendControl(socket, { type: 'brief_not_ready', message: 'Discussion session has ended. Start a new discussion first.' }); } catch { /* closed */ }
-      return;
-    }
-    ptyEntry.planPolling = true;
-    options.onPlanPollingStart?.(taskId);
-    mkdirSync(runDir, { recursive: true });
-    const briefPath = join(runDir, 'task_brief.md');
-    try {
-      if (existsSync(briefPath)) unlinkSync(briefPath);
-    } catch { /* ignore stale brief cleanup failure */ }
-    const requestStartMs = Date.now();
-    const cmd = `Generate a plan only if ready. Review the current discussion and decide whether it contains a sufficiently clear, user-confirmed task brief or clearly agreed final scope. If it is ready, write a new task brief to ${runDir}/task_brief.md with these sections: Task Summary, Requirements, Scope, Constraints, and Acceptance Criteria. If it is unclear or not confirmed, do not write task_brief.md; instead ask the missing clarifying questions in the terminal.`;
-    injectInitialTuiMessage(ptyEntry.session, cmd);
-    let stableCount = 0;
-    let lastSize = -1;
-    let finished = false;
-    let pollInterval: ReturnType<typeof setInterval>;
-    let timeoutHandle: ReturnType<typeof setTimeout>;
-    const finish = (type: 'plan_ready' | 'brief_not_ready', message?: string) => {
-      if (finished) return;
-      finished = true;
-      ptyEntry.planPolling = false;
-      ptyEntry.planPollCleanup = undefined;
-      clearInterval(pollInterval);
-      clearTimeout(timeoutHandle);
-      try { sendControl(socket, message ? { type, message } : { type }); } catch { /* closed */ }
-    };
-    let invalidAttempts = 0;
-    pollInterval = setInterval(() => {
-      // Stop polling if PTY session died
-      if (!ptyEntry.alive) {
-        finish('brief_not_ready', 'Discussion session ended before the task brief was written.');
-        return;
-      }
-      try {
-        if (existsSync(briefPath)) {
-          const stat = statSync(briefPath);
-          if (stat.mtimeMs < requestStartMs) return;
-          if (stat.size > 0 && stat.size === lastSize) {
-            stableCount++;
-            if (stableCount >= 2) {
-              const briefContent = readFileSync(briefPath, 'utf-8');
-              if (isValidTaskBrief(briefContent)) {
-                finish('plan_ready');
-              } else {
-                try { unlinkSync(briefPath); } catch { /* ignore invalid brief cleanup failure */ }
-                stableCount = 0;
-                lastSize = -1;
-                invalidAttempts++;
-                if (invalidAttempts >= 2) {
-                  finish('brief_not_ready', 'The task brief is missing required sections (need at least 2 of: Summary, Requirements, Scope, Constraints, Acceptance Criteria). Clarify these in Discussion and try again.');
-                } else if (ptyEntry.alive) {
-                  // Tell the agent the brief was rejected so it can fix it
-                  const retryMsg = `The task brief you wrote was rejected — it needs at least 2 of these sections: Task Summary, Requirements, Scope, Constraints, Acceptance Criteria. Please rewrite ${briefPath} with the missing sections.`;
-                  injectInitialTuiMessage(ptyEntry.session, retryMsg);
-                }
-              }
-            }
-          } else { stableCount = 0; lastSize = stat.size; }
-        }
-      } catch { /* file doesn't exist yet */ }
-    }, 1000);
-    timeoutHandle = setTimeout(() => finish('brief_not_ready', 'No confirmed task brief was produced. Continue discussion until the task brief is clear and confirmed, then try Generate Plan again.'), 120000);
-    ptyEntry.planPollCleanup = () => {
-      if (finished) return;
-      finished = true;
-      ptyEntry.planPolling = false;
-      ptyEntry.planPollCleanup = undefined;
-      clearInterval(pollInterval);
-      clearTimeout(timeoutHandle);
-    };
-  }
 
   // 12. POST /api/plan
   app.post<{ Body: { taskId: string; workflow?: string } }>("/api/plan", async (req, reply) => {
@@ -2523,11 +2826,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   // Graceful shutdown: kill all PTY sessions and stop timers
   const cleanup = () => {
     clearInterval(staleTimer);
-    for (const [, pty] of ptySessions) {
-      pty.planPollCleanup?.();
-      if (pty.alive) { try { pty.session.kill(); } catch { /* ignore */ } }
-    }
-    ptySessions.clear();
   };
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);

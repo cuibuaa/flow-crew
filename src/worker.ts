@@ -13,12 +13,7 @@ import {
 import type { StageStatus } from './store.js';
 
 function getDefaultTimeout(projectDir: string): string {
-  try {
-    const raw = readFileSync(join(projectDir, 'config', 'defaults.yaml'), 'utf-8');
-    const match = raw.match(/default_timeout_ms:\s*(\d+)/);
-    if (match) return match[1];
-  } catch { /* fallback */ }
-  return '300000';
+  return String(loadProjectDefaults(projectDir).timeout_ms);
 }
 
 interface StageOpts {

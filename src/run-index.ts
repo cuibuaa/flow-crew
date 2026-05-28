@@ -68,6 +68,7 @@ function openDb(projectDir: string): DatabaseSync | null {
   const { homedir } = require('node:os') as typeof import('node:os');
   mkdirSync(join(homedir(), '.fc'), { recursive: true });
   const db = new sqlite.DatabaseSync(dbPath(projectDir));
+  db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY,

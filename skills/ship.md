@@ -82,6 +82,20 @@ If `SUGGEST_RESET=true`, include this line in your confirm message:
 
 Default to adding `--no-inherit-campaign` when the heuristic triggers; let user override.
 
+## 2.5 Research-mode Detection (BEFORE confirming)
+
+FlowCrew has two loop modes. Detect which fits and PROPOSE it (don't silently pick — the modes behave very differently):
+
+- **`engineering`** (default): convergent. plan → execute → gate(pass/fail) → retry until green. For: build X, fix Y, implement Z.
+- **`research`**: divergent. propose → implement → measure(vs baseline) → keep/drop + continue/stop. "Ceiling" (failing to beat target) is a VALID terminal. For: exploration, finding alpha, testing many directions, cumulative stacking, "until exhausted".
+
+Heuristic — if the conversation has signals like: "explore / research program / find alpha / test directions / multi-stage / cumulative / stack / until regression / self-evolve / 直到用尽 / 多阶段" → flag as **likely research**.
+
+If likely-research, in the confirm message propose:
+> This looks like a research exploration (divergent — accepts "ceiling" as a valid outcome). Use `--workflow research`? It computes keep/drop + continue/ship/ceiling from a policy, so you don't hand-write decision tables. (Or `engineering` for convergent retry-to-pass.)
+
+If the user picks research, the brief MUST include a `research:` frontmatter block (see "Research-mode frontmatter" in step 4). If unsure, ASK — don't guess.
+
 ## 3. Confirm with User (REQUIRED — do NOT skip)
 
 Present the brief and ask for confirmation:
@@ -99,8 +113,9 @@ Key Files: [files]
 Settings:
 - Max iterations: 5 (plan→execute→review cycles)
 - Stage timeout: 5 minutes (per-stage time limit)
-- Workflow: default
+- Workflow: default | research (from step 2.5)
 [Campaign hygiene note from step 2, if triggered]
+[Research-mode note from step 2.5, if triggered]
 
 Shall I proceed? You can edit the brief or adjust settings.
 ```
@@ -114,10 +129,10 @@ Once confirmed:
 1. Write the brief to `docs/task_brief.md` (see "Terminal-state frontmatter" below for research-style briefs).
 2. Run:
 ```bash
-flowcrew quick --task "$(cat docs/task_brief.md)" --project . --max-iterations <N> --timeout <MS> [--no-inherit-campaign]
+flowcrew quick --task "$(cat docs/task_brief.md)" --project . --max-iterations <N> --timeout <MS> [--workflow research] [--no-inherit-campaign]
 ```
 
-Add `--no-inherit-campaign` if step 2's hygiene check triggered (or the user requested fresh-campaign context).
+Add `--workflow research` if step 2.5 selected research mode (and the brief has a `research:` block). Add `--no-inherit-campaign` if step 2's hygiene check triggered.
 
 ### Terminal-state frontmatter (for research-exploration briefs)
 
@@ -144,6 +159,29 @@ How it interacts with the agent:
 - `ceiling_hit` → **gated**. The floor is the anti-premature-quit mechanism. If agent writes ceiling_report.md before satisfying the floor, scheduler ignores it, appends a hint to supervisor_guidance.md telling the agent to keep working OR write escalation_note.md with a real blocker, and continues the loop.
 
 Without this frontmatter, the brief behaves exactly as before (no terminal-state handling). Only add it when a negative outcome is a valid completion.
+
+### Research-mode frontmatter (for `--workflow research`)
+
+When step 2.5 selected research mode, add a `research:` block. The FRAMEWORK then computes keep/drop + continue/ship/ceiling from the policy — you do NOT hand-write decision tables, and you do NOT need terminal_states/program blocks for the decision (the research loop owns it).
+
+```yaml
+---
+research:
+  baseline: 128.08                       # entering running-best the loop builds on
+  policy: greedy_stack                   # | best_of_n | replace_if_better
+  higher_is_better: true
+  result_file: docs/<task>_research/round_result.json   # agent writes {label, result} here each round
+  report_dir: docs/<task>_research                       # framework writes ship/ceiling report here
+  stop:
+    beat: 198                            # running-best ≥ this → ship + stop
+    max_rounds: 8
+    max_wall_hours: 100
+    halt_after_no_improvement: 2         # N consecutive non-improving rounds → ceiling
+---
+# Task: ...
+```
+
+Each round the agent: proposes a direction → implements on the kept stack → measures OOS → writes `{ "label": "<direction>", "result": <number> }` to `result_file`. The framework journals it (run-dir, agent-unreachable), runs the policy, and either steers the next round (a guidance hint with running-best + kept set) or terminates (ship/ceiling report). No prose decision tables; no agent-written verdicts.
 
 The adapter (claude/codex) is auto-detected. Override with `--adapter claude` or `--adapter codex` if needed.
 

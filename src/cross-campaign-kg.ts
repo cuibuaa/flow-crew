@@ -1,0 +1,226 @@
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export interface KGNode {
+  id: string;
+  type: 'symptom' | 'diagnosis' | 'patch' | 'outcome';
+  campaignId: string;
+  campaignStartedAt: string;
+  metadata: Record<string, any>;
+}
+
+export interface KGEdge {
+  from: string;
+  to: string;
+  relation: 'caused_by' | 'fixed_by' | 'resulted_in' | 'related_to';
+  weight?: number;
+}
+
+export interface KGSuggestion {
+  symptomNode: KGNode;
+  suggestedPatch?: KGNode;
+  outcomeNode: KGNode;
+  similarity: number;
+  reason: string;
+}
+
+interface CampaignArc {
+  campaignId: string;
+  symptom: KGNode['metadata'];
+  diagnosis: KGNode['metadata'];
+  patch?: KGNode['metadata'];
+  outcome: KGNode['metadata'];
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashId(parts: unknown[]): string {
+  return createHash('sha256').update(stableJson(parts)).digest('hex').slice(0, 24);
+}
+
+function nodeId(campaignId: string, type: KGNode['type'], metadata: Record<string, any>): string {
+  return hashId([campaignId, type, metadata]);
+}
+
+function nodesPath(): string {
+  return join(ensureKGStore(), 'nodes.jsonl');
+}
+
+function edgesPath(): string {
+  return join(ensureKGStore(), 'edges.jsonl');
+}
+
+function shallowMatches<T extends Record<string, any>>(value: T, filter?: Partial<T>): boolean {
+  if (!filter) return true;
+  return Object.entries(filter).every(([key, expected]) => expected === undefined || value[key] === expected);
+}
+
+function readJsonl<T>(path: string): T[] {
+  if (!existsSync(path)) return [];
+  const out: T[] = [];
+  for (const line of readFileSync(path, 'utf-8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      out.push(JSON.parse(trimmed) as T);
+    } catch {
+      // Append-only logs may be hand-edited; ignore bad rows rather than breaking campaigns.
+    }
+  }
+  return out;
+}
+
+function clampWeight(value?: number): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.min(1, value));
+}
+
+function topRejection(counts: unknown): string | undefined {
+  if (!counts || typeof counts !== 'object') return undefined;
+  let best: string | undefined;
+  let bestCount = -Infinity;
+  for (const [key, value] of Object.entries(counts as Record<string, unknown>)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (value > bestCount) {
+      best = key;
+      bestCount = value;
+    }
+  }
+  return best;
+}
+
+function findOutcome(symptom: KGNode, nodes: KGNode[], edges: KGEdge[]): { patch?: KGNode; outcome?: KGNode } {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const diagnosis = edges
+    .filter((edge) => edge.from === symptom.id && edge.relation === 'caused_by')
+    .map((edge) => byId.get(edge.to))
+    .find((node): node is KGNode => node?.type === 'diagnosis');
+  if (!diagnosis) return {};
+  const patch = edges
+    .filter((edge) => edge.from === diagnosis.id && edge.relation === 'fixed_by')
+    .map((edge) => byId.get(edge.to))
+    .find((node): node is KGNode => node?.type === 'patch');
+  if (patch) {
+    const outcome = edges
+      .filter((edge) => edge.from === patch.id && edge.relation === 'resulted_in')
+      .map((edge) => byId.get(edge.to))
+      .find((node): node is KGNode => node?.type === 'outcome');
+    return { patch, outcome };
+  }
+  const outcome = edges
+    .filter((edge) => edge.from === diagnosis.id && edge.relation === 'resulted_in')
+    .map((edge) => byId.get(edge.to))
+    .find((node): node is KGNode => node?.type === 'outcome');
+  return { outcome };
+}
+
+export function ensureKGStore(): string {
+  const root = join(homedir(), '.fc', 'cross-campaign-kg');
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+
+export function appendNode(node: KGNode): void {
+  const full = {
+    ...node,
+    id: node.id || nodeId(node.campaignId, node.type, node.metadata),
+  };
+  writeFileSync(nodesPath(), JSON.stringify(full) + '\n', { encoding: 'utf-8', flag: 'a' });
+}
+
+export function appendEdge(edge: KGEdge): void {
+  writeFileSync(edgesPath(), JSON.stringify({ ...edge, weight: clampWeight(edge.weight) }) + '\n', { encoding: 'utf-8', flag: 'a' });
+}
+
+export function getNodes(filter?: Partial<KGNode>): KGNode[] {
+  return readJsonl<KGNode>(nodesPath()).filter((node) => shallowMatches(node, filter));
+}
+
+export function getEdges(filter?: Partial<KGEdge>): KGEdge[] {
+  return readJsonl<KGEdge>(edgesPath()).filter((edge) => shallowMatches(edge, filter));
+}
+
+export function persistCampaignArc(arc: CampaignArc): void {
+  const campaignStartedAt = typeof arc.symptom.campaignStartedAt === 'string'
+    ? arc.symptom.campaignStartedAt
+    : new Date().toISOString();
+  const makeNode = (type: KGNode['type'], metadata: Record<string, any>): KGNode => ({
+    id: nodeId(arc.campaignId, type, metadata),
+    type,
+    campaignId: arc.campaignId,
+    campaignStartedAt,
+    metadata,
+  });
+
+  const symptom = makeNode('symptom', arc.symptom);
+  const diagnosis = makeNode('diagnosis', arc.diagnosis);
+  const outcome = makeNode('outcome', arc.outcome);
+  appendNode(symptom);
+  appendNode(diagnosis);
+  if (arc.patch) {
+    const patch = makeNode('patch', arc.patch);
+    appendNode(patch);
+    appendNode(outcome);
+    appendEdge({ from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 });
+    appendEdge({ from: diagnosis.id, to: patch.id, relation: 'fixed_by', weight: 1 });
+    appendEdge({ from: patch.id, to: outcome.id, relation: 'resulted_in', weight: 1 });
+    return;
+  }
+
+  appendNode(outcome);
+  appendEdge({ from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 });
+  appendEdge({ from: diagnosis.id, to: outcome.id, relation: 'resulted_in', weight: 1 });
+}
+
+export function findSimilar(currentContext: {
+  campaignId: string;
+  projectDir: string;
+  briefMetric?: string;
+  earlyRejections?: Record<string, number>;
+}): KGSuggestion[] {
+  const nodes = getNodes();
+  const edges = getEdges();
+  const currentTopRejection = topRejection(currentContext.earlyRejections);
+  const suggestions: KGSuggestion[] = [];
+
+  for (const symptom of nodes.filter((node) => node.type === 'symptom' && node.campaignId !== currentContext.campaignId)) {
+    const reasons: string[] = [];
+    let similarity = 0;
+    if (symptom.metadata.projectDir === currentContext.projectDir) {
+      similarity += 0.5;
+      reasons.push('same projectDir');
+    }
+    if (currentContext.briefMetric && symptom.metadata.briefMetric === currentContext.briefMetric) {
+      similarity += 0.3;
+      reasons.push('same brief metric');
+    }
+    const symptomTopRejection = topRejection(symptom.metadata.counts);
+    if (currentTopRejection && symptomTopRejection && currentTopRejection === symptomTopRejection) {
+      similarity += 0.2;
+      reasons.push(`same top rejection: ${currentTopRejection}`);
+    }
+    similarity = Math.min(1, similarity);
+    if (similarity < 0.3) continue;
+    const linked = findOutcome(symptom, nodes, edges);
+    if (!linked.outcome) continue;
+    suggestions.push({
+      symptomNode: symptom,
+      suggestedPatch: linked.patch,
+      outcomeNode: linked.outcome,
+      similarity,
+      reason: reasons.join(' + '),
+    });
+  }
+
+  return suggestions
+    .sort((a, b) => b.similarity - a.similarity || b.symptomNode.campaignStartedAt.localeCompare(a.symptomNode.campaignStartedAt))
+    .slice(0, 5);
+}

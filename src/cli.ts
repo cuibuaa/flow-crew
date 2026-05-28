@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, symlinkSync, lstatSync, renameSync as fsRenameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
+import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { runsRoot } from './store.js';
-import { loadProjectDefaults } from './config.js';
+import { campaignDir, runsRoot, extractTaskTitle } from './store.js';
+import { ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
+import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
+import { diffVersions, readHead, rollback } from './brief-versioning.js';
+import { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -43,19 +47,8 @@ function cmdInit() {
   // Create defaults.yaml if missing
   const defaultsPath = join(configDir, 'defaults.yaml');
   if (!existsSync(defaultsPath)) {
-    const adapter = detectAdapter();
-    const defaults = {
-      default_timeout_ms: 1800000,
-      default_max_iterations: 5,
-      default_gate_retry_loops: 3,
-      default_stage_technical_retries: 1,
-      adapter,
-      model: 'default',
-      reasoning_effort: 'default',
-      paths: { runs: '.fc/runs', agents: 'config/agents', workflows: 'config/workflows' },
-      campaign_triggers: { enabled: true, regression_after: 2, plateau_after: 3, plateau_threshold: 5, repeated_failure_after: 3 },
-    };
-    writeFileSync(defaultsPath, stringifyYaml(defaults), 'utf-8');
+    ensureProjectDefaultsFile(projectDir);
+    const adapter = loadProjectDefaults(projectDir).adapter;
     console.log(`✅ Created ${defaultsPath} (adapter: ${adapter})`);
   } else {
     console.log(`⏭️  ${defaultsPath} already exists`);
@@ -196,8 +189,7 @@ async function cmdDoctor() {
   if (existsSync(agentsDir)) {
     const agents = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
     checks.push({ name: 'Agent configs', status: agents.length > 0 ? 'ok' : 'warn', message: `${agents.length} agents found` });
-    // Check for required agents
-    const requiredAgents = ['discussion', 'planner'];
+    const requiredAgents = ['planner'];
     for (const name of requiredAgents) {
       if (!agents.includes(`${name}.yaml`)) {
         checks.push({ name: `Agent: ${name}`, status: 'warn', message: `config/agents/${name}.yaml missing. Run \`flowcrew init\` to create it.` });
@@ -213,14 +205,6 @@ async function cmdDoctor() {
     }
   } else {
     checks.push({ name: 'Agent configs', status: 'fail', message: 'config/agents/ missing. Run `flowcrew init`.' });
-  }
-
-  // node-pty (optional but recommended for interactive discussion)
-  try {
-    await import('node-pty');
-    checks.push({ name: 'node-pty', status: 'ok', message: 'available (full PTY support for discussion)' });
-  } catch { /* expected - optional resource */
-    checks.push({ name: 'node-pty', status: 'warn', message: 'not available — discussion will use fallback mode (no TUI rendering)' });
   }
 
   // Port availability
@@ -342,23 +326,26 @@ async function cmdQuick() {
   let campaignDisabled = false;
   let inheritCampaignContext = true; // --no-inherit-campaign stays attached but skips prior-phase context injection
   let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
+  let background = false;
+  const launchArgs: string[] = [];
   const taskParts: string[] = [];
 
   if (args.includes('--help') || args.includes('-h')) { args.length = 0; } // trigger usage
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
-    if (args[i] === '--adapter' && args[i + 1]) { adapter = args[++i]; continue; }
-    if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; continue; }
-    if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); continue; }
-    if (args[i] === '--timeout' && args[i + 1]) { timeout = parseInt(args[++i], 10); continue; }
-    if (args[i] === '--supervise') { supervise = true; continue; }
-    if (args[i] === '--no-supervise') { supervise = false; continue; }
-    if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; continue; }
-    if (args[i] === '--no-campaign') { campaignDisabled = true; continue; }
-    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; continue; }
+    if (args[i] === '--adapter' && args[i + 1]) { adapter = args[++i]; launchArgs.push('--adapter', adapter); continue; }
+    if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; launchArgs.push('--workflow', workflow); continue; }
+    if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); launchArgs.push('--max-iterations', String(maxIterations)); continue; }
+    if (args[i] === '--timeout' && args[i + 1]) { timeout = parseInt(args[++i], 10); launchArgs.push('--timeout', String(timeout)); continue; }
+    if (args[i] === '--supervise') { supervise = true; launchArgs.push('--supervise'); continue; }
+    if (args[i] === '--no-supervise') { supervise = false; launchArgs.push('--no-supervise'); continue; }
+    if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; launchArgs.push('--campaign', campaignArg); continue; }
+    if (args[i] === '--no-campaign') { campaignDisabled = true; launchArgs.push('--no-campaign'); continue; }
+    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; launchArgs.push('--no-inherit-campaign'); continue; }
     if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
     if (args[i] === '--existing-run-id' && args[i + 1]) { existingRunId = args[++i]; continue; }
+    if (args[i] === '--background') { background = true; continue; }
     if (args[i] === '-') { task = readFileSync(0, 'utf-8').trim(); continue; }
     taskParts.push(args[i]);
   }
@@ -386,7 +373,7 @@ async function cmdQuick() {
     console.error('Usage: flowcrew quick "task description" [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --adapter claude|codex  Agent backend (Claude Code preferred if omitted)');
+    console.error('  --adapter claude|codex  Agent backend (defaults to config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
     console.error('  --max-iterations <n>    Max plan-execute-review cycles (default: 5)');
     console.error('  --timeout <ms>          Per-stage timeout in ms (default: 300000)');
@@ -397,9 +384,36 @@ async function cmdQuick() {
     console.error('  --no-inherit-campaign   Stay in campaign but skip injecting prior-phase context into planner prompts');
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
+    console.error('  --background            Register and launch under the flowcrew daemon');
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
     process.exit(1);
+  }
+
+  if (background) {
+    try {
+      const { defaultSocketPath, sendRpc } = await import('./orchestrator-rpc.js');
+      const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
+      const res = await sendRpc<{ id: number; unit: string }>(socketPath, {
+        cmd: 'register',
+        task: {
+          kind: 'quick',
+          name: task.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || 'Quick task',
+          brief_text: task,
+          projectDir,
+          launch_args: launchArgs,
+        },
+      });
+      console.log(`Task #${res.id} registered. Unit: ${res.unit}`);
+      return;
+    } catch (err) {
+      if (err instanceof (await import('./orchestrator-rpc.js')).DaemonUnavailableError) {
+        console.error('daemon not running. Start with: flowcrew daemon start');
+      } else {
+        console.error(err instanceof Error ? err.message : String(err));
+      }
+      process.exit(1);
+    }
   }
 
   if (!adapter) {
@@ -517,26 +531,67 @@ async function cmdQuick() {
   process.exitCode = finalState.status === 'complete' ? 0 : 1;
 }
 
+/**
+ * Run IDs that have a readable run.json, ordered newest-first by run.json mtime.
+ * Resolving by mtime (not lexicographic name) so named/test run dirs like
+ * `trace-run-001` can't hijack "latest", and dirs without run.json are skipped.
+ */
+function runIdsByRecency(root: string): string[] {
+  return readdirSync(root)
+    .map((id) => {
+      try { return { id, mtime: statSync(join(root, id, 'run.json')).mtimeMs }; }
+      catch { return null; }
+    })
+    .filter((x): x is { id: string; mtime: number } => x !== null)
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((x) => x.id);
+}
+
+function printResearchProgress(runDir: string): void {
+  const journalPath = join(runDir, 'research_journal.json');
+  if (!existsSync(journalPath)) return;
+  let journal: { rounds?: { label?: string; result?: number; wallHoursCumulative?: number }[] };
+  try { journal = JSON.parse(readFileSync(journalPath, 'utf-8')); } catch { return; }
+  const rounds = Array.isArray(journal.rounds) ? journal.rounds : [];
+  console.log('\n## Research progress');
+  if (rounds.length === 0) {
+    console.log('  (no rounds journaled yet — agent is working on the first direction)');
+  } else {
+    for (let i = 0; i < rounds.length; i++) {
+      const r = rounds[i];
+      const wall = typeof r.wallHoursCumulative === 'number' ? ` @ ${r.wallHoursCumulative.toFixed(1)}h` : '';
+      console.log(`  ${i + 1}. ${r.label ?? '?'} = ${r.result ?? '?'}${wall}`);
+    }
+  }
+  const decisionPath = join(runDir, 'research_decision.json');
+  if (existsSync(decisionPath)) {
+    try {
+      const d = JSON.parse(readFileSync(decisionPath, 'utf-8'));
+      console.log(`  → running-best ${d.runningBest} | kept: ${(d.keptLabels ?? []).join(', ') || 'none'} | decision: ${d.decision} (${d.reason})`);
+    } catch { /* non-critical */ }
+  }
+}
+
 function cmdStatus() {
 
   const root = runsRoot();
   if (!existsSync(root)) { console.log('No runs found. Run `flowcrew quick "task"` first.'); return; }
-  const runs = readdirSync(root).sort().reverse();
+  const runs = runIdsByRecency(root);
   if (runs.length === 0) { console.log('No runs found.'); return; }
   const runDir = join(root, runs[0]);
 
   // Show summary.md if generated (best overview of what was done)
   const summaryPath = join(runDir, 'summary.md');
-  if (existsSync(summaryPath)) { console.log(readFileSync(summaryPath, 'utf-8')); return; }
+  if (existsSync(summaryPath)) { console.log(readFileSync(summaryPath, 'utf-8')); printResearchProgress(runDir); return; }
 
   // Show progress.md if supervisor generated one
   const progressPath = join(runDir, 'progress.md');
-  if (existsSync(progressPath)) { console.log(readFileSync(progressPath, 'utf-8')); return; }
+  if (existsSync(progressPath)) { console.log(readFileSync(progressPath, 'utf-8')); printResearchProgress(runDir); return; }
 
   // Fallback: show run.json summary
   const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8'));
   console.log(`# Run: ${runs[0]}\n`);
-  console.log(`Goal: ${state.taskDescription?.slice(0, 200) ?? '(no description)'}`);
+  console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
   console.log(`Status: ${state.status}`);
   console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}\n`);
   console.log('## Stages');
@@ -545,6 +600,7 @@ function cmdStatus() {
     const icon = ss.status === 'complete' ? '✓' : ss.status === 'running' ? '⟳' : ss.status === 'failed' ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
   }
+  printResearchProgress(runDir);
 }
 
 function cmdList() {
@@ -553,7 +609,7 @@ function cmdList() {
   if (!existsSync(root)) { console.log('No runs found. Run `flowcrew quick "task"` first.'); return; }
   const limitArg = args.find((a, i) => args[i - 1] === '--limit');
   const limit = limitArg ? parseInt(limitArg, 10) : 10;
-  const runs = readdirSync(root).sort().reverse().slice(0, limit);
+  const runs = runIdsByRecency(root).slice(0, limit);
   if (runs.length === 0) { console.log('No runs found.'); return; }
   console.log(`\nRecent runs (${runs.length}):\n`);
   console.log('  Status     Duration  Run ID                          Task');
@@ -565,7 +621,7 @@ function cmdList() {
       const startMs = new Date(state.startedAt).getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
       const duration = `${Math.round((endMs - startMs) / 1000)}s`.padEnd(8);
-      const taskDesc = (state.taskDescription || state.workflowName || '').slice(0, 40);
+      const taskDesc = (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 40);
       console.log(`  ${status}  ${duration}  ${runId}  ${taskDesc}`);
     } catch { /* non-critical */ console.log(`  ? unknown   —         ${runId}`); }
   }
@@ -578,7 +634,7 @@ function cmdGuide() {
   if (!message) { console.error('Usage: flowcrew guide "your guidance message"'); process.exit(1); }
   const root = runsRoot();
   if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
-  const runs = readdirSync(root).sort().reverse();
+  const runs = runIdsByRecency(root);
   if (runs.length === 0) { console.error('No runs found.'); process.exit(1); }
   writeFileSync(join(root, runs[0], 'user_input.md'), message, 'utf-8');
   console.log(`Guidance sent to run ${runs[0]}:`);
@@ -642,6 +698,230 @@ function cmdExport() {
   console.log(`  ${Object.keys((bundle.stages as object) || {}).length} stages, ${size}KB`);
 }
 
+async function cmdCampaign() {
+  const subcommand = args[1];
+  if (subcommand === 'pending') {
+    const id = args[2];
+    if (!id || args.includes('--help') || args.includes('-h')) {
+      console.log('Usage: flowcrew campaign pending <campaign_id>');
+      return;
+    }
+    const entries = readPendingReviews(id);
+    console.log(`Pending review: ${entries.length}`);
+    entries.forEach((entry, index) => {
+      console.log(`${index}: [${entry.severity ?? 'medium'}] ${entry.reason}`);
+      console.log(`   ${summarizePatch(entry.patch)}`);
+    });
+    return;
+  }
+
+  if (subcommand === 'review') {
+    const id = args[2];
+    if (!id || args.includes('--help') || args.includes('-h')) {
+      console.log('Usage: flowcrew campaign review <campaign_id>');
+      console.log('Interactively accept, reject, skip, or quit pending brief patches.');
+      return;
+    }
+    const scriptedAnswers = process.stdin.isTTY ? null : readFileSync(0, 'utf-8').split(/\r?\n/);
+    const rl = scriptedAnswers ? null : createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      let index = 0;
+      let answerIndex = 0;
+      while (true) {
+        const entries = readPendingReviews(id);
+        if (index >= entries.length) {
+          console.log('No more pending reviews.');
+          break;
+        }
+        const entry = entries[index];
+        console.log(`${index}: [${entry.severity ?? 'medium'}] ${entry.reason}`);
+        console.log(`   ${summarizePatch(entry.patch)}`);
+        const answer = (scriptedAnswers
+          ? (scriptedAnswers[answerIndex++] ?? 'q')
+          : await rl!.question('[a]ccept | [r]eject | [s]kip | [q]uit: ')).trim().toLowerCase();
+        if (answer === 'q' || answer === 'quit') break;
+        if (answer === 's' || answer === 'skip' || answer === '') {
+          index++;
+          continue;
+        }
+        if (answer === 'a' || answer === 'accept' || answer === 'r' || answer === 'reject') {
+          const decision = answer.startsWith('a') ? 'accept' : 'reject';
+          try {
+            const result = await consumePendingReview(id, index, decision);
+            console.log(`${decision === 'accept' ? 'Accepted' : 'Rejected'} review ${index}${result.version ? ` -> ${result.version}` : ''}`);
+          } catch (err) {
+            if (err instanceof ReviewConflictError) console.error(err.message);
+            else throw err;
+          }
+          continue;
+        }
+        console.log('Unrecognized choice.');
+      }
+    } finally {
+      rl?.close();
+    }
+    return;
+  }
+
+  if (subcommand === 'run') {
+    const configPath = args[2];
+    if (!configPath || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew campaign run <config.yaml> [--dry-run] [--background]');
+      process.exit(1);
+    }
+    if (args.includes('--background')) {
+      try {
+        const { defaultSocketPath, sendRpc } = await import('./orchestrator-rpc.js');
+        const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
+        const launchArgs = args.slice(3).filter((arg) => arg !== '--background');
+        const res = await sendRpc<{ id: number; unit: string }>(socketPath, {
+          cmd: 'register',
+          task: {
+            kind: 'campaign',
+            name: `Campaign ${configPath}`,
+            config_path: resolve(configPath),
+            projectDir: detectProjectDir(),
+            launch_args: launchArgs,
+          },
+        });
+        console.log(`Task #${res.id} registered. Unit: ${res.unit}`);
+        return;
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+    const cfg = await loadCampaignConfig(resolve(configPath));
+    const result = await runCampaign(cfg, { dryRun: args.includes('--dry-run') });
+    console.log(`Campaign ${cfg.id}: ${result.status}`);
+    return;
+  }
+
+  if (subcommand === 'status') {
+    const id = args[2];
+    if (!id || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew campaign status <campaign_id>');
+      process.exit(1);
+    }
+    const dir = campaignDir(id);
+    const summaryPath = join(dir, 'summary.json');
+    const logPath = join(dir, 'iteration_log.jsonl');
+    const activePath = join(dir, 'active.json');
+    console.log(`# Campaign: ${id}`);
+    if (!existsSync(dir)) {
+      console.log('Status: not found');
+      return;
+    }
+    if (existsSync(summaryPath)) {
+      try {
+        const summary = JSON.parse(readFileSync(summaryPath, 'utf-8'));
+        console.log(`Status: ${summary.status ?? 'unknown'}`);
+        if (summary.iter !== undefined) console.log(`Iterations: ${summary.iter}`);
+      } catch {
+        console.log('Status: summary unreadable');
+      }
+    } else if (existsSync(activePath)) {
+      try {
+        const active = JSON.parse(readFileSync(activePath, 'utf-8'));
+        console.log(`Status: running`);
+        console.log(`Iteration: ${active.iter ?? '?'}`);
+        console.log(`Unit: ${active.systemdUnit ?? '?'}`);
+      } catch {
+        console.log('Status: running');
+      }
+    } else {
+      console.log('Status: initialized');
+    }
+    if (existsSync(logPath)) {
+      const lines = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
+      console.log(`Log entries: ${lines.length}`);
+      const last = lines.at(-1);
+      if (last) console.log(`Last: ${last}`);
+    }
+    return;
+  }
+
+  if (subcommand === 'stop') {
+    const id = args[2];
+    if (!id || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew campaign stop <campaign_id>');
+      process.exit(1);
+    }
+    stopCampaign(id);
+    console.log(`Campaign ${id}: stop requested`);
+    return;
+  }
+
+  console.error('Usage: flowcrew campaign run|status|stop|pending|review ...');
+  process.exit(1);
+}
+
+function cmdBrief() {
+  const subcommand = args[1];
+  const briefDir = args[2] ? resolve(args[2]) : undefined;
+
+  if (subcommand === 'head') {
+    if (!briefDir || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew brief head <briefDir>');
+      process.exit(1);
+    }
+    const head = readHead(briefDir);
+    console.log(`${head.version} ${head.path}`);
+    return;
+  }
+
+  if (subcommand === 'diff') {
+    const fromVersion = args[3];
+    const toVersion = args[4];
+    if (!briefDir || !fromVersion || !toVersion || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew brief diff <briefDir> <fromVersion> <toVersion>');
+      process.exit(1);
+    }
+    process.stdout.write(diffVersions(briefDir, fromVersion, toVersion));
+    return;
+  }
+
+  if (subcommand === 'rollback') {
+    const version = args[3];
+    if (!briefDir || !version || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew brief rollback <briefDir> <version>');
+      process.exit(1);
+    }
+    const head = rollback(briefDir, version, `cli rollback to ${version}`);
+    console.log(`${head.version} ${head.path}`);
+    return;
+  }
+
+  if (subcommand === 'log') {
+    if (!briefDir || args.includes('--help') || args.includes('-h')) {
+      console.error('Usage: flowcrew brief log <briefDir>');
+      process.exit(1);
+    }
+    const logPath = join(briefDir, 'revisions.jsonl');
+    if (!existsSync(logPath)) {
+      console.log('No revisions.');
+      return;
+    }
+    const lines = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) {
+      console.log('No revisions.');
+      return;
+    }
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line) as { ts?: string; from?: string; to?: string; reason?: string };
+        console.log(`${entry.ts ?? '?'} ${entry.from ?? '?'} -> ${entry.to ?? '?'} ${entry.reason ?? ''}`.trim());
+      } catch {
+        console.log(line);
+      }
+    }
+    return;
+  }
+
+  console.error('Usage: flowcrew brief head|diff|rollback|log ...');
+  process.exit(1);
+}
+
 function printUsage() {
   console.log(`
 FlowCrew — Multi-agent orchestration platform
@@ -656,6 +936,11 @@ Commands:
   guide     Send guidance to the running supervisor
   clean     Delete old runs (keeps 5 most recent by default)
   export    Export a run as JSON bundle
+  campaign  Run, inspect, or stop an outer-loop research campaign
+  daemon    Start, stop, and inspect the background orchestrator
+  task      List and manage background tasks
+  audit-reality  Run declared checks against task history
+  brief     Inspect, diff, or roll back versioned briefs
   doctor    Check system requirements and configuration
   start     Start the FlowCrew dashboard server
   version   Show version
@@ -665,8 +950,12 @@ Examples:
   flowcrew quick "task" --supervise --max-iterations 3
   flowcrew status
   flowcrew list --limit 20
+  flowcrew daemon start
+  flowcrew task list
   flowcrew guide "try a different approach"
   flowcrew clean --keep 3
+  flowcrew campaign run docs/framework_campaign/example_campaign.yaml --dry-run
+  flowcrew brief head docs/brief
 
 Options:
   --help    Show this help message
@@ -699,6 +988,21 @@ switch (command) {
     break;
   case 'export':
     cmdExport();
+    break;
+  case 'campaign':
+    cmdCampaign().catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'daemon':
+    import('./cli-daemon.js').then(({ cmdDaemon }) => cmdDaemon(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'task':
+    import('./cli-task.js').then(({ cmdTask }) => cmdTask(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'audit-reality':
+    import('./reality-gate/audit-reality.js').then(({ cmdAuditReality }) => cmdAuditReality(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'brief':
+    try { cmdBrief(); } catch (err) { console.error(err); process.exit(1); }
     break;
   case 'doctor':
     cmdDoctor().catch((err) => { console.error(err); process.exit(1); });

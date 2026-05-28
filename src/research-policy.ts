@@ -1,0 +1,124 @@
+/**
+ * Research-mode decision policy — a PURE function decoupled from the scheduler
+ * so it is trivially unit-testable.
+ *
+ * After each measured research round (one direction tested + OOS-measured), the
+ * scheduler calls evaluateResearch() with the full ordered history of rounds.
+ * The evaluator computes:
+ *   - which rounds are KEPT (cumulative stack), per the configured policy
+ *   - the running-best metric value
+ *   - whether the latest round was kept
+ *   - the consecutive-no-improvement streak
+ *   - the loop decision: ship | continue | stop_ceiling
+ *
+ * This replaces the per-phase prose decision-tables that brief authors
+ * previously hand-wrote (e.g. "$144~$198 → continue, $128~$144 → ceiling").
+ */
+import type { ResearchConfig, ResearchPolicy } from './store.js';
+
+export interface ResearchRound {
+  label: string;
+  result: number;
+  /** Cumulative wall hours across the program up to and including this round. */
+  wallHoursCumulative?: number;
+}
+
+export interface ResearchEvaluation {
+  runningBest: number;
+  keptLabels: string[];
+  latestKept: boolean;
+  consecutiveNoImprovement: number;
+  decision: 'ship' | 'continue' | 'stop_ceiling';
+  reason: string;
+}
+
+/** True if `a` is strictly better than `b` under the higher/lower-is-better convention. */
+function isBetter(a: number, b: number, higherIsBetter: boolean): boolean {
+  return higherIsBetter ? a > b : a < b;
+}
+
+/**
+ * Compute the kept-set + running-best for the given policy over the ordered rounds.
+ * Returns kept labels (in round order) and the final running-best value.
+ */
+function applyPolicy(
+  policy: ResearchPolicy,
+  baseline: number,
+  higherIsBetter: boolean,
+  rounds: ResearchRound[],
+): { keptLabels: string[]; runningBest: number; perRoundKept: boolean[] } {
+  const perRoundKept: boolean[] = [];
+  const keptLabels: string[] = [];
+
+  if (policy === 'best_of_n' || policy === 'replace_if_better') {
+    // Single-slot: keep only the best round seen so far (replaces prior keep).
+    let best = baseline;
+    let bestLabel: string | null = null;
+    for (const r of rounds) {
+      if (isBetter(r.result, best, higherIsBetter)) {
+        best = r.result;
+        bestLabel = r.label;
+        perRoundKept.push(true);
+      } else {
+        perRoundKept.push(false);
+      }
+    }
+    if (bestLabel) keptLabels.push(bestLabel);
+    return { keptLabels, runningBest: best, perRoundKept };
+  }
+
+  // greedy_stack (default): keep a round iff it improves the running best;
+  // gains accumulate.
+  let runningBest = baseline;
+  for (const r of rounds) {
+    if (isBetter(r.result, runningBest, higherIsBetter)) {
+      runningBest = r.result;
+      keptLabels.push(r.label);
+      perRoundKept.push(true);
+    } else {
+      perRoundKept.push(false);
+    }
+  }
+  return { keptLabels, runningBest, perRoundKept };
+}
+
+export function evaluateResearch(config: ResearchConfig, rounds: ResearchRound[]): ResearchEvaluation {
+  const higherIsBetter = config.higherIsBetter !== false;
+  const { keptLabels, runningBest, perRoundKept } = applyPolicy(
+    config.policy, config.baseline, higherIsBetter, rounds,
+  );
+  const latestKept = perRoundKept.length > 0 ? perRoundKept[perRoundKept.length - 1] : false;
+
+  // Consecutive no-improvement streak ending at the latest round.
+  let consecutiveNoImprovement = 0;
+  for (let i = perRoundKept.length - 1; i >= 0; i--) {
+    if (perRoundKept[i]) break;
+    consecutiveNoImprovement++;
+  }
+
+  const stop = config.stop ?? {};
+
+  // 1. Breakthrough: running-best beats the headline target → ship.
+  if (stop.beat !== undefined && (higherIsBetter ? runningBest >= stop.beat : runningBest <= stop.beat)) {
+    return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'ship', reason: `running-best ${runningBest} beats target ${stop.beat}` };
+  }
+
+  // 2. Round budget exhausted → ceiling.
+  if (stop.maxRounds !== undefined && rounds.length >= stop.maxRounds) {
+    return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'stop_ceiling', reason: `max_rounds reached (${rounds.length}/${stop.maxRounds})` };
+  }
+
+  // 3. Wall budget exhausted → ceiling.
+  const latestWall = rounds.length > 0 ? rounds[rounds.length - 1].wallHoursCumulative : undefined;
+  if (stop.maxWallHours !== undefined && latestWall !== undefined && latestWall >= stop.maxWallHours) {
+    return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'stop_ceiling', reason: `max_wall_hours reached (${latestWall.toFixed(2)}/${stop.maxWallHours})` };
+  }
+
+  // 4. No-improvement streak → ceiling.
+  if (stop.haltAfterNoImprovement !== undefined && consecutiveNoImprovement >= stop.haltAfterNoImprovement) {
+    return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'stop_ceiling', reason: `${consecutiveNoImprovement} consecutive rounds without improvement` };
+  }
+
+  // 5. Otherwise keep exploring.
+  return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'continue', reason: latestKept ? `latest round improved running-best to ${runningBest}` : 'no improvement this round, but budget remains' };
+}

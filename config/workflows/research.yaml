@@ -1,0 +1,13 @@
+name: research
+description: >
+  Research-exploration loop. The brief carries a `research:` frontmatter block
+  (baseline, policy, stop conditions). Each iteration the planner dynamically
+  dispatches a round (researcher proposes a direction → implement → measure →
+  write the result to research result_file). The FRAMEWORK reads each round
+  result, journals it (run-dir, agent-unreachable), and computes keep/drop +
+  continue/ship/ceiling via the decision policy — no prose decision tables.
+  The loop terminates natively when the policy says ship or ceiling.
+stages:
+  - id: plan
+    role: planner
+    dynamic_dispatch: true

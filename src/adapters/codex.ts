@@ -1,9 +1,8 @@
-import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Adapter, AgentConfig, RunOpts, RunResult, DiscussOpts, ChildProcess, InteractiveSession } from './base.js';
-import { execWithTimeout, execWithStreaming, tryImportPty, spawnFallbackInteractive } from './base.js';
+import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
+import { execWithTimeout } from './base.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -66,10 +65,6 @@ export function stageCodexHome(runDir: string, stageId: string): string {
   return join(runDir, 'stages', stageId, 'codex_home');
 }
 
-export function discussionCodexHome(sessionDir: string): string {
-  return join(sessionDir, 'codex_home');
-}
-
 export function codexArgs(): string[] {
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
@@ -91,6 +86,12 @@ export class CodexAdapter implements Adapter {
     const codexHome = stageCodexHome(opts.runDir, opts.stageId);
     writeCodexConfig(codexHome, role);
     const args = ['exec', ...codexArgs()];
+    // Use `--` to terminate option parsing before the prompt. Without this,
+    // codex CLI treats prompts beginning with `-` (e.g. briefs whose first
+    // line is `---` YAML frontmatter) as unrecognized flags and aborts with
+    // `error: unexpected argument`. The `--` separator is the standard
+    // POSIX convention codex itself recommends in its tip output.
+    args.push('--');
     args.push(prompt);
 
     const result = await execWithTimeout('codex', args, {
@@ -106,65 +107,6 @@ export class CodexAdapter implements Adapter {
     return result;
   }
 
-  async discuss(message: string, role: AgentConfig, opts: DiscussOpts): Promise<RunResult> {
-    mkdirSync(opts.sessionDir, { recursive: true });
-    const codexHome = discussionCodexHome(opts.sessionDir);
-    writeCodexConfig(codexHome, role);
-    const hasSession = existsSync(join(codexHome, 'sessions'));
-    const args = ['exec', ...codexArgs()];
-    if (hasSession) args.push('resume', '--last', message);
-    else args.push(message);
-
-    return execWithStreaming('codex', args, {
-      cwd: opts.sessionDir,
-      timeout_ms: 300000,
-      onChunk: opts.onChunk ?? (() => {}),
-      env: { CODEX_HOME: codexHome },
-    });
-  }
-
-  spawnDiscuss(message: string, role: AgentConfig, opts: DiscussOpts): ChildProcess {
-    mkdirSync(opts.sessionDir, { recursive: true });
-    const codexHome = discussionCodexHome(opts.sessionDir);
-    writeCodexConfig(codexHome, role);
-    const hasSession = existsSync(join(codexHome, 'sessions'));
-    const args = ['exec', ...codexArgs()];
-    if (hasSession) args.push('resume', '--last', message);
-    else args.push(message);
-    return spawn('codex', args, {
-      cwd: opts.sessionDir,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CODEX_HOME: codexHome },
-    });
-  }
-
-  async spawnInteractive(role: AgentConfig, opts: DiscussOpts): Promise<InteractiveSession> {
-    mkdirSync(opts.sessionDir, { recursive: true });
-    const codexHome = discussionCodexHome(opts.sessionDir);
-    writeCodexConfig(codexHome, role);
-    const pty = await tryImportPty();
-    // Interactive TUI mode — no 'exec', just 'codex'
-    const args = codexArgs();
-    if (pty) {
-      const proc = pty.spawn('codex', args, {
-        cwd: opts.workDir,
-        cols: opts.cols ?? 80,
-        rows: opts.rows ?? 24,
-        env: { ...process.env, CODEX_HOME: codexHome, TERM: 'xterm-256color' },
-      });
-      return {
-        onData: (cb: (data: string) => void) => proc.onData(cb),
-        write: (data: string) => proc.write(data),
-        resize: (cols: number, rows: number) => proc.resize(cols, rows),
-        kill: () => proc.kill(),
-        onExit: (cb: (exitCode: number) => void) => proc.onExit(({ exitCode }: { exitCode: number }) => cb(exitCode)),
-      };
-    }
-    return spawnFallbackInteractive('codex', args, {
-      cwd: opts.workDir,
-      env: { ...process.env, CODEX_HOME: codexHome, TERM: 'xterm-256color' },
-    });
-  }
 }
 
 export function createAdapter(): Adapter {
