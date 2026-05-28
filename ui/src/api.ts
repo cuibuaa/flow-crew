@@ -1,4 +1,4 @@
-import type { Task, StageDetail, Agent, Message, PlanStage, SettingsData, CampaignSummary, CampaignEntry, CampaignTriggers, KnowledgeGraph, KGNode, KGEdge, TraceEvent, TraceSummary } from "./types";
+import type { Task, StageDetail, Agent, PlanStage, SettingsData, CampaignSummary, CampaignEntry, CampaignTriggers, KnowledgeGraph, KGNode, KGEdge, TraceEvent, TraceSummary, M3CampaignSummary, M3CampaignIteration, M3CampaignRevision, M3PendingReview, M3KGSuggestion, Campaign, CampaignKGNode, CampaignKGEdge, RunDetailData, WorkspaceRun } from "./types";
 
 const BASE = "/api";
 
@@ -34,7 +34,6 @@ function patch<T>(url: string, body: unknown): Promise<T> {
 export interface CreateTaskRequest {
   name: string;
   workflow: string;
-  discussion: Message[];
   plan: PlanStage[];
   planFile?: string;
   campaignId?: string;
@@ -84,19 +83,6 @@ export const fetchAgent = async (name: string): Promise<string> => {
   return res.text();
 };
 
-// WebSocket helpers
-function getWsBase(): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}`;
-}
-
-export const discussWsUrl = (taskId: string) =>
-  `${getWsBase()}/api/discuss/ws?taskId=${encodeURIComponent(taskId)}`;
-
-// Discussion & Plan
-export const generatePlan = (taskId: string) =>
-  post<PlanStage[]>(`${BASE}/plan`, { taskId });
-
 // Settings
 export const fetchSettings = () => json<SettingsData>(`${BASE}/settings`);
 
@@ -129,11 +115,30 @@ export const fetchStageOutput = (taskId: string, stageId: string, opts?: { full?
   });
 };
 
-// Campaigns
-export const fetchCampaigns = () => json<CampaignSummary[]>(`${BASE}/campaigns`);
-export const fetchCampaign = (id: string) => json<CampaignEntry[]>(`${BASE}/campaigns/${id}`);
-export const renameCampaign = (campaignId: string, name: string) =>
-  fetch(`${BASE}/campaigns/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignId, name }) }).then(r => r.json());
+// Run campaign history used by task import and dashboard score summaries.
+export const fetchRunCampaigns = () => json<CampaignSummary[]>(`${BASE}/run-campaigns`);
+export const fetchRunCampaign = (id: string) => json<CampaignEntry[]>(`${BASE}/run-campaigns/${encodeURIComponent(id)}`);
+export const renameRunCampaign = (campaignId: string, name: string) =>
+  fetch(`${BASE}/run-campaigns/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ campaignId, name }) }).then(r => r.json());
+export const deleteRunCampaign = (campaignId: string) =>
+  fetch(`${BASE}/run-campaigns/${encodeURIComponent(campaignId)}`, { method: 'DELETE' }).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() as Promise<{ ok: boolean; orphaned: number; removedHistory: boolean }>; });
+
+// M1/M2 filesystem campaigns shown by the M3 dashboard view.
+export const fetchM3Campaigns = () => json<M3CampaignSummary[]>(`${BASE}/campaigns`);
+export const fetchM3Campaign = (id: string) => json<M3CampaignSummary>(`${BASE}/campaigns/${encodeURIComponent(id)}`);
+export const fetchM3CampaignIterations = (id: string) => json<M3CampaignIteration[]>(`${BASE}/campaigns/${encodeURIComponent(id)}/iterations`);
+export const fetchM3CampaignRevisions = (id: string) => json<M3CampaignRevision[]>(`${BASE}/campaigns/${encodeURIComponent(id)}/revisions`);
+export const fetchM3CampaignPendingReview = (id: string) => json<M3PendingReview[]>(`${BASE}/campaigns/${encodeURIComponent(id)}/pending-review`);
+export const fetchM3CampaignKGHints = (id: string) => json<M3KGSuggestion[]>(`${BASE}/campaigns/${encodeURIComponent(id)}/kg-hints`);
+export const reviewM3CampaignKGHint = (id: string, index: number) =>
+  post<Record<string, unknown>>(`${BASE}/campaigns/${encodeURIComponent(id)}/kg-hints/${index}/review`, {});
+export const reviewM3CampaignPatch = (id: string, index: number, decision: "accept" | "reject") =>
+  post<Record<string, unknown>>(`${BASE}/campaigns/${encodeURIComponent(id)}/review/${index}`, { decision });
+export const fetchM3CampaignBriefDiff = async (id: string, from: string, to: string): Promise<string> => {
+  const res = await fetch(`${BASE}/campaigns/${encodeURIComponent(id)}/brief-diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.text();
+};
 
 // Knowledge Graph
 export const fetchKnowledgeGraph = (taskId: string) =>
@@ -152,3 +157,11 @@ export const fetchTrace = (taskId: string) =>
   json<{ events: TraceEvent[]; summary: TraceSummary }>(`${BASE}/tasks/${taskId}/trace`);
 export const fetchStageTrace = (taskId: string, stageId: string) =>
   json<{ events: TraceEvent[]; summary: TraceSummary }>(`${BASE}/tasks/${taskId}/stages/${stageId}/trace`);
+
+// Hierarchical Workspaces
+export const fetchCampaigns = () => json<Campaign[]>(`${BASE}/campaigns`);
+export const fetchCampaign = (id: string) => json<Campaign>(`${BASE}/campaigns/${encodeURIComponent(id)}`);
+export const fetchRunDetail = (id: string) => json<RunDetailData>(`${BASE}/runs/${encodeURIComponent(id)}`);
+export const fetchCrossCampaignKGNodes = () => json<CampaignKGNode[]>(`${BASE}/cross-campaign-kg/nodes`);
+export const fetchCrossCampaignKGEdges = () => json<CampaignKGEdge[]>(`${BASE}/cross-campaign-kg/edges`);
+export const fetchStandaloneRuns = () => json<WorkspaceRun[]>(`${BASE}/standalone-runs`);

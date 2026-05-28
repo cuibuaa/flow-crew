@@ -5,7 +5,7 @@ import { fetchAgents, fetchAgent } from '../api';
 const roleIcon: Record<string, string> = {
   coder: "💻", qa: "✅", paper_writer: "✍️", paper_reviewer: "📝",
   ai_detector: "🔎", researcher: "🔍", doc_writer: "📄", doc_reviewer: "📝",
-  planner: "📋", discussion: "💬",
+  planner: "📋",
 };
 
 export default function AgentManagement() {

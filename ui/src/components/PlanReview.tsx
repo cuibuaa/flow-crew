@@ -51,7 +51,7 @@ export default function PlanReview() {
   useEffect(() => {
     if (!task || !id) return;
     if (task.status === "pending") {
-      nav(`/task/${id}/discuss`, { replace: true });
+      nav(`/task/${id}/monitor`, { replace: true });
       return;
     }
     if (task.status === "completed" || task.status === "failed") {
@@ -191,9 +191,9 @@ export default function PlanReview() {
             className="btn-accent px-5 py-2.5 text-sm font-medium disabled:opacity-50">
             {approving ? "Approving…" : "✓ Approve & Execute"}
           </button>
-          <button onClick={() => nav(`/task/${id}/discuss`)}
+          <button onClick={() => nav("/")}
             className="btn-ghost px-4 py-2.5 text-sm border border-rc-border">
-            ← Back to Discussion
+            ← Back to board
           </button>
         </div>
       )}

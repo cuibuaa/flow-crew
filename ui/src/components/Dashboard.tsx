@@ -5,8 +5,7 @@ import type { Task } from "../types";
 import Sparkline from "./Sparkline";
 import AlertsFeed from "./AlertsFeed";
 import TaskCard from "./TaskCard";
-import NewTaskDialog from "./NewTaskDialog";
-import { createTask, renameTask, deleteTask, cancelTask, rerunTask, updateTask, fetchCampaigns, fetchCampaign, renameCampaign } from "../api";
+import { renameTask, deleteTask, cancelTask, rerunTask, updateTask, fetchRunCampaigns, fetchRunCampaign, renameRunCampaign } from "../api";
 import { useRefreshTasks, useRemoveTask } from "./Layout";
 import { showToast } from "./Toast";
 
@@ -27,7 +26,6 @@ function fmtDuration(ms: number): string {
 
 function navTarget(task: Task) {
   switch (task.status) {
-    case "pending": return `/task/${task.id}/discuss`;
     case "running": return `/task/${task.id}/monitor`;
     case "awaiting_approval": return `/task/${task.id}/plan`;
     default: return `/task/${task.id}/monitor`;
@@ -184,7 +182,7 @@ function EditableCampaignName({ campaignId, name }: { campaignId: string; name: 
     setEditing(false);
     const trimmed = editName.trim();
     if (trimmed && trimmed !== name) {
-      try { await renameCampaign(campaignId, trimmed); refresh(); } catch { setEditName(name); }
+      try { await renameRunCampaign(campaignId, trimmed); refresh(); } catch { setEditName(name); }
     } else {
       setEditName(name);
     }
@@ -222,7 +220,6 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; task: Task } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [recentEventsOpen, setRecentEventsOpen] = useState(false);
   const [campaignScores, setCampaignScores] = useState<Record<string, CampaignScoreData>>({});
   const ctxRef = useRef<HTMLDivElement>(null);
@@ -251,9 +248,10 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
 
     let cancelled = false;
     Promise.all([
-      fetchCampaigns().catch(() => []),
+      fetchRunCampaigns().catch(() => []),
       Promise.all(campaignIds.map(async (id) => {
-        const entries = await fetchCampaign(id).catch(() => []);
+        const entries = await fetchRunCampaign(id).catch(() => []);
+        if (!Array.isArray(entries)) return [id, [] as number[]] as const;
         return [id, entries.map((entry) => entry.score).filter((score) => Number.isFinite(score))] as const;
       })),
     ]).then(([summaries, histories]) => {
@@ -313,7 +311,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     try {
       const res = await rerunTask(task.id);
       refresh();
-      nav(res.route === 'monitor' ? `/task/${task.id}/monitor` : `/task/${task.id}/discuss`);
+      nav(res.route === 'monitor' ? `/task/${task.id}/monitor` : '/import');
     } catch (err) {
       showToast(`Could not rerun "${task.name}": ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -342,16 +340,6 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
     refresh();
   };
 
-  const handleNewTask = async (name: string, campaignId?: string, campaignName?: string) => {
-    setNewTaskOpen(false);
-    try {
-      const { id } = await createTask({ name, workflow: "default", discussion: [], plan: [], campaignId, campaignName });
-      nav(`/task/${id}/discuss`);
-    } catch (err) {
-      showToast(`Could not create task: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  };
-
   const sorted = [...tasks].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
 
   // Group by campaign
@@ -372,11 +360,10 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
         <div className="flex flex-col items-center justify-center h-full text-rc-muted gap-4">
           <p>No tasks</p>
           <div className="flex gap-2">
-            <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
+            <button onClick={() => nav("/import")} className="btn-accent px-4 py-2 text-sm">+ New Task</button>
             <button onClick={() => nav("/import")} className="btn-ghost px-4 py-2 text-sm border border-rc-border">Import</button>
           </div>
         </div>
-        <NewTaskDialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} onSubmit={handleNewTask} />
       </div>
     );
   }
@@ -439,7 +426,7 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-rc-text">Dashboard</h2>
         <div className="flex gap-2">
-          <button onClick={() => setNewTaskOpen(true)} className="btn-accent px-3 py-1.5 text-sm">+ New Task</button>
+          <button onClick={() => nav("/import")} className="btn-accent px-3 py-1.5 text-sm">+ New Task</button>
           <button onClick={() => nav("/import")} className="btn-ghost px-3 py-1.5 text-sm border border-rc-border">Import</button>
         </div>
       </div>
@@ -587,7 +574,6 @@ export default function Dashboard({ tasks }: { tasks: Task[] }) {
           )}
         </div>
       )}
-      <NewTaskDialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} onSubmit={handleNewTask} />
     </div>
   );
 }

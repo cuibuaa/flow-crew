@@ -39,6 +39,23 @@ export function edgeEndpoints(edge: KGEdge) {
   };
 }
 
+export function filterByTime(nodes: SimNode[], edges: KGEdge[], percent: number) {
+  if (nodes.length === 0) return { visibleNodes: [], visibleEdges: [] };
+  const clamped = Math.max(0, Math.min(100, percent));
+  const count = clamped >= 100
+    ? nodes.length
+    : Math.max(1, Math.floor((nodes.length * clamped) / 100));
+  const visibleNodes = [...nodes]
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+    .slice(0, count);
+  const visibleIds = new Set(visibleNodes.map(node => node.id));
+  const visibleEdges = edges.filter(edge => {
+    const endpoints = edgeEndpoints(edge);
+    return Boolean(endpoints.from && endpoints.to && visibleIds.has(endpoints.from) && visibleIds.has(endpoints.to));
+  });
+  return { visibleNodes, visibleEdges };
+}
+
 export function runSimulation(nodes: SimNode[], edges: KGEdge[], width: number, height: number) {
   const cx = width / 2, cy = height / 2;
   for (let iter = 0; iter < 180; iter++) {

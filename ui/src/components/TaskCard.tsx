@@ -41,8 +41,7 @@ export default function TaskCard({ task, onContextMenu, forceEdit, onEditDone }:
     }
   };
 
-  const target = task.status === "pending" ? `/task/${task.id}/discuss`
-    : task.status === "awaiting_approval" ? `/task/${task.id}/plan`
+  const target = task.status === "awaiting_approval" ? `/task/${task.id}/plan`
     : `/task/${task.id}/monitor`;
 
   return (

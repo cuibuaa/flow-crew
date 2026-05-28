@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { createTask, executeTask, fetchCampaigns } from "../api";
+import { createTask, executeTask, fetchRunCampaigns } from "../api";
 import { cleanCampaignDisplayName, getCampaignDisplayName } from "../types";
 import type { CampaignSelectionMode, CampaignSummary } from "../types";
 
@@ -18,7 +18,7 @@ export default function ImportBrief() {
   const nav = useNavigate();
 
   useEffect(() => {
-    fetchCampaigns()
+    fetchRunCampaigns()
       .then((data) => {
         setCampaigns(data);
         setCampaignLoadError(null);
@@ -54,7 +54,6 @@ export default function ImportBrief() {
       const { id } = await createTask({
         name: name.trim(),
         workflow: "default",
-        discussion: [],
         plan: [],
         planFile: content,
         campaignId: resolvedCampaignId,

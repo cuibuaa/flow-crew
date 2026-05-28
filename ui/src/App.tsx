@@ -1,39 +1,40 @@
-import { BrowserRouter, Routes, Route, useParams } from "react-router-dom";
-import Layout from "./components/Layout";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import AgentsView from "./components/AgentsView";
+import RunDetail from "./components/RunDetail";
+import SettingsView from "./components/SettingsView";
 import ToastContainer from "./components/Toast";
-import TaskBoard from "./components/TaskBoard";
-import TaskDiscussion from "./components/TaskDiscussion";
-import PlanReview from "./components/PlanReview";
-import LiveMonitor from "./components/LiveMonitor";
-import StageDetail from "./components/StageDetail";
-import AgentManagement from "./components/AgentManagement";
-import Settings from "./components/Settings";
-import ImportBrief from "./components/ImportBrief";
-import KnowledgeGraph from "./components/KnowledgeGraph";
-
-function KnowledgeGraphRoute() {
-  const { id } = useParams();
-  if (!id) return null;
-  return <KnowledgeGraph taskId={id} />;
-}
+import Workspaces from "./components/Workspaces";
 
 export default function App() {
   return (
     <BrowserRouter>
       <ToastContainer />
       <Routes>
-        <Route element={<Layout />}>
-          <Route path="/" element={<TaskBoard />} />
-          <Route path="/import" element={<ImportBrief />} />
-          <Route path="/task/:id/discuss" element={<TaskDiscussion />} />
-          <Route path="/task/:id/plan" element={<PlanReview />} />
-          <Route path="/task/:id/monitor" element={<LiveMonitor />} />
-          <Route path="/task/:id/knowledge-graph" element={<KnowledgeGraphRoute />} />
-          <Route path="/task/:id/stage/:stageId" element={<StageDetail />} />
-          <Route path="/agents" element={<AgentManagement />} />
-          <Route path="/settings" element={<Settings />} />
-        </Route>
+        <Route path="/" element={<Workspaces />} />
+        <Route path="/campaign" element={<Workspaces />} />
+        <Route path="/campaign/:id" element={<Workspaces />} />
+        <Route path="/campaign/:campaignId/run/:id" element={<><TopbarOnly /><main className="main run-main"><RunDetail /></main></>} />
+        <Route path="/run/:id" element={<><TopbarOnly /><main className="main run-main"><RunDetail /></main></>} />
+        <Route path="/agents" element={<><TopbarOnly /><main className="main full-main"><AgentsView /></main></>} />
+        <Route path="/settings" element={<><TopbarOnly /><main className="main full-main"><SettingsView /></main></>} />
+        <Route path="/task/:id/monitor" element={<Navigate to="/campaign" replace />} />
+        <Route path="/task/:id/plan" element={<Navigate to="/campaign" replace />} />
+        <Route path="/task/:id/knowledge-graph" element={<Navigate to="/campaign" replace />} />
+        <Route path="/import" element={<Navigate to="/campaign" replace />} />
       </Routes>
     </BrowserRouter>
+  );
+}
+
+function TopbarOnly() {
+  return (
+    <div className="topbar">
+      <div className="brand">FlowCrew</div>
+      <div className="tabs">
+        <a className="tab" href="/campaign">Workspaces</a>
+        <a className="tab" href="/agents">Agents</a>
+        <a className="tab" href="/settings">Settings</a>
+      </div>
+    </div>
   );
 }

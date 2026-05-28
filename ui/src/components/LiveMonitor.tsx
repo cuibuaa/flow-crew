@@ -679,14 +679,14 @@ function RunOverview({
   health,
   onRerun,
   onCancel,
-  onBackToDiscussion,
+  onBackToBoard,
 }: {
   task: Task;
   selectedStage?: Stage;
   health?: HealthInfo;
   onRerun?: () => void;
   onCancel?: () => void;
-  onBackToDiscussion?: () => void;
+  onBackToBoard?: () => void;
 }) {
   const completed = task.stages.filter((stage) => stage.status === "complete").length;
   const running = task.stages.filter((stage) => stage.status === "running").length;
@@ -762,9 +762,9 @@ function RunOverview({
               Rerun Task
             </button>
           )}
-          {task.status === "failed" && onBackToDiscussion && (
-            <button onClick={onBackToDiscussion} className="btn-ghost border border-rc-border px-4 py-2 text-xs">
-              ← Back to Discussion
+          {task.status === "failed" && onBackToBoard && (
+            <button onClick={onBackToBoard} className="btn-ghost border border-rc-border px-4 py-2 text-xs">
+              ← Back to board
             </button>
           )}
         </div>
@@ -794,7 +794,7 @@ function nodeLayer(selected: boolean, related: boolean, dimmed: boolean): number
   return 10;
 }
 
-function NodeCard({
+export function NodeCard({
   stage,
   selected,
   related,
@@ -815,13 +815,14 @@ function NodeCard({
 }) {
   return (
     <button
-      ref={(node) => registerNode(stage.id, node)}
       type="button"
+      onClick={onSelect}
+      ref={(node) => registerNode(stage.id, node)}
       data-testid={`dag-node-${stage.id}`}
       data-stage-id={stage.id}
       data-selected={selected ? "true" : "false"}
       data-related={related ? "true" : "false"}
-      onClick={onSelect}
+      aria-label={`Select stage ${stage.id}`}
       className={`monitor-node-shell absolute rounded-card border px-4 py-3 text-left ${statusTone(stage.status)} ${selected ? "ring-2 ring-sky-300/70 shadow-glow" : ""} ${dimmed ? "opacity-35" : "opacity-100"} ${related && !selected ? "border-sky-300/35" : ""}`}
       style={{
         left: position.x,
@@ -1173,7 +1174,6 @@ export default function LiveMonitor() {
 
   useEffect(() => {
     if (!taskState || !id) return;
-    if (taskState.status === "pending") nav(`/task/${id}/discuss`, { replace: true });
     if (taskState.status === "awaiting_approval") nav(`/task/${id}/plan`, { replace: true });
   }, [taskState, id, nav]);
 
@@ -1213,7 +1213,7 @@ export default function LiveMonitor() {
     try {
       const res = await rerunTask(id);
       refresh();
-      nav(res.route === 'monitor' ? `/task/${id}/monitor` : `/task/${id}/discuss`);
+      nav(res.route === 'monitor' ? `/task/${id}/monitor` : '/import');
     } catch (err) {
       setActionError(`Rerun failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1245,7 +1245,7 @@ export default function LiveMonitor() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto lg-wide:w-[38%]">
-        <RunOverview task={task} selectedStage={selectedStage} health={selectedStage ? healthMap.get(selectedStage.id) : undefined} onRerun={handleRerun} onCancel={handleCancel} onBackToDiscussion={() => nav(`/task/${id}/discuss`)} />
+        <RunOverview task={task} selectedStage={selectedStage} health={selectedStage ? healthMap.get(selectedStage.id) : undefined} onRerun={handleRerun} onCancel={handleCancel} onBackToBoard={() => nav("/")} />
         <SupervisorPane taskId={id!} />
         <ProgressBrief taskId={id!} />
         <button onClick={() => nav(`/task/${id}/knowledge-graph`)} className="btn-ghost border border-rc-border px-4 py-2 text-xs w-full text-left" title="View findings, decisions, dead ends, and evidence collected during this run">
