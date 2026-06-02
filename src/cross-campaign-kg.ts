@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -140,12 +140,38 @@ export function appendEdge(edge: KGEdge): void {
   writeFileSync(edgesPath(), JSON.stringify({ ...edge, weight: clampWeight(edge.weight) }) + '\n', { encoding: 'utf-8', flag: 'a' });
 }
 
+// mtime+size-keyed parse cache. getNodes/getEdges are called once per campaign
+// in the dashboard list build (500+ calls); re-reading and re-parsing the whole
+// jsonl each time was pure waste. appends change the file size, busting the cache.
+let _nodesCache: { key: string; data: KGNode[] } | null = null;
+let _edgesCache: { key: string; data: KGEdge[] } | null = null;
+
+function fileCacheKey(path: string): string {
+  try { const s = statSync(path); return `${s.mtimeMs}:${s.size}`; } catch { return 'absent'; }
+}
+
+function loadNodesCached(): KGNode[] {
+  const key = fileCacheKey(nodesPath());
+  if (_nodesCache && _nodesCache.key === key) return _nodesCache.data;
+  const data = readJsonl<KGNode>(nodesPath());
+  _nodesCache = { key, data };
+  return data;
+}
+
+function loadEdgesCached(): KGEdge[] {
+  const key = fileCacheKey(edgesPath());
+  if (_edgesCache && _edgesCache.key === key) return _edgesCache.data;
+  const data = readJsonl<KGEdge>(edgesPath());
+  _edgesCache = { key, data };
+  return data;
+}
+
 export function getNodes(filter?: Partial<KGNode>): KGNode[] {
-  return readJsonl<KGNode>(nodesPath()).filter((node) => shallowMatches(node, filter));
+  return loadNodesCached().filter((node) => shallowMatches(node, filter));
 }
 
 export function getEdges(filter?: Partial<KGEdge>): KGEdge[] {
-  return readJsonl<KGEdge>(edgesPath()).filter((edge) => shallowMatches(edge, filter));
+  return loadEdgesCached().filter((edge) => shallowMatches(edge, filter));
 }
 
 export function persistCampaignArc(arc: CampaignArc): void {

@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -170,6 +171,8 @@ export interface StoreState {
   runId: string;
   workflowName: string;
   projectDir: string;
+  /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
+  baseCommit?: string;
   status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed';
   /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
   terminalStates?: TerminalStatesConfig;
@@ -430,6 +433,21 @@ function generateRunId(): string {
   return `${ts}-${suffix}`;
 }
 
+/** Return the current git HEAD SHA for `projectDir`, or undefined when it is not a git repo / git is unavailable. */
+function captureGitHead(projectDir: string): string | undefined {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectDir,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim();
+    return /^[0-9a-f]{7,40}$/.test(sha) ? sha : undefined;
+  } catch { /* not a git repo, or git not installed — fall back to LLM extraction */
+    return undefined;
+  }
+}
+
 export function createRun(
   projectDir: string,
   workflowName: string,
@@ -454,6 +472,8 @@ export function createRun(
     stages,
     startedAt: new Date().toISOString(),
   };
+  const baseCommit = captureGitHead(projectDir);
+  if (baseCommit) state.baseCommit = baseCommit;
   atomicWrite(join(dir, 'run.json'), JSON.stringify(state, null, 2));
   try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
   atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
@@ -529,9 +549,12 @@ export function readStageOutput(projectDir: string, runId: string, stageId: stri
 }
 
 export function listRuns(projectDir: string): string[] {
-  // Always use filesystem as source of truth — index may be stale after concurrent writes
-  // The index is still maintained (upsertRunIndex on writes) for future query optimization
-  listRunIdsFromIndex(projectDir); // triggers index seed/rebuild as side effect
+  // Prefer the SQLite index: every createRun/writeRunState upserts into it, so it
+  // stays as fresh as the filesystem for listing, and returns ids directly without
+  // a ~9900-entry readdir + a per-entry existsSync(run.json) on every call.
+  const indexed = listRunIdsFromIndex(projectDir);
+  if (indexed && indexed.length > 0) return indexed;
+  // Fallback: SQLite unavailable, or index genuinely empty — scan the filesystem.
   try {
     const root = runsRoot(projectDir);
     return readdirSync(root)

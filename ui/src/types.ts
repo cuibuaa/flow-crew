@@ -342,6 +342,7 @@ export interface WorkspaceRun {
   duration?: string;
   outcome?: string;
   projectDir?: string;
+  hasSummary?: boolean;
 }
 
 export interface Campaign {

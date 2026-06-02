@@ -77,6 +77,15 @@ export async function startRpcServer(socketPath: string, handler: (request: RpcR
   const server = net.createServer((socket) => {
     let raw = '';
     let handled = false;
+    // Swallow EPIPE / connection reset from clients that disconnect mid-write.
+    // Without this listener Node escalates socket errors to an uncaught
+    // exception that crashes the whole daemon.
+    socket.on('error', () => {});
+    const safeEnd = (payload: string) => {
+      try {
+        if (!socket.destroyed && socket.writable) socket.end(payload);
+      } catch { /* socket already closed */ }
+    };
     socket.on('data', (chunk) => { raw += chunk.toString('utf-8'); });
     socket.on('data', async () => {
       if (handled) return;
@@ -84,10 +93,10 @@ export async function startRpcServer(socketPath: string, handler: (request: RpcR
         const req = JSON.parse(raw) as RpcRequest;
         handled = true;
         const res = await handler(req);
-        socket.end(JSON.stringify(res));
+        safeEnd(JSON.stringify(res));
       } catch (err) {
         if (err instanceof SyntaxError) return;
-        socket.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        safeEnd(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
     });
   });

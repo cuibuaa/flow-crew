@@ -8,13 +8,15 @@ import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot, extractTaskTitle } from "./store.js";
 import type { StoreState } from "./store.js";
-import { deleteRunIndex } from './run-index.js';
+import { deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex } from './run-index.js';
 import {
   listCampaigns,
   nextCampaignSeq,
   readCampaignEntries,
+  readAllCampaignEntries,
   resolveCampaignSelection,
 } from "./campaigns.js";
+import type { CampaignHistoryEntry } from "./campaigns.js";
 import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
 import type { StageConfig } from "./scheduler.js";
 import type { AgentConfig, Adapter } from "./adapters/base.js";
@@ -105,7 +107,18 @@ const TASK_LIST_CACHE_TTL_MS = 5_000; // 5s TTL
 
 function invalidateTaskListCache(): void {
   _taskListCache = null;
+  _campaignListCache = null;
 }
+
+// --- Performance: campaign list cache ---
+// Building the campaign list reads every campaign's state + iteration log and
+// joins in run summaries; it's the heaviest dashboard query and gets polled
+// every 15s by the UI. Cache it per projectDir with a short TTL, and bust it
+// whenever a run/task changes (shared invalidation with the task-list cache).
+let _campaignListCache: { projectDir: string; data: WorkspaceCampaign[]; timestamp: number } | null = null;
+// Above the UI's 15s poll interval so a steady poll usually hits the cache;
+// real changes still bust it immediately via the shared invalidation hook.
+const CAMPAIGN_LIST_CACHE_TTL_MS = 20_000;
 
 function isTaskListCacheValid(runsDir: string): boolean {
   if (!_taskListCache || _taskListCache.runsDir !== runsDir) return false;
@@ -760,7 +773,12 @@ function summarizeRunOutcome(status?: string): string {
   return status || 'unknown';
 }
 
-function runSummaryFromState(state: StoreState, metric?: number | null): { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string } {
+/** True when the run has a generated summary.md the dashboard can display. */
+function runHasSummary(runId: string): boolean {
+  return existsSync(join(runsRoot(), runId, 'summary.md'));
+}
+
+function runSummaryFromState(state: StoreState, metric?: number | null): CampaignRunSummary {
   const best = readBestScore(state.projectDir, state.runId).bestScore;
   return {
     id: state.runId,
@@ -769,11 +787,21 @@ function runSummaryFromState(state: StoreState, metric?: number | null): { id: s
     summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 90),
     duration: formatDuration(state.startedAt, state.completedAt),
     outcome: summarizeRunOutcome(state.status),
+    hasSummary: runHasSummary(state.runId),
   };
 }
 
-function readCampaignRuns(projectDir: string, id: string): { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[] {
-  const runs: { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[] = [];
+type CampaignRunSummary = { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string; hasSummary: boolean };
+
+function readCampaignRuns(projectDir: string, id: string): CampaignRunSummary[] {
+  // Fast path: query the SQLite run index by campaign storage key instead of
+  // scanning every run.json on disk. This turns the per-campaign cost from
+  // O(all runs) into O(matching runs) and is what keeps the campaign list
+  // responsive as the number of campaigns/runs grows.
+  const indexed = readCampaignRunsFromIndex(projectDir, id);
+  if (indexed) return indexed;
+  // Fallback (SQLite unavailable): legacy full scan.
+  const runs: CampaignRunSummary[] = [];
   for (const runId of listRuns(projectDir).reverse()) {
     const state = readRunStateSafe(projectDir, runId);
     if (!state || !runMatchesCampaign(state, id)) continue;
@@ -783,9 +811,43 @@ function readCampaignRuns(projectDir: string, id: string): { id: string; iter: s
   return runs;
 }
 
-function readStandaloneRuns(projectDir: string): { id: string; projectDir: string; summary: string; duration: string; outcome: string }[] {
-  const out: { id: string; projectDir: string; summary: string; duration: string; outcome: string }[] = [];
-  for (const runId of listRuns(projectDir).reverse()) {
+function readCampaignRunsFromIndex(projectDir: string, id: string): CampaignRunSummary[] | null {
+  // The index is keyed by canonical campaign storage key; campaign ids on disk
+  // are usually already canonical, but normalize defensively and try both.
+  const normalized = id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const keys = new Set<string>([id, normalized].filter(Boolean));
+  const records: { runId: string }[] = [];
+  const seen = new Set<string>();
+  for (const key of keys) {
+    const rows = readRunIndexRecordsByCampaign(projectDir, key);
+    if (rows === null) return null; // SQLite unavailable → signal fallback
+    for (const row of rows) {
+      if (seen.has(row.runId)) continue;
+      seen.add(row.runId);
+      records.push({ runId: row.runId });
+    }
+  }
+  // Records come back ordered by run_id ASC; newest run ids sort last.
+  const runs: CampaignRunSummary[] = [];
+  for (const { runId } of records.sort((a, b) => b.runId.localeCompare(a.runId))) {
+    const state = readRunStateSafe(projectDir, runId);
+    if (!state || !runMatchesCampaign(state, id)) continue;
+    runs.push(runSummaryFromState(state));
+    if (runs.length >= 12) break;
+  }
+  return runs;
+}
+
+function readStandaloneRuns(projectDir: string): { id: string; projectDir: string; summary: string; duration: string; outcome: string; hasSummary: boolean }[] {
+  const out: { id: string; projectDir: string; summary: string; duration: string; outcome: string; hasSummary: boolean }[] = [];
+  // Prefer the index: query only run ids with no campaign attached (newest first),
+  // so we read at most ~LIMIT run.json files instead of scanning toward all ~9900
+  // when the workspace is dominated by campaign runs. Over-fetch a little to absorb
+  // any rows whose state no longer matches, then re-verify and cap.
+  const LIMIT = 30;
+  const indexedIds = listStandaloneRunIdsFromIndex(projectDir, LIMIT * 2);
+  const candidateIds = indexedIds ?? listRuns(projectDir).reverse();
+  for (const runId of candidateIds) {
     const state = readRunStateSafe(projectDir, runId);
     if (!state) continue;
     if (state.campaignId || state.campaignStorageKey || state.campaignName) continue;
@@ -795,8 +857,9 @@ function readStandaloneRuns(projectDir: string): { id: string; projectDir: strin
       summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 80),
       duration: formatDuration(state.startedAt, state.completedAt),
       outcome: summarizeRunOutcome(state.status),
+      hasSummary: runHasSummary(state.runId),
     });
-    if (out.length >= 30) break;
+    if (out.length >= LIMIT) break;
   }
   return out;
 }
@@ -1105,9 +1168,15 @@ function campaignSummary(id: string, dir: string): WorkspaceCampaign {
   };
 }
 
-function campaignFromHistory(projectDir: string, id: string, name?: string): WorkspaceCampaign | null {
-  const entries = readCampaignEntries(projectDir, id);
-  const runs = readCampaignRuns(projectDir, id);
+function campaignFromHistory(
+  projectDir: string,
+  id: string,
+  name?: string,
+  prefetchedEntries?: CampaignHistoryEntry[],
+  prefetchedRuns?: CampaignRunSummary[],
+): WorkspaceCampaign | null {
+  const entries = prefetchedEntries ?? readCampaignEntries(projectDir, id);
+  const runs = prefetchedRuns ?? readCampaignRuns(projectDir, id);
   if (!entries.length && !runs.length) return null;
   const latest = entries.at(-1);
   const scoreEntries = entries.filter((entry) => typeof entry.score === 'number');
@@ -1175,6 +1244,19 @@ function campaignFromHistory(projectDir: string, id: string, name?: string): Wor
 }
 
 function listWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
+  if (
+    _campaignListCache &&
+    _campaignListCache.projectDir === projectDir &&
+    Date.now() - _campaignListCache.timestamp < CAMPAIGN_LIST_CACHE_TTL_MS
+  ) {
+    return _campaignListCache.data;
+  }
+  const data = computeWorkspaceCampaigns(projectDir);
+  _campaignListCache = { projectDir, data, timestamp: Date.now() };
+  return data;
+}
+
+function computeWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
   const campaigns = new Map<string, WorkspaceCampaign>();
   try {
     for (const id of readdirSync(campaignFsRoot())
@@ -1191,12 +1273,57 @@ function listWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
   } catch { /* no campaign root */
     // Optional global campaign directory may not exist.
   }
+  // Prefetch ALL history entries and campaign runs in a single pass each, keyed
+  // by canonical storage key. Previously campaignFromHistory re-scanned every
+  // history file (and the SQLite index) once PER campaign — O(campaigns × all
+  // history), which made the list take ~70s at 500+ campaigns. Now it's O(all
+  // history) once, with per-campaign lookups against the prefetched maps.
+  const entriesByKey = readAllCampaignEntries(projectDir);
+  const runsByKey = readAllCampaignRunsByKey(projectDir);
   for (const summary of listCampaigns(projectDir)) {
     if (campaigns.has(summary.id)) continue;
-    const campaign = campaignFromHistory(projectDir, summary.id, summary.name);
+    const entries = entriesByKey.get(summary.storageKey) ?? [];
+    const runs = runsByKey?.get(summary.storageKey) ?? readCampaignRuns(projectDir, summary.id);
+    const campaign = campaignFromHistory(projectDir, summary.id, summary.name, entries, runs);
     if (campaign) campaigns.set(summary.id, campaign);
   }
-  return [...campaigns.values()].sort((a, b) => (b.started_at ?? '').localeCompare(a.started_at ?? ''));
+  // Sidebar order: running campaigns first, then most-recently-started.
+  return [...campaigns.values()].sort((a, b) => {
+    const ra = a.status === 'running' ? 0 : 1;
+    const rb = b.status === 'running' ? 0 : 1;
+    if (ra !== rb) return ra - rb;
+    return (b.started_at ?? '').localeCompare(a.started_at ?? '');
+  });
+}
+
+/**
+ * Read the run index ONCE and group campaign-run summaries by canonical storage
+ * key (newest first, capped at 12 per campaign). Returns null when the SQLite
+ * index is unavailable so callers fall back to the per-campaign scan.
+ */
+function readAllCampaignRunsByKey(projectDir: string): Map<string, CampaignRunSummary[]> | null {
+  const records = readRunIndexRecords(projectDir);
+  if (records === null) return null;
+  const idsByKey = new Map<string, string[]>();
+  for (const r of records) {
+    if (!r.campaignStorageKey) continue;
+    const list = idsByKey.get(r.campaignStorageKey);
+    if (list) list.push(r.runId);
+    else idsByKey.set(r.campaignStorageKey, [r.runId]);
+  }
+  const out = new Map<string, CampaignRunSummary[]>();
+  for (const [key, runIds] of idsByKey) {
+    runIds.sort((a, b) => b.localeCompare(a));
+    const runs: CampaignRunSummary[] = [];
+    for (const runId of runIds) {
+      const state = readRunStateSafe(projectDir, runId);
+      if (!state) continue;
+      runs.push(runSummaryFromState(state));
+      if (runs.length >= 12) break;
+    }
+    out.set(key, runs);
+  }
+  return out;
 }
 
 function getWorkspaceCampaign(projectDir: string, id: string): WorkspaceCampaign | null {

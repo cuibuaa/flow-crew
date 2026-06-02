@@ -173,33 +173,51 @@ function runBelongsToProject(projectDir: string, runId: string): boolean {
   }
 }
 
-function hasProjectCampaignHistory(projectDir: string, targetStorageKey: string): boolean {
+/** Storage keys that appear in the project-local campaign history (single scan). */
+function projectHistoryStorageKeys(projectDir: string): Set<string> {
+  const keys = new Set<string>();
+  let files: string[];
   try {
-    for (const file of readdirSync(campaignsRoot(projectDir)).filter((name) => name.endsWith('.jsonl'))) {
-      const fileStem = file.replace(/\.jsonl$/, '');
-      const rawLines = readFileSync(join(campaignsRoot(projectDir), file), 'utf-8').split('\n').filter(Boolean);
-      for (const line of rawLines) {
-        try {
-          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry>;
-          const ref = normalizeEntryCampaign(fileStem, parsed);
-          if (ref?.storageKey === targetStorageKey) return true;
-        } catch { /* non-critical */
-          // Ignore malformed lines.
-        }
-      }
-    }
+    files = readdirSync(campaignsRoot(projectDir)).filter((name) => name.endsWith('.jsonl'));
   } catch { /* non-critical */
-    return false;
+    return keys;
   }
-  return false;
+  for (const file of files) {
+    const fileStem = file.replace(/\.jsonl$/, '');
+    let lines: string[];
+    try {
+      lines = readFileSync(join(campaignsRoot(projectDir), file), 'utf-8').split('\n').filter(Boolean);
+    } catch { /* non-critical */
+      continue;
+    }
+    for (const line of lines) {
+      try {
+        const ref = normalizeEntryCampaign(fileStem, JSON.parse(line) as Partial<CampaignHistoryEntry>);
+        if (ref) keys.add(ref.storageKey);
+      } catch { /* ignore malformed */ }
+    }
+  }
+  return keys;
 }
 
-export function readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[] {
-  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
-  if (!targetStorageKey) return [];
-  const byRunIteration = new Map<string, CampaignHistoryEntry>();
-  const projectHasHistory = hasProjectCampaignHistory(projectDir, targetStorageKey);
+/**
+ * Read ALL campaign history in a single pass, grouped by canonical storage key.
+ *
+ * This is the batched form of {@link readCampaignEntries}: scanning every history
+ * file once and bucketing entries, instead of re-scanning every file for each
+ * campaign. The dashboard campaign list (500+ campaigns) uses this to avoid an
+ * O(campaigns × all-history) blowup.
+ */
+export function readAllCampaignEntries(projectDir: string): Map<string, CampaignHistoryEntry[]> {
+  const projectKeys = projectHistoryStorageKeys(projectDir);
   const globalRoot = globalCampaignsRoot();
+  const belongsCache = new Map<string, boolean>();
+  const belongs = (runId: string): boolean => {
+    let v = belongsCache.get(runId);
+    if (v === undefined) { v = runBelongsToProject(projectDir, runId); belongsCache.set(runId, v); }
+    return v;
+  };
+  const groups = new Map<string, Map<string, CampaignHistoryEntry>>();
   for (const root of campaignHistoryRoots(projectDir)) {
     let files: string[];
     try {
@@ -220,9 +238,9 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
         try {
           const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry> & { ts?: unknown };
           const ref = normalizeEntryCampaign(fileStem, parsed);
-          if (!ref || ref.storageKey !== targetStorageKey) continue;
+          if (!ref) continue;
           if (typeof parsed.runId !== 'string') continue;
-          if (root === globalRoot && projectHasHistory && !runBelongsToProject(projectDir, parsed.runId)) continue;
+          if (root === globalRoot && projectKeys.has(ref.storageKey) && !belongs(parsed.runId)) continue;
           const hasSeq = typeof parsed.seq === 'number';
           const kind = typeof parsed.kind === 'string' ? parsed.kind : undefined;
           const hasScore = typeof parsed.score === 'number'
@@ -275,9 +293,11 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
             } catch { /* optional historical evidence */ }
           }
           const key = `${normalized.runId}::${normalized.iteration ?? 1}::${hasScore ? 'score' : hasEnvelope ? kind : 'phase'}`;
-          const previous = byRunIteration.get(key);
+          let group = groups.get(ref.storageKey);
+          if (!group) { group = new Map<string, CampaignHistoryEntry>(); groups.set(ref.storageKey, group); }
+          const previous = group.get(key);
           if (!previous || normalized.timestamp >= previous.timestamp) {
-            byRunIteration.set(key, normalized);
+            group.set(key, normalized);
           }
         } catch { /* non-critical */
           // Ignore malformed lines.
@@ -285,14 +305,23 @@ export function readCampaignEntries(projectDir: string, campaignId: string): Cam
       }
     }
   }
-  const entries = [...byRunIteration.values()];
-  entries.sort((a, b) => {
-    if (a.seq !== b.seq) return a.seq - b.seq;
-    const iterDiff = (a.iteration ?? 0) - (b.iteration ?? 0);
-    if (iterDiff !== 0) return iterDiff;
-    return a.timestamp.localeCompare(b.timestamp);
-  });
-  return entries;
+  const out = new Map<string, CampaignHistoryEntry[]>();
+  for (const [storageKey, group] of groups) {
+    const entries = [...group.values()].sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      const iterDiff = (a.iteration ?? 0) - (b.iteration ?? 0);
+      if (iterDiff !== 0) return iterDiff;
+      return a.timestamp.localeCompare(b.timestamp);
+    });
+    out.set(storageKey, entries);
+  }
+  return out;
+}
+
+export function readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[] {
+  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
+  if (!targetStorageKey) return [];
+  return readAllCampaignEntries(projectDir).get(targetStorageKey) ?? [];
 }
 
 export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {

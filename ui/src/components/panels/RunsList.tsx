@@ -32,7 +32,7 @@ export default function RunsList({ runs, metricFormat = "raw", onRunClick }: { r
             return (
               <button className="run-row" key={run.full_id ?? run.id} type="button" onClick={() => onRunClick?.(run)} data-testid="run-row">
                 <span className={`icon ${iconClassByOutcome[outcome] ?? ""}`}>{iconByOutcome[outcome] ?? "·"}</span>
-                <span className="id">{run.id}</span>
+                <span className="id">{run.id}{run.hasSummary ? <span className="run-summary-flag" title="Run summary available" aria-label="has summary" style={{ marginLeft: 6, opacity: 0.7 }}>📄</span> : null}</span>
                 <span className="run-iter">{run.iter ?? ""}</span>
                 <span className="metric">{run.metric != null ? formatMetric(metricFormat, run.metric) : "—"}</span>
                 <span className="run-summary">{run.summary ?? ""}</span>

@@ -32,6 +32,14 @@ export interface RunIndexRecord {
 }
 
 const rebuildAttempted = new Set<string>();
+// Persistent per-DB connection cache. Opening a fresh node:sqlite handle (plus
+// re-running the CREATE TABLE/INDEX DDL) on every query was a major source of
+// per-request overhead; the index is read/written hundreds of times per
+// dashboard refresh. We keep one handle per db path for the process lifetime.
+const dbHandles = new Map<string, DatabaseSync>();
+// Memoize the seed-freshness check so readers don't re-run it on every call.
+const seedCheckedAt = new Map<string, number>();
+const SEED_CHECK_TTL_MS = 5_000;
 
 function runsRoot(_projectDir: string): string {
   return join(homedir(), '.fc', 'runs');
@@ -40,18 +48,6 @@ function runsRoot(_projectDir: string): string {
 function dbPath(_projectDir: string): string {
   const { homedir } = require('node:os') as typeof import('node:os');
   return join(homedir(), '.fc', 'run-index.sqlite');
-}
-
-function listRunDirectories(projectDir: string): string[] {
-  try {
-    return readdirSync(runsRoot(projectDir), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .filter((name) => /^\d{4}-\d{2}-\d{2}T/.test(name))
-      .sort();
-  } catch { /* non-critical */
-    return [];
-  }
 }
 
 function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | null {
@@ -63,11 +59,14 @@ function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | nu
 }
 
 function openDb(projectDir: string): DatabaseSync | null {
+  const path = dbPath(projectDir);
+  const cached = dbHandles.get(path);
+  if (cached) return cached;
   const sqlite = loadSqlite();
   if (!sqlite) return null;
   const { homedir } = require('node:os') as typeof import('node:os');
   mkdirSync(join(homedir(), '.fc'), { recursive: true });
-  const db = new sqlite.DatabaseSync(dbPath(projectDir));
+  const db = new sqlite.DatabaseSync(path);
   db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -89,6 +88,7 @@ function openDb(projectDir: string): DatabaseSync | null {
     CREATE INDEX IF NOT EXISTS idx_runs_campaign ON runs(campaign_storage_key, campaign_seq);
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
   `);
+  dbHandles.set(path, db);
   return db;
 }
 
@@ -155,7 +155,7 @@ export function recordToPartialState(record: RunIndexRecord): StoreState {
 export function upsertRunIndex(projectDir: string, state: StoreState): void {
   const db = openDb(projectDir);
   if (!db) return;
-  try {
+  {
     const runJson = join(runsRoot(projectDir), state.runId, 'run.json');
     const jsonMtime = existsSync(runJson) ? statSync(runJson).mtimeMs : Date.now();
     const campaignStorageKey = campaignStorageKeyForState(state);
@@ -193,19 +193,13 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
       jsonMtime,
       Date.now(),
     );
-  } finally {
-    db.close();
   }
 }
 
 export function deleteRunIndex(projectDir: string, runId: string): void {
   const db = openDb(projectDir);
   if (!db) return;
-  try {
-    db.prepare('DELETE FROM runs WHERE run_id = ?').run(runId);
-  } finally {
-    db.close();
-  }
+  db.prepare('DELETE FROM runs WHERE run_id = ?').run(runId);
 }
 
 export function rebuildRunIndex(projectDir: string): number {
@@ -256,73 +250,73 @@ export function rebuildRunIndex(projectDir: string): number {
   } catch (err) {
     try { db.exec('ROLLBACK'); } catch { /* ignore */ }
     throw err;
-  } finally {
-    db.close();
   }
 }
 
 function ensureIndexSeeded(projectDir: string): void {
+  const last = seedCheckedAt.get(projectDir);
+  if (last !== undefined && Date.now() - last < SEED_CHECK_TTL_MS) return;
   const db = openDb(projectDir);
   if (!db) return;
-  try {
-    const runDirs = listRunDirectories(projectDir);
-    const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get();
-    const latest = db.prepare('SELECT run_id FROM runs ORDER BY run_id DESC LIMIT 1').get();
-    const indexedCount = Number(row?.count ?? 0);
-    const latestIndexedRunId = typeof latest?.run_id === 'string' ? latest.run_id : undefined;
-    const latestRunDir = runDirs.at(-1);
-    if (indexedCount !== runDirs.length || latestIndexedRunId !== latestRunDir) {
-      if (!rebuildAttempted.has(projectDir)) {
-        rebuildAttempted.add(projectDir);
-        db.close();
-        rebuildRunIndex(projectDir);
-        return;
-      }
-    }
-  } finally {
-    try { db.close(); } catch { /* already closed */ }
+  // Every createRun/writeRunState upserts into the index, so the index can only
+  // be *missing* rows when it has never been seeded (fresh sqlite, or legacy runs
+  // predating the index). A one-time full rebuild on an empty index covers that;
+  // we no longer readdir all ~9900 run dirs on every check.
+  const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get();
+  const indexedCount = Number(row?.count ?? 0);
+  if (indexedCount === 0 && !rebuildAttempted.has(projectDir)) {
+    rebuildAttempted.add(projectDir);
+    rebuildRunIndex(projectDir);
   }
+  seedCheckedAt.set(projectDir, Date.now());
 }
 
 export function listRunIdsFromIndex(projectDir: string): string[] | null {
   ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return null;
-  try {
-    return db.prepare('SELECT run_id FROM runs ORDER BY run_id ASC').all().map((row) => String(row.run_id));
-  } finally {
-    db.close();
-  }
+  return db.prepare('SELECT run_id FROM runs ORDER BY run_id ASC').all().map((row) => String(row.run_id));
+}
+
+/** Run ids with no campaign attached (standalone runs), newest first. */
+export function listStandaloneRunIdsFromIndex(projectDir: string, limit: number): string[] | null {
+  ensureIndexSeeded(projectDir);
+  const db = openDb(projectDir);
+  if (!db) return null;
+  return db
+    .prepare('SELECT run_id FROM runs WHERE campaign_storage_key IS NULL ORDER BY run_id DESC LIMIT ?')
+    .all(limit)
+    .map((row) => String(row.run_id));
 }
 
 export function readRunIndexRecords(projectDir: string): RunIndexRecord[] | null {
   ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return null;
-  try {
-    return db.prepare('SELECT * FROM runs ORDER BY run_id ASC').all().map(rowToRecord);
-  } finally {
-    db.close();
-  }
+  return db.prepare('SELECT * FROM runs ORDER BY run_id ASC').all().map(rowToRecord);
 }
 
 export function readRunIndexRecordsByCampaign(projectDir: string, campaignStorageKey: string): RunIndexRecord[] | null {
   ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return null;
-  try {
-    return db.prepare('SELECT * FROM runs WHERE campaign_storage_key = ? ORDER BY run_id ASC')
-      .all(campaignStorageKey)
-      .map(rowToRecord);
-  } finally {
-    db.close();
-  }
+  return db.prepare('SELECT * FROM runs WHERE campaign_storage_key = ? ORDER BY run_id ASC')
+    .all(campaignStorageKey)
+    .map(rowToRecord);
 }
 
 export function removeRunIndexFiles(projectDir: string): void {
+  // Drop the cached handle first so deleting the files doesn't race an open connection.
+  const path = dbPath(projectDir);
+  const handle = dbHandles.get(path);
+  if (handle) {
+    try { handle.close(); } catch { /* already closed */ }
+    dbHandles.delete(path);
+  }
   for (const suffix of ['', '-shm', '-wal']) {
-    const p = `${dbPath(projectDir)}${suffix}`;
+    const p = `${path}${suffix}`;
     if (existsSync(p)) unlinkSync(p);
   }
   rebuildAttempted.delete(projectDir);
+  seedCheckedAt.delete(projectDir);
 }

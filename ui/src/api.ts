@@ -99,6 +99,26 @@ export interface StageOutputResponse {
   tailBytes: number | null;
   truncated: boolean;
 }
+function parseStageOutputResponse(r: Response): Promise<StageOutputResponse> {
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.text().then((text) => ({
+    text,
+    totalBytes: Number(r.headers.get("X-Output-Total-Bytes")) || null,
+    tailBytes: Number(r.headers.get("X-Output-Tail-Bytes")) || null,
+    truncated: r.headers.get("X-Output-Truncated") === "true",
+  }));
+}
+function stageOutputQuery(opts?: { full?: boolean; tailBytes?: number }): string {
+  const params = new URLSearchParams();
+  if (opts?.full) params.set("tailBytes", "full");
+  else if (opts?.tailBytes) params.set("tailBytes", String(opts.tailBytes));
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+// Run-scoped stage output (workspace runs). Mirrors fetchStageOutput but hits the
+// /runs/ endpoint; supports lazy tail + on-demand full load.
+export const fetchRunStageOutput = (runId: string, stageId: string, opts?: { full?: boolean; tailBytes?: number }): Promise<StageOutputResponse> =>
+  fetch(`${BASE}/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/output${stageOutputQuery(opts)}`).then(parseStageOutputResponse);
 export const fetchStageOutput = (taskId: string, stageId: string, opts?: { full?: boolean; tailBytes?: number }): Promise<StageOutputResponse> => {
   const params = new URLSearchParams();
   if (opts?.full) params.set("tailBytes", "full");
@@ -162,6 +182,15 @@ export const fetchStageTrace = (taskId: string, stageId: string) =>
 export const fetchCampaigns = () => json<Campaign[]>(`${BASE}/campaigns`);
 export const fetchCampaign = (id: string) => json<Campaign>(`${BASE}/campaigns/${encodeURIComponent(id)}`);
 export const fetchRunDetail = (id: string) => json<RunDetailData>(`${BASE}/runs/${encodeURIComponent(id)}`);
+// Run summary markdown (summary.md, falls back to progress.md). Runs and tasks
+// share runsRoot, so the /tasks/:id/summary endpoint resolves by run id too.
+// Returns null when no summary exists yet (e.g. run still in progress → 404).
+export const fetchRunSummary = (runId: string): Promise<string | null> =>
+  fetch(`${BASE}/tasks/${encodeURIComponent(runId)}/summary`).then(async (r) => {
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => null);
+    return d && typeof d.content === "string" ? d.content : null;
+  }).catch(() => null);
 export const fetchCrossCampaignKGNodes = () => json<CampaignKGNode[]>(`${BASE}/cross-campaign-kg/nodes`);
 export const fetchCrossCampaignKGEdges = () => json<CampaignKGEdge[]>(`${BASE}/cross-campaign-kg/edges`);
 export const fetchStandaloneRuns = () => json<WorkspaceRun[]>(`${BASE}/standalone-runs`);
