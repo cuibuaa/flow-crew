@@ -365,6 +365,11 @@ export interface CampaignKGNode {
   id: string;
   type: string;
   label?: string;
+  // Run-local KG nodes carry their substance in `text` (goal/approach/finding
+  // descriptions); many have no `label` at all.
+  text?: string;
+  score?: number;
+  timestamp?: string;
   meta?: string;
   campaign?: string;
   campaignId?: string;

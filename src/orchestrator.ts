@@ -18,6 +18,8 @@ export interface SystemdAdapter {
 export interface GitAdapter {
   findCommitByPrefix(projectDir: string, prefix: string): Promise<string | undefined>;
   hasUncommittedChanges(projectDir: string): Promise<boolean>;
+  /** Latest commit (HEAD) made on or after isoSince. Undefined if no commit since. */
+  findCommitSince(projectDir: string, isoSince: string): Promise<{ sha: string; subject: string } | undefined>;
 }
 
 export interface OrchestratorOptions {
@@ -146,6 +148,30 @@ export class Orchestrator {
       }
     }
 
+    // No commit_prefix match (or no commit_prefix declared). Before declaring
+    // the worktree "stuck on uncommitted changes", check whether the unit
+    // produced ANY commit during its lifetime — planner-style workflows
+    // commit their output (e.g. backlog edits) but routinely leave behind
+    // worktree noise (logs, sqlite-wal, codex .tmp). A successful commit +
+    // leftover WIP should be `done`, not `stuck`.
+    if (task.started_at) {
+      const recent = await this.git.findCommitSince(task.projectDir, task.started_at);
+      if (recent) {
+        this.registry.update(task.id, {
+          status: 'done',
+          completed_at: completed,
+          completing_commit: recent.sha,
+          notes: `unit committed during lifetime (${recent.subject}); leftover worktree WIP ignored`,
+        });
+        this.registry.appendTick(task.id, {
+          ts: completed,
+          status: 'done',
+          message: `commit ${recent.sha} (no prefix match; WIP ignored)`,
+        });
+        return;
+      }
+    }
+
     if (await this.git.hasUncommittedChanges(task.projectDir)) {
       this.registry.update(task.id, { status: 'stuck', completed_at: completed, notes: 'unit exited cleanly with uncommitted changes; operator review needed' });
       this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: 'uncommitted changes need operator review' });
@@ -260,6 +286,22 @@ export class NodeGit implements GitAdapter {
       return stdout.trim().length > 0;
     } catch {
       return false;
+    }
+  }
+
+  async findCommitSince(projectDir: string, isoSince: string): Promise<{ sha: string; subject: string } | undefined> {
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['log', `--since=${isoSince}`, '--format=%H%x09%s', '-n', '1'],
+        { cwd: projectDir }
+      );
+      const line = stdout.trim().split(/\r?\n/).find(Boolean);
+      if (!line) return undefined;
+      const [sha, ...rest] = line.split('\t');
+      return { sha, subject: rest.join('\t') };
+    } catch {
+      return undefined;
     }
   }
 }

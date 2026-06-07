@@ -3,7 +3,11 @@ default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1
 adapter: codex
-model: default
+# Codex CLI's built-in default was bumped to gpt-5.3-codex which isn't
+# enabled for ChatGPT accounts yet (returns HTTP 400). Pin to the model
+# the user's global ~/.codex/config.toml declares so per-stage spawns
+# don't fall back to the broken default.
+model: gpt-5.5
 reasoning_effort: default
 paths:
   agents: config/agents
@@ -18,7 +22,8 @@ campaign_triggers:
 supervisor:
   # Minimum idle duration (ms) before the supervisor is allowed to ABORT a stuck
   # stage. Injected into the supervisor's system prompt so the LLM judge applies
-  # this floor when deciding WAIT vs ABORT. Default 10 min: codex agents often
-  # spend several minutes silently editing files via tool calls; a shorter window
-  # produces false-positive aborts mid-implementation.
-  stuck_threshold_ms: 600000
+  # this floor when deciding WAIT vs ABORT. BTC explore V runs need ~50 min for
+  # audit-chain phases (A1-A4b) — a 10-min floor produced false-positive aborts
+  # at the 10-min mark for every V, preventing any finalize. Raised to 60 min
+  # to let real V runs survive while still bounding obvious stalls.
+  stuck_threshold_ms: 3600000

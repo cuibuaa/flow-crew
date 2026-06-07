@@ -40,7 +40,7 @@ export default function CampaignKG({ campaignId, nodes, edges, emptyState = "omi
               data-testid={`kg-node-${node.type}`}
               role="button"
               tabIndex={0}
-              aria-label={`Open details for ${node.label ?? node.id}`}
+              aria-label={`Open details for ${node.label ?? node.text ?? node.id}`}
               style={{ color: colorFor(node.type) }}
               onClick={() => selectNode(node.id)}
               onKeyDown={(event) => {
@@ -50,8 +50,9 @@ export default function CampaignKG({ campaignId, nodes, edges, emptyState = "omi
                 }
               }}
             >
+              <title>{node.label ?? node.text ?? node.type}</title>
               <circle r="18" fill={`${colorFor(node.type)}2a`} stroke={colorFor(node.type)} strokeWidth="1.5" />
-              <text textAnchor="middle" y="4" fill={colorFor(node.type)} fontSize="9">{(node.label ?? node.type).slice(0, 10)}</text>
+              <text textAnchor="middle" y="4" fill={colorFor(node.type)} fontSize="9">{(node.label ?? node.text ?? node.type).slice(0, 10)}</text>
               <text textAnchor="middle" y="32" fill="#6b748a" fontSize="9">{node.type}</text>
             </g>
           ))}

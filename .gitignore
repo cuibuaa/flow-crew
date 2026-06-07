@@ -38,3 +38,6 @@ btc_training_*_artifacts/
 btc_training_*_result.json
 btc_trading_methods_landscape.md
 btc_training_*.md
+# btc_explore/ is a local-only research sub-repo. It has its own .git
+# inside the directory. Flow-crew main tree must never track its contents.
+btc_explore/

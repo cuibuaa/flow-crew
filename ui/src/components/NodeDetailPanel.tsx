@@ -8,9 +8,12 @@ interface NodeDetailPanelProps {
 }
 
 function metadataFor(node: CampaignKGNode): Record<string, unknown> {
-  if (node.metadata) return node.metadata;
-  if (node.meta) return { meta: node.meta };
-  return {};
+  const base: Record<string, unknown> = node.metadata ? { ...node.metadata } : {};
+  if (node.meta && base.meta === undefined) base.meta = node.meta;
+  // Surface the flat fields run-local KG nodes carry alongside `text`.
+  if (node.score !== undefined && base.score === undefined) base.score = node.score;
+  if (node.timestamp && base.timestamp === undefined) base.timestamp = node.timestamp;
+  return base;
 }
 
 export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps) {
@@ -40,6 +43,12 @@ export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps)
         </div>
 
         <div className="node-detail-body">
+          {node.text ? (
+            <section className="node-detail-section">
+              <h3>Description</h3>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{node.text}</p>
+            </section>
+          ) : null}
           <section className="node-detail-section">
             <h3>ID</h3>
             <code>{node.id}</code>
@@ -53,7 +62,7 @@ export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps)
           </section>
           <section className="node-detail-section">
             <h3>Label</h3>
-            <code>{node.label ?? "—"}</code>
+            <code>{node.label ?? node.text ?? "—"}</code>
           </section>
           <section className="node-detail-section">
             <h3>Campaign</h3>
