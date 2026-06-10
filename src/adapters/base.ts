@@ -167,12 +167,22 @@ export function execWithStdin(
     if (opts.onChild) opts.onChild({ kill: () => killChild(child) });
     const timer = setTimeout(() => { timedOut = true; killChild(child); }, Math.max(1, opts.timeout_ms));
     const onAbort = () => { aborted = true; killChild(child); };
+    let abortedBeforeWrite = false;
     if (opts.abortSignal) {
-      if (opts.abortSignal.aborted) onAbort();
+      if (opts.abortSignal.aborted) { abortedBeforeWrite = true; onAbort(); }
       else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
     }
-    child.stdin!.write(stdin);
-    child.stdin!.end();
+    // Guard the stdin write: if spawn failed (ENOENT, emitted async) or the child
+    // was already killed (aborted), writing to stdin emits/raises EPIPE. Without an
+    // 'error' handler that surfaces as an unhandled exception that crashes the
+    // process. Attach a handler and skip the write when already aborted.
+    if (child.stdin) child.stdin.on('error', () => { /* EPIPE on dead child — non-fatal */ });
+    if (!abortedBeforeWrite) {
+      try {
+        child.stdin!.write(stdin);
+        child.stdin!.end();
+      } catch { /* child already gone; close/error event will settle the promise */ }
+    }
     const chunks: Buffer[] = [];
     const finish = (code: number | null) => {
       if (settled) return;

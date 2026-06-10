@@ -13,6 +13,7 @@ export type RunEventType =
   | 'run_completed'
   | 'campaign_alert'
   | 'research_injected'
+  | 'supervisor_replan'
   | 'attempt_summary_refresh_requested';
 
 export interface RunEvent {
@@ -106,14 +107,21 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
 }
 
 export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
+  let raw: string;
   try {
-    return readFileSync(eventsPath(projectDir, runId), 'utf-8')
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as RunEvent);
-  } catch { /* non-critical */
+    raw = readFileSync(eventsPath(projectDir, runId), 'utf-8');
+  } catch { /* no events file yet */
     return [];
   }
+  // Parse per line, tolerating a single corrupt/truncated row (an append-only file
+  // can be torn by a crash mid-write). Previously one bad line threw and dropped
+  // the ENTIRE event history — inconsistent with every other jsonl reader here.
+  const out: RunEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try { out.push(JSON.parse(line) as RunEvent); } catch { /* skip bad row */ }
+  }
+  return out;
 }
 
 export function requestAttemptSummaryRefresh(

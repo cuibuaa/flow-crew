@@ -89,7 +89,14 @@ export class ClaudeAdapter implements Adapter {
           try {
             const parsed = JSON.parse(line);
             let text = '';
-            if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
+            // Claude Code stream-json emits assistant text as message.content[] blocks
+            // (the canonical shape — same as the dashboard's parser). The legacy
+            // top-level-string / content_block_delta forms are kept as fallbacks.
+            if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+              for (const block of parsed.message.content) {
+                if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
+              }
+            } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
               text = parsed.content;
             } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
               text = parsed.delta.text;

@@ -1,10 +1,10 @@
-import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, renameSync, copyFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, renameSync, copyFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
-import type { Adapter, AgentConfig } from './adapters/base.js';
+import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
-import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir, runsRoot } from './store.js';
+import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir, runsRoot, isTerminalRunStatus } from './store.js';
 import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig } from './store.js';
 import { evaluateResearch, type ResearchRound } from './research-policy.js';
 import { runStage } from './worker.js';
@@ -67,7 +67,18 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
       const policy = (typeof r.policy === 'string' && ['greedy_stack', 'best_of_n', 'replace_if_better'].includes(r.policy))
         ? r.policy as ResearchConfig['policy'] : 'greedy_stack';
       const research: ResearchConfig = { baseline: r.baseline, policy };
-      if (typeof r.higher_is_better === 'boolean') research.higherIsBetter = r.higher_is_better;
+      // Honor higher_is_better; coerce the common YAML-quoting mistake ("false"/"true"
+      // as strings) instead of silently dropping it (which would flip every keep/ship
+      // decision for a lower-is-better metric). Warn on an uncoercible value.
+      if (typeof r.higher_is_better === 'boolean') {
+        research.higherIsBetter = r.higher_is_better;
+      } else if (typeof r.higher_is_better === 'string') {
+        const v = r.higher_is_better.trim().toLowerCase();
+        if (v === 'false' || v === 'true') research.higherIsBetter = v === 'true';
+        else log.warn({ value: r.higher_is_better }, 'research.higher_is_better is not a boolean — ignoring (defaults to higher-is-better)');
+      } else if (r.higher_is_better !== undefined) {
+        log.warn({ value: r.higher_is_better }, 'research.higher_is_better is not a boolean — ignoring (defaults to higher-is-better)');
+      }
       if (typeof r.result_file === 'string') research.resultFile = r.result_file;
       if (typeof r.report_dir === 'string') research.reportDir = r.report_dir;
       if (r.stop && typeof r.stop === 'object') {
@@ -353,7 +364,18 @@ function findActiveSiblingRun(projectDir: string, selfRunId: string): string | n
       const pidRaw = readFileSync(join(runsRoot(), dir, 'scheduler.pid'), 'utf-8').trim();
       const pid = parseInt(pidRaw, 10);
       if (!Number.isFinite(pid)) continue;
-      try { process.kill(pid, 0); /* alive */ return dir; } catch { /* dead pid → orphan, ignore */ }
+      try {
+        process.kill(pid, 0); // process exists
+        // Guard against PID reuse: after a crash the OS may recycle the dead
+        // scheduler's PID for an unrelated process, which would falsely read as a
+        // live sibling and block this project from launching. Confirm it's actually
+        // a node/flowcrew process via /proc/<pid>/cmdline (best-effort on Linux).
+        try {
+          const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
+          if (cmdline && !/cli\.js|flowcrew|node/.test(cmdline)) continue; // recycled PID, not us
+        } catch { /* /proc unavailable (non-Linux) — trust kill(0) */ }
+        return dir;
+      } catch { /* dead pid → orphan, ignore */ }
     } catch { /* missing run.json / pid → skip */ }
   }
   return null;
@@ -482,6 +504,10 @@ async function tryTerminateOnTerminalState(
  *
  * Returns the terminated state on ship/ceiling, else null (continue).
  */
+/** Dedicated cap for integrity-gate rejections, independent of the research round
+ * budget (rc.stop.maxRounds) so a run can't ceiling "by being right". */
+const INTEGRITY_REJECTION_CEILING = 30;
+
 async function tryAdvanceResearch(
   state: StoreState,
   ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number; adapter: Adapter },
@@ -547,7 +573,11 @@ async function tryAdvanceResearch(
       }
     } catch { /* non-critical */ }
     log.warn({ runId: ctx.runId, reason, label, result: round.result, total_rejections: totalRej }, 'Research round rejected by integrity gate');
-    const maxRej = rc.stop?.maxRounds ?? 24;
+    // Integrity-rejection budget is SEPARATE from the research round budget
+    // (rc.stop.maxRounds): a run shouldn't hit "ceiling" at the same count as
+    // legitimate journaled rounds just because some results tripped a gate — that
+    // would let a run terminate "by being right". Use a dedicated, independent cap.
+    const maxRej = Math.max(rc.stop?.maxRounds ?? 24, INTEGRITY_REJECTION_CEILING);
     if (totalRej >= maxRej) {
       state.status = 'ceiling_hit';
       state.completedAt = new Date().toISOString();
@@ -601,13 +631,19 @@ async function tryAdvanceResearch(
     if (r) return r; else return null;
   }
 
-  // Gate #5: outlier (result > baseline × 5 = sanity cap on too-good-to-be-true)
-  // quality_triad daily baseline is ~$195; hourly + leverage shouldn't realistically
-  // produce > 5× that even in 2024-2025 bull market. Numerical-explosion / oracle
-  // results land here and get rejected.
-  if (Math.abs(round.result) > Math.abs(rc.baseline) * 5) {
+  // Gate #5: outlier ("too-good-to-be-true" cap). Two correctness guards over the
+  // old `Math.abs(result) > Math.abs(baseline) * 5`:
+  //   (a) baseline ≈ 0 → a relative ceiling is undefined and the old form rejected
+  //       EVERY non-zero result (→ instant ceiling). Skip the gate.
+  //   (b) DIRECTIONAL — only an implausible improvement is suspicious. A big LOSS
+  //       (huge magnitude in the worse direction) is a VALID, informative result,
+  //       not an outlier to suppress. Respect higher_is_better.
+  const baseAbs = Math.abs(rc.baseline);
+  const higherIsBetter = rc.higherIsBetter !== false;
+  const tooGood = higherIsBetter ? round.result > baseAbs * 5 : round.result < -(baseAbs * 5);
+  if (baseAbs > 1e-9 && tooGood) {
     const r = await rejectGate('outlier_too_high',
-      `Rejected '${label}' = ${round.result}: > 5× baseline (${rc.baseline}). This magnitude is implausible vs HODL (~$200) and indicates either numerical explosion, oracle leakage, lucky-seed overfit, or a units/compounding bug. Verify the calculation, cap leverage tighter, and produce a result < ${(rc.baseline * 5).toFixed(0)}.`);
+      `Rejected '${label}' = ${round.result}: implausibly far beyond 5× baseline (${rc.baseline}) in the improving direction — likely numerical explosion, oracle leakage, lucky-seed overfit, or a units/compounding bug. Verify the calculation and reproduce before trusting.`);
     if (r) return r; else return null;
   }
 
@@ -2027,6 +2063,20 @@ export async function runWorkflow(
     state.maxIterations = maxIterations;
     state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
     state.currentIteration = 1;
+    // Relaunch hygiene: this run previously reached a terminal state. Refresh the
+    // lifecycle markers and purge prior-run signals so we don't (a) compute a
+    // stale/negative duration off the old completedAt, (b) honor a leftover
+    // goal_met.json/replan.json and terminate the rerun prematurely, or (c) let
+    // tryAdvanceResearch journal a stale result file from the previous run as a
+    // phantom round (its freshness check keys off startedAt).
+    state.startedAt = new Date().toISOString();
+    delete state.completedAt;
+    delete state.failureReason;
+    delete state.terminalArtifact;
+    try { rmSync(join(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
+    // Reset the integrity-rejection tally so a prior run's rejections don't shrink
+    // this rerun's budget.
+    try { unlinkSync(join(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
     writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
     writeRunState(projectDir, runId, state);
   } else {
@@ -2174,7 +2224,7 @@ export async function runWorkflow(
     let state = readRunState(projectDir, runId);
 
     // Exit if run was cancelled externally or already terminated
-    if (state.status === 'failed' || state.status === 'complete' || isTerminalStatus(state.status)) {
+    if (isTerminalRunStatus(state.status)) {
       return state;
     }
 
@@ -2252,6 +2302,32 @@ export async function runWorkflow(
         }
       } catch (err) {
         log.warn({ err, runId, iteration }, 'Failed to archive supervisor guidance');
+      }
+    }
+
+    // Honor supervisor REPLAN: the supervisor judged the current approach
+    // fundamentally wrong and wrote signals/replan.json (previously a DEAD signal
+    // — written, never read). Consume it and inject a hard-pivot hint into this
+    // iteration's fresh guidance so the re-plan avoids the rejected approach. The
+    // signal is one-shot (deleted on consume) and bounded by maxIterations.
+    if (iteration > 1) {
+      const replanPath = join(runDir(projectDir, runId), 'signals', 'replan.json');
+      if (existsSync(replanPath)) {
+        let replanReason = 'supervisor judged the approach fundamentally wrong';
+        try {
+          const sig = JSON.parse(readFileSync(replanPath, 'utf-8')) as { reason?: string };
+          if (sig.reason) replanReason = sig.reason;
+        } catch { /* malformed; keep generic reason */ }
+        try { unlinkSync(replanPath); } catch { /* already consumed */ }
+        try {
+          appendFileSync(
+            join(runDir(projectDir, runId), 'supervisor_guidance.md'),
+            `⚠️ PIVOT REQUIRED (supervisor REPLAN): ${replanReason}\nThe previous approach was judged fundamentally wrong. Plan a materially DIFFERENT approach; do not repeat the rejected direction.\n`,
+            'utf-8',
+          );
+        } catch { /* non-critical */ }
+        recordRunEvent(projectDir, runId, { type: 'supervisor_replan', runId, timestamp: new Date().toISOString(), iteration, detail: replanReason });
+        log.info({ runId, iteration, replanReason }, 'Supervisor REPLAN consumed; pivot hint injected for this iteration plan');
       }
     }
 
@@ -2412,7 +2488,7 @@ export async function runWorkflow(
 
             // Check for cancellation between retries
             state = readRunState(projectDir, runId);
-            if (state.status === 'failed' || state.status === 'complete') break;
+            if (isTerminalRunStatus(state.status)) break;
 
             // Determine which retry stages need to run based on current failed gates
             const currentCheck = inner === 0
@@ -2443,6 +2519,11 @@ export async function runWorkflow(
               // Clear live.log so the SSE feed shows only the current attempt's output
               const liveLog = join(runDirPath, 'stages', retryStage.id, 'live.log');
               if (existsSync(liveLog)) unlinkSync(liveLog);
+              // Clear any stale supervisor abort signal: the worker only auto-cleans
+              // it on retries>0, but the inner loop re-runs with retries=0, so a
+              // leftover abort_<stage>.json would instantly self-kill this fresh attempt.
+              const staleAbort = join(runDirPath, 'signals', `abort_${retryStage.id}.json`);
+              if (existsSync(staleAbort)) unlinkSync(staleAbort);
             }
             writeRunState(projectDir, runId, state);
 
@@ -2454,7 +2535,7 @@ export async function runWorkflow(
             state = readRunState(projectDir, runId);
 
             // Check for cancellation after fix stages complete
-            if (state.status === 'failed' || state.status === 'complete') break;
+            if (isTerminalRunStatus(state.status)) break;
 
             // Skip gate re-runs if any fix stage itself failed (saves wasted agent calls)
             const anyFixFailed = activeRetryStages.some(s => state.stages[s.id]?.status === 'failed');
@@ -2873,8 +2954,8 @@ async function executeIteration(
   while (true) {
     let state = readRunState(projectDir, runId);
 
-    // Exit if run was cancelled or failed externally
-    if (state.status === 'failed' || state.status === 'complete') {
+    // Exit if run was cancelled or reached any terminal state externally
+    if (isTerminalRunStatus(state.status)) {
       return state;
     }
 
@@ -2991,6 +3072,7 @@ async function executeIteration(
     writeRunState(projectDir, runId, state);
 
     const results = await Promise.all(toRun.map(async (stage) => {
+     try {
       if (!agents.has(stage.role)) {
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
         if (!existsSync(agentPath)) throw new Error(`No agent config for role "${stage.role}"`);
@@ -3118,6 +3200,18 @@ async function executeIteration(
         isGate: stage.is_gate,
       });
       return { stage, result, currentRetries };
+     } catch (err) {
+       // A stage that THROWS (e.g. missing/invalid agent yaml at runtime) must not
+       // reject Promise.all and unwind out of the loop, which would leave run.json
+       // stuck 'running' forever (orphan). Degrade to a normal stage failure so the
+       // downstream handling turns the run into 'failed'.
+       const retriesNow = state.stages[stage.id]?.retries ?? 0;
+       const msg = err instanceof Error ? err.message : String(err);
+       log.error({ stage: stage.id, err: msg }, 'Stage threw before completion — degrading to failed');
+       try { writeStageStatus(projectDir, runId, stage.id, { status: 'failed', exitCode: 1, error: msg, retries: retriesNow }); } catch { /* non-critical */ }
+       const failedResult: RunResult = { output: '', exitCode: 1, duration_ms: 0, timedOut: false, adapterError: false };
+       return { stage, result: failedResult, currentRetries: retriesNow };
+     }
     }));
 
     state = readRunState(projectDir, runId);

@@ -38,7 +38,13 @@ const ADAPTER_ERROR_PATTERNS = ['403 Forbidden', 'connection refused', 'ECONNREF
 const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
 function isAdapterError(output: string): boolean {
-  return ADAPTER_ERROR_PATTERNS.some(p => output.includes(p));
+  // Scan only the TAIL: an adapter's real connection/rate-limit error surfaces at
+  // the end. Scanning the whole output false-matches when the agent's prompt or a
+  // prior-stage transcript merely mentions "rate limit"/"overloaded" (codex echoes
+  // the full prompt), which would mislabel a real task failure as transient and
+  // trigger needless backoff + cross-adapter fallback.
+  const tail = output.length > 2048 ? output.slice(-2048) : output;
+  return ADAPTER_ERROR_PATTERNS.some(p => tail.includes(p));
 }
 
 function inferAdapterName(adapter: Adapter): string | undefined {

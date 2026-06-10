@@ -59,7 +59,14 @@ export function kgPath(projectDir: string, runId: string): string {
 export function readKG(projectDir: string, runId: string): KnowledgeGraph {
   const p = kgPath(projectDir, runId);
   if (!existsSync(p)) return emptyGraph();
-  return JSON.parse(readFileSync(p, 'utf-8'));
+  // knowledge_graph.json is agent-written, so malformed content is plausible.
+  // Tolerate it (return an empty graph) instead of throwing — matches the rest
+  // of the codebase's corruption-tolerant readers.
+  try {
+    return JSON.parse(readFileSync(p, 'utf-8'));
+  } catch { /* malformed agent KG */
+    return emptyGraph();
+  }
 }
 
 export function writeKG(projectDir: string, runId: string, kg: KnowledgeGraph): void {

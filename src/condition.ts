@@ -61,10 +61,18 @@ function compare(actual: unknown, op: typeof OPS[number], expected: string | num
   switch (op) {
     case '==': return String(actual) === String(expected);
     case '!=': return String(actual) !== String(expected);
-    case '>':  return Number(actual) > Number(expected);
-    case '<':  return Number(actual) < Number(expected);
-    case '>=': return Number(actual) >= Number(expected);
-    case '<=': return Number(actual) <= Number(expected);
+    case '>': case '<': case '>=': case '<=': {
+      // Numeric comparators: if either operand isn't a finite number, a Number()
+      // coercion yields NaN and every comparison is silently false (a misleading
+      // "condition unmet"). Bail explicitly so a non-numeric operand is an obvious
+      // false rather than a NaN trap.
+      const a = Number(actual); const b = Number(expected);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+      if (op === '>') return a > b;
+      if (op === '<') return a < b;
+      if (op === '>=') return a >= b;
+      return a <= b;
+    }
     default: return false;
   }
 }

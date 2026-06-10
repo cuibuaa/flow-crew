@@ -5,6 +5,11 @@ import type { Adapter, AgentConfig } from './adapters/base.js';
 import { runsRoot } from './store.js';
 import type { StoreState } from './store.js';
 import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
+// Re-exported for back-compat + the unit test. The codex adapter now applies this
+// at the source (output.md/handoff/summary all get clean text); re-applying it
+// here is idempotent.
+import { extractFinalMessage } from './adapters/transcript.js';
+export { extractFinalMessage };
 import pino from 'pino';
 
 const log = pino({ name: 'run-summary' });
@@ -273,27 +278,6 @@ function collectStageOutputs(runDir: string, state: StoreState): { joined: strin
 // ---------------------------------------------------------------------------
 // LLM narrative.
 // ---------------------------------------------------------------------------
-
-/**
- * Strip CLI transcript noise to recover just the agent's final message.
- *
- * The codex `exec` adapter returns the entire CLI session on stdout: a banner,
- * the fully echoed prompt (which itself contains prior stage transcripts), then
- * the real answer introduced by a lone `codex` line and followed by a
- * `tokens used\n<n>` footer. We keep the text after the LAST `codex` marker and
- * drop that footer (and any reprint after it). The claude adapter already returns
- * clean text — no markers — so this is a no-op there.
- */
-export function extractFinalMessage(raw: string): string {
-  let text = raw;
-  const marker = /\n\s*codex\s*\n/g;
-  let lastEnd = -1;
-  let m: RegExpExecArray | null;
-  while ((m = marker.exec(text)) !== null) lastEnd = m.index + m[0].length;
-  if (lastEnd >= 0) text = text.slice(lastEnd);
-  text = text.replace(/\n\s*tokens used\s*\n[\d,]+[\s\S]*$/i, '');
-  return text.trim();
-}
 
 async function generateNarrative(
   projectDir: string,

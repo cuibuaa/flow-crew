@@ -6,9 +6,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot, extractTaskTitle } from "./store.js";
+import { listRuns, readRunState, readStageInput, createRun, writeRunState, runsRoot, extractTaskTitle, isTerminalRunStatus } from "./store.js";
 import type { StoreState } from "./store.js";
-import { deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex } from './run-index.js';
+import { deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex, listRunningRunIdsFromIndex, getMaxUpdatedAt } from './run-index.js';
 import {
   listCampaigns,
   nextCampaignSeq,
@@ -102,7 +102,7 @@ const _stageRolesCache = new Map<string, { mtime: number; roles: Record<string, 
 const DEFAULT_STAGE_OUTPUT_TAIL_BYTES = 200 * 1024;
 
 // --- Performance: task list cache (P0) ---
-let _taskListCache: { data: unknown[]; timestamp: number; runsDir: string; dirMtime: number } | null = null;
+let _taskListCache: { data: unknown[]; timestamp: number; runsDir: string; dirMtime: number; projectDir: string; maxUpdatedAt: number } | null = null;
 const TASK_LIST_CACHE_TTL_MS = 5_000; // 5s TTL
 
 function invalidateTaskListCache(): void {
@@ -115,7 +115,7 @@ function invalidateTaskListCache(): void {
 // joins in run summaries; it's the heaviest dashboard query and gets polled
 // every 15s by the UI. Cache it per projectDir with a short TTL, and bust it
 // whenever a run/task changes (shared invalidation with the task-list cache).
-let _campaignListCache: { projectDir: string; data: WorkspaceCampaign[]; timestamp: number } | null = null;
+let _campaignListCache: { projectDir: string; data: WorkspaceCampaign[]; timestamp: number; maxUpdatedAt: number } | null = null;
 // Above the UI's 15s poll interval so a steady poll usually hits the cache;
 // real changes still bust it immediately via the shared invalidation hook.
 const CAMPAIGN_LIST_CACHE_TTL_MS = 20_000;
@@ -123,11 +123,16 @@ const CAMPAIGN_LIST_CACHE_TTL_MS = 20_000;
 function isTaskListCacheValid(runsDir: string): boolean {
   if (!_taskListCache || _taskListCache.runsDir !== runsDir) return false;
   if ((Date.now() - _taskListCache.timestamp) >= TASK_LIST_CACHE_TTL_MS) return false;
-  // Also check if any run.json was modified since cache was built
+  // Also check if any run.json was modified since cache was built. On drvfs the
+  // subdir-file change may not bump the runs/ dir mtime and other processes don't
+  // call our invalidator, so ALSO compare the index's MAX(updated_at) — any
+  // upsert by any process busts the cache.
   try {
     const dirMtime = statSync(runsDir).mtimeMs;
     if (dirMtime !== _taskListCache.dirMtime) return false;
   } catch { /* non-critical */ return false; }
+  const maxUpdatedAt = getMaxUpdatedAt(_taskListCache.projectDir);
+  if (maxUpdatedAt !== null && maxUpdatedAt !== _taskListCache.maxUpdatedAt) return false;
   return true;
 }
 
@@ -350,9 +355,12 @@ function listRecentRunIdsForStartup(projectDir: string, limit = 50): string[] {
 
 export function performStartupRecovery(projectDir: string, limit = 50): void {
   try {
-    const runIds = Number.isFinite(limit) && limit > 0
-      ? listRecentRunIdsForStartup(projectDir, limit)
-      : [];
+    // Prefer the index: it lets us reconcile EVERY orphaned 'running' run cheaply,
+    // not just the most-recent `limit`. Fall back to the recent-N fs scan only when
+    // the index is unavailable. This is also safe to call periodically (not just at
+    // startup) so a run whose scheduler died mid-flight self-heals without a restart.
+    const runningIds = listRunningRunIdsFromIndex(projectDir);
+    const runIds = runningIds ?? (Number.isFinite(limit) && limit > 0 ? listRecentRunIdsForStartup(projectDir, limit) : []);
     for (const id of runIds) {
       try {
         const state = readRunState(projectDir, id);
@@ -360,14 +368,14 @@ export function performStartupRecovery(projectDir: string, limit = 50): void {
           if (hasLiveDirectRunner(projectDir, id)) continue;
           if (hasLiveScheduler(projectDir, id)) continue;
           state.status = 'failed';
-          state.failureReason = 'Server restarted while task was running';
+          state.failureReason = 'Scheduler process gone while task was running (orphan reconciled)';
           state.completedAt = new Date().toISOString();
           for (const [, s] of Object.entries(state.stages)) {
             if (s.status === 'running') s.status = 'failed';
           }
           writeRunState(projectDir, id, state);
         }
-      } catch { /* skip unreadable runs */ }
+      } catch { /* skip unreadable runs (e.g. dir deleted) */ }
     }
   } catch { /* no runs dir */ }
 }
@@ -636,7 +644,8 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     : state.completedAt
       ? Math.max(0, Date.parse(state.completedAt) - Date.parse(state.startedAt)) || 0
       : stages.reduce((sum, s) => sum + (s.duration_ms ?? 0), 0);
-  const totalTokens = Object.values(state.stages).reduce((sum, s) => sum + (s.tokens_in ?? 0) + (s.tokens_out ?? 0), 0);
+  const finiteOr0 = (n?: number) => (typeof n === 'number' && Number.isFinite(n) ? n : 0);
+  const totalTokens = Object.values(state.stages).reduce((sum, s) => sum + finiteOr0(s.tokens_in) + finiteOr0(s.tokens_out), 0);
   const { bestScore, metricName } = readBestScore(projectDir, state.runId);
   const task: TaskShape = {
     id: state.runId,
@@ -947,7 +956,12 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     iteration: state.currentIteration ?? state.campaignIteration,
     maxIterations: state.maxIterations,
     completedAt: state.completedAt,
-    duration_min: state.startedAt ? Math.floor((Date.parse(state.completedAt ?? new Date().toISOString()) - Date.parse(state.startedAt)) / 60000) : null,
+    duration_min: (() => {
+      const start = state.startedAt ? Date.parse(state.startedAt) : NaN;
+      const end = Date.parse(state.completedAt ?? new Date().toISOString());
+      const mins = Math.floor((end - start) / 60000);
+      return Number.isFinite(mins) ? mins : null; // guard unparseable timestamps → NaN
+    })(),
     taskDescriptionPreview: (state.taskDescription ?? '').slice(0, 300),
     campaignId: state.campaignId ?? state.campaignStorageKey,
     stages,
@@ -1244,15 +1258,17 @@ function campaignFromHistory(
 }
 
 function listWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
+  const maxUpdatedAt = getMaxUpdatedAt(projectDir);
   if (
     _campaignListCache &&
     _campaignListCache.projectDir === projectDir &&
-    Date.now() - _campaignListCache.timestamp < CAMPAIGN_LIST_CACHE_TTL_MS
+    Date.now() - _campaignListCache.timestamp < CAMPAIGN_LIST_CACHE_TTL_MS &&
+    (maxUpdatedAt === null || maxUpdatedAt === _campaignListCache.maxUpdatedAt)
   ) {
     return _campaignListCache.data;
   }
   const data = computeWorkspaceCampaigns(projectDir);
-  _campaignListCache = { projectDir, data, timestamp: Date.now() };
+  _campaignListCache = { projectDir, data, timestamp: Date.now(), maxUpdatedAt: maxUpdatedAt ?? 0 };
   return data;
 }
 
@@ -1460,6 +1476,15 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
   }, staleCheckMs);
 
+  // Orphan reconciliation: the staleTimer above only covers runs THIS process
+  // launched (activeExecutions). Runs launched by other processes (e.g. the
+  // daemons) whose scheduler died leave run.json='running' forever and were only
+  // healed at dashboard startup. Periodically reconcile ALL 'running' runs via the
+  // index + pid-liveness so cross-process orphans self-heal without a restart.
+  const orphanReconcileTimer = setInterval(() => {
+    try { performStartupRecovery(projectDir, Number(process.env.FLOWCREW_STARTUP_RECOVERY_LIMIT ?? 50)); } catch { /* non-critical */ }
+  }, 5 * 60_000);
+
   const app = Fastify({ logger: false });
 
   // CORS
@@ -1570,7 +1595,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }).filter(Boolean);
     let dirMtime = 0;
     try { dirMtime = statSync(runsDir).mtimeMs; } catch { /* non-critical */ }
-    _taskListCache = { data, timestamp: Date.now(), runsDir, dirMtime };
+    _taskListCache = { data, timestamp: Date.now(), runsDir, dirMtime, projectDir, maxUpdatedAt: getMaxUpdatedAt(projectDir) ?? 0 };
     return data;
   });
 
@@ -2384,6 +2409,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           if (ss.status && ss.status !== 'running' && ss.status !== 'pending') {
             stageFinished = true;
             clearInterval(interval);
+            // Close the SSE socket now that the stage is done, instead of leaking
+            // an idle open connection until the client happens to disconnect.
+            if (!reply.raw.writableEnded) reply.raw.end();
           }
         } catch { /* status.json doesn't exist yet — stage hasn't started */ }
       };
@@ -2451,9 +2479,10 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           lastPayload = payload;
           invalidateTaskListCache(); // task changed, bust list cache
           reply.raw.write(`data: ${payload}\n\n`);
-          if (state.status === 'complete' || state.status === 'failed') {
+          if (isTerminalRunStatus(state.status)) {
             terminalSent = true;
             clearInterval(interval);
+            if (!reply.raw.writableEnded) reply.raw.end();
           }
         } catch { /* non-critical */
           // Task disappeared (deleted) — stop polling to avoid resource leak

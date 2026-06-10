@@ -40,6 +40,19 @@ const dbHandles = new Map<string, DatabaseSync>();
 // Memoize the seed-freshness check so readers don't re-run it on every call.
 const seedCheckedAt = new Map<string, number>();
 const SEED_CHECK_TTL_MS = 5_000;
+// Directory count at the last rebuild, so we can cheaply detect when run dirs
+// were added/removed OUTSIDE the upsert path (e.g. the operator manually deletes
+// run dirs) and reconcile, without re-counting on every call.
+const rebuiltAtDirCount = new Map<string, number>();
+
+/** Cheap count of run directories on disk (one readdir, no per-entry stat). */
+function countRunDirs(projectDir: string): number {
+  try {
+    return readdirSync(runsRoot(projectDir), { withFileTypes: true }).filter((e) => e.isDirectory()).length;
+  } catch { /* non-critical */
+    return 0;
+  }
+}
 
 function runsRoot(_projectDir: string): string {
   return join(homedir(), '.fc', 'runs');
@@ -258,15 +271,28 @@ function ensureIndexSeeded(projectDir: string): void {
   if (last !== undefined && Date.now() - last < SEED_CHECK_TTL_MS) return;
   const db = openDb(projectDir);
   if (!db) return;
-  // Every createRun/writeRunState upserts into the index, so the index can only
-  // be *missing* rows when it has never been seeded (fresh sqlite, or legacy runs
-  // predating the index). A one-time full rebuild on an empty index covers that;
-  // we no longer readdir all ~9900 run dirs on every check.
+  // Every createRun/writeRunState upserts into the index, so under normal operation
+  // indexedCount tracks the on-disk dir count. They diverge only when run dirs are
+  // added/removed OUTSIDE the upsert path (operator rm/cp, restore). Detect that
+  // cheaply via a dir count and reconcile with a full rebuild — but only when the
+  // dir set actually CHANGED since the last rebuild, so a persistent benign gap
+  // (e.g. a half-created dir without run.json) doesn't trigger a rebuild every tick.
   const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get();
   const indexedCount = Number(row?.count ?? 0);
-  if (indexedCount === 0 && !rebuildAttempted.has(projectDir)) {
+  const dirCount = countRunDirs(projectDir);
+  const lastRebuildDirCount = rebuiltAtDirCount.get(projectDir);
+  const needsRebuild =
+    (indexedCount === 0 && !rebuildAttempted.has(projectDir)) ||
+    (dirCount !== indexedCount && dirCount !== lastRebuildDirCount);
+  if (needsRebuild) {
     rebuildAttempted.add(projectDir);
-    rebuildRunIndex(projectDir);
+    try {
+      rebuildRunIndex(projectDir);
+      rebuiltAtDirCount.set(projectDir, dirCount);
+    } catch { /* another process may be mid-rebuild (SQLITE_BUSY) or a transient
+      error — the rebuild transaction rolled back so the index is unchanged (not
+      partial). Don't propagate (would crash a reader); leave rebuiltAtDirCount
+      unset so the next tick retries once the contention clears. */ }
   }
   seedCheckedAt.set(projectDir, Date.now());
 }
@@ -287,6 +313,26 @@ export function listStandaloneRunIdsFromIndex(projectDir: string, limit: number)
     .prepare('SELECT run_id FROM runs WHERE campaign_storage_key IS NULL ORDER BY run_id DESC LIMIT ?')
     .all(limit)
     .map((row) => String(row.run_id));
+}
+
+/** Run ids whose status is 'running' (for orphan reconciliation), newest first. */
+export function listRunningRunIdsFromIndex(projectDir: string): string[] | null {
+  ensureIndexSeeded(projectDir);
+  const db = openDb(projectDir);
+  if (!db) return null;
+  return db.prepare("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id DESC")
+    .all()
+    .map((row) => String(row.run_id));
+}
+
+/** Max updated_at across all rows — a cheap cross-process "anything changed?" token for cache keys. */
+export function getMaxUpdatedAt(projectDir: string): number | null {
+  ensureIndexSeeded(projectDir);
+  const db = openDb(projectDir);
+  if (!db) return null;
+  const row = db.prepare('SELECT MAX(updated_at) AS m FROM runs').get();
+  const m = Number(row?.m ?? 0);
+  return Number.isFinite(m) ? m : 0;
 }
 
 export function readRunIndexRecords(projectDir: string): RunIndexRecord[] | null {
@@ -319,4 +365,5 @@ export function removeRunIndexFiles(projectDir: string): void {
   }
   rebuildAttempted.delete(projectDir);
   seedCheckedAt.delete(projectDir);
+  rebuiltAtDirCount.delete(projectDir);
 }

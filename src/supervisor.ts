@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
-import { readRunState, runDir as getRunDirPath } from './store.js';
+import { readRunState, runDir as getRunDirPath, isTerminalRunStatus } from './store.js';
 import type { StoreState } from './store.js';
 import type { SupervisorConfig } from './config.js';
 import pino from 'pino';
@@ -329,8 +329,8 @@ export class Supervisor {
       }
     }
 
-    // Stop if run is no longer active
-    if (state.status === 'complete' || state.status === 'failed') {
+    // Stop if run is no longer active (any terminal state, not just complete/failed)
+    if (isTerminalRunStatus(state.status)) {
       this.stop();
       return;
     }

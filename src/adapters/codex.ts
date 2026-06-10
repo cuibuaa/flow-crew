@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 import { execWithTimeout } from './base.js';
+import { extractFinalMessage } from './transcript.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -14,6 +15,10 @@ function parseTokens(output: string): { tokens_in?: number; tokens_out?: number 
     tokens_in: inM ? parseInt(inM[1].replace(/,/g, ''), 10) : undefined,
     tokens_out: outM ? parseInt(outM[1].replace(/,/g, ''), 10) : undefined,
   };
+  // codex `exec` prints a total-usage footer "tokens used\n<n>"; best-effort capture
+  // it as output tokens so codex token telemetry isn't silently always undefined.
+  const used = output.match(/tokens used\s*\n\s*([\d,]+)/i);
+  if (used) return { tokens_out: parseInt(used[1].replace(/,/g, ''), 10) };
   return {};
 }
 
@@ -162,6 +167,12 @@ export class CodexAdapter implements Adapter {
       const tokens = parseTokens(result.output);
       if (tokens.tokens_in !== undefined) result.tokens_in = tokens.tokens_in;
       if (tokens.tokens_out !== undefined) result.tokens_out = tokens.tokens_out;
+      // Return ONLY the agent's final message. `codex exec` echoes the entire
+      // session (banner + full prompt + prior-stage transcripts + token footer);
+      // returning that raw polluted output.md, downstream handoff context, and run
+      // summaries. The raw transcript is preserved in live.log for debugging.
+      // (Parse tokens above FIRST — cleaning strips the "tokens used" footer.)
+      result.output = extractFinalMessage(result.output);
       return result;
     } finally {
       cleanupRunEndArtifacts(codexHome);

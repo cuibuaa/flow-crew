@@ -140,6 +140,20 @@ export function appendEdge(edge: KGEdge): void {
   writeFileSync(edgesPath(), JSON.stringify({ ...edge, weight: clampWeight(edge.weight) }) + '\n', { encoding: 'utf-8', flag: 'a' });
 }
 
+// Batched appends: write a whole set of nodes/edges in ONE append so a multi-record
+// arc can't interleave with another process's concurrent append (which would tear
+// lines / corrupt the jsonl). One write() per set instead of per record.
+function appendNodes(nodes: KGNode[]): void {
+  if (nodes.length === 0) return;
+  const payload = nodes.map((n) => JSON.stringify({ ...n, id: n.id || nodeId(n.campaignId, n.type, n.metadata) })).join('\n') + '\n';
+  writeFileSync(nodesPath(), payload, { encoding: 'utf-8', flag: 'a' });
+}
+function appendEdges(edges: KGEdge[]): void {
+  if (edges.length === 0) return;
+  const payload = edges.map((e) => JSON.stringify({ ...e, weight: clampWeight(e.weight) })).join('\n') + '\n';
+  writeFileSync(edgesPath(), payload, { encoding: 'utf-8', flag: 'a' });
+}
+
 // mtime+size-keyed parse cache. getNodes/getEdges are called once per campaign
 // in the dashboard list build (500+ calls); re-reading and re-parsing the whole
 // jsonl each time was pure waste. appends change the file size, busting the cache.
@@ -189,21 +203,22 @@ export function persistCampaignArc(arc: CampaignArc): void {
   const symptom = makeNode('symptom', arc.symptom);
   const diagnosis = makeNode('diagnosis', arc.diagnosis);
   const outcome = makeNode('outcome', arc.outcome);
-  appendNode(symptom);
-  appendNode(diagnosis);
   if (arc.patch) {
     const patch = makeNode('patch', arc.patch);
-    appendNode(patch);
-    appendNode(outcome);
-    appendEdge({ from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 });
-    appendEdge({ from: diagnosis.id, to: patch.id, relation: 'fixed_by', weight: 1 });
-    appendEdge({ from: patch.id, to: outcome.id, relation: 'resulted_in', weight: 1 });
+    appendNodes([symptom, diagnosis, patch, outcome]);
+    appendEdges([
+      { from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 },
+      { from: diagnosis.id, to: patch.id, relation: 'fixed_by', weight: 1 },
+      { from: patch.id, to: outcome.id, relation: 'resulted_in', weight: 1 },
+    ]);
     return;
   }
 
-  appendNode(outcome);
-  appendEdge({ from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 });
-  appendEdge({ from: diagnosis.id, to: outcome.id, relation: 'resulted_in', weight: 1 });
+  appendNodes([symptom, diagnosis, outcome]);
+  appendEdges([
+    { from: symptom.id, to: diagnosis.id, relation: 'caused_by', weight: 1 },
+    { from: diagnosis.id, to: outcome.id, relation: 'resulted_in', weight: 1 },
+  ]);
 }
 
 export function findSimilar(currentContext: {

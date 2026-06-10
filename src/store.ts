@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -173,7 +173,7 @@ export interface StoreState {
   projectDir: string;
   /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
   baseCommit?: string;
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed';
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed' | 'phase_complete' | 'stopped';
   /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
   terminalStates?: TerminalStatesConfig;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
@@ -267,13 +267,16 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
   appendFileSync(filePath, JSON.stringify(event) + '\n', 'utf-8');
 }
 
-function isTerminalRunStatus(status: string): boolean {
+/** Single source of truth for "this run has reached a terminal state". */
+export function isTerminalRunStatus(status: string): boolean {
   return status === 'complete'
     || status === 'failed'
     || status === 'shipped'
     || status === 'ceiling_hit'
     || status === 'escalated'
-    || status === 'reality_gate_failed';
+    || status === 'reality_gate_failed'
+    || status === 'phase_complete'
+    || status === 'stopped';
 }
 
 function isRealityGatedTerminal(status: string): boolean {
@@ -491,6 +494,22 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
 }
 
 export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void): StoreState {
+  // Compare-and-swap: another process (e.g. dashboard cancel vs scheduler write)
+  // can rename run.json between our read and write, so a plain read-modify-write
+  // silently loses one side's update (last-writer-wins). Re-read + re-apply the
+  // mutator if the file changed since we read it. atomicWrite makes each write
+  // atomic; this shrinks the lost-update window to the tiny check→rename gap.
+  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
+  const mtimeOf = (): number => { try { return statSync(runJsonPath).mtimeMs; } catch { return -1; } };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const mtimeBefore = mtimeOf();
+    const state = readRunState(projectDir, runId);
+    mutator(state);
+    if (mtimeOf() !== mtimeBefore) continue; // raced — re-read and re-apply
+    writeRunState(projectDir, runId, state);
+    return state;
+  }
+  // Retries exhausted (heavy contention) — apply once more best-effort.
   const state = readRunState(projectDir, runId);
   mutator(state);
   writeRunState(projectDir, runId, state);
