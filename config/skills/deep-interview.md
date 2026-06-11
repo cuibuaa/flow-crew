@@ -1,3 +1,6 @@
+---
+description: Socratic clarification — probe scope/success-criteria/edge-cases before executing, to eliminate ambiguity.
+---
 Before executing any task, apply Socratic clarification to eliminate ambiguity.
 
 Ask probing questions in these categories using numbered lists:

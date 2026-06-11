@@ -278,7 +278,11 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
             terminalStudyComplete: parsed.terminalStudyComplete === true ? true : undefined,
             modelSuccess: typeof parsed.modelSuccess === 'boolean' ? parsed.modelSuccess : undefined,
           };
-          if (!normalized.terminalStudyComplete && normalized.gate === 'btc_transfer_multiphase_gate') {
+          // Domain-agnostic: a gate verdict may declare "study complete without model
+          // success" (a valid terminal negative result). Recognized by the verdict
+          // contract on ANY gate — not a hardcoded gate name. Only consult the verdict
+          // file for a gated entry not already passing/terminal (bounds the I/O).
+          if (!normalized.terminalStudyComplete && !normalized.pass && typeof normalized.gate === 'string') {
             try {
               const evidence = JSON.parse(readFileSync(join(runsRoot(projectDir), normalized.runId, `verdict_${normalized.gate}.json`), 'utf-8'));
               if (evidence?.study_complete === true

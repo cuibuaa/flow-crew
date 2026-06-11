@@ -91,6 +91,14 @@ The important boundary: the supervisor steers, but it does not edit files or run
 | Lost rationale | Knowledge graph of decisions and evidence |
 | Single backend assumption | Codex default with Claude/Codex per-role overrides |
 
+## Architecture: Atoms
+
+FlowCrew is built on **self-describing atomic semantics**. Every composable primitive — roles, skills, deterministic checks, research policies, terminal/verdict vocabularies — describes itself, is collected into a registry, and is injected into the planner at runtime. The planner composes a run from these atoms, and each atom maps to the roles that execute it.
+
+The invariant that keeps this maintainable: **semantics live at the atom's own source, injected at runtime — the planner prompt is a stable composition engine, never a semantics dictionary. Domain-specific semantics live in the brief / project contract, never in the engine.** Adding a role, check, or skill needs zero planner-prompt edits, and a project's hard constraints (declared in `<project>/.flowcrew/contract.yaml`) are wired by the planner into deterministic Reality-Gate checks.
+
+See [`design/atom-architecture.md`](design/atom-architecture.md) for the full rationale, the drift problem it solves, and the roadmap.
+
 ## Quick Start
 
 ```bash
@@ -214,6 +222,7 @@ flowcrew audit-reality
 
 ## Documentation
 
+- [Atom Architecture](design/atom-architecture.md): self-describing atoms, the planner composition model, and the design roadmap.
 - [Architecture](docs/architecture.md): scheduler, worker, supervisor, loops, and storage.
 - [Campaigns and Run Memory](docs/campaigns.md): campaigns, plateaus, pivots, and knowledge graph semantics.
 - [Reality-Gate](docs/reality-gate.md): deterministic evidence checks before terminal success.

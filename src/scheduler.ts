@@ -5,8 +5,9 @@ import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
 import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir, runsRoot, isTerminalRunStatus } from './store.js';
-import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig } from './store.js';
-import { evaluateResearch, type ResearchRound } from './research-policy.js';
+import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig } from './store.js';
+import { listCheckTypes } from './reality-gate/index.js';
+import { evaluateResearch, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
 import { runStage } from './worker.js';
 import {
   canonicalCampaignId,
@@ -64,7 +65,7 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
   if (resRaw && typeof resRaw === 'object') {
     const r = resRaw as Record<string, unknown>;
     if (typeof r.baseline === 'number') {
-      const policy = (typeof r.policy === 'string' && ['greedy_stack', 'best_of_n', 'replace_if_better'].includes(r.policy))
+      const policy = (typeof r.policy === 'string' && RESEARCH_POLICY_IDS.includes(r.policy))
         ? r.policy as ResearchConfig['policy'] : 'greedy_stack';
       const research: ResearchConfig = { baseline: r.baseline, policy };
       // Honor higher_is_better; coerce the common YAML-quoting mistake ("false"/"true"
@@ -81,6 +82,25 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
       }
       if (typeof r.result_file === 'string') research.resultFile = r.result_file;
       if (typeof r.report_dir === 'string') research.reportDir = r.report_dir;
+      // Per-round integrity gates — brief-declared so the engine carries no domain
+      // field/threshold knowledge. snake_case in YAML → camelCase in config.
+      if (r.integrity && typeof r.integrity === 'object') {
+        const ig = r.integrity as Record<string, unknown>;
+        const integrity: ResearchIntegrityConfig = {};
+        if (typeof ig.noop === 'boolean') integrity.noop = ig.noop;
+        if (typeof ig.max_std_ratio === 'number') integrity.maxStdRatio = ig.max_std_ratio;
+        if (typeof ig.outlier_factor === 'number') integrity.outlierFactor = ig.outlier_factor;
+        if (ig.field_floors && typeof ig.field_floors === 'object') {
+          const ff: Record<string, number> = {};
+          for (const [k, v] of Object.entries(ig.field_floors as Record<string, unknown>)) if (typeof v === 'number') ff[k] = v;
+          if (Object.keys(ff).length) integrity.fieldFloors = ff;
+        }
+        if (Array.isArray(ig.reject_if_positive)) {
+          const rip = ig.reject_if_positive.filter((x): x is string => typeof x === 'string');
+          if (rip.length) integrity.rejectIfPositive = rip;
+        }
+        research.integrity = integrity;
+      }
       if (r.stop && typeof r.stop === 'object') {
         const s = r.stop as Record<string, unknown>;
         research.stop = {};
@@ -542,20 +562,20 @@ async function tryAdvanceResearch(
   // Dedupe: skip if this exact (label,result) was already journaled.
   if (journal.rounds.some((r) => r.label === label && r.result === round.result)) return null;
 
-  // Integrity gates — reject rounds that look like cheats / noise / overflow
-  // before they pollute the journal. Each gate can reject; on rejection we
-  // write a guidance note and a continue signal so the agent gets another try
-  // (up to maxRounds total rejections → ceiling).
+  // Integrity gates — reject rounds that look like no-ops / noise / overflow before
+  // they pollute the journal. DOMAIN-AGNOSTIC: the engine has NO built-in field or
+  // threshold knowledge. Generic gates (no-op / cross-run variance / outlier cap)
+  // apply with defaults; any domain-specific gate (e.g. a trading floor on a custom
+  // field) is declared in the brief's `research.integrity` block and applied generically.
   //
   // Gates evaluated in order:
-  //   #1 no-op (result == baseline)            — original gate
-  //   #2 robustness (result_std/mean too high) — exposes lucky-seed overfit
-  //   #3 stress crashed (stress_min_nv < 50%)  — would be liquidated on CEX
-  //   #4 liquidation reported (liq_total > 0)
-  //   #5 outlier (result > baseline × 5)        — too-good-to-be-true cap
+  //   #1 no-op            (result == baseline within tolerance)      — generic
+  //   #2 variance         (result_std/|mean| > maxStdRatio)          — generic, default 0.30
+  //   #3 field floors     (round[field] < min, per brief)            — brief-declared
+  //   #4 reject-if-positive (round[field] > 0, per brief)            — brief-declared
+  //   #5 outlier          (beyond outlierFactor× baseline, directional) — generic, default 5
   //
-  // Each gate is "soft": if the relevant field is absent on round_result.json
-  // the gate doesn't fire (backwards compatible with legacy briefs).
+  // Each gate is "soft": absent field / disabled config → gate doesn't fire.
   const rejectGate = async (reason: string, message: string): Promise<StoreState | null> => {
     const rejPath = join(ctx.runDirPath, 'research_integrity_rejections.json');
     let rejData: Record<string, number> = {};
@@ -596,54 +616,62 @@ async function tryAdvanceResearch(
     return null;
   };
 
-  // Gate #1: no-op (result == baseline)
-  const noopEps = Math.max(1e-4, Math.abs(rc.baseline) * 1e-5);
-  if (Math.abs(round.result - rc.baseline) <= noopEps) {
-    return rejectGate('noop',
-      `Rejected '${label}' = ${round.result}: equals baseline (${rc.baseline}) within tolerance — strategy changed NO positions (no-op/proxy). Implement a direction that genuinely alters positions and re-measure.`);
+  const ig = rc.integrity;
+  const roundFields = round as Record<string, unknown>;
+
+  // Gate #1: no-op (result == baseline within tolerance) — generic; on unless disabled.
+  if (ig?.noop !== false) {
+    const noopEps = Math.max(1e-4, Math.abs(rc.baseline) * 1e-5);
+    if (Math.abs(round.result - rc.baseline) <= noopEps) {
+      return rejectGate('noop',
+        `Rejected '${label}' = ${round.result}: equals baseline (${rc.baseline}) within tolerance — the change did nothing (no-op/proxy). Implement a direction that genuinely alters behavior and re-measure.`);
+    }
   }
 
-  // Gate #2: robustness (multi-seed std / mean too high → lucky-seed overfit)
+  // Gate #2: cross-run variance (result_std/|mean| too high → unstable/lucky). Generic, default 0.30.
   const stdField = (round as { result_std?: number }).result_std;
   const meanReference = round.result;  // round.result IS the mean by convention
+  const maxStdRatio = ig?.maxStdRatio ?? 0.30;
   if (typeof stdField === 'number' && Math.abs(meanReference) > 1e-6) {
     const stdRatio = Math.abs(stdField) / Math.abs(meanReference);
-    if (stdRatio > 0.30) {
-      const r = await rejectGate('unstable_seeds',
-        `Rejected '${label}' = ${round.result}: result_std/mean = ${stdRatio.toFixed(2)} > 0.30 — extreme cross-seed variance indicates lucky-seed overfit, not robust alpha. Train deeper or report variance reduction techniques; do not pretend a high-variance result is the true mean.`);
+    if (stdRatio > maxStdRatio) {
+      const r = await rejectGate('unstable',
+        `Rejected '${label}' = ${round.result}: result_std/mean = ${stdRatio.toFixed(2)} > ${maxStdRatio} — cross-run variance too high to trust the mean. Reduce variance (more seeds/runs) before reporting.`);
       if (r) return r; else return null;
     }
   }
 
-  // Gate #3: any stress window NV crashed below initial × 0.5 → would be liquidated
-  const stressMinNV = (round as { stress_min_nv?: number }).stress_min_nv;
-  if (typeof stressMinNV === 'number' && stressMinNV < 50.0) {
-    const r = await rejectGate('stress_crashed',
-      `Rejected '${label}' = ${round.result}: stress_min_nv = ${stressMinNV} < 50 — at least one stress window crashes NV below 50% of initial, which would trigger CEX maintenance-margin liquidation in production. The reward layer's per-tick liquidation check is not enough; cumulative NV crash must also be < 50% loss.`);
-    if (r) return r; else return null;
+  // Gate #3: brief-declared numeric floors. The engine knows nothing about the field
+  // names; a brief declares e.g. field_floors: { worst_case_score: 50 }.
+  for (const [field, min] of Object.entries(ig?.fieldFloors ?? {})) {
+    const v = roundFields[field];
+    if (typeof v === 'number' && v < min) {
+      const r = await rejectGate(`field_floor_${field}`,
+        `Rejected '${label}' = ${round.result}: ${field} = ${v} < ${min} (brief-declared floor).`);
+      if (r) return r; else return null;
+    }
   }
 
-  // Gate #4: explicit liquidation_total > 0
-  const liqTotal = (round as { liquidation_total?: number }).liquidation_total;
-  if (typeof liqTotal === 'number' && liqTotal > 0) {
-    const r = await rejectGate('liquidation_event',
-      `Rejected '${label}' = ${round.result}: liquidation_total = ${liqTotal} > 0 — at least one stress/OOS window had a liquidation event. Brief mandates 0 liquidations across all windows.`);
-    if (r) return r; else return null;
+  // Gate #4: brief-declared "must be zero" fields, e.g. reject_if_positive: [failure_count].
+  for (const field of ig?.rejectIfPositive ?? []) {
+    const v = roundFields[field];
+    if (typeof v === 'number' && v > 0) {
+      const r = await rejectGate(`nonzero_${field}`,
+        `Rejected '${label}' = ${round.result}: ${field} = ${v} > 0 (brief mandates 0 for this field).`);
+      if (r) return r; else return null;
+    }
   }
 
-  // Gate #5: outlier ("too-good-to-be-true" cap). Two correctness guards over the
-  // old `Math.abs(result) > Math.abs(baseline) * 5`:
-  //   (a) baseline ≈ 0 → a relative ceiling is undefined and the old form rejected
-  //       EVERY non-zero result (→ instant ceiling). Skip the gate.
-  //   (b) DIRECTIONAL — only an implausible improvement is suspicious. A big LOSS
-  //       (huge magnitude in the worse direction) is a VALID, informative result,
-  //       not an outlier to suppress. Respect higher_is_better.
+  // Gate #5: outlier cap (implausible improvement). Generic, default factor 5.
+  //   (a) baseline ≈ 0 → a relative ceiling is undefined; skip (else it rejects everything).
+  //   (b) DIRECTIONAL — only an implausible IMPROVEMENT is suspect; a big loss is a valid result.
   const baseAbs = Math.abs(rc.baseline);
   const higherIsBetter = rc.higherIsBetter !== false;
-  const tooGood = higherIsBetter ? round.result > baseAbs * 5 : round.result < -(baseAbs * 5);
+  const outlierFactor = ig?.outlierFactor ?? 5;
+  const tooGood = higherIsBetter ? round.result > baseAbs * outlierFactor : round.result < -(baseAbs * outlierFactor);
   if (baseAbs > 1e-9 && tooGood) {
     const r = await rejectGate('outlier_too_high',
-      `Rejected '${label}' = ${round.result}: implausibly far beyond 5× baseline (${rc.baseline}) in the improving direction — likely numerical explosion, oracle leakage, lucky-seed overfit, or a units/compounding bug. Verify the calculation and reproduce before trusting.`);
+      `Rejected '${label}' = ${round.result}: implausibly far beyond ${outlierFactor}× baseline (${rc.baseline}) in the improving direction — likely numerical explosion, data leakage, overfit, or a units bug. Verify the calculation and reproduce before trusting.`);
     if (r) return r; else return null;
   }
 
@@ -928,8 +956,11 @@ type CampaignPhaseMetadata = {
 };
 type GateMetricLookup = { found: boolean; metric: CampaignMetric | null };
 
-function isTerminalStudyCompletionArtifact(record: Record<string, unknown>, gateId?: string): boolean {
-  if (gateId && gateId !== 'btc_transfer_multiphase_gate') return false;
+function isTerminalStudyCompletionArtifact(record: Record<string, unknown>): boolean {
+  // Domain-agnostic contract: a gate verdict may declare that the STUDY is complete
+  // even though the model did NOT succeed — a rigorous negative result is itself a
+  // valid terminal outcome. Recognized by the verdict's OWN fields, NOT by any
+  // hardcoded gate name, so any brief/gate can opt in by emitting this contract.
   if (record.phase_complete === true || record.phaseComplete === true || record.continue_next_phase === true) return false;
   return record.study_complete === true
     && record.model_success === false
@@ -1070,13 +1101,25 @@ export function buildRoleRegistry(agentsDir: string): Map<string, { name: string
   return registry;
 }
 
-/** List available skill names from config/skills/ directory */
+/** List available skills from config/skills/, surfacing each skill's self-described
+ * `description:` front-matter (like roles) so the planner sees WHAT each skill is for,
+ * not just its name. Falls back to name-only when a skill has no front-matter. */
 function listAvailableSkills(projectDir: string): string {
   const skillsDir = join(projectDir, 'config', 'skills');
   try {
     const files = readdirSync(skillsDir).filter(f => f.endsWith('.md'));
     if (files.length === 0) return 'none';
-    return files.map(f => f.replace('.md', '')).join(', ');
+    return files.map(f => {
+      const name = f.replace('.md', '');
+      let desc = '';
+      try {
+        const head = readFileSync(join(skillsDir, f), 'utf-8').slice(0, 800);
+        const fm = head.match(/^---\s*\n([\s\S]*?)\n---/);
+        const m = (fm?.[1] ?? '').match(/(?:^|\n)description:\s*(.+)/);
+        if (m) desc = m[1].trim().replace(/^["']|["']$/g, '');
+      } catch { /* name-only */ }
+      return desc ? `- ${name}: ${desc}` : `- ${name}`;
+    }).join('\n');
   } catch { return 'none'; }
 }
 
@@ -1804,7 +1847,7 @@ function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, 
   for (const file of [`verdict_${stageId}.json`, `pre_gate_verdict_${stageId}.json`]) {
     try {
       const parsed = JSON.parse(readFileSync(join(base, file), 'utf-8')) as Record<string, unknown>;
-      if (isTerminalStudyCompletionArtifact(parsed, stageId)) return parsed;
+      if (isTerminalStudyCompletionArtifact(parsed)) return parsed;
     } catch { /* optional */ }
   }
   return null;
@@ -1814,27 +1857,23 @@ function writeTerminalStudyCompletionArtifacts(projectDir: string, runId: string
   const base = runDir(projectDir, runId);
   mkdirSync(stageDir(projectDir, runId, stageId), { recursive: true });
   writeFileSync(join(base, `verdict_${stageId}.json`), JSON.stringify(evidence, null, 2) + '\n', 'utf-8');
-  const value = typeof evidence.value === 'number'
-    ? evidence.value
-    : typeof evidence.net_2024_evaluation === 'number'
-      ? evidence.net_2024_evaluation
-      : undefined;
+  // Generic: the score comes from the verdict's own `value`/`metric` (no domain
+  // field names or default metric baked in). higher_is_better is read from the
+  // evidence when present, defaulting to true.
+  const value = typeof evidence.value === 'number' ? evidence.value : undefined;
   if (typeof value === 'number' && Number.isFinite(value)) {
     writeFileSync(join(stageDir(projectDir, runId, stageId), 'metric.json'), JSON.stringify({
       hasMetric: true,
-      metric: typeof evidence.metric === 'string' ? evidence.metric : 'BTCTransferRobustScore',
+      metric: typeof evidence.metric === 'string' ? evidence.metric : 'study_score',
       value,
-      higherIsBetter: true,
+      higherIsBetter: typeof evidence.higher_is_better === 'boolean' ? evidence.higher_is_better : true,
       threshold: typeof evidence.threshold === 'number' ? evidence.threshold : null,
       pass: false,
       source: {
         path: typeof evidence.final_candidate_artifact === 'string'
           ? evidence.final_candidate_artifact
           : join(base, `pre_gate_verdict_${stageId}.json`),
-        evidence: [
-          typeof evidence.net_2024_evaluation === 'number' ? `net_2024_evaluation=${evidence.net_2024_evaluation}` : null,
-          typeof evidence.net_2025_evaluation === 'number' ? `net_2025_evaluation=${evidence.net_2025_evaluation}` : null,
-        ].filter(Boolean).join(', ') || `value=${value}`,
+        evidence: `value=${value}`,
       },
       notes: 'Recovered from terminal study completion evidence.',
     }, null, 2) + '\n', 'utf-8');
@@ -1870,7 +1909,7 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
-  if (runId && isTerminalStudyCompletionArtifact(v, stageId)) {
+  if (runId && isTerminalStudyCompletionArtifact(v)) {
     writeTerminalStudyCompletionArtifacts(projectDir, runId, stageId, v);
     return { pass: true, reason: 'study_complete_without_model_success' };
   }
@@ -3085,8 +3124,12 @@ async function executeIteration(
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
 
       let availableRoles: string | undefined;
+      let availableChecks: string | undefined;
       if (stage.dynamic_dispatch) {
         availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
+        // Inject the self-describing deterministic-check vocabulary so the planner
+        // composes gates from real checks, not only free-text QA prose.
+        availableChecks = (await listCheckTypes()).map((c) => `- ${c.type}: ${c.description} (params: ${c.params})`).join('\n');
       }
 
       let resolvedPrompt = stage.prompt_template;
@@ -3195,6 +3238,7 @@ async function executeIteration(
         skills,
         stageSkills: stage.skills,
         availableRoles,
+        availableChecks,
         availableSkills,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,

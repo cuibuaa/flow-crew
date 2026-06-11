@@ -8,6 +8,7 @@ interface Params {
 }
 
 export default class VarianceFloorCheck implements RealityCheck {
+  static meta = { description: 'Require the stddev of numeric values at a JSON path to meet a floor (rejects degenerate/constant output).', params: 'file: string, field_path: string, min_stddev: number' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.file !== 'string') return result(false, 'file must be provided');

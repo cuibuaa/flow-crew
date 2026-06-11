@@ -9,6 +9,9 @@ import {
   writeStageInput,
   writeStageOutput,
   writeStageStatus,
+  TERMINAL_STATUSES,
+  VERDICT_CONTRACT_DOC,
+  PHASE_METADATA_FIELDS,
 } from './store.js';
 import type { StageStatus } from './store.js';
 
@@ -29,6 +32,7 @@ interface StageOpts {
   skills?: string;
   stageSkills?: string[];
   availableRoles?: string;
+  availableChecks?: string;
   availableSkills?: string;
   taskDescription?: string;
   isGate?: boolean;
@@ -94,6 +98,21 @@ function diffArtifacts(before: Map<string, number>, projectDir: string, extraFil
   return changed;
 }
 
+/**
+ * Project-local acceptance contract (P3). The PROJECT declares its domain hard
+ * constraints + metric in <project>/.flowcrew/contract.yaml; the planner reads it
+ * (injected as {project_contract}) and wires deterministic gates from it. Domain
+ * semantics live with the project — never in the engine or the planner prompt.
+ */
+function loadProjectContract(projectDir: string): string {
+  try {
+    const p = join(projectDir, '.flowcrew', 'contract.yaml');
+    if (!existsSync(p)) return 'none';
+    const body = readFileSync(p, 'utf-8').trim();
+    return body || 'none';
+  } catch { return 'none'; }
+}
+
 export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
@@ -133,9 +152,16 @@ export async function runStage(
   //   - Codex `developer_instructions` similarly benefits from auto-caching.
   // The brief lives at <run_dir>/task_brief.md and is written by the dispatcher
   // (cli.ts cmdQuick or the dashboard). If absent, we skip prepending.
+  const projectContract = opts.role.prompt.includes('{project_contract}')
+    ? loadProjectContract(opts.projectDir) : 'none';
   let resolvedSystemPrompt = opts.role.prompt
     .replace(/\{available_roles\}/g, opts.availableRoles ?? '')
+    .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
+    .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))
+    .replace(/\{verdict_contract\}/g, VERDICT_CONTRACT_DOC)
+    .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)
+    .replace(/\{project_contract\}/g, projectContract)
     .replace(/\{run_dir\}/g, opts.runDir)
     .replace(/\{project\}/g, opts.projectDir)
     .replace(/\{default_timeout_ms\}/g, getDefaultTimeout(opts.projectDir));

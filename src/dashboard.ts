@@ -21,7 +21,7 @@ import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageC
 import type { StageConfig } from "./scheduler.js";
 import type { AgentConfig, Adapter } from "./adapters/base.js";
 import { readAttemptSummaryRefreshState } from "./run-events.js";
-import { readKG, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
+import { readKG, readKGSafe, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
 import { readTraceEvents, readAllTraceEvents, summarizeTrace } from './trace.js';
 import { appendPendingReview, consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
 import { getEdges as getCrossCampaignEdges, getNodes as getCrossCampaignNodes } from './cross-campaign-kg.js';
@@ -946,7 +946,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
       artifact_count: status?.artifacts?.length ?? stageArtifactCount(projectDir, state.runId, id),
     };
   });
-  const kg = readKG(projectDir, state.runId);
+  const kg = readKGSafe(projectDir, state.runId);
   return {
     runId: state.runId,
     workflowName: state.workflowName,

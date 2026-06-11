@@ -7,6 +7,7 @@ interface Params {
 }
 
 export default class HttpReachabilityCheck implements RealityCheck {
+  static meta = { description: 'GET a URL and require an expected HTTP status.', params: 'url: string | { from_field, json_file }, status: number' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     const expected = params.status;

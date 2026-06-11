@@ -59,14 +59,18 @@ export function kgPath(projectDir: string, runId: string): string {
 export function readKG(projectDir: string, runId: string): KnowledgeGraph {
   const p = kgPath(projectDir, runId);
   if (!existsSync(p)) return emptyGraph();
-  // knowledge_graph.json is agent-written, so malformed content is plausible.
-  // Tolerate it (return an empty graph) instead of throwing — matches the rest
-  // of the codebase's corruption-tolerant readers.
-  try {
-    return JSON.parse(readFileSync(p, 'utf-8'));
-  } catch { /* malformed agent KG */
-    return emptyGraph();
-  }
+  // Missing → empty (the KG may not exist yet). A CORRUPT file, however, must NOT be
+  // silently reset here: the mutating callers below (markDeadEnd/addNode/updateMetadata)
+  // would then overwrite and DESTROY the graph. Surface the corruption instead;
+  // display-only callers use readKGSafe() to stay corruption-tolerant.
+  return JSON.parse(readFileSync(p, 'utf-8'));
+}
+
+/** Corruption-tolerant read for display/throwaway contexts: returns an empty graph
+ * instead of throwing on a missing OR malformed KG. Never use for read-modify-write
+ * (it would mask corruption and let the writer overwrite a recoverable file). */
+export function readKGSafe(projectDir: string, runId: string): KnowledgeGraph {
+  try { return readKG(projectDir, runId); } catch { return emptyGraph(); }
 }
 
 export function writeKG(projectDir: string, runId: string, kg: KnowledgeGraph): void {

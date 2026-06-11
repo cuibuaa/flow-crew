@@ -17,6 +17,7 @@ interface Params {
 }
 
 export default class JsonSchemaMatchCheck implements RealityCheck {
+  static meta = { description: 'Validate a JSON file against a declared schema (type/required/properties/items/enum/minimum/maximum).', params: 'file: string, schema: {...} | { file: string }' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.file !== 'string') return result(false, 'file must be provided');

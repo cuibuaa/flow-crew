@@ -16,6 +16,20 @@
  */
 import type { ResearchConfig, ResearchPolicy } from './store.js';
 
+/**
+ * Single source of truth for research policies (P4 of the Atom Architecture).
+ * The runtime allow-list (scheduler frontmatter parse) derives from this — no
+ * second hardcoded enum. Adding a policy = add a descriptor here + a branch in
+ * applyPolicy below.
+ */
+export const RESEARCH_POLICIES = [
+  { id: 'greedy_stack', description: 'Keep every round that improves running-best; stack improvements cumulatively.' },
+  { id: 'best_of_n', description: 'Keep only the single best round seen so far (no stacking).' },
+  { id: 'replace_if_better', description: 'Replace running-best only when a round strictly beats it.' },
+] as const;
+
+export const RESEARCH_POLICY_IDS: readonly string[] = RESEARCH_POLICIES.map((p) => p.id);
+
 export interface ResearchRound {
   label: string;
   result: number;

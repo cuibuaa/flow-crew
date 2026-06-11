@@ -175,7 +175,9 @@ function loadSkills(skillNames: string[], projectDir: string): string {
     const globalPath = join(process.cwd(), SKILLS_DIR, `${name}.md`);
     const path = existsSync(localPath) ? localPath : existsSync(globalPath) ? globalPath : null;
     if (path) {
-      const content = readFileSync(path, 'utf-8').trim();
+      // Strip optional YAML front-matter (the self-description used by the planner
+      // registry) so only the skill body is injected into the stage prompt.
+      const content = readFileSync(path, 'utf-8').replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '').trim();
       blocks.push(`## Skill: ${name}\n\n${content}`);
     }
   }

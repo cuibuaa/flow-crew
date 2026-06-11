@@ -27,7 +27,8 @@ docs/*
 docs/framework_campaign/
 tests/
 ui/tests/
-design/
+design/*
+!design/atom-architecture.md
 op_*.sh
 eval.sh
 scripts/btc_training_*.py

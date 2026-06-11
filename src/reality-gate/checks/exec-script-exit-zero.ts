@@ -9,6 +9,7 @@ interface Params {
 }
 
 export default class ExecScriptExitZeroCheck implements RealityCheck {
+  static meta = { description: 'Run a script and require it to exit 0.', params: 'script: string, args?: string[], timeout_seconds?: number' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.script !== 'string') return result(false, 'script must be provided');

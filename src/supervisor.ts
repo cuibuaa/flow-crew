@@ -8,7 +8,19 @@ import pino from 'pino';
 
 const log = pino({ name: 'supervisor' });
 
-export type SupervisorVerdict = 'WAIT' | 'GUIDE' | 'ABORT' | 'REPLAN' | 'DONE';
+/**
+ * Single source of truth for supervisor verdicts (P4 of the Atom Architecture).
+ * The system prompt's verdict union + descriptions are RENDERED from this — no
+ * second prose copy to drift. Adding a verdict = add a descriptor here.
+ */
+export const SUPERVISOR_VERDICTS = [
+  { id: 'WAIT', description: 'Agents making progress. No intervention.' },
+  { id: 'GUIDE', description: 'Agent going wrong direction. Provide corrective instruction in "guidance".' },
+  { id: 'ABORT', description: 'Stage stuck/looping/wasting time. Kill it and let retry handle it.' },
+  { id: 'REPLAN', description: 'Fundamental approach is wrong. Needs a new plan entirely.' },
+  { id: 'DONE', description: 'The original goal is fully met based on evidence in the output.' },
+] as const;
+export type SupervisorVerdict = typeof SUPERVISOR_VERDICTS[number]['id'];
 
 export interface SupervisorAssessment {
   verdict: SupervisorVerdict;
@@ -24,20 +36,39 @@ interface SupervisorAction {
   runningStages: string[];
 }
 
-function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
+/**
+ * Parse a supervisor verdict from raw adapter output. Pure + exported so it is unit-
+ * testable (a prior JSON-parse bug silently killed the supervisor for whole runs).
+ * Collects ALL `{...verdict...}` matches and scans LAST-to-FIRST — the real response is
+ * at the end; the prompt's echoed template (with `<placeholders>`) appears earlier and
+ * must not be mistaken for the answer. Valid verdicts derive from SUPERVISOR_VERDICTS.
+ */
+export function parseSupervisorVerdict(output: string): SupervisorAssessment | null {
+  const matches = [...output.matchAll(/\{[^}]*"verdict"[^}]*\}/g)];
+  if (matches.length === 0) return null;
+  const valid = SUPERVISOR_VERDICTS.map((v) => v.id);
+  for (let i = matches.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(matches[i][0]);
+      if (!valid.includes(parsed.verdict)) continue;
+      return { verdict: parsed.verdict, targetStage: parsed.target_stage ?? null, reason: parsed.reason ?? '', guidance: parsed.guidance ?? null };
+    } catch { /* try the next earlier match */ }
+  }
+  return null;
+}
+
+export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
   const stuckMinutes = Math.max(1, Math.round(stuckThresholdMs / 60_000));
+  const verdictUnion = SUPERVISOR_VERDICTS.map((v) => v.id).join('|');
+  const verdictList = SUPERVISOR_VERDICTS.map((v) => `- ${v.id}: ${v.description}`).join('\n');
   return `You are a workflow supervisor monitoring agent progress toward a goal.
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
-Format: {"verdict":"WAIT|GUIDE|ABORT|REPLAN|DONE","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>"}
+Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>"}
 
 Verdicts:
-- WAIT: Agents making progress. No intervention.
-- GUIDE: Agent going wrong direction. Provide corrective instruction in "guidance".
-- ABORT: Stage stuck/looping/wasting time. Kill it and let retry handle it.
-- REPLAN: Fundamental approach is wrong. Needs a new plan entirely.
-- DONE: The original goal is fully met based on evidence in the output.
+${verdictList}
 
 Rules:
 - Default to WAIT when agents are making progress toward the goal.
@@ -640,38 +671,14 @@ export class Supervisor {
       return null;
     }
 
-    // Parse JSON from output. Codex echoes the prompt before its response, so
-    // `output` typically contains: [prompt with possibly a JSON template that
-    // also has "verdict"] then [the real response]. Single-match regex picked
-    // the prompt-echoed template (with placeholders like <number>) and failed
-    // to JSON.parse — silently killing the supervisor for the entire run.
-    //
-    // Fix: collect ALL `{...verdict...}` matches, scan LAST-TO-FIRST (real
-    // response is at the end of output, templates appear earlier in the
-    // prompt), and accept the first one that both parses as JSON and carries a
-    // legal verdict string. If none parse, log a tail preview for debugging.
-    const matches = [...result.output.matchAll(/\{[^}]*"verdict"[^}]*\}/g)];
-    if (matches.length === 0) {
-      log.warn({ outputPreview: result.output.slice(-500) }, 'No JSON with "verdict" found in supervisor response');
+    // Parse the verdict (codex echoes the prompt+template before the real answer;
+    // parseSupervisorVerdict scans last-to-first to skip the echoed template).
+    const verdict = parseSupervisorVerdict(result.output);
+    if (!verdict) {
+      log.warn({ outputPreview: result.output.slice(-500) }, 'No parseable supervisor verdict in response');
       return null;
     }
-    const validVerdicts = ['WAIT', 'GUIDE', 'ABORT', 'REPLAN', 'DONE'];
-    for (let i = matches.length - 1; i >= 0; i--) {
-      const candidate = matches[i][0];
-      try {
-        const parsed = JSON.parse(candidate);
-        const verdict = parsed.verdict as string;
-        if (!validVerdicts.includes(verdict)) continue;
-        return {
-          verdict: verdict as SupervisorVerdict,
-          targetStage: parsed.target_stage ?? null,
-          reason: parsed.reason ?? '',
-          guidance: parsed.guidance ?? null,
-        };
-      } catch { /* try the next earlier match */ }
-    }
-    log.warn({ matchCount: matches.length, outputPreview: result.output.slice(-500) }, 'All supervisor JSON candidates failed to parse');
-    return null;
+    return verdict;
   }
 
   private async act(assessment: SupervisorAssessment): Promise<void> {

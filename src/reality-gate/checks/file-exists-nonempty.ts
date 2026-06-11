@@ -7,6 +7,7 @@ interface Params {
 }
 
 export default class FileExistsNonemptyCheck implements RealityCheck {
+  static meta = { description: 'Assert that listed files exist and are non-empty.', params: 'paths: string[] | { from_manifest: string, field: string }' };
   async run(raw: object, context: CheckContext) {
     const paths = this.paths(raw as Params, context);
     if (paths.length === 0) return result(false, 'no paths resolved');

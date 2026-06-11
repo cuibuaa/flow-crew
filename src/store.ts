@@ -136,7 +136,7 @@ export interface ProgramConfig {
  */
 export type ResearchPolicy = 'greedy_stack' | 'best_of_n' | 'replace_if_better';
 export interface ResearchStopConditions {
-  /** Ship + stop when running-best ≥ this value (the headline target, e.g. HODL). */
+  /** Ship + stop when running-best ≥ this value (the headline target / do-nothing baseline). */
   beat?: number;
   /** Stop after this many research rounds (phases). */
   maxRounds?: number;
@@ -145,6 +145,28 @@ export interface ResearchStopConditions {
   /** Stop after N consecutive rounds with no improvement to running-best. */
   haltAfterNoImprovement?: number;
 }
+/**
+ * Domain-AGNOSTIC per-round integrity gates, declared in the brief's `research.integrity`
+ * block. The engine applies these generically — it has NO built-in knowledge of any
+ * domain's fields/thresholds. A brief declares e.g.
+ *   integrity: { field_floors: { worst_case_score: 50 }, reject_if_positive: [failure_count] }
+ * and the engine rejects rounds violating them, without the engine knowing what
+ * those fields mean. Generic gates (no-op / variance / outlier) apply with sensible
+ * defaults regardless.
+ */
+export interface ResearchIntegrityConfig {
+  /** Reject a round whose result equals the baseline within tolerance (no-op/proxy). Default on. */
+  noop?: boolean;
+  /** Reject if result_std/|result| exceeds this (cross-run variance). Default 0.30 when result_std present. */
+  maxStdRatio?: number;
+  /** Reject if |result| is beyond this multiple of |baseline| in the improving direction (baseline≠0). Default 5. */
+  outlierFactor?: number;
+  /** Reject if round[field] < min — brief-declared numeric floors (domain-specific values live here, not in code). */
+  fieldFloors?: Record<string, number>;
+  /** Reject if round[field] > 0 — brief-declared "this field must be zero/absent". */
+  rejectIfPositive?: string[];
+}
+
 export interface ResearchConfig {
   /** Entering running-best the loop builds on (the baseline metric value). */
   baseline: number;
@@ -152,6 +174,8 @@ export interface ResearchConfig {
   higherIsBetter?: boolean;
   policy: ResearchPolicy;
   stop?: ResearchStopConditions;
+  /** Per-round integrity gates (brief-declared; engine stays domain-agnostic). */
+  integrity?: ResearchIntegrityConfig;
   /**
    * Project-relative file where the agent writes the latest round's measured
    * result as JSON `{ "label": "...", "result": <number> }`. The framework
@@ -166,6 +190,18 @@ export interface ResearchConfig {
    */
   reportDir?: string;
 }
+
+/**
+ * Single source of truth for campaign health trigger types (P4 of the Atom
+ * Architecture). The interface fields below derive their type from this — no
+ * duplicated string-literal unions. checkCampaignHealth() detects these.
+ */
+export const CAMPAIGN_TRIGGER_TYPES = [
+  { id: 'regression', description: 'A new run scored materially worse than the campaign best — alert and inject a researcher.' },
+  { id: 'plateau', description: 'No improvement over the campaign best for N runs — alert and inject a researcher.' },
+  { id: 'repeated_failure', description: 'N consecutive runs failed/terminated without a passing result — alert and inject a researcher.' },
+] as const;
+export type CampaignTriggerType = typeof CAMPAIGN_TRIGGER_TYPES[number]['id'];
 
 export interface StoreState {
   runId: string;
@@ -211,7 +247,7 @@ export interface StoreState {
   // current task has fundamentally pivoted from the campaign's recent history.
   inheritCampaignContext?: boolean;
   campaignAlert?: {
-    type: 'regression' | 'plateau' | 'repeated_failure';
+    type: CampaignTriggerType;
     action: 'inject_researcher';
     message: string;
     source: 'campaign_health';
@@ -222,7 +258,7 @@ export interface StoreState {
     source: 'campaign_health';
     triggeredAt: string;
     iteration: number;
-    alertType: 'regression' | 'plateau' | 'repeated_failure';
+    alertType: CampaignTriggerType;
     message: string;
   };
   parentTaskId?: string;
@@ -267,16 +303,25 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
   appendFileSync(filePath, JSON.stringify(event) + '\n', 'utf-8');
 }
 
+/**
+ * Single source of truth for terminal run statuses. The verdict contract and
+ * phase-metadata field list below are exported from here and INJECTED into the
+ * planner prompt at runtime (P2 of the Atom Architecture) — so the planner is never
+ * a second, drift-prone copy of these vocabularies.
+ */
+export const TERMINAL_STATUSES = [
+  'complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'phase_complete', 'stopped',
+] as const;
+
+/** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
+export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>)';
+
+/** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
+export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';
+
 /** Single source of truth for "this run has reached a terminal state". */
 export function isTerminalRunStatus(status: string): boolean {
-  return status === 'complete'
-    || status === 'failed'
-    || status === 'shipped'
-    || status === 'ceiling_hit'
-    || status === 'escalated'
-    || status === 'reality_gate_failed'
-    || status === 'phase_complete'
-    || status === 'stopped';
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
 function isRealityGatedTerminal(status: string): boolean {
@@ -306,10 +351,16 @@ export async function enforceRealityGateBeforeTerminal(
   if (!isRealityGatedTerminal(targetStatus)) return { allowed: true, state };
   const dir = runDir(projectDir, runId);
   const briefPath = join(dir, 'task_brief.md');
-  if (!existsSync(briefPath)) return { allowed: true, state };
-  const checks = parseChecksFromBrief(briefPath);
+  // Checks come from two sources, both in the `## Reality checks` block format:
+  //   1. the human-authored brief (task_brief.md), and
+  //   2. PLANNER-authored checks (reality_checks.md) — this is how the planner wires
+  //      deterministic gates for the goal's hard constraints (Atom Architecture P1/P3),
+  //      without having to edit the human brief.
+  const checks = existsSync(briefPath) ? parseChecksFromBrief(briefPath) : [];
+  const plannerChecksPath = join(dir, 'reality_checks.md');
+  if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
   if (checks.length === 0) return { allowed: true, state };
-  const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath });
+  const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath: existsSync(briefPath) ? briefPath : plannerChecksPath });
   atomicWrite(join(dir, '.reality-gate.json'), JSON.stringify(report, null, 2) + '\n');
   if (report.pass) return { allowed: true, state, report };
   const next: StoreState = {

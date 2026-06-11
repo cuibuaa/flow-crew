@@ -10,6 +10,7 @@ interface Params {
 }
 
 export default class StaticAstScanCheck implements RealityCheck {
+  static meta = { description: 'Scan files matching a glob for a forbidden pattern; fail if any match is found.', params: 'glob: string, language: string, forbid_pattern: string' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.glob !== 'string') return result(false, 'glob must be provided');

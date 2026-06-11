@@ -26,6 +26,29 @@ prompt: |
   Available skills (attachable via `skills: [...]` on any stage):
   {available_skills}
 
+  Available deterministic gate checks (the verifiable, ungameable vocabulary — prefer
+  these for HARD pass/fail constraints over trusting an agent's QA judgement):
+  {available_checks}
+  For any HARD constraint the goal implies (a file must exist, a script must exit 0, a
+  number must clear a floor, output must not be degenerate), write a deterministic check
+  to {run_dir}/reality_checks.md — do NOT rely solely on a QA agent reading prose. These
+  run automatically at terminal and block shipping if they fail. Format:
+    ## Reality checks
+    ```yaml
+    checks:
+      - name: <human label>
+        type: <one of the check types above>
+        params: { <per that check's params> }
+    ```
+  Reserve agent QA gates for judgement that no deterministic check can express.
+
+  Project acceptance contract (the project's OWN declared hard constraints + headline metric):
+  {project_contract}
+  If a contract is present (not "none"), it is AUTHORITATIVE: treat each of its hard
+  constraints as MUST-pass and wire each as a deterministic check (from the list above)
+  in {run_dir}/reality_checks.md; make its metric the headline gate. The contract is the
+  project's domain truth — you may ADD checks the goal implies, but never weaken the contract's.
+
   Template variables available in any `prompt_template`:
   - {run_dir} — this run's directory
   - {project} — project root
@@ -43,8 +66,13 @@ prompt: |
     depends_on: [<stage_ids>]      # stages that must complete first
     is_gate: true                   # quality gate — agent writes a verdict file
     retry_to: [<gate_ids>]          # if listed gate fails, re-run THIS stage then re-check the gate
+    condition: <stage.field op value>  # optional — run this stage only if the expr holds
+                                    #   (e.g. "verify_thing.status == failed"); ops: == != < <= > >=
     timeout_ms: <number>            # optional — override {default_timeout_ms}
     skills: [<skill_names>]         # optional
+
+  Gate verdict contract (write to {run_dir}/verdict_<stage_id>.json): {verdict_contract}
+  Terminal run statuses the engine recognizes: {terminal_statuses}
 
   # Task brief auto-injection (IMPORTANT — read this carefully)
   The scheduler **automatically prepends the full task brief to every stage's
@@ -184,7 +212,7 @@ prompt: |
   # Knowledge Graph Integration
   Read {run_dir}/knowledge_graph.json when it exists. Use dead_end nodes as hard negative evidence, prioritize user_hint nodes, and add approach nodes for materially new directions.
 
-  - **Campaign phase progress** (if injected as "Phase progress"): dispatch ONLY the first phase/current phase. NEVER dispatch stages for multiple phases in a single dispatch.yaml. Don't pre-emptively plan future phases — they belong to later planner iterations. Instruct gates to write phase metadata (phase, phaseComplete, nextPhase, outcome, artifactSummary, reason) in their verdicts.
+  - **Campaign phase progress** (if injected as "Phase progress"): dispatch ONLY the first phase/current phase. NEVER dispatch stages for multiple phases in a single dispatch.yaml. Don't pre-emptively plan future phases — they belong to later planner iterations. Instruct gates to write phase metadata ({phase_metadata_fields}) in their verdicts.
 
   - **iteration > 1**: read {run_dir}/iteration_log.md to understand prior failures.
     - Same approach failed twice → consider researcher for a different angle.

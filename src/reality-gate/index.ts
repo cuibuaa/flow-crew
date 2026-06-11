@@ -76,3 +76,32 @@ async function loadHandlers(): Promise<Map<string, RealityCheck>> {
   }
   return handlers;
 }
+
+export interface CheckTypeInfo { type: string; description: string; params: string; }
+let _checkTypesCache: CheckTypeInfo[] | null = null;
+
+/**
+ * Self-describing check catalog — each check class exposes a static `meta`
+ * { description, params }. Injected into the planner as the deterministic-check
+ * vocabulary so it can compose gates from real checks (not just free-text QA prose).
+ * Adding/changing a check = edit its own `meta`; the planner auto-syncs.
+ */
+export async function listCheckTypes(): Promise<CheckTypeInfo[]> {
+  if (_checkTypesCache) return _checkTypesCache;
+  const dir = join(dirname(fileURLToPath(import.meta.url)), 'checks');
+  const entries = readdirSync(dir)
+    .filter((file) => file.endsWith('.js') || (file.endsWith('.ts') && !file.endsWith('.d.ts')))
+    .filter((file) => !file.startsWith('_'));
+  const out: CheckTypeInfo[] = [];
+  for (const file of entries) {
+    const type = file.replace(/\.(js|ts)$/, '');
+    try {
+      const mod = await import(pathToFileURL(join(dir, file)).href);
+      const meta = (mod.default && (mod.default as { meta?: { description?: string; params?: string } }).meta) || {};
+      out.push({ type, description: meta.description ?? '', params: meta.params ?? '' });
+    } catch { /* skip unloadable check */ }
+  }
+  out.sort((a, b) => a.type.localeCompare(b.type));
+  _checkTypesCache = out;
+  return out;
+}
