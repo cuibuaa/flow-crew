@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
-import { deleteRunCampaign, fetchCampaigns, fetchCrossCampaignKGEdges, fetchCrossCampaignKGNodes, fetchStandaloneRuns, renameRunCampaign } from "../api";
+import { deleteRunCampaign, fetchCampaign, fetchCampaignKG, fetchCampaigns, fetchCrossCampaignKGEdges, fetchCrossCampaignKGNodes, fetchStandaloneRuns, renameRunCampaign } from "../api";
 import { formatMetric } from "../lib/metric-format";
 import type { Campaign, CampaignKGEdge, CampaignKGNode, WorkspaceRun } from "../types";
 import CampaignFilter, { type CampaignFilterValue } from "./CampaignFilter";
@@ -65,6 +65,14 @@ export default function Workspaces({ initialCampaigns, initialKg }: { initialCam
   const navigate = useNavigate();
   const params = useParams();
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns ?? []);
+  // The list endpoint (/campaigns) stays cheap (no per-run journal reads), so its phases lack
+  // the research direction. For the *active* campaign we additionally fetch the detail endpoint
+  // (/campaigns/:id), which surfaces each phase's winning direction. This override is bounded to
+  // one campaign, so the list never pays O(campaigns × runs) journal IO.
+  const [activeDetail, setActiveDetail] = useState<Campaign | null>(null);
+  // Campaign-level KG synthesized from the active campaign's per-run graphs (the cross-campaign
+  // store is often empty for a campaign whose runs never produced an arc). Bounded to the active one.
+  const [activeKg, setActiveKg] = useState<{ id: string; nodes: CampaignKGNode[]; edges: CampaignKGEdge[] } | null>(null);
   const [campaignFilter, setCampaignFilter] = useState<CampaignFilterValue>(readInitialCampaignFilter);
   const [kgNodes, setKgNodes] = useState<CampaignKGNode[]>(initialKg?.nodes ?? []);
   const [kgEdges, setKgEdges] = useState<CampaignKGEdge[]>(initialKg?.edges ?? []);
@@ -101,6 +109,22 @@ export default function Workspaces({ initialCampaigns, initialKg }: { initialCam
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [initialCampaigns]);
+
+  // Fetch the richer detail (with per-phase direction) for whichever campaign is active.
+  useEffect(() => {
+    if (initialCampaigns) return;
+    if (!activeId || activeId === "__standalone") { setActiveDetail(null); setActiveKg(null); return; }
+    let cancelled = false;
+    setActiveDetail(null); // drop stale detail while switching campaigns
+    setActiveKg(null);
+    const loadDetail = () => {
+      fetchCampaign(activeId).then((value) => { if (!cancelled) setActiveDetail(value); }).catch(() => { if (!cancelled) setActiveDetail(null); });
+      fetchCampaignKG(activeId).then((value) => { if (!cancelled) setActiveKg({ id: activeId, ...value }); }).catch(() => { if (!cancelled) setActiveKg(null); });
+    };
+    loadDetail();
+    const interval = window.setInterval(() => { if (!document.hidden) loadDetail(); }, 15000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [activeId, initialCampaigns]);
 
   useEffect(() => {
     window.localStorage.setItem(CAMPAIGN_FILTER_STORAGE_KEY, campaignFilter);
@@ -224,9 +248,9 @@ export default function Workspaces({ initialCampaigns, initialKg }: { initialCam
             </div>
           ) : activeCampaign ? (
             <Workspace
-              campaign={activeCampaign}
-              kgNodes={kgNodes}
-              kgEdges={kgEdges}
+              campaign={activeDetail?.id === activeId ? activeDetail : activeCampaign}
+              kgNodes={activeKg?.id === activeId && activeKg.nodes.length ? activeKg.nodes : kgNodes}
+              kgEdges={activeKg?.id === activeId && activeKg.nodes.length ? activeKg.edges : kgEdges}
               onRunClick={openRun}
               onClickIterate={() => {
                 setDefaultCampaignId(activeCampaign.id);

@@ -4,6 +4,7 @@ import { fetchRunDetail, fetchRunStageOutput, fetchRunSummary, type StageOutputR
 import type { RunDetailData, RunStage } from "../types";
 import ActivityFeed from "./ActivityFeed";
 import CampaignKG from "./panels/CampaignKG";
+import CampaignKnowledge from "./panels/CampaignKnowledge";
 import StageDAG from "./StageDAG";
 
 function fmtMs(ms?: number | null): string {
@@ -214,7 +215,15 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         </div>
         <ActivityFeed events={run.events ?? []} />
       </div>
-      {runKgNodes.length > 0 ? <CampaignKG campaignId={run.runId} nodes={runKgNodes} edges={runKgEdges} emptyState="show" /> : null}
+      {runKgNodes.length > 0 ? (
+        <>
+          <CampaignKnowledge campaignId={run.runId} nodes={runKgNodes} />
+          <details className="kg-graph-details">
+            <summary>Relational graph · {runKgNodes.length} nodes</summary>
+            <CampaignKG campaignId={run.runId} nodes={runKgNodes} edges={runKgEdges} emptyState="show" />
+          </details>
+        </>
+      ) : null}
       {run.status === "awaiting_approval" ? <div className="section" data-testid="plan-review-section"><h2>Plan review <span className="h2-hint">awaiting approval</span></h2><div className="empty-state">Plan is waiting for approval.</div></div> : null}
     </div>
   );

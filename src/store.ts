@@ -144,6 +144,18 @@ export interface ResearchStopConditions {
   maxWallHours?: number;
   /** Stop after N consecutive rounds with no improvement to running-best. */
   haltAfterNoImprovement?: number;
+  /**
+   * A round counts as a genuine IMPROVEMENT (resets the no-improvement streak + becomes
+   * the new running-best) only if it beats the prior best by at least this ABSOLUTE margin.
+   * Filters out within-noise knob-tuning that otherwise resets the ceiling counter forever. Default 0.
+   */
+  minImprovement?: number;
+  /**
+   * ...or by at least this multiple of the round's own cross-run standard error (result_std),
+   * when reported. Default 1 — an improvement must exceed ~1 SE to count. Set 0 to disable.
+   * The effective margin is max(minImprovement, improvementSEMultiple * result_std).
+   */
+  improvementSEMultiple?: number;
 }
 /**
  * Domain-AGNOSTIC per-round integrity gates, declared in the brief's `research.integrity`
@@ -176,6 +188,13 @@ export interface ResearchConfig {
   stop?: ResearchStopConditions;
   /** Per-round integrity gates (brief-declared; engine stays domain-agnostic). */
   integrity?: ResearchIntegrityConfig;
+  /**
+   * OPAQUE JSON Schema for the round_result file (single source of the output contract).
+   * The engine never interprets the fields — it only (a) injects it into the planner as
+   * {result_schema} so checks reference the declared shape, and (b) validates each round's
+   * result against it. Domain field names live here (the brief), never in the engine.
+   */
+  resultSchema?: Record<string, unknown>;
   /**
    * Project-relative file where the agent writes the latest round's measured
    * result as JSON `{ "label": "...", "result": <number> }`. The framework

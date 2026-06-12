@@ -8,6 +8,7 @@ import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunStat
 import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig } from './store.js';
 import { listCheckTypes } from './reality-gate/index.js';
 import { evaluateResearch, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
+import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
 import { runStage } from './worker.js';
 import {
   canonicalCampaignId,
@@ -101,6 +102,9 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
         }
         research.integrity = integrity;
       }
+      // Single-source output contract: an opaque JSON Schema for round_result, used to
+      // validate each round + injected to the planner so its checks reference the declared shape.
+      if (r.result_schema && typeof r.result_schema === 'object') research.resultSchema = r.result_schema as Record<string, unknown>;
       if (r.stop && typeof r.stop === 'object') {
         const s = r.stop as Record<string, unknown>;
         research.stop = {};
@@ -108,6 +112,8 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
         if (typeof s.max_rounds === 'number') research.stop.maxRounds = s.max_rounds;
         if (typeof s.max_wall_hours === 'number') research.stop.maxWallHours = s.max_wall_hours;
         if (typeof s.halt_after_no_improvement === 'number') research.stop.haltAfterNoImprovement = s.halt_after_no_improvement;
+        if (typeof s.min_improvement === 'number') research.stop.minImprovement = s.min_improvement;
+        if (typeof s.improvement_se_multiple === 'number') research.stop.improvementSEMultiple = s.improvement_se_multiple;
       }
       out.research = research;
     }
@@ -619,6 +625,17 @@ async function tryAdvanceResearch(
   const ig = rc.integrity;
   const roundFields = round as Record<string, unknown>;
 
+  // Gate #0: output-contract — round_result must match the brief's declared research.result_schema.
+  // Single-sourced: the SAME schema is injected to the planner ({result_schema}); the engine treats
+  // it as an opaque JSON Schema. This is what stops plan-time checks and execute-time output drifting.
+  if (rc.resultSchema) {
+    const schemaErrs = validateResultSchema(round, rc.resultSchema, '$');
+    if (schemaErrs.length) {
+      return rejectGate('schema_mismatch',
+        `Rejected '${label}': round_result violates the brief-declared research.result_schema — ${schemaErrs.slice(0, 5).join('; ')}. Write EXACTLY the declared fields (don't invent or omit), then re-measure.`);
+    }
+  }
+
   // Gate #1: no-op (result == baseline within tolerance) — generic; on unless disabled.
   if (ig?.noop !== false) {
     const noopEps = Math.max(1e-4, Math.abs(rc.baseline) * 1e-5);
@@ -675,7 +692,7 @@ async function tryAdvanceResearch(
     if (r) return r; else return null;
   }
 
-  journal.rounds.push({ label, result: round.result, wallHoursCumulative: (Date.now() - startedMs) / 3600000 });
+  journal.rounds.push({ label, result: round.result, resultStd: (round as { result_std?: number }).result_std, wallHoursCumulative: (Date.now() - startedMs) / 3600000 });
   try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
 
   const evalResult = evaluateResearch(rc, journal.rounds);
@@ -694,7 +711,9 @@ async function tryAdvanceResearch(
       const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
       const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
       if (!prior.includes(marker)) {
-        writeFileSync(guidancePath, prior + `\n\n${marker}\nResearch round '${label}' = ${round.result} (running-best ${evalResult.runningBest}, kept: ${evalResult.keptLabels.join(', ') || 'none'}). Decision: CONTINUE. Propose and test the NEXT distinct direction on top of the kept stack, then write its result to ${resultRel}.\n`, 'utf-8');
+        const nextRound = journal.rounds.length + 1;
+        writeFileSync(guidancePath, prior + `\n\n${marker}\nResearch round '${label}' = ${round.result} (running-best ${evalResult.runningBest}, kept: ${evalResult.keptLabels.join(', ') || 'none'}). Decision: CONTINUE.\n`
+          + `▶ START ROUND ${nextRound} — a NEW, genuinely DIFFERENT mechanism. Do NOT reuse, rename, or lightly re-tune the previous round's plan or candidate; a within-noise tweak will NOT count as an improvement (it must beat running-best by more than its standard error) and will burn the ceiling budget. Build on the kept stack, implement the new direction, then write its measured result to ${resultRel}.\n`, 'utf-8');
       }
     } catch { /* non-critical */ }
     // Signal the outer iteration loop to re-plan the next round instead of
@@ -3125,11 +3144,15 @@ async function executeIteration(
 
       let availableRoles: string | undefined;
       let availableChecks: string | undefined;
+      let resultSchema: string | undefined;
       if (stage.dynamic_dispatch) {
         availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
         // Inject the self-describing deterministic-check vocabulary so the planner
         // composes gates from real checks, not only free-text QA prose.
         availableChecks = (await listCheckTypes()).map((c) => `- ${c.type}: ${c.description} (params: ${c.params})`).join('\n');
+        // Single-source the round_result output contract: the planner's checks must reference
+        // THIS schema (not invent fields). The engine enforces the same schema per round (Gate #0).
+        if (state.research?.resultSchema) resultSchema = JSON.stringify(state.research.resultSchema, null, 2);
       }
 
       let resolvedPrompt = stage.prompt_template;
@@ -3240,6 +3263,7 @@ async function executeIteration(
         availableRoles,
         availableChecks,
         availableSkills,
+        resultSchema,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
       });

@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import NodeDetailPanel from "../NodeDetailPanel";
 import { colorFor, edgeSource, edgeTarget, layoutGraph } from "../../lib/d3-graph";
 import type { CampaignKGEdge, CampaignKGNode } from "../../types";
 
 export default function CampaignKG({ campaignId, nodes, edges, emptyState = "omit" }: { campaignId: string; nodes?: CampaignKGNode[]; edges?: CampaignKGEdge[]; emptyState?: "omit" | "show" }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  // Manual drag overrides keyed by node id. layoutGraph() provides each node's default
+  // position; if the user has dragged a node, its override wins. Overrides live in state,
+  // so they survive re-renders / KG polls (layout is never recomputed over a dragged node).
+  const [overrides, setOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  const svgRef = useRef<SVGSVGElement>(null);
+
   const ownNodes = (nodes ?? []).filter((node) => node && (node.campaign ?? node.campaignId) === campaignId);
   if (ownNodes.length === 0) {
     if (emptyState === "omit") return null;
@@ -19,20 +26,45 @@ export default function CampaignKG({ campaignId, nodes, edges, emptyState = "omi
   const ids = new Set(ownNodes.map((node) => node.id));
   const ownEdges = (edges ?? []).filter((edge) => edge && ids.has(edgeSource(edge)) && ids.has(edgeTarget(edge)));
   const placed = layoutGraph(ownNodes, 640, 220, ownEdges);
-  const byId = new Map(placed.map((node) => [node.id, node]));
+  // Override the computed layout with any manually-dragged positions.
+  const byId = new Map(placed.map((node) => {
+    const o = overrides[node.id];
+    return [node.id, o ? { ...node, x: o.x, y: o.y } : node] as const;
+  }));
   const selectNode = (nodeId: string) => setSelectedNodeId(nodeId);
+
+  // Map a client-space mouse position into the fixed 640x220 viewBox and move the dragged node.
+  const handleMouseMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    if (!dragId || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = ((event.clientX - rect.left) / rect.width) * 640;
+    const y = ((event.clientY - rect.top) / rect.height) * 220;
+    setOverrides((prev) => ({ ...prev, [dragId]: { x, y } }));
+  };
+  const endDrag = () => setDragId(null);
+
   return (
     <div className="section" data-testid="panel-campaign-kg">
-      <h2>Knowledge graph <span className="h2-hint">{ownNodes.length} nodes for this campaign</span></h2>
+      <h2>Knowledge graph <span className="h2-hint">{ownNodes.length} nodes for this campaign · drag to rearrange</span></h2>
       <div className="kg-mini">
-        <svg viewBox="0 0 640 220" role="group" aria-label="campaign knowledge graph">
+        <svg
+          ref={svgRef}
+          viewBox="0 0 640 220"
+          role="group"
+          aria-label="campaign knowledge graph"
+          style={{ cursor: dragId ? "grabbing" : "default" }}
+          onMouseMove={handleMouseMove}
+          onMouseUp={endDrag}
+          onMouseLeave={endDrag}
+        >
           {ownEdges.map((edge, index) => {
             const source = byId.get(edgeSource(edge));
             const target = byId.get(edgeTarget(edge));
             if (!source || !target) return null;
             return <line key={edge.id ?? index} x1={source.x} y1={source.y} x2={target.x} y2={target.y} stroke={edge.kind === "similarity" ? "#a78bfa" : "#3a4a6a"} strokeDasharray={edge.kind === "similarity" ? "4 3" : undefined} />;
           })}
-          {placed.map((node) => (
+          {[...byId.values()].map((node) => (
             <g
               key={node.id}
               transform={`translate(${node.x},${node.y})`}
@@ -41,7 +73,8 @@ export default function CampaignKG({ campaignId, nodes, edges, emptyState = "omi
               role="button"
               tabIndex={0}
               aria-label={`Open details for ${node.label ?? node.text ?? node.id}`}
-              style={{ color: colorFor(node.type) }}
+              style={{ color: colorFor(node.type), cursor: "grab" }}
+              onMouseDown={(event) => { if (event.button === 0) setDragId(node.id); }}
               onClick={() => selectNode(node.id)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {

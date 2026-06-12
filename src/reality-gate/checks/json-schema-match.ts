@@ -35,7 +35,9 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
   }
 }
 
-function validate(value: unknown, schema: Schema, path: string): string[] {
+/** Pure, reusable validator (also used per-round by the research loop to enforce the
+ *  brief-declared round_result schema). Returns a list of human-readable path errors. */
+export function validate(value: unknown, schema: Schema, path: string): string[] {
   const errors: string[] = [];
   if (schema.type && !matchesType(value, schema.type)) errors.push(`${path} expected ${schema.type}`);
   if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) errors.push(`${path} not in enum`);

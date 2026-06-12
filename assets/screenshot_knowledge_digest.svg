@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <style>
+      .title { fill:#e8eaed; font-size:22px; font-weight:700; }
+      .hint  { fill:#8b96aa; font-size:13px; }
+      .sect  { fill:#e8eaed; font-size:13px; font-weight:700; }
+      .count { fill:#8b96aa; font-size:11px; }
+      .item  { fill:#cdd3dd; font-size:12.5px; }
+      .bullet{ fill:#8b96aa; font-size:12.5px; }
+      .more  { fill:#8b96aa; font-size:11px; font-style:italic; }
+      .mono  { font-family:'Fira Code', ui-monospace, monospace; }
+      .lbl   { fill:#8b96aa; font-size:10px; letter-spacing:0.5px; }
+      .src   { fill:#5b9eff; font-size:12.5px; }
+    </style>
+  </defs>
+
+  <!-- backdrop + card -->
+  <rect width="900" height="560" fill="#0a0e1a"/>
+  <rect x="24" y="24" width="852" height="512" rx="12" fill="#131927" stroke="#2a3142"/>
+
+  <!-- heading -->
+  <text x="48" y="62" class="title">Knowledge</text>
+  <text x="170" y="62" class="hint">· synthesized from 6 runs</text>
+
+  <!-- best highlight -->
+  <rect x="48" y="80" width="804" height="46" rx="8" fill="#0e1422" stroke="#2a3142"/>
+  <circle cx="70" cy="103" r="5" fill="#fbbf24"/>
+  <text x="86" y="107" class="lbl">BEST</text>
+  <text x="132" y="107" class="mono" fill="#5b9eff" font-size="13">checkout-service split</text>
+  <text x="320" y="107" fill="#8b96aa" font-size="13">→</text>
+  <text x="338" y="108" class="mono" fill="#4ade80" font-size="16" font-weight="700">9.2</text>
+
+  <!-- Insights -->
+  <circle cx="54" cy="155" r="4" fill="#a78bfa"/>
+  <text x="68" y="159" class="sect">Insights</text>
+  <text x="132" y="159" class="count">3</text>
+  <text x="60" y="181" class="bullet">·</text>
+  <text x="72" y="181" class="item">Extract the token mint into its own stage before splitting checkout</text>
+  <text x="60" y="201" class="bullet">·</text>
+  <text x="72" y="201" class="item">Keep sessions thin so the boundary split scales horizontally</text>
+
+  <!-- Findings -->
+  <circle cx="54" cy="233" r="4" fill="#fbbf24"/>
+  <text x="68" y="237" class="sect">Findings</text>
+  <text x="132" y="237" class="count">12</text>
+  <text x="60" y="259" class="bullet">·</text>
+  <text x="72" y="259" class="item">Shared token API removes the auth round-trip between services</text>
+  <text x="60" y="279" class="bullet">·</text>
+  <text x="72" y="279" class="item">p99 latency drops ~40% once sessions are stateless</text>
+  <text x="60" y="299" class="bullet">·</text>
+  <text x="72" y="299" class="item">The two teams can deploy independently after the boundary split</text>
+  <text x="72" y="319" class="more">… 9 more</text>
+
+  <!-- Dead ends -->
+  <circle cx="54" cy="351" r="4" fill="#f87171"/>
+  <text x="68" y="355" class="sect">Dead ends</text>
+  <text x="142" y="355" class="count">4</text>
+  <text x="60" y="377" class="bullet">·</text>
+  <text x="72" y="377" class="item">Global session state races under concurrent load</text>
+  <text x="60" y="397" class="bullet">·</text>
+  <text x="72" y="397" class="item">Post-hoc cache invalidation never converged</text>
+  <text x="72" y="417" class="more">… 2 more</text>
+
+  <!-- Sources -->
+  <circle cx="54" cy="449" r="4" fill="#5b9eff"/>
+  <text x="68" y="453" class="sect">Sources</text>
+  <text x="128" y="453" class="count">5</text>
+  <text x="60" y="475" class="bullet">·</text>
+  <text x="72" y="475" class="src">Designing Data-Intensive Applications — Kleppmann</text>
+  <text x="60" y="495" class="bullet">·</text>
+  <text x="72" y="495" class="src">Release It! — Nygard (stability patterns)</text>
+  <text x="72" y="515" class="more">… 3 more</text>
+</svg>

@@ -33,6 +33,9 @@ export const RESEARCH_POLICY_IDS: readonly string[] = RESEARCH_POLICIES.map((p) 
 export interface ResearchRound {
   label: string;
   result: number;
+  /** Cross-run standard error of this round's result (from result_std), if reported.
+   *  Used to require an improvement to clear the measurement noise before it counts. */
+  resultStd?: number;
   /** Cumulative wall hours across the program up to and including this round. */
   wallHoursCumulative?: number;
 }
@@ -46,9 +49,16 @@ export interface ResearchEvaluation {
   reason: string;
 }
 
-/** True if `a` is strictly better than `b` under the higher/lower-is-better convention. */
-function isBetter(a: number, b: number, higherIsBetter: boolean): boolean {
-  return higherIsBetter ? a > b : a < b;
+/** True if `a` beats `b` by more than `margin`, under the higher/lower-is-better convention.
+ *  margin filters within-noise gains so they don't count as real improvements. */
+function isBetter(a: number, b: number, higherIsBetter: boolean, margin = 0): boolean {
+  return higherIsBetter ? a > b + margin : a < b - margin;
+}
+
+/** The improvement margin a round must clear to count: max(absolute floor, SE-multiple × its SE). */
+function improvementMargin(r: ResearchRound, minImprovement: number, seMultiple: number): number {
+  const se = (typeof r.resultStd === 'number' && Number.isFinite(r.resultStd)) ? Math.abs(r.resultStd) * seMultiple : 0;
+  return Math.max(minImprovement, se);
 }
 
 /**
@@ -60,6 +70,8 @@ function applyPolicy(
   baseline: number,
   higherIsBetter: boolean,
   rounds: ResearchRound[],
+  minImprovement: number,
+  seMultiple: number,
 ): { keptLabels: string[]; runningBest: number; perRoundKept: boolean[] } {
   const perRoundKept: boolean[] = [];
   const keptLabels: string[] = [];
@@ -69,7 +81,7 @@ function applyPolicy(
     let best = baseline;
     let bestLabel: string | null = null;
     for (const r of rounds) {
-      if (isBetter(r.result, best, higherIsBetter)) {
+      if (isBetter(r.result, best, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
         best = r.result;
         bestLabel = r.label;
         perRoundKept.push(true);
@@ -85,7 +97,7 @@ function applyPolicy(
   // gains accumulate.
   let runningBest = baseline;
   for (const r of rounds) {
-    if (isBetter(r.result, runningBest, higherIsBetter)) {
+    if (isBetter(r.result, runningBest, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
       runningBest = r.result;
       keptLabels.push(r.label);
       perRoundKept.push(true);
@@ -98,8 +110,10 @@ function applyPolicy(
 
 export function evaluateResearch(config: ResearchConfig, rounds: ResearchRound[]): ResearchEvaluation {
   const higherIsBetter = config.higherIsBetter !== false;
+  const minImprovement = config.stop?.minImprovement ?? 0;
+  const seMultiple = config.stop?.improvementSEMultiple ?? 1; // default: improvement must clear ~1 SE
   const { keptLabels, runningBest, perRoundKept } = applyPolicy(
-    config.policy, config.baseline, higherIsBetter, rounds,
+    config.policy, config.baseline, higherIsBetter, rounds, minImprovement, seMultiple,
   );
   const latestKept = perRoundKept.length > 0 ? perRoundKept[perRoundKept.length - 1] : false;
 

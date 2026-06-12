@@ -181,6 +181,7 @@ export const fetchStageTrace = (taskId: string, stageId: string) =>
 // Hierarchical Workspaces
 export const fetchCampaigns = () => json<Campaign[]>(`${BASE}/campaigns`);
 export const fetchCampaign = (id: string) => json<Campaign>(`${BASE}/campaigns/${encodeURIComponent(id)}`);
+export const fetchCampaignKG = (id: string) => json<{ nodes: CampaignKGNode[]; edges: CampaignKGEdge[] }>(`${BASE}/campaigns/${encodeURIComponent(id)}/kg`);
 export const fetchRunDetail = (id: string) => json<RunDetailData>(`${BASE}/runs/${encodeURIComponent(id)}`);
 // Run summary markdown (summary.md, falls back to progress.md). Runs and tasks
 // share runsRoot, so the /tasks/:id/summary endpoint resolves by run id too.

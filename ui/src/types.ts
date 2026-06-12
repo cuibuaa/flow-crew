@@ -323,6 +323,9 @@ export interface WorkspacePhase {
   commit?: string | null;
   commit_chain?: string[] | null;
   notes?: string | null;
+  direction?: string | null;
+  result?: number | null;
+  runId?: string | null;
 }
 
 export interface BriefRevision {
@@ -371,6 +374,10 @@ export interface CampaignKGNode {
   score?: number;
   timestamp?: string;
   meta?: string;
+  // External URL on `source`-type nodes (cited literature).
+  source?: string;
+  // Full run id (set by the campaign-KG aggregator) so a campaign-level node can link to its run.
+  runId?: string;
   campaign?: string;
   campaignId?: string;
   metadata?: Record<string, unknown>;

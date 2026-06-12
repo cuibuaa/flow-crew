@@ -556,7 +556,7 @@ interface WorkspaceCampaign {
   badges: { text: string; kind: string }[];
   metric: WorkspaceMetric | null;
   iterations: { label: string; value: number; verdict: string }[] | null;
-  phases: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string }[] | null;
+  phases: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string | null; direction?: string | null; result?: number | null; runId?: string | null }[] | null;
   brief_revisions: { version: string; reason: string; shipped?: boolean }[] | null;
   runs: { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[];
   kg_node_count: number;
@@ -727,6 +727,97 @@ function formatDuration(startIso?: string, endIso?: string): string {
   const minutes = Math.max(0, Math.floor((end - start) / 60000));
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+/** Parse the "5m" / "1h2m" duration string back into minutes for the phase timeline bar. */
+function parseDurationMin(duration?: string): number | undefined {
+  if (!duration) return undefined;
+  const h = /(\d+)h/.exec(duration);
+  const m = /(\d+)m/.exec(duration);
+  if (!h && !m) return undefined;
+  return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
+}
+
+/**
+ * The winning research direction for a run: the round (label + result) from its
+ * research_journal that the run treated as best. Prefers the round whose result equals the
+ * canonical bestScore; otherwise the max-result round (higher-is-better default). Detail-view
+ * only — returns null with no journal so the caller falls back to the cheap run summary.
+ */
+function bestRoundForRun(runId: string, prefer?: number | null): { label: string; result: number | null } | null {
+  try {
+    const path = join(runsRoot(), runId, 'research_journal.json');
+    if (!existsSync(path)) return null;
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { rounds?: { label?: unknown; result?: unknown }[] };
+    const rounds = (parsed.rounds ?? []).filter(
+      (round): round is { label: string; result: number } => typeof round?.label === 'string' && typeof round?.result === 'number',
+    );
+    if (!rounds.length) return null;
+    if (typeof prefer === 'number') {
+      const hit = rounds.find((round) => round.result === prefer);
+      if (hit) return { label: hit.label, result: hit.result };
+    }
+    const best = rounds.reduce((a, c) => (c.result > a.result ? c : a));
+    return { label: best.label, result: best.result };
+  } catch {
+    return null;
+  }
+}
+
+interface KgRawNode { id?: string; type?: string; label?: string; text?: string; details?: string; source?: string; score?: number }
+interface KgRawEdge { from?: string; to?: string; source?: string; target?: string; type?: string }
+
+/**
+ * Campaign-level knowledge graph: the union of the campaign's per-run KGs. Per-run KGs are rich
+ * but isolated (and shown on the run detail page); this synthesizes them so the campaign panel is
+ * not empty. Nodes are deduped by (type + substance) so the shared goal and repeated findings
+ * collapse, namespaced by run so ids never collide across runs, and capped newest-run-first so the
+ * mini graph stays legible. Each node is tagged with the campaign id to satisfy the panel's filter.
+ */
+function aggregateCampaignKG(projectDir: string, id: string): { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] } {
+  const runIds = readCampaignRuns(projectDir, id).map((run) => run.id).filter((value): value is string => !!value);
+  const ordered = [...new Set(runIds)].sort().reverse(); // newest run first → it wins the node budget
+  // The consumer is the campaign knowledge digest (ranked text lists), not a force graph, so the
+  // legibility cap can be high: include every run's learnings, just bound payload for huge campaigns.
+  const NODE_CAP = 500;
+  const canonicalByKey = new Map<string, string>(); // (type+substance) → the node id that represents it
+  const nodes: Record<string, unknown>[] = [];
+  const edges: Record<string, unknown>[] = [];
+  const seenEdge = new Set<string>();
+  for (const runId of ordered) {
+    let graph: { nodes?: KgRawNode[]; edges?: KgRawEdge[] };
+    try {
+      const path = join(runsRoot(), runId, 'knowledge_graph.json');
+      if (!existsSync(path)) continue;
+      graph = JSON.parse(readFileSync(path, 'utf-8')) as { nodes?: KgRawNode[]; edges?: KgRawEdge[] };
+    } catch {
+      continue;
+    }
+    const localToCanon = new Map<string, string>(); // this run's local id → the canonical id in `nodes`
+    for (const node of graph.nodes ?? []) {
+      const localId = String(node.id ?? '');
+      if (!localId) continue;
+      const nsId = `${runId}::${localId}`;
+      const substance = String(node.text ?? node.label ?? '').trim().toLowerCase();
+      const key = `${String(node.type)}::${substance}`;
+      if (substance && canonicalByKey.has(key)) { localToCanon.set(localId, canonicalByKey.get(key)!); continue; }
+      if (nodes.length >= NODE_CAP) continue; // over budget: drop (its edges get pruned below)
+      if (substance) canonicalByKey.set(key, nsId);
+      localToCanon.set(localId, nsId);
+      nodes.push({ id: nsId, type: node.type, label: node.label, text: node.text, details: node.details, source: node.source, score: node.score, runId, meta: runId.slice(0, 16), campaign: id });
+    }
+    for (const edge of graph.edges ?? []) {
+      const source = localToCanon.get(String(edge.from ?? edge.source ?? ''));
+      const target = localToCanon.get(String(edge.to ?? edge.target ?? ''));
+      if (!source || !target || source === target) continue;
+      const edgeKey = `${source}->${target}::${String(edge.type ?? '')}`;
+      if (seenEdge.has(edgeKey)) continue;
+      seenEdge.add(edgeKey);
+      edges.push({ id: edgeKey, source, target, kind: edge.type });
+    }
+  }
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  return { nodes, edges: edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)) };
 }
 
 function deriveMetricFormat(metricName?: string, score?: number | null, _threshold?: number | null): MetricFormat {
@@ -1188,6 +1279,10 @@ function campaignFromHistory(
   name?: string,
   prefetchedEntries?: CampaignHistoryEntry[],
   prefetchedRuns?: CampaignRunSummary[],
+  // detailed=true is the single-campaign detail view (/api/campaigns/:id): it may read each
+  // phase-run's research_journal to surface the winning direction. The campaign LIST keeps
+  // detailed=false so it never pays O(campaigns × runs) journal reads.
+  detailed = false,
 ): WorkspaceCampaign | null {
   const entries = prefetchedEntries ?? readCampaignEntries(projectDir, id);
   const runs = prefetchedRuns ?? readCampaignRuns(projectDir, id);
@@ -1210,17 +1305,36 @@ function campaignFromHistory(
     value: entry.score as number,
     verdict: entry.pass ? 'shipped' : 'interim',
   }));
-  const phases = entries
-    .filter((entry) => entry.phase || entry.nextPhase || entry.outcome)
-    .map((entry) => ({
+  const phaseEntries = entries.filter((entry) => entry.phase || entry.nextPhase || entry.outcome);
+  // Each phase row is one research attempt (a run). Enrich it from the run summary (duration +
+  // best score — both already loaded, no extra IO) and, on the detail view only, the winning
+  // direction (round label) from that run's research_journal. This turns an opaque
+  // "seq N · ?m · att K · failed" row into "round23_bao_owner_split → 0.31 · 18m".
+  const runById = new Map((runs ?? []).map((run) => [run.id, run] as const));
+  const directionByRun = new Map<string, { label: string; result: number | null }>();
+  if (detailed) {
+    for (const runId of new Set(phaseEntries.map((entry) => entry.runId).filter((v): v is string => !!v))) {
+      const best = bestRoundForRun(runId, runById.get(runId)?.metric ?? null);
+      if (best) directionByRun.set(runId, best);
+    }
+  }
+  const phases = phaseEntries.map((entry) => {
+    const run = entry.runId ? runById.get(entry.runId) : undefined;
+    const direction = entry.runId ? directionByRun.get(entry.runId) : undefined;
+    const result = direction?.result ?? run?.metric ?? (typeof entry.score === 'number' ? entry.score : null);
+    return {
       name: entry.phase ?? entry.nextPhase ?? `seq ${entry.seq}`,
       status: entry.phaseComplete ? 'complete' : entry.status ?? entry.outcome,
-      elapsed_min: undefined,
+      elapsed_min: parseDurationMin(run?.duration),
       attempt: entry.iteration,
       commit: undefined,
       commit_chain: [],
-      notes: entry.reason ?? entry.artifactSummary,
-    }));
+      notes: entry.reason || entry.artifactSummary || entry.outcome || null,
+      direction: direction?.label ?? null,
+      result,
+      runId: entry.runId ?? null,
+    };
+  });
   // Stale-detect "running" outcome: if last iteration entry is >30min old,
   // the daemon likely exited without terminal status (framework bug).
   let rawStatus = entries.some((entry) => entry.pass) ? 'shipped' : runs.some((run) => run.outcome === 'running') ? 'running' : latest?.status ?? 'idle';
@@ -1349,7 +1463,7 @@ function getWorkspaceCampaign(projectDir: string, id: string): WorkspaceCampaign
     campaign.runs = readCampaignRuns(projectDir, id);
     return campaign;
   }
-  return campaignFromHistory(projectDir, id);
+  return campaignFromHistory(projectDir, id, undefined, undefined, undefined, true);
 }
 
 function listM3Campaigns(projectDir?: string) {
@@ -2592,6 +2706,11 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const campaign = getWorkspaceCampaign(projectDir, req.params.id);
     if (!campaign) return reply.code(404).send({ error: 'not found' });
     return campaign;
+  });
+
+  // GET /api/campaigns/:id/kg — campaign-level KG synthesized from the campaign's per-run graphs.
+  app.get<{ Params: { id: string } }>("/api/campaigns/:id/kg", async (req) => {
+    return aggregateCampaignKG(projectDir, req.params.id);
   });
 
   app.get<{ Params: { id: string } }>("/api/campaigns/:id/iterations", async (req, reply) => {

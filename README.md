@@ -35,7 +35,7 @@ It is not just a prompt runner. FlowCrew gives your AI workflow a run state, a d
 | **Planner-generated DAG** | The planner turns a brief into explicit stages with dependencies, gates, and retries. |
 | **QA gate retry loop** | Failed gates trigger targeted fix stages and re-checks instead of asking you to babysit the run. |
 | **Backend-driven supervisor** | A configurable observer reads stage output and run state, then guides, aborts, replans, or detects completion. |
-| **Run Memory Graph** | Goals, approaches, findings, insights, results, user hints, and dead ends stay attached to the run. |
+| **Run Memory** | Goals, approaches, findings, insights, results, sources, and dead ends stay attached to each run, and roll up into a ranked per-campaign knowledge digest. |
 | **Campaign intelligence** | Related runs share metrics and failure history so future attempts can pivot instead of repeat. |
 | **Reality-Gate** | Deterministic checks block fabricated or unsupported terminal success. |
 | **Dashboard + CLI + skills** | Use the interface that fits the moment: `/ship`, terminal, or browser dashboard. |
@@ -158,7 +158,15 @@ Never invent citations, never change reported numbers, and only rewrite passages
 
 ## Run Memory
 
-FlowCrew records why a run made decisions, not just what files changed.
+FlowCrew records why a run made decisions, not just what files changed. Every run captures its goals, approaches, findings, insights, results, cited sources, and dead ends as a knowledge graph.
+
+Across a campaign these roll up into a **knowledge digest**: the best direction and its result, plus ranked, deduped findings, insights, dead ends, and sources — each linking back to the run that produced it — so the signal is readable at a glance instead of buried in a dense node graph.
+
+<p align="center">
+  <img src="assets/screenshot_knowledge_digest.svg" width="780" alt="Campaign knowledge digest: best direction and result, ranked findings, insights, dead ends, and cited sources" />
+</p>
+
+The relational graph stays available per run for the full goal -> approach -> finding -> result structure:
 
 <p align="center">
   <img src="assets/screenshot_knowledge_graph.png" width="780" alt="Run Memory Graph with goal, approach, finding, insight, and result nodes" />
@@ -173,6 +181,7 @@ Common node types:
 | `finding` | Evidence discovered during work |
 | `insight` | Reusable lesson from a stage or iteration |
 | `result` | Measured outcome |
+| `source` | External reference (paper/URL) cited during research |
 | `dead_end` | Failed direction that future runs should avoid |
 | `user_hint` | Human guidance preserved for future stages |
 

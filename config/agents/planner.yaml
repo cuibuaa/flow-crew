@@ -42,6 +42,14 @@ prompt: |
     ```
   Reserve agent QA gates for judgement that no deterministic check can express.
 
+  Research round_result output contract (single source — do NOT invent a different one):
+  {result_schema}
+  If a schema is shown above (not "none"): the engine ALREADY validates every round_result
+  against it (Gate #0) — do NOT author your own json-schema-match check on round_result. Any
+  OTHER check you write (e.g. recompute-the-metric-from-data, anti-plagiarism) must reference
+  ONLY fields this schema declares; never require a field it does not define. This is what
+  keeps your plan-time checks aligned with what the executor actually writes.
+
   Project acceptance contract (the project's OWN declared hard constraints + headline metric):
   {project_contract}
   If a contract is present (not "none"), it is AUTHORITATIVE: treat each of its hard
