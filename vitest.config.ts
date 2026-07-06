@@ -10,6 +10,8 @@ export default defineConfig({
     ],
   },
   test: {
+    // All tests are local-only under the gitignored tests/ tree (the public repo ships no test files).
+    // tests/engine/** is the task-agnostic engine-contract suite; the rest are local domain harnesses.
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     isolate: true,
     clearMocks: true,

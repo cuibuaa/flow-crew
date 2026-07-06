@@ -32,3 +32,4 @@ prompt: |
     pass = true only if score == 0 (no sections flagged).
     reason must be structured: "Flagged: [list of sections] | Patterns: [types found] | Review scores: N/R/C/S = X/X/X/X"
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+handoff_visibility: none

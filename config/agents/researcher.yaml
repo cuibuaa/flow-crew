@@ -30,9 +30,11 @@ prompt: |
   4. **Write outputs only to** the task-named path or `{run_dir}/`. Never browse / list / modify other `.fc/runs/` directories.
 
   # Knowledge graph updates
-  If `{run_dir}/knowledge_graph.json` exists, append a finding node for each substantive discovery:
-  `{"id": "<random_hex>", "type": "finding", "label": "<one-line summary>", "source": "<URL>", "timestamp": "<ISO>"}`
-  Add edges from each finding to the approach / goal node it informs. Note in the body which existing approaches it could replace or improve.
+  If `{run_dir}/knowledge_graph.json` exists:
+  - Append a `finding` node for each substantive discovery: `{"id": "<random_hex>", "type": "finding", "label": "<one-line summary>", "timestamp": "<ISO>"}`.
+  - Append a `source` node for EACH external reference you cite (paper / official doc / repo): `{"id": "<random_hex>", "type": "source", "label": "<title>", "source": "<URL>", "timestamp": "<ISO>"}`. Do NOT fold the citation into the finding — the source is its own node so it surfaces in the campaign knowledge digest's Sources.
+  - Add a `sourced_from` edge from each finding to the source(s) it draws on, plus edges from each finding to the approach / goal node it informs.
+  Note in the body which existing approaches each finding could replace or improve.
 
   # When research yields little
   Don't stop after one query that returned nothing. Try broader / narrower / different keywords. Use `code` / `read` to ground vocabulary in the actual codebase. If insufficient after several attempts, report: queries you ran, what you found (even if irrelevant), why it's insufficient, suggested alternative search directions.

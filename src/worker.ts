@@ -35,6 +35,8 @@ interface StageOpts {
   availableChecks?: string;
   availableSkills?: string;
   resultSchema?: string;
+  contextInventory?: string;
+  ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
 }
@@ -133,6 +135,7 @@ export async function runStage(
     isGate: opts.isGate,
     stageId: opts.stageId,
     role: opts.role.name,
+    handoffVisibility: opts.role.handoff_visibility,
   });
 
   writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
@@ -160,6 +163,8 @@ export async function runStage(
     .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
     .replace(/\{result_schema\}/g, opts.resultSchema ?? 'none')
+    .replace(/\{context_inventory\}/g, opts.contextInventory ?? 'none')
+    .replace(/\{ledger_digest\}/g, opts.ledgerDigest ?? 'none')
     .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))
     .replace(/\{verdict_contract\}/g, VERDICT_CONTRACT_DOC)
     .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)

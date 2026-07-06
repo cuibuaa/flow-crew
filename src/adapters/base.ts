@@ -34,6 +34,8 @@ export interface AgentConfig {
   prompt: string;
   /** Optional per-role adapter override (e.g. "claude", "codex"). When set, this role runs on its own adapter instead of the run-level adapter. */
   adapter?: string;
+  /** Self-declared handoff context verbosity (atom: replaces the engine's hardcoded role→visibility map). Default 'full'. */
+  handoff_visibility?: 'full' | 'minimal' | 'none';
 }
 
 export interface Adapter {

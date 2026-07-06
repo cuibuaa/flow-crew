@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { CheckContext, RealityCheck } from '../types.js';
 import { result } from './_utils.js';
 
@@ -16,10 +18,18 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
     const args = Array.isArray(params.args) ? params.args : [];
     const timeoutMs = Math.max(1, params.timeout_seconds ?? 60) * 1000;
     // Run the script BODY through the shell from the project dir, so inline scripts and
-    // relative paths (docs/...) work. A bare path is still a valid command → backward-compatible.
+    // relative paths (docs/...) work. A bare command is still valid → backward-compatible.
+    // Edge: a bare relative filename (no slash) that exists in the project dir is a project
+    // SCRIPT, but `bash -c "name"` would PATH-resolve it and miss it — so prefix `./` to run
+    // the project-relative file (makes the "relative paths resolve from the project dir" claim true).
+    let scriptText = params.script;
+    const firstTok = params.script.trim().split(/\s+/)[0] ?? '';
+    if (firstTok && !firstTok.includes('/') && existsSync(join(context.projectDir, firstTok))) {
+      scriptText = './' + params.script.trim();
+    }
     const cmd = args.length
-      ? `${params.script} ${args.map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ')}`
-      : params.script;
+      ? `${scriptText} ${args.map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ')}`
+      : scriptText;
     const execution = await run('bash', ['-c', cmd], context.projectDir, timeoutMs);
     return result(execution.code === 0, execution.code === 0 ? 'script exited 0' : `script exited ${execution.code ?? 'without code'}`, execution);
   }

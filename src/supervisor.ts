@@ -18,6 +18,7 @@ export const SUPERVISOR_VERDICTS = [
   { id: 'GUIDE', description: 'Agent going wrong direction. Provide corrective instruction in "guidance".' },
   { id: 'ABORT', description: 'Stage stuck/looping/wasting time. Kill it and let retry handle it.' },
   { id: 'REPLAN', description: 'Fundamental approach is wrong. Needs a new plan entirely.' },
+  { id: 'REJECT', description: 'A stage emitted a deliverable that does NOT meet its own declared work/acceptance criteria (e.g. a verdict claims pass while its evidence shows otherwise, or a stage marked itself done with the required artifact missing/empty). The result must NOT be accepted — set "target_stage" to the stage and the work is re-done.' },
   { id: 'DONE', description: 'The original goal is fully met based on evidence in the output.' },
 ] as const;
 export type SupervisorVerdict = typeof SUPERVISOR_VERDICTS[number]['id'];
@@ -57,6 +58,52 @@ export function parseSupervisorVerdict(output: string): SupervisorAssessment | n
   return null;
 }
 
+/**
+ * GAP-2: deterministic per-running-stage no-progress watchdog. PURE + exported so it is
+ * unit-testable independent of the LLM supervisor verdict. Generic mechanism — no domain
+ * knowledge: "progress" is any of the per-tick signals the supervisor already computes
+ * (new live.log bytes for that stage, a new artifact, or a stage transition); the threshold
+ * is config-owned.
+ *
+ * Tracks the last time each running stage showed progress in `lastProgressMs` (a map the
+ * caller persists across ticks). On each tick:
+ *   - a stage seen for the FIRST time is initialized to `now` (it just started — not stalled).
+ *   - a stage that made progress this tick has its timestamp refreshed to `now`.
+ *   - a stage that has shown no progress for >= thresholdMs is reported as STALLED.
+ *   - stages no longer running are dropped from the map (completed / iteration transition).
+ *
+ * Returns the next map (caller stores it) and the list of stalled stage ids to abort.
+ */
+export function detectStalledStages(input: {
+  runningStages: string[];
+  /** Stage ids that showed progress THIS tick (new live.log bytes, new artifact, or a transition). */
+  progressedStageIds: Set<string>;
+  /** Per-stage last-progress timestamps carried across ticks (caller-owned). */
+  lastProgressMs: Record<string, number>;
+  now: number;
+  thresholdMs: number;
+}): { nextLastProgressMs: Record<string, number>; stalledStageIds: string[] } {
+  const { runningStages, progressedStageIds, lastProgressMs, now, thresholdMs } = input;
+  const running = new Set(runningStages);
+  const next: Record<string, number> = {};
+  const stalled: string[] = [];
+  for (const stageId of runningStages) {
+    if (progressedStageIds.has(stageId) || lastProgressMs[stageId] === undefined) {
+      // First appearance OR fresh progress this tick → (re)set the clock; not stalled.
+      next[stageId] = now;
+      continue;
+    }
+    // No progress this tick — carry the prior timestamp forward and check the gap.
+    next[stageId] = lastProgressMs[stageId];
+    if (now - lastProgressMs[stageId] >= thresholdMs) stalled.push(stageId);
+  }
+  // Drop any tracked stage that is no longer running (completed / iteration transition).
+  for (const stageId of Object.keys(lastProgressMs)) {
+    if (!running.has(stageId)) delete next[stageId];
+  }
+  return { nextLastProgressMs: next, stalledStageIds: stalled };
+}
+
 export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
   const stuckMinutes = Math.max(1, Math.round(stuckThresholdMs / 60_000));
   const verdictUnion = SUPERVISOR_VERDICTS.map((v) => v.id).join('|');
@@ -73,6 +120,7 @@ ${verdictList}
 Rules:
 - Default to WAIT when agents are making progress toward the goal.
 - GUIDE only when you see a concrete wrong direction (not just slow progress).
+- REJECT only when an EMITTED deliverable contradicts its OWN declared work or acceptance criteria — e.g. a gate verdict says pass:true while the evidence/metric it cites shows fail, a stage claims it produced an artifact that is missing or empty, or a result codifies a smoke/error as success. Set "target_stage" to that stage; "reason" must name the specific contradiction (what was claimed vs what the evidence shows). REJECT forces the work to be re-done — it is NOT for slow progress (use WAIT) or a wrong overall approach (use REPLAN). CRITICAL GUARD: an HONEST NEGATIVE is a VALID deliverable, not a rejection — do NOT REJECT a result simply because the target metric was not beaten, the hypothesis failed, or the run found no improvement. Only REJECT when the deliverable itself is internally inconsistent or does not actually do the work it declares.
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
 - ABORT only if a stage has been running for ${stuckMinutes}+ minutes with no new output (truly stuck). Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT abort based on stdout silence alone if you can see file/artifact activity in the snapshot.
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
@@ -120,6 +168,12 @@ export class Supervisor {
   // Per-iteration assessment budget refills when state.currentIteration advances.
   private lastSeenIteration = 0;
   private iterationAssessmentCount = 0;
+  // GAP-2 watchdog: last-progress timestamp per running stage (carried across ticks).
+  private stageLastProgressMs: Record<string, number> = {};
+  // Idempotency: stages already aborted by the deterministic watchdog (don't re-fire each tick).
+  private watchdogAbortedStages = new Set<string>();
+  // Cursor for the watchdog's own artifact-freshness probe (independent of the LLM artifact scan).
+  private watchdogLastArtifactCheckMs = 0;
 
   start(): void {
     if (this.timer) return;
@@ -223,7 +277,7 @@ export class Supervisor {
     // "VERDICT: reason"; user input pushes "User guidance received: ...".
     if (this.observations.length > 0) {
       const noteworthy = this.observations.filter(o =>
-        /^(GUIDE|ABORT|REPLAN|DONE):/.test(o) || o.startsWith('User guidance received:'),
+        /^(GUIDE|ABORT|REPLAN|REJECT|DONE):/.test(o) || o.startsWith('User guidance received:'),
       );
       const recent = noteworthy.slice(-5);
       if (recent.length > 0) {
@@ -329,6 +383,31 @@ export class Supervisor {
     return join(this.runDir(), 'signals');
   }
 
+  /**
+   * GAP-2 watchdog probe: true if ANY file under the run dir was modified at/after `sinceMs`.
+   * Used as a generic "something happened" progress signal independent of the LLM artifact scan
+   * (it does not advance that scan's cursor). Skips noisy/internal dirs and is depth-bounded.
+   */
+  private hasFreshArtifactSince(sinceMs: number): boolean {
+    const root = this.runDir();
+    const walk = (dir: string, depth: number): boolean => {
+      if (depth > 4) return false;
+      let entries: import('node:fs').Dirent[];
+      try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return false; }
+      for (const e of entries) {
+        if (e.name === 'codex_home' || e.name === 'node_modules' || e.name === '.tmp' || e.name === 'signals') continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) {
+          if (walk(p, depth + 1)) return true;
+        } else if (e.isFile()) {
+          try { if (statSync(p).mtimeMs >= sinceMs) return true; } catch { /* skip */ }
+        }
+      }
+      return false;
+    };
+    return walk(root, 0);
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped) return;
     this.tickCount++;
@@ -407,6 +486,52 @@ export class Supervisor {
       log.info({ from: this.effectivePollIntervalMs, to: this.config.pollIntervalMs }, 'Supervisor adaptive reset: stage transition');
       this.effectivePollIntervalMs = this.config.pollIntervalMs;
       this.consecutiveWaits = 0;
+    }
+
+    // === GAP-2: deterministic no-progress watchdog ===
+    // BEFORE the idle / minDeltaBytes early-returns below (which would otherwise skip the
+    // whole tick on a quiet run — the exact condition under which a stage silently hangs).
+    // This fires the SAME abort_<stage> signal the LLM ABORT verdict uses, but
+    // deterministically, independent of the model: a stage that has shown NO progress
+    // signal (new live.log bytes, new artifact, or a stage transition) for
+    // config.stuckThresholdMs is killed and left to the retry machinery.
+    {
+      const now = Date.now();
+      // A new artifact anywhere under the run dir this window counts as progress for all
+      // running stages (artifacts are not reliably stage-attributed). Probe is independent
+      // of readRecentArtifacts() so the LLM scan's cursor is untouched.
+      const freshArtifact = this.hasFreshArtifactSince(this.watchdogLastArtifactCheckMs || (now - this.config.stuckThresholdMs));
+      this.watchdogLastArtifactCheckMs = now;
+      const progressedStageIds = new Set<string>();
+      for (const stageId of runningStages) {
+        const stageProgressed = (tails.get(stageId)?.length ?? 0) > 0 || stageTransition || freshArtifact;
+        if (stageProgressed) progressedStageIds.add(stageId);
+      }
+      const { nextLastProgressMs, stalledStageIds } = detectStalledStages({
+        runningStages,
+        progressedStageIds,
+        lastProgressMs: this.stageLastProgressMs,
+        now,
+        thresholdMs: this.config.stuckThresholdMs,
+      });
+      this.stageLastProgressMs = nextLastProgressMs;
+      // Forget abort-idempotency for stages no longer running (so a future re-run can be watched).
+      for (const aborted of [...this.watchdogAbortedStages]) {
+        if (!runningStages.includes(aborted)) this.watchdogAbortedStages.delete(aborted);
+      }
+      for (const stageId of stalledStageIds) {
+        if (this.watchdogAbortedStages.has(stageId)) continue;  // already fired; don't spam
+        this.watchdogAbortedStages.add(stageId);
+        const stalledMs = now - (this.stageLastProgressMs[stageId] ?? now);
+        const reason = `Deterministic watchdog: no progress signal (live.log/artifact/transition) for ${Math.round(stalledMs / 1000)}s (>= ${Math.round(this.config.stuckThresholdMs / 1000)}s threshold) — aborting stuck stage.`;
+        try {
+          mkdirSync(this.signalDir(), { recursive: true });
+          writeFileSync(join(this.signalDir(), `abort_${stageId}.json`),
+            JSON.stringify({ reason, timestamp: new Date().toISOString(), source: 'watchdog' }), 'utf-8');
+          log.warn({ runId: this.runId, stageId, stalledMs }, 'Watchdog ABORT — stage made no progress past threshold');
+          this.observations.push(`Watchdog aborted stuck stage '${stageId}' (${Math.round(stalledMs / 1000)}s no progress)`);
+        } catch (err) { log.warn({ err, stageId }, 'Watchdog failed to write abort signal'); }
+      }
     }
 
     // Skip if not enough new output (artifact scan still gates via separate path below)
@@ -504,6 +629,8 @@ export class Supervisor {
         this.decisions.push(`Guided ${assessment.targetStage}: ${assessment.guidance.slice(0, 100)}`);
       } else if (assessment.verdict === 'REPLAN') {
         this.decisions.push(`Triggered replan: ${assessment.reason}`);
+      } else if (assessment.verdict === 'REJECT') {
+        this.decisions.push(`Rejected ${assessment.targetStage ?? 'deliverable'}: ${assessment.reason.slice(0, 100)}`);
       } else if (assessment.verdict === 'DONE') {
         this.decisions.push(`Goal confirmed met: ${assessment.reason}`);
       }
@@ -712,6 +839,22 @@ export class Supervisor {
       case 'REPLAN':
         writeFileSync(join(signalDir, 'replan.json'),
           JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        this.lastActionTime = Date.now();
+        break;
+
+      case 'REJECT':
+        // Reject an emitted deliverable that does not meet its declared work.
+        // The scheduler-side consumer re-pends the target stage so the work is
+        // re-done rather than accepted. Bounded there by a max reject count.
+        if (assessment.targetStage) {
+          writeFileSync(join(signalDir, `reject_${assessment.targetStage}.json`),
+            JSON.stringify({ stage: assessment.targetStage, reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        } else {
+          // No target named: write a run-level reject the scheduler can map to the
+          // most-recently-completed stage. Still bounded by the same max count.
+          writeFileSync(join(signalDir, 'reject.json'),
+            JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        }
         this.lastActionTime = Date.now();
         break;
 

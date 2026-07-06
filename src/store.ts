@@ -95,10 +95,11 @@ export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
  * cumulative wall time, manual stop file) and auto-append the phase's outcome
  * to a findings ledger when the run terminates via phase_complete.
  *
- * When a phase terminates via phase_complete and no explicit
- * post_terminate_hook was set on that state, the scheduler invokes the
- * default advance script (skills/program_advance.sh installed to the project)
- * with FC_PROGRAM_* env vars added.
+ * When a phase terminates via phase_complete, the scheduler runs that state's
+ * post_terminate_hook command if the brief declared one — passing FC_PROGRAM_*
+ * env vars so the hook can advance the program (parse the verdict, generate the
+ * next phase's brief, launch the next run). If no hook is declared, the run
+ * simply terminates; there is no implicit default script.
  *
  * Backwards-compatible: briefs without a `program:` block behave exactly as
  * before. Only multi-phase programs need this.
@@ -196,6 +197,12 @@ export interface ResearchConfig {
    */
   resultSchema?: Record<string, unknown>;
   /**
+   * Context primitive roots (project-relative) the engine inventories into {context_inventory}
+   * so the planner's Propose step sees the real on-disk world-model. Default: ['data'].
+   * Engineering objectives can widen this (e.g. ['src', 'data']).
+   */
+  contextRoots?: string[];
+  /**
    * Project-relative file where the agent writes the latest round's measured
    * result as JSON `{ "label": "...", "result": <number> }`. The framework
    * reads it, journals it (framework-owned, in the run dir), computes the
@@ -208,6 +215,40 @@ export interface ResearchConfig {
    * Default: docs/.
    */
   reportDir?: string;
+  /**
+   * OUTER-LOOP portfolio: the declared candidate direction labels a campaign must COVER before a
+   * frontier verdict is accepted. The campaign loop forces each untested entry through one real
+   * (gated) round BEFORE honoring any frontier — from either the proposer (null) or the policy
+   * (stop_ceiling). This is the OUTER analogue of the inner loop's empirical floor: it stops the
+   * LLM proposer from confabulating that an untested direction "failed" and frontier-ing early.
+   * Engine-agnostic: these are opaque labels; their meaning lives in the brief.
+   */
+  directions?: string[];
+  /**
+   * Optional CONFIRM gate (A+(a)): before a candidate is accepted as a `ship`, the engine runs
+   * this brief-declared shell command and only allows `shipped` if it exits 0; otherwise the
+   * terminal status is downgraded to `ceiling_hit`. This is the verify-before-trust mechanism —
+   * the engine carries NO domain knowledge; the command + its contract live entirely in the brief
+   * (e.g. "re-run the candidate on a fresh independent split and assert it still beats baseline").
+   * Generic: runs through the SAME exec-script-exit-zero check the reality gate uses.
+   */
+  confirm?: ResearchConfirmConfig;
+}
+
+/**
+ * A+(a) confirm gate: a brief-declared, domain-agnostic verify-before-trust contract.
+ * The engine treats `command` as opaque shell text run via the exec-script-exit-zero check
+ * (exit 0 = confirmed). `requires` is optional human-readable documentation of the contract
+ * (surfaced in events/reports); it does not alter engine behavior — the exit-zero contract is
+ * the machine-checked assertion.
+ */
+export interface ResearchConfirmConfig {
+  /** Shell command run before a `ship`; exit 0 confirms the candidate. */
+  command: string;
+  /** Optional human-readable assertion the command is expected to enforce (documentation only). */
+  requires?: string;
+  /** Optional timeout for the confirm command in seconds (default 300). */
+  timeoutSeconds?: number;
 }
 
 /**
@@ -228,7 +269,7 @@ export interface StoreState {
   projectDir: string;
   /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
   baseCommit?: string;
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed' | 'phase_complete' | 'stopped';
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed' | 'phase_complete' | 'stopped' | 'incomplete';
   /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
   terminalStates?: TerminalStatesConfig;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
@@ -329,7 +370,7 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
  * a second, drift-prone copy of these vocabularies.
  */
 export const TERMINAL_STATUSES = [
-  'complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'phase_complete', 'stopped',
+  'complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'phase_complete', 'stopped', 'incomplete',
 ] as const;
 
 /** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
@@ -341,6 +382,22 @@ export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, 
 /** Single source of truth for "this run has reached a terminal state". */
 export function isTerminalRunStatus(status: string): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * Single source of truth for "this run finished successfully" (process exit 0).
+ * A research run that exhausts its policy without a beat ends `ceiling_hit` — an
+ * HONEST NEGATIVE is a valid deliverable, not a failure — and a shipped beat ends
+ * `shipped`; both are successes alongside a plain `complete`. Anything else
+ * (`failed`, `reality_gate_failed`, `escalated`, `stopped`, `incomplete`) is a
+ * non-success exit. `incomplete` = budget/iteration exhausted mid-search WITHOUT a
+ * clean exhaustive ceiling (distinct from `failed`=crash and `ceiling_hit`=honest
+ * negative); it is terminal but not a success.
+ * Used for the CLI exit code so a spawning parent (e.g. the campaign outer loop's
+ * execSync) does not mistake a normal ceiling for a crash.
+ */
+export function isSuccessfulRunStatus(status: string): boolean {
+  return status === 'complete' || status === 'shipped' || status === 'ceiling_hit';
 }
 
 function isRealityGatedTerminal(status: string): boolean {

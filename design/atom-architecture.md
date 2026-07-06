@@ -67,7 +67,7 @@ Hard constraints (e.g. survival/no-liquidation in trading) must be enforced by *
 
 ### Validation
 
-`tests/planner-matrix.mjs` exercises the planner against a task matrix. Deterministic layer (capturing adapter): asserts every atom is injected into the planner's resolved prompt and that planner-authored `reality_checks.md` is enforced (passes when the deliverable exists, blocks terminal when missing). Real-LLM layer (`PLANNER_LLM=1`): the live planner composes coder+qa with deterministic checks for a build task, reaches for the `researcher` atom on an exploratory task, and — given a project contract — wires the contract's hard constraints as deterministic `exec-script-exit-zero` / `file-exists-nonempty` checks. 15/15.
+A planner-matrix test exercises the planner against a task matrix. Deterministic layer (capturing adapter): asserts every atom is injected into the planner's resolved prompt and that planner-authored `reality_checks.md` is enforced (passes when the deliverable exists, blocks terminal when missing). Real-LLM layer: the live planner composes coder+qa with deterministic checks for a build task, reaches for the `researcher` atom on an exploratory task, and — given a project contract — wires the contract's hard constraints as deterministic `exec-script-exit-zero` / `file-exists-nonempty` checks.
 - **P4 — remaining atoms.** Research policies, campaign health triggers, supervisor verdicts become single-source, descriptor-driven (extensible; no if-ladders / double sources).
 
 ### End state

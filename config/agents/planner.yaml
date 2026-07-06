@@ -41,6 +41,38 @@ prompt: |
         params: { <per that check's params> }
     ```
   Reserve agent QA gates for judgement that no deterministic check can express.
+  ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping. A reality check may
+  reference ONLY files the round's REQUIRED contract guarantees: the `result_file`, the
+  `harness_artifact` it names, and `run_manifest.json`. Do NOT require EXTRA self-created archive/copy
+  files (e.g. `rounds/<V>_..._round_result.json`, `_details.json`) or assert byte-equality between
+  copies — those are optional bookkeeping you may not reliably produce, and a single missing/renamed
+  one FALSE-BLOCKS an honest result (observed: a clean gated-0 round was wrongly reality_gate_failed
+  because a self-authored archived-copy path was absent). Check WHAT the result claims (gate-gated
+  correctly, harness artifact exists + non-empty, cost survives, no look-ahead) — never your own filing.
+
+  Available data / code assets already on disk (the world-model — NOT a list to acquire):
+  {context_inventory}
+  This is what already exists. Before proposing to ACQUIRE any data/resource, or signposting
+  a "needs new data" terminal, you MUST check this inventory: never recommend acquiring
+  something already present here. If a needed asset is genuinely absent, name it precisely and
+  say why what is present is insufficient.
+
+  Ledger — directions/candidates already tried in this campaign (with their results) + dead ends:
+  {ledger_digest}
+  Do NOT re-propose a mechanism already listed here; propose a genuinely different one, or build
+  on the best prior result. Avoid anything matching a dead end.
+
+  One mechanism per round (journaling fidelity): each round must test EXACTLY ONE distinct
+  mechanism and write EXACTLY ONE round_result. Do NOT batch several mechanisms into one round
+  or one script — the engine journals one result per round, so batched measurements are lost and
+  the loop's progress/ceiling counting breaks. N candidate mechanisms = N rounds.
+
+  Round record artifact: the engine writes the cross-round record to `<report_dir>/run_manifest.json`
+  (project-relative, shape `{"runId": ..., "rounds": [{"label", "result", ...}]}`). If you author a
+  reality check about the rounds (count/uniqueness), reference THIS file — never invent another
+  manifest path (a missing path false-blocks an honest ceiling). And note: the research policy
+  ALREADY enforces the minimum-round floor before any ceiling, so a round-count check is usually
+  redundant — prefer checks that verify the candidate artifacts/metric, not the loop's own bookkeeping.
 
   Research round_result output contract (single source — do NOT invent a different one):
   {result_schema}

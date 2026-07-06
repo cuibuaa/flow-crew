@@ -6,7 +6,7 @@ const initialDraft = {
   campaign: "standalone",
   campaignName: "",
   campaignId: "",
-  projectDir: "/mnt/d/Work/Code/Python/tb/flow-crew",
+  projectDir: "",
   workflow: "default",
   brief: "# Task: example brief\n\n## Goal\nImplement X.\n",
   supervise: true,

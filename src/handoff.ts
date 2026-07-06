@@ -14,12 +14,6 @@ function readDefaultTimeout(projectDir: string): string {
 
 export type HandoffVisibility = 'full' | 'minimal' | 'none';
 
-const DEFAULT_ROLE_VISIBILITY: Record<string, HandoffVisibility> = {
-  qa: 'minimal',
-  paper_reviewer: 'minimal',
-  ai_detector: 'none',
-};
-
 interface HandoffOpts {
   dependsOn: string[];
   promptTemplate: string;
@@ -54,13 +48,14 @@ Knowledge graph continuity:
 - If this stage produced reusable goals, approaches, findings, results, dead ends, user hints, source references, or candidate metrics, update the task-local knowledge graph at {kg_path}.
 - If the file does not exist, create it with this shape: {"nodes":[],"edges":[],"metadata":{"createdAt":"<iso>","updatedAt":"<iso>"}}.
 - Keep entries concise and evidence-backed. Do not invent sources, scores, or results.
-- Use node types: goal, approach, finding, result, insight, dead_end, user_hint.
+- Use node types: goal, approach, finding, result, insight, dead_end, user_hint, source.
+- A "source" node is an external reference you cite (paper / doc / repo): {"type":"source","label":"<title>","source":"<URL>"}. Link the finding it backs with a "sourced_from" edge.
 - Use edge types: explored_by, found_that, measured_as, sourced_from, supports, contradicts, combines_with, depends_on.`;
 
 function resolveVisibility(opts: HandoffOpts): HandoffVisibility {
-  if (opts.handoffVisibility) return opts.handoffVisibility;
-  if (opts.role && opts.role in DEFAULT_ROLE_VISIBILITY) return DEFAULT_ROLE_VISIBILITY[opts.role];
-  return 'full';
+  // Visibility is a role atom: each agent self-declares handoff_visibility in its config; the
+  // worker passes it through as opts.handoffVisibility. No engine-side role→visibility map.
+  return opts.handoffVisibility ?? 'full';
 }
 
 function buildFullContext(depId: string, opts: HandoffOpts): string {

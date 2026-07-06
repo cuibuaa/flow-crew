@@ -86,7 +86,7 @@ function loadProjectDefaults(configDir: string): { model: string; reasoning_effo
   } catch { return { model: 'default', reasoning_effort: 'default' }; }
 }
 
-const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string(), adapter: z.string().optional() });
+const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string(), adapter: z.string().optional(), handoff_visibility: z.enum(['full', 'minimal', 'none']).optional() });
 
 function parseAgentConfig(raw: unknown, configDir?: string): AgentConfig {
   const defaults = loadProjectDefaults(configDir ?? join(process.cwd(), 'config'));

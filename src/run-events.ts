@@ -14,6 +14,9 @@ export type RunEventType =
   | 'campaign_alert'
   | 'research_injected'
   | 'supervisor_replan'
+  | 'supervisor_reject'
+  | 'plan_dispatch_retry'
+  | 'research_mode_degraded'
   | 'attempt_summary_refresh_requested';
 
 export interface RunEvent {

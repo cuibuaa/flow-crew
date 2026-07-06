@@ -2,6 +2,17 @@ default_timeout_ms: 3600000
 default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1
+# Bounded re-plan budget for a dynamic_dispatch (plan) stage that exits 0 but
+# emits ZERO valid injected stages (truncated/empty/invalid dispatch.yaml — a
+# transient LLM flake). Each retry deletes the bad dispatch.yaml, re-runs the
+# plan stage with a specific re-prompt, until exhausted (then escalate with the
+# parse/unknown-role specifics). Generic engine mechanism, not task logic.
+default_plan_stage_retries: 2
+# Max times the supervisor's REJECT verdict can force a single deliverable to be
+# re-worked before the engine stops re-rejecting and lets the run proceed (so a
+# mis-firing supervisor can't trap a run in an infinite reject loop). Generic
+# bound; the per-task "what counts as a valid deliverable" lives in the brief.
+default_supervisor_max_rejects: 2
 adapter: codex
 # Codex CLI's built-in default was bumped to gpt-5.3-codex which isn't
 # enabled for ChatGPT accounts yet (returns HTTP 400). Pin to the model

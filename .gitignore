@@ -29,6 +29,7 @@ tests/
 ui/tests/
 design/*
 !design/atom-architecture.md
+!design/autonomous-loop.md
 op_*.sh
 eval.sh
 scripts/btc_training_*.py

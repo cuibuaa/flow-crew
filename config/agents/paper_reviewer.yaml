@@ -34,3 +34,4 @@ prompt: |
     pass = true only if score >= threshold AND no major unresolved issues.
     reason must be structured: "Strengths: ... | Weaknesses: ... | Verdict: ..."
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+handoff_visibility: minimal

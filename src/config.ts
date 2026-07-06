@@ -17,6 +17,10 @@ export interface ProjectDefaults {
   max_iterations: number;
   gate_retry_loops: number;
   stage_technical_retries: number;
+  /** Bounded re-plan budget for a plan (dynamic_dispatch) stage that exits 0 but emits zero valid injected stages. See defaults.yaml. */
+  plan_stage_retries: number;
+  /** Max times a supervisor REJECT verdict can force a single deliverable to be re-worked before the engine stops re-rejecting. See defaults.yaml. */
+  supervisor_max_rejects: number;
   model: string;
   reasoning_effort: string;
   adapter: string;
@@ -106,11 +110,18 @@ export function ensureProjectDefaultsFile(projectDir?: string): string {
   if (existsSync(target)) return target;
 
   const source = flowCrewDefaultsPath();
-  mkdirSync(dirname(target), { recursive: true });
-  if (resolve(source) !== resolve(target)) {
-    copyFileSync(source, target);
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    if (resolve(source) !== resolve(target)) {
+      copyFileSync(source, target);
+    }
+    return target;
+  } catch {
+    // Unwritable project dir (read-only / sandboxed). This is a READ path
+    // (getDefaultTimeout → buildStagePrompt) — fall back to the packaged defaults
+    // rather than crashing prompt assembly.
+    return source;
   }
-  return target;
 }
 
 function readRaw(projectDir?: string): Record<string, unknown> {
@@ -147,6 +158,8 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
     max_iterations: numberValue(raw, template, 'default_max_iterations'),
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
     stage_technical_retries: numberValue(raw, template, 'default_stage_technical_retries'),
+    plan_stage_retries: numberValue(raw, template, 'default_plan_stage_retries'),
+    supervisor_max_rejects: numberValue(raw, template, 'default_supervisor_max_rejects'),
     model: stringValue(raw, template, 'model'),
     reasoning_effort: stringValue(raw, template, 'reasoning_effort'),
     adapter: stringValue(raw, template, 'adapter'),

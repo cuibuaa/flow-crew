@@ -5,9 +5,11 @@ import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { evaluateCondition } from './condition.js';
 import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir, runsRoot, isTerminalRunStatus } from './store.js';
-import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig } from './store.js';
-import { listCheckTypes } from './reality-gate/index.js';
+import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
+import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
+import { summarizeContext } from './context-inventory.js';
+import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
 import { runStage } from './worker.js';
 import {
@@ -28,6 +30,29 @@ import pino from 'pino';
 const log = pino({ name: 'scheduler' });
 
 /**
+ * FIX D — confirm-gate observability on non-ship terminals. The confirm gate runs ONLY on a
+ * `ship` decision, so a brief-declared `research.confirm` is silently SKIPPED on a non-ship
+ * terminal (e.g. ceiling_hit / incomplete) with no record at all. This records that a declared
+ * confirm was NOT run (and why), so a declared confirm is never silently invisible. It does NOT
+ * run the confirm and does NOT alter the terminal status — the safer of the two options. No-ops
+ * (returns without writing) when no confirm is declared, or when a real research_confirm.json
+ * already exists (don't clobber an actual confirm result on the ship path).
+ */
+function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig | undefined, terminalStatus: string): void {
+  if (!confirm?.command) return;
+  const path = join(runDirPath, 'research_confirm.json');
+  if (existsSync(path)) return; // a real confirm result was already written (ship path) — leave it.
+  try {
+    writeFileSync(path, JSON.stringify({
+      status: 'not_run',
+      reason: `confirm runs on a 'ship' terminal; this run terminated '${terminalStatus}', so the brief-declared confirm was not executed`,
+      command: confirm.command,
+      requires: confirm.requires,
+    }, null, 2) + '\n', 'utf-8');
+  } catch { /* non-critical */ }
+}
+
+/**
  * Parse `---` YAML frontmatter from the top of a task brief. Used to extract
  * `terminal_states` config that tells the scheduler which file paths signal a
  * legitimate completion (so a research-exploration brief can declare
@@ -46,23 +71,30 @@ const log = pino({ name: 'scheduler' });
  * see internal config) plus the parsed config. Briefs without frontmatter,
  * with malformed YAML, or with unknown shapes are passed through unchanged.
  */
-export function parseBriefFrontmatter(brief: string): { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string } {
+export function parseBriefFrontmatter(brief: string): { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string; frontmatterError?: string } {
   if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return { stripped: brief };
   const open = brief.indexOf('\n', 3) + 1;
   const closeIdx = brief.indexOf('\n---', open);
-  if (closeIdx < 0) return { stripped: brief };
+  // GAP-3: a brief that OPENED a frontmatter fence but never closed it is
+  // malformed — surface that instead of silently passing the whole brief through
+  // (which would hide a research: block the author intended to declare).
+  if (closeIdx < 0) return { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' };
   const fm = brief.slice(open, closeIdx);
   // Find the newline that ends the closing fence so we can slice past it
   const afterFence = brief.indexOf('\n', closeIdx + 4);
   const stripped = afterFence < 0 ? '' : brief.slice(afterFence + 1);
   let parsed: unknown;
-  try { parsed = parseYaml(fm); } catch { return { stripped: brief }; }
-  if (!parsed || typeof parsed !== 'object') return { stripped };
-  const out: { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string } = { stripped };
+  // GAP-3: RETURN the YAML parse error instead of swallowing it — the caller can
+  // then fail loud / record an event rather than silently falling back to plain dispatch.
+  try { parsed = parseYaml(fm); } catch (err) { return { stripped: brief, frontmatterError: `frontmatter YAML parse error: ${err instanceof Error ? err.message : String(err)}` }; }
+  if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
+  const out: { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string; frontmatterError?: string } = { stripped };
 
-  // Parse the optional `research:` block — drives the native research loop
-  // (researcher → implement → measure → decide). Requires baseline + policy.
-  const resRaw = (parsed as Record<string, unknown>).research;
+  // Parse the optional `research:` (alias: `objective:`) block — drives the native loop
+  // (propose → execute → measure → decide). Requires baseline + policy. `objective:` is the
+  // unified primitive name; metric-kind is identical to `research:`, acceptance-kind uses the
+  // pass-ratio convention (result = fraction of acceptance checks passed, target 1.0).
+  const resRaw = (parsed as Record<string, unknown>).research ?? (parsed as Record<string, unknown>).objective;
   if (resRaw && typeof resRaw === 'object') {
     const r = resRaw as Record<string, unknown>;
     if (typeof r.baseline === 'number') {
@@ -105,6 +137,29 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
       // Single-source output contract: an opaque JSON Schema for round_result, used to
       // validate each round + injected to the planner so its checks reference the declared shape.
       if (r.result_schema && typeof r.result_schema === 'object') research.resultSchema = r.result_schema as Record<string, unknown>;
+      if (Array.isArray(r.context_roots)) {
+        const roots = r.context_roots.filter((x): x is string => typeof x === 'string');
+        if (roots.length) research.contextRoots = roots;
+      }
+      // OUTER-loop portfolio: direction labels the campaign must cover before a frontier is honored.
+      if (Array.isArray(r.directions)) {
+        const dirs = r.directions.filter((x): x is string => typeof x === 'string');
+        if (dirs.length) research.directions = dirs;
+      }
+      // A+(a) CONFIRM gate — verify-before-trust as a generic mechanism. The brief declares a
+      // shell command (and optional human-readable contract); the engine runs it before a `ship`
+      // (via the same exec-script-exit-zero check the reality gate uses) and only allows `shipped`
+      // if it exits 0, else downgrades to `ceiling_hit`. The engine holds NO domain knowledge —
+      // the command/assertion is entirely brief-owned (e.g. "re-run on a fresh split, assert beat").
+      if (r.confirm && typeof r.confirm === 'object') {
+        const c = r.confirm as Record<string, unknown>;
+        if (typeof c.command === 'string' && c.command.trim()) {
+          const confirm: ResearchConfirmConfig = { command: c.command };
+          if (typeof c.requires === 'string') confirm.requires = c.requires;
+          if (typeof c.timeout_seconds === 'number') confirm.timeoutSeconds = c.timeout_seconds;
+          research.confirm = confirm;
+        }
+      }
       if (r.stop && typeof r.stop === 'object') {
         const s = r.stop as Record<string, unknown>;
         research.stop = {};
@@ -360,9 +415,20 @@ function appendProgramLedger(
  */
 /** Terminal program statuses set by the unified terminal-state gate. Once any
  * of these is set, the run is done and the iteration loop must exit without
- * re-processing (prevents double-firing the post_terminate_hook / ledger). */
-function isTerminalStatus(status: string | undefined): boolean {
-  return status === 'shipped' || status === 'ceiling_hit' || status === 'escalated' || status === 'phase_complete' || status === 'stopped';
+ * re-processing (prevents double-firing the post_terminate_hook / ledger).
+ *
+ * GAP-1 fix: this DEFERS to store.ts's isTerminalRunStatus (the single source of
+ * truth, TERMINAL_STATUSES) so it returns true for ALL terminal statuses —
+ * including `reality_gate_failed` and `failed`, which the prior narrow set
+ * OMITTED. That omission let the post-iteration guards (after executeIteration
+ * and after the supervisor-REJECT rework loop) fall through on an eager
+ * reality_gate_failed / failed, and let the max-iters handler unconditionally
+ * clobber an already-terminal status to 'failed'. The narrow set existed only
+ * to avoid double-firing the post_terminate_hook — but that hook does NOT run on
+ * these branches (it runs only from the unified terminal-state gate), so
+ * widening the predicate is safe. Exported for tests. */
+export function isTerminalStatus(status: string | undefined): boolean {
+  return status !== undefined && isTerminalRunStatus(status);
 }
 
 /**
@@ -606,9 +672,15 @@ async function tryAdvanceResearch(
     const maxRej = Math.max(rc.stop?.maxRounds ?? 24, INTEGRITY_REJECTION_CEILING);
     if (totalRej >= maxRej) {
       state.status = 'ceiling_hit';
+      // FIX D — non-ship terminal: record any brief-declared confirm as not-run (observability).
+      recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
       state.completedAt = new Date().toISOString();
       const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-      if (!gate.allowed) return gate.state;
+      // GAP-1: the reality-gate may downgrade to `reality_gate_failed`. That is a
+      // TERMINAL status the outer loop must see — write a campaign jsonl row on
+      // this eager branch too, else the run silently returns reality_gate_failed
+      // with no campaign envelope.
+      if (!gate.allowed) { writeCampaignEntry(ctx.projectDir, gate.state); return gate.state; }
       writeRunState(ctx.projectDir, ctx.runId, state);
       writeCampaignEntry(ctx.projectDir, state);
       recordRunEvent(ctx.projectDir, ctx.runId, { type: 'run_completed', runId: ctx.runId, timestamp: state.completedAt, iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` });
@@ -694,6 +766,15 @@ async function tryAdvanceResearch(
 
   journal.rounds.push({ label, result: round.result, resultStd: (round as { result_std?: number }).result_std, wallHoursCumulative: (Date.now() - startedMs) / 3600000 });
   try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+  // Project-relative mirror of the round record (the journal lives in the run dir, which a
+  // planner's project-relative reality check can't reach). The planner is told to reference
+  // <report_dir>/run_manifest.json for any round-level check — so it never invents a missing
+  // artifact and false-blocks an honest ceiling (observed: planner required run_manifest.json).
+  try {
+    const manifestDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
+    mkdirSync(manifestDir, { recursive: true });
+    writeFileSync(join(manifestDir, 'run_manifest.json'), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+  } catch { /* non-critical */ }
 
   const evalResult = evaluateResearch(rc, journal.rounds);
   try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
@@ -728,10 +809,51 @@ async function tryAdvanceResearch(
   }
 
   // ship | stop_ceiling → terminate the run via a framework-owned status.
-  state.status = evalResult.decision === 'ship' ? 'shipped' : 'ceiling_hit';
+  let terminalDecision: 'ship' | 'stop_ceiling' = evalResult.decision === 'ship' ? 'ship' : 'stop_ceiling';
+
+  // A+(a) CONFIRM gate (verify-before-trust): before ACCEPTING a 'ship', run the brief-declared
+  // confirm command (generic mechanism — the exact exec-script-exit-zero check the reality gate
+  // uses). Only allow `shipped` if it exits 0; on failure DOWNGRADE to `ceiling_hit` (the candidate
+  // is unconfirmed, not shippable). The engine carries no domain knowledge — the command/contract
+  // is entirely brief-owned. This internalizes "confirm a candidate beat on a fresh independent
+  // split before accepting" as an engine primitive rather than trusting the agent's self-report.
+  if (terminalDecision === 'ship' && rc.confirm) {
+    let confirmReport: { pass: boolean; results: Array<{ details: string }> };
+    try {
+      confirmReport = await runAllChecks(
+        [{ name: 'research_confirm', type: 'exec-script-exit-zero', params: { script: rc.confirm.command, timeout_seconds: rc.confirm.timeoutSeconds ?? 300 } }],
+        { taskDir: ctx.runDirPath, projectDir: ctx.projectDir },
+      );
+    } catch (err) {
+      confirmReport = { pass: false, results: [{ details: `confirm command threw: ${err instanceof Error ? err.message : String(err)}` }] };
+    }
+    try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+    if (!confirmReport.pass) {
+      const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
+      log.warn({ runId: ctx.runId, command: rc.confirm.command, detail }, 'Confirm gate FAILED — downgrading ship → ceiling_hit (candidate unconfirmed)');
+      recordRunEvent(ctx.projectDir, ctx.runId, {
+        type: 'run_completed',
+        runId: ctx.runId,
+        timestamp: new Date().toISOString(),
+        iteration: ctx.iteration,
+        detail: `Confirm gate failed — ship downgraded to ceiling_hit: ${detail}`,
+      });
+      terminalDecision = 'stop_ceiling';
+      evalResult.reason = `${evalResult.reason} | confirm gate failed (ship downgraded to ceiling_hit): ${detail}`;
+    } else {
+      log.info({ runId: ctx.runId, command: rc.confirm.command }, 'Confirm gate PASSED — ship confirmed');
+    }
+  }
+
+  state.status = terminalDecision === 'ship' ? 'shipped' : 'ceiling_hit';
+  // FIX D — if confirm was declared but this is a non-ship terminal, record that it was not run
+  // (the confirm gate above only writes research_confirm.json on a ship). Observability only.
+  if (terminalDecision !== 'ship') recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
   state.completedAt = new Date().toISOString();
   const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-  if (!gate.allowed) return gate.state;
+  // GAP-1: write a campaign jsonl row on the reality_gate_failed downgrade too, so the
+  // outer loop sees the truthful terminal status (not a silent return with no envelope).
+  if (!gate.allowed) { writeCampaignEntry(ctx.projectDir, gate.state); return gate.state; }
   writeRunState(ctx.projectDir, ctx.runId, state);
   writeCampaignEntry(ctx.projectDir, state);
   recordRunEvent(ctx.projectDir, ctx.runId, {
@@ -739,15 +861,17 @@ async function tryAdvanceResearch(
     runId: ctx.runId,
     timestamp: state.completedAt,
     iteration: ctx.iteration,
-    detail: `Research ${evalResult.decision}: ${evalResult.reason}`,
+    detail: `Research ${terminalDecision}: ${evalResult.reason}`,
   });
   // Write a program report (framework-owned location, in project for visibility).
+  // Use terminalDecision (not evalResult.decision) so a confirm-gate downgrade is
+  // reported as a ceiling, not a ship.
   try {
     const reportDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
     mkdirSync(reportDir, { recursive: true });
-    const reportName = evalResult.decision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
-    const body = `# Research ${evalResult.decision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
-      + `Decision: ${evalResult.decision}\n`
+    const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
+    const body = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
+      + `Decision: ${terminalDecision}\n`
       + `Running-best: ${evalResult.runningBest}\n`
       + `Baseline: ${rc.baseline}\n`
       + `Kept directions: ${evalResult.keptLabels.join(', ') || 'none'}\n`
@@ -755,7 +879,7 @@ async function tryAdvanceResearch(
       + `## Rounds\n` + journal.rounds.map((r) => `- ${r.label}: ${r.result}`).join('\n') + '\n';
     writeFileSync(join(reportDir, reportName), body, 'utf-8');
   } catch { /* non-critical */ }
-  log.info({ runId: ctx.runId, decision: evalResult.decision, runningBest: evalResult.runningBest }, 'Research loop terminated');
+  log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: evalResult.runningBest }, 'Research loop terminated');
   await generateRunSummary(ctx.projectDir, ctx.runId, ctx.adapter).catch(() => { /* non-critical */ });
   return state;
 }
@@ -871,12 +995,32 @@ function countGlobMatches(projectDir: string, glob: string): number {
   }
 }
 
+// Error-string prefix written into a plan stage's status.json when it exited 0
+// but produced zero valid injected stages (empty/invalid dispatch.yaml). The
+// retry preamble keys off this prefix to render a dispatch-specific re-prompt.
+const INVALID_DISPATCH_ERROR_PREFIX = 'invalid dispatch.yaml';
+
+// Canonical dispatch.yaml schema reminder, single-sourced for the re-prompt so
+// the planner re-emits a well-formed file. Generic mechanism (no task content).
+const DISPATCH_SCHEMA_REMINDER = [
+  'Required dispatch.yaml schema — a YAML list at top level (or {stages: [...]}), each item:',
+  '  - id: <snake_case, unique>',
+  '    role: <one of the available roles named above>',
+  '    prompt_template: |',
+  '      <short, stage-specific instructions>',
+  '    depends_on: [<stage_ids>]   # optional',
+  '    is_gate: true               # optional — quality gate (writes a verdict file)',
+  '    retry_to: [<gate_ids>]      # optional',
+].join('\n');
+
 /**
  * Build the retry preamble injected before the resolved prompt on attempt >= 2.
- * Distinguishes supervisor-abort failures from true wall-clock timeouts by
- * reading the previous attempt's status.error string written by worker.ts.
+ * Distinguishes supervisor-abort failures, transient adapter errors, and the
+ * empty/invalid-dispatch re-plan case from true wall-clock timeouts by reading
+ * the previous attempt's status.error string written by worker.ts (or, for the
+ * dispatch case, by the empty-dispatch handler in executeIteration).
  */
-function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: string, stageId: string): string {
+export function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: string, stageId: string): string {
   const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
   let prevError: string | undefined;
   try {
@@ -884,6 +1028,17 @@ function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: stri
     const status = JSON.parse(statusRaw) as { error?: string };
     prevError = status.error;
   } catch { /* status not readable; fall through to generic message */ }
+  // Empty/invalid dispatch.yaml — re-plan, do NOT "continue from partial". The
+  // detail (parse error / unknown roles) is carried in the error string itself.
+  if (prevError && prevError.startsWith(INVALID_DISPATCH_ERROR_PREFIX)) {
+    const detail = prevError.slice(INVALID_DISPATCH_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
+    return [
+      `RE-PLAN (attempt ${retries + 1}): your previous attempt exited cleanly but you failed to emit a valid dispatch.yaml — it produced ZERO usable stages.`,
+      detail ? `Specific problem: ${detail}` : 'The file was missing, empty, unparseable, or contained no schema-valid stages.',
+      DISPATCH_SCHEMA_REMINDER,
+      `Write ONLY the dispatch.yaml file (at ${runDirPath}/dispatch.yaml) with at least one schema-valid stage that uses a known role. Do not continue from any partial output; emit a fresh, complete file.`,
+    ].join('\n\n');
+  }
   let cause: string;
   if (prevError && prevError.startsWith('aborted by supervisor')) {
     cause = `Previous attempt was ${prevError}. The supervisor judged that the previous attempt was stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this attempt, and START making file edits within a few minutes; do NOT spend the whole attempt only inspecting code.`;
@@ -893,6 +1048,282 @@ function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: stri
     cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
   }
   return `RETRY (attempt ${retries + 1}): ${cause} Read partial output at ${partialPath} and continue from where you left off. Do not start over.`;
+}
+
+/**
+ * The detail string diagnosing WHY a plan stage's dispatch.yaml yielded zero
+ * valid injected stages. Pure + exported for unit testing. Distinguishes:
+ *   - no dispatch.yaml written at all (the planner emitted nothing)
+ *   - dispatch.yaml present but unparseable (truncated/malformed YAML)
+ *   - dispatch.yaml parsed but every stage referenced an unknown role
+ *   - dispatch.yaml parsed but contained no stages / no schema-valid stages
+ * The unknown-role case is GENUINE (unsatisfiable as written) — surfaced so the
+ * caller can fail faster with the specific roles named; the others are typically
+ * TRANSIENT LLM flakes worth a bounded retry.
+ */
+export function diagnoseEmptyDispatch(
+  dispatchExists: boolean,
+  rawDispatchText: string | null,
+  knownRoles: string[],
+): { detail: string; unknownRoles: string[]; transient: boolean } {
+  if (!dispatchExists) {
+    return { detail: 'No dispatch.yaml was written (the plan stage produced no execution plan).', unknownRoles: [], transient: true };
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(rawDispatchText ?? '');
+  } catch (e) {
+    return {
+      detail: `dispatch.yaml could not be parsed as YAML (${e instanceof Error ? e.message : String(e)}) — likely truncated or malformed.`,
+      unknownRoles: [],
+      transient: true,
+    };
+  }
+  const items = (Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).stages)
+        ? (parsed as Record<string, unknown>).stages
+        : [])) as Record<string, unknown>[];
+  if (!Array.isArray(items) || items.length === 0) {
+    return { detail: 'dispatch.yaml parsed but contained no stages (expected a top-level list, or a {stages: [...]} object).', unknownRoles: [], transient: true };
+  }
+  const known = new Set(knownRoles);
+  const unknownRoles = items
+    .filter((i) => i?.role && !known.has(i.role as string))
+    .map((i) => `"${i.role}"`)
+    .filter((v, idx, arr) => arr.indexOf(v) === idx);
+  // GENUINE failure: every stage names a role the registry does not have. This
+  // is unsatisfiable as written — re-planning the same brief tends to repeat it.
+  if (unknownRoles.length > 0 && unknownRoles.length >= items.filter((i) => i?.role).length) {
+    return {
+      detail: `every stage referenced an unknown role: ${unknownRoles.join(', ')}. Available roles: ${knownRoles.join(', ')}.`,
+      unknownRoles,
+      transient: false,
+    };
+  }
+  // Some unknown roles but not all, or schema-invalid stages — treat as transient.
+  if (unknownRoles.length > 0) {
+    return {
+      detail: `some stages referenced unknown role(s): ${unknownRoles.join(', ')}. Available roles: ${knownRoles.join(', ')}.`,
+      unknownRoles,
+      transient: true,
+    };
+  }
+  return { detail: 'dispatch.yaml contained stages but none were schema-valid (check id/role/prompt_template fields).', unknownRoles: [], transient: true };
+}
+
+/** Action the engine takes when a plan stage emits zero valid injected stages and
+ * there is no static follow-up. Pure + exported for unit testing. */
+export type EmptyDispatchAction =
+  | { action: 'retry'; nextRetry: number; error: string; detail: string }
+  | { action: 'escalate'; status: 'escalated' | 'failed'; reason: string; unknownRoles: string[] };
+
+/**
+ * Decide whether an empty/invalid-dispatch plan stage should be RETRIED (a
+ * bounded re-plan of the plan stage) or ESCALATED with specifics. Generic engine
+ * mechanism: a transient flake under budget retries; an exhausted budget OR a
+ * genuine (every-stage-unknown-role) failure escalates with the precise detail
+ * instead of the old generic "refine the brief" punt. A genuine unknown-role
+ * failure escalates immediately (re-planning the same brief just repeats it).
+ */
+export function decideEmptyDispatchAction(
+  diagnosis: { detail: string; unknownRoles: string[]; transient: boolean },
+  retriesUsed: number,
+  maxRetries: number,
+): EmptyDispatchAction {
+  const canRetry = diagnosis.transient && retriesUsed < maxRetries;
+  if (canRetry) {
+    return {
+      action: 'retry',
+      nextRetry: retriesUsed + 1,
+      error: `${INVALID_DISPATCH_ERROR_PREFIX}: ${diagnosis.detail}`,
+      detail: diagnosis.detail,
+    };
+  }
+  // Escalate with specifics. A genuine unknown-role failure is unsatisfiable as
+  // written → prefer the structured 'escalated' terminal (it carries the named
+  // roles). A transient failure that merely exhausted its budget → 'failed' with
+  // the specific parse/dispatch detail (still specific, never the generic punt).
+  if (diagnosis.unknownRoles.length > 0) {
+    return {
+      action: 'escalate',
+      status: 'escalated',
+      reason: `Planner cannot satisfy this brief: ${diagnosis.detail} These roles do not exist in the registry — the brief asks for capabilities the engine has no agent for. Add the missing role(s) or rewrite the brief to use available roles.`,
+      unknownRoles: diagnosis.unknownRoles,
+    };
+  }
+  return {
+    action: 'escalate',
+    status: 'failed',
+    reason: `Planner failed to emit a valid dispatch.yaml after ${maxRetries} bounded retr${maxRetries === 1 ? 'y' : 'ies'}. Last problem: ${diagnosis.detail}`,
+    unknownRoles: [],
+  };
+}
+
+/** A pending supervisor REJECT signal read off disk (signals/reject_<stage>.json
+ * or the run-level signals/reject.json). */
+export interface SupervisorRejectSignal {
+  /** Target stage to re-work. null when the supervisor wrote a run-level reject
+   * with no target named (the caller maps it to the most-recently-completed stage). */
+  targetStage: string | null;
+  reason: string;
+}
+
+/** Decision for a supervisor REJECT (FIX 2). Pure + exported for unit testing.
+ * Honors a bounded reject budget so a mis-firing supervisor cannot trap a run in
+ * an infinite reject loop. Generic mechanism — the engine never judges deliverable
+ * quality itself (that is the supervisor's call, grounded in the brief); it only
+ * mechanically re-works the named stage or, once the budget is spent, accepts and
+ * proceeds. */
+export type RejectDecision =
+  | { action: 'rework'; targetStage: string; nextCount: number; reason: string }
+  | { action: 'accept'; reason: string };
+
+export function decideRejectAction(
+  signal: SupervisorRejectSignal,
+  resolvedTargetStage: string | null,
+  rejectsUsedForStage: number,
+  maxRejects: number,
+): RejectDecision {
+  if (!resolvedTargetStage) {
+    // No stage to re-work (run-level reject with no resolvable target) — cannot
+    // mechanically force re-work, so accept and proceed (the supervisor's prose
+    // is still recorded for the operator).
+    return { action: 'accept', reason: `REJECT had no resolvable target stage; proceeding. (${signal.reason})` };
+  }
+  if (rejectsUsedForStage >= maxRejects) {
+    return {
+      action: 'accept',
+      reason: `REJECT budget exhausted for stage "${resolvedTargetStage}" (${maxRejects} re-work${maxRejects === 1 ? '' : 's'} already forced); accepting the deliverable to avoid an infinite reject loop. Last reason: ${signal.reason}`,
+    };
+  }
+  return {
+    action: 'rework',
+    targetStage: resolvedTargetStage,
+    nextCount: rejectsUsedForStage + 1,
+    reason: signal.reason,
+  };
+}
+
+/** Read any pending supervisor REJECT signal from the run's signals dir. Returns
+ * the per-stage signal first (reject_<stage>.json), else the run-level reject.json.
+ * Does NOT consume (delete) — the caller deletes once it acts. */
+function readPendingRejectSignal(runDirPath: string): { path: string; signal: SupervisorRejectSignal } | null {
+  const signalsDir = join(runDirPath, 'signals');
+  let entries: string[];
+  try { entries = readdirSync(signalsDir); } catch { return null; }
+  const perStage = entries.filter((f) => /^reject_.+\.json$/.test(f)).sort();
+  const pick = perStage.length > 0 ? perStage[0] : (entries.includes('reject.json') ? 'reject.json' : null);
+  if (!pick) return null;
+  const path = join(signalsDir, pick);
+  let reason = 'supervisor rejected the deliverable as not meeting its declared work';
+  let targetStage: string | null = null;
+  try {
+    const sig = JSON.parse(readFileSync(path, 'utf-8')) as { reason?: string; stage?: string };
+    if (sig.reason) reason = sig.reason;
+    if (typeof sig.stage === 'string') targetStage = sig.stage;
+  } catch { /* malformed; keep generic reason */ }
+  if (!targetStage && pick.startsWith('reject_')) targetStage = pick.slice('reject_'.length, -'.json'.length);
+  return { path, signal: { targetStage, reason } };
+}
+
+/** Read/persist the per-stage reject counts (bounds re-work loops across iterations). */
+function readRejectCounts(runDirPath: string): Record<string, number> {
+  try { return JSON.parse(readFileSync(join(runDirPath, 'signals', 'reject_counts.json'), 'utf-8')); } catch { return {}; }
+}
+function writeRejectCounts(runDirPath: string, counts: Record<string, number>): void {
+  try {
+    mkdirSync(join(runDirPath, 'signals'), { recursive: true });
+    writeFileSync(join(runDirPath, 'signals', 'reject_counts.json'), JSON.stringify(counts), 'utf-8');
+  } catch { /* non-critical */ }
+}
+
+/**
+ * Consume a pending supervisor REJECT before a deliverable is accepted as
+ * terminal (FIX 2). If a REJECT signal targets a stage that completed this
+ * iteration and the per-stage reject budget is not exhausted, re-pend that stage
+ * (and any gate that consumes it, clearing its verdict) so the work is RE-DONE
+ * rather than accepted, then return true (caller `continue`s the loop). Returns
+ * false to let the run proceed (no reject pending, budget exhausted, or no
+ * resolvable target). The signal is one-shot (deleted on consume).
+ */
+function consumeSupervisorReject(
+  state: StoreState,
+  sorted: StageConfig[],
+  iterationDispatchedIds: string[],
+  ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
+): boolean {
+  const pending = readPendingRejectSignal(ctx.runDirPath);
+  if (!pending) return false;
+
+  // Resolve the target stage. A named target must be a real stage that ran this
+  // iteration. A run-level reject (no target) maps to the most-recently-completed
+  // dispatched stage in this iteration.
+  const completedThisIter = (id: string) =>
+    state.stages[id]?.status === 'complete' &&
+    (iterationDispatchedIds.includes(id) || sorted.some((s) => s.id === id));
+  let resolved: string | null = null;
+  if (pending.signal.targetStage && completedThisIter(pending.signal.targetStage)) {
+    resolved = pending.signal.targetStage;
+  } else if (!pending.signal.targetStage) {
+    const candidates = iterationDispatchedIds
+      .filter(completedThisIter)
+      .map((id) => ({ id, at: state.stages[id]?.completedAt ?? '' }))
+      .sort((a, b) => (a.at < b.at ? 1 : -1));
+    resolved = candidates.length > 0 ? candidates[0].id : null;
+  }
+
+  const counts = readRejectCounts(ctx.runDirPath);
+  const usedForStage = resolved ? (counts[resolved] ?? 0) : 0;
+  const maxRejects = Math.max(0, Math.floor(Number(loadDefaults(ctx.projectDir).supervisor_max_rejects)));
+  const decision = decideRejectAction(pending.signal, resolved, usedForStage, maxRejects);
+
+  // Consume the signal (one-shot) regardless of outcome.
+  try { unlinkSync(pending.path); } catch { /* already gone */ }
+
+  if (decision.action === 'accept') {
+    log.info({ runId: ctx.runId, iteration: ctx.iteration, reason: decision.reason }, 'Supervisor REJECT not actioned — proceeding');
+    return false;
+  }
+
+  // Re-pend the target stage so it is re-done; clear its verdict; re-pend (and
+  // clear verdict for) any gate stage that depends on it so the gate re-evaluates
+  // the re-worked deliverable instead of the stale pass.
+  const repend = (id: string) => {
+    state.stages[id] = { status: 'pending', retries: 0 };
+    try { mkdirSync(join(ctx.runDirPath, 'stages', id), { recursive: true }); } catch { /* ignore */ }
+    const v = join(ctx.runDirPath, `verdict_${id}.json`);
+    try { if (existsSync(v)) unlinkSync(v); } catch { /* ignore */ }
+    const m = join(ctx.runDirPath, 'stages', id, 'metric.json');
+    try { if (existsSync(m)) unlinkSync(m); } catch { /* ignore */ }
+  };
+  repend(decision.targetStage);
+  for (const s of sorted) {
+    if (s.is_gate && (s.depends_on ?? []).includes(decision.targetStage)) repend(s.id);
+  }
+  // Inject the rejection reason as guidance so the re-work knows what to fix.
+  try {
+    appendFileSync(
+      join(ctx.runDirPath, 'supervisor_guidance.md'),
+      `⚠️ DELIVERABLE REJECTED (supervisor REJECT) — stage "${decision.targetStage}": ${decision.reason}\nThe previous deliverable did NOT meet its declared work/criteria. Re-do this stage and produce a deliverable that actually satisfies the stated criteria; do not re-submit the same result.\n`,
+      'utf-8',
+    );
+  } catch { /* non-critical */ }
+
+  counts[decision.targetStage] = decision.nextCount;
+  writeRejectCounts(ctx.runDirPath, counts);
+  state.status = 'running';
+  writeRunState(ctx.projectDir, ctx.runId, state);
+  recordRunEvent(ctx.projectDir, ctx.runId, {
+    type: 'supervisor_reject',
+    runId: ctx.runId,
+    timestamp: new Date().toISOString(),
+    iteration: ctx.iteration,
+    stageId: decision.targetStage,
+    detail: `reject ${decision.nextCount}/${maxRejects}: ${decision.reason}`,
+  });
+  log.warn({ runId: ctx.runId, iteration: ctx.iteration, stage: decision.targetStage, count: decision.nextCount, max: maxRejects }, 'Supervisor REJECT — deliverable not accepted, forcing re-work');
+  return true;
 }
 
 /** Load project defaults, creating config/defaults.yaml from FlowCrew's template if absent. */
@@ -908,6 +1339,7 @@ const AgentConfigSchema = z.object({
   tools: z.array(z.string()).default([]),
   prompt: z.string(),
   adapter: z.string().optional(),
+  handoff_visibility: z.enum(['full', 'minimal', 'none']).optional(),
 });
 
 const ADAPTER_MODULE_MAP: Record<string, string> = {
@@ -1775,12 +2207,21 @@ function metricNamesMatch(metricName: string, verdictName: string): boolean {
     || (GATE_METRIC_SYNONYMS[verdict] ?? []).map(s => s.toLowerCase()).includes(metric);
 }
 
-function validateVerdictAgainstMetricFile(
+export function validateVerdictAgainstMetricFile(
   verdict: Record<string, unknown>,
   metric: Record<string, unknown>,
 ): string | null {
   if (metric.pass === false && verdict.pass === true) {
+    // A closeout/ceiling-deliverable audit legitimately passes (the deliverable is valid)
+    // while the beat-metric legitimately fails (no beat) — an honest negative is a valid
+    // deliverable. The QA signals this with phase-completion metadata. Honor it from EITHER
+    // file: the metric.json OR the verdict itself (observed thrash: the verdict carried
+    // phaseComplete/nextPhase but an early metric.json attempt omitted them, so the gate was
+    // re-rejected for iterations). This does not weaken the measure-round self-deception guard:
+    // a measure round that falsely passes a non-beat is still caught unless it explicitly
+    // declares a phase-completion, which the planner reserves for closeout phases.
     if (metric.phaseComplete === true || metric.phase_complete === true || metric.nextPhase || metric.next_phase) return null;
+    if (verdict.phaseComplete === true || verdict.phase_complete === true || verdict.nextPhase || verdict.next_phase) return null;
     return 'verdict/metric.json mismatch: metric says fail, verdict says pass';
   }
   if (typeof metric.metric === 'string' && typeof verdict.metric === 'string' && !metricNamesMatch(metric.metric, verdict.metric)) {
@@ -2185,7 +2626,7 @@ export async function runWorkflow(
   if (existsSync(briefPath)) {
     const briefContent = readFileSync(briefPath, 'utf-8').trim();
     if (briefContent) {
-      const { terminalStates, program, research, stripped } = parseBriefFrontmatter(briefContent);
+      const { terminalStates, program, research, stripped, frontmatterError } = parseBriefFrontmatter(briefContent);
       taskDescription = stripped || briefContent;
       if (terminalStates || program || research) {
         const s = readRunState(projectDir, runId);
@@ -2201,10 +2642,36 @@ export async function runWorkflow(
       // frontmatter block should agree. The block is the precise expression of
       // intent, so we WARN on mismatch rather than fail.
       const isResearchWorkflow = workflow.name === 'research';
+      // GAP-3: if the brief's frontmatter was MALFORMED (parse error / unclosed
+      // fence / non-object), do NOT silently swallow it. When the run intends to
+      // be a research loop (workflow=research) yet no `research:` block parsed
+      // because of that error, fail LOUD — surfacing the YAML error — instead of
+      // degrading to plain dispatch (which would run an entirely different,
+      // policy-less workflow than the author asked for).
+      if (frontmatterError && isResearchWorkflow && !research) {
+        const s = readRunState(projectDir, runId);
+        s.status = 'failed';
+        s.failureReason = `Research mode degraded: brief frontmatter could not be parsed (${frontmatterError}). The research loop needs a valid \`research:\` block (baseline + policy); refusing to silently fall back to plain dispatch. Fix the YAML and relaunch.`;
+        s.completedAt = new Date().toISOString();
+        writeRunState(projectDir, runId, s);
+        recordRunEvent(projectDir, runId, {
+          type: 'research_mode_degraded',
+          runId,
+          timestamp: s.completedAt,
+          detail: frontmatterError,
+        });
+        writeCampaignEntry(projectDir, s);
+        log.error({ runId, frontmatterError }, 'workflow=research but brief frontmatter failed to parse — failing loud instead of falling back to plain dispatch');
+        return s;
+      }
       if (isResearchWorkflow && !research) {
         log.warn({ runId }, 'workflow=research but brief has no `research:` block — research loop needs baseline+policy; falling back to plain dispatch');
       } else if (research && !isResearchWorkflow) {
         log.warn({ runId, workflow: workflow.name }, 'brief has a `research:` block but workflow is not `research` — research advance gate still active, but consider --workflow research for clarity');
+      } else if (frontmatterError) {
+        // Frontmatter was malformed but the run isn't a research loop — still
+        // surface it (it may have intended terminal_states / program config).
+        log.warn({ runId, frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/program/research config in it was ignored');
       }
       // Program safeguard pre-check at run start. If violated, refuse to start
       // and write a program-level abort artifact for the orchestrator's next
@@ -2277,6 +2744,73 @@ export async function runWorkflow(
   }
 
   try {
+  // Policy-owned terminal for a research/loop run whose iteration budget is exhausted without
+  // the policy shipping/ceilinging (e.g. the agent produced too few measured rounds). Keeps the
+  // research policy as the SOLE terminal authority — a research run never resolves as 'complete'.
+  //
+  // FIX A — `ceiling_hit` vs `incomplete`: this path is reached ONLY when the iteration budget
+  // ran out before the policy itself shipped/ceilinged (a genuine policy stop_ceiling terminates
+  // earlier, via tryAdvanceResearch). So the honest label depends on whether enough rounds were
+  // actually BANKED to constitute a real exhaustive ceiling. A run whose journal has fewer banked
+  // rounds than the policy needs to render a stop_ceiling verdict (e.g. rounds were integrity-
+  // rejected, so the search never measured enough) is `incomplete` — budget exhausted mid-search,
+  // NOT a clean honest-negative ceiling. A run that DID bank enough measured rounds (the policy
+  // had the data to ceiling but the outer loop hit its iteration cap first) stays `ceiling_hit`.
+  //
+  // FIX B — observability: surface the count of integrity-rejected rounds (noop etc., recorded in
+  // research_integrity_rejections.json) in the terminal detail, so honest work the gate discarded
+  // (e.g. a baseline==0 margin objective's legitimate ~0 result) is VISIBLE in the terminal report
+  // rather than silently invisible. This does NOT change the noop gate's decision.
+  const finishResearchCeiling = async (state: StoreState, iterationNum: number, detail: string): Promise<StoreState> => {
+    // Banked (journaled) measured rounds — the rounds that survived the integrity gates.
+    let bankedRounds = 0;
+    try {
+      const j = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8'));
+      if (j && Array.isArray(j.rounds)) bankedRounds = j.rounds.length;
+    } catch { /* no journal → 0 banked */ }
+    // Integrity-gate rejections, by reason (e.g. {"noop":3}). Surfaced for observability.
+    let rejections: Record<string, number> = {};
+    try {
+      const r = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
+      if (r && typeof r === 'object') rejections = r as Record<string, number>;
+    } catch { /* no rejections file → none */ }
+    const totalRejected = Object.values(rejections).reduce((s, n) => s + (typeof n === 'number' ? n : 0), 0);
+    // Minimum banked rounds a genuine policy stop_ceiling would require: the policy ceilings at the
+    // FIRST of maxRounds reached / haltAfterNoImprovement consecutive measured rounds. Task-agnostic:
+    // no domain field/threshold — derived purely from the brief-declared stop conditions.
+    const stop = state.research?.stop;
+    const ceilingFloors: number[] = [];
+    if (typeof stop?.maxRounds === 'number') ceilingFloors.push(stop.maxRounds);
+    if (typeof stop?.haltAfterNoImprovement === 'number') ceilingFloors.push(stop.haltAfterNoImprovement);
+    // With no stop conditions declared the policy can't render an exhaustive ceiling at all, so a
+    // single banked round suffices to call it a (degenerate) ceiling; require >=1 banked round.
+    const requiredRounds = ceilingFloors.length > 0 ? Math.min(...ceilingFloors) : 1;
+    const insufficientRounds = bankedRounds < requiredRounds;
+
+    let terminalDetail = detail;
+    if (insufficientRounds) {
+      // Mid-search budget exhaustion with too few measured rounds for a real ceiling → `incomplete`.
+      state.status = 'incomplete';
+      state.failureReason = `${detail} (banked ${bankedRounds}/${requiredRounds} required measured rounds)`;
+    } else {
+      state.status = 'ceiling_hit';
+    }
+    if (totalRejected > 0) {
+      const summary = Object.entries(rejections).filter(([, n]) => typeof n === 'number' && n > 0).map(([k, n]) => `${k}:${n}`).join(', ');
+      terminalDetail = `${detail} | integrity-rejected rounds: ${totalRejected} (${summary})`;
+    }
+    // FIX D — a budget-exhaustion terminal is always non-ship; record any declared confirm as not-run.
+    recordConfirmNotRun(runDir(projectDir, runId), state.research?.confirm, state.status);
+    state.completedAt = new Date().toISOString();
+    const rg = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
+    if (!rg.allowed) return rg.state;
+    writeRunState(projectDir, runId, state);
+    writeCampaignEntry(projectDir, state);
+    recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration: iterationNum, detail: terminalDetail });
+    log.info({ runId, iteration: iterationNum, status: state.status, bankedRounds, requiredRounds, totalRejected }, 'Research run: iteration budget exhausted — policy-owned terminal (no gate-pass complete)');
+    await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+    return state;
+  };
   // Iteration loop
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     let state = readRunState(projectDir, runId);
@@ -2406,6 +2940,11 @@ export async function runWorkflow(
     // Build sorted stages for this iteration: start from base stages
     const sorted: StageConfig[] = baseStages.map(s => ({ ...s }));
     const injectedDispatchStages = new Set<string>();
+    // Per-plan-stage bounded retry counter for the empty/invalid-dispatch case
+    // (FIX 1). Scoped to this iteration's executeIteration call so a transient
+    // dispatch flake re-plans up to default_plan_stage_retries times before
+    // escalating with specifics, rather than being fatal on the first miss.
+    const planStageRetries = new Map<string, number>();
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
@@ -2496,7 +3035,7 @@ export async function runWorkflow(
     // Inner execution loop for this iteration
     const iterationResult = await executeIteration(
       sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
-      resolvedAgentsDir, roleRegistry, injectedDispatchStages, skills, taskDescription, availableSkillsList,
+      resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription, availableSkillsList,
     );
 
     state = readRunState(projectDir, runId);
@@ -2693,6 +3232,26 @@ export async function runWorkflow(
       detail: `iteration ${iteration} completed`,
     });
 
+    // FIX 2: before ACCEPTING any deliverable as terminal (gate-passed → complete
+    // or allDone → complete below), honor a pending supervisor REJECT. If the
+    // supervisor judged an emitted deliverable does not meet its declared work,
+    // re-pend that stage (+ its gate) and RE-RUN it WITHIN this iteration so the
+    // work is RE-DONE rather than accepted (a `continue` of the outer loop would
+    // reset the dispatched stages on the re-plan path and lose the re-work).
+    // Bounded by default_supervisor_max_rejects so a mis-firing supervisor cannot
+    // loop forever; the in-prompt guard keeps it from over-rejecting an honest
+    // negative. Re-evaluate gates after each re-work pass.
+    while (!anyFailed(state) && !isTerminalRunStatus(state.status)) {
+      const reworked = consumeSupervisorReject(state, sorted, iterationDispatchedIds, { projectDir, runId, runDirPath, iteration });
+      if (!reworked) break;
+      await executeIteration(
+        sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription, availableSkillsList,
+      );
+      state = readRunState(projectDir, runId);
+      if (isTerminalStatus(state.status)) return state;
+    }
+
     // Check if last gate passed
     if (iterationDispatchedIds.length > 0 && !anyFailed(state) && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
       // Bug ③ fix: before marking the whole run complete, see if any gate
@@ -2725,6 +3284,18 @@ export async function runWorkflow(
         log.info({ runId, iteration, gate: pendingNextPhase.gateId, nextPhase: pendingNextPhase.nextPhase }, 'Gate passed with nextPhase set — continuing to next iteration instead of marking complete');
         continue;
       }
+      // Terminal-authority invariant (P1.3): on a research/loop run the POLICY is the SOLE
+      // terminal authority (ship/ceiling via tryAdvanceResearch at the iteration top). A passing
+      // gate must NOT complete the run — that bypass let a run end with too few (or zero) measured
+      // rounds. Keep re-planning until the policy terminates; if the iteration budget is exhausted
+      // first, ceiling (insufficient measured rounds) — never a silent 'complete'.
+      if (state.research) {
+        if (iteration < maxIterations) {
+          log.info({ runId, iteration }, 'Research run: gate passed but policy has not shipped/ceilinged — continuing (policy is sole terminal authority)');
+          continue;
+        }
+        return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
+      }
       // Terminal-state already handled by the top gate + eager post-batch gate
       // (with an isTerminalStatus early-return after executeIteration), so
       // reaching here means a plain gate-passed completion.
@@ -2751,6 +3322,15 @@ export async function runWorkflow(
       if (state.status === 'failed') {
         writeCampaignEntry(projectDir, state);
         return state;
+      }
+      // Terminal-authority invariant (P1.3): research/loop runs never complete by default — only
+      // the policy ships/ceilings. Keep re-planning until budget, then ceiling.
+      if (state.research) {
+        if (iteration < maxIterations) {
+          log.info({ runId, iteration }, 'Research run: no terminal from policy yet — continuing (policy is sole terminal authority)');
+          continue;
+        }
+        return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
       }
       // Terminal-state already handled by the top + eager gates (see above).
       state.status = 'complete';
@@ -2799,8 +3379,17 @@ export async function runWorkflow(
 
     // Max iterations reached
     if (iteration === maxIterations) {
-      state.status = 'failed';
-      state.failureReason = `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s).`;
+      // GAP-1 belt-and-suspenders: NEVER clobber an already-terminal status. An
+      // eager reality_gate_failed / ceiling / ship set earlier in this iteration
+      // (e.g. via tryAdvanceResearch or the reject-rework loop) is the truthful
+      // verdict the outer loop must see — overwriting it to 'incomplete' here
+      // would manufacture a false outcome.
+      if (isTerminalStatus(state.status)) return state;
+      // A+(c): budget/iteration exhausted mid-search WITHOUT a clean exhaustive
+      // ceiling is `incomplete` — distinct from `failed` (crash) and `ceiling_hit`
+      // (honest negative). The search simply ran out of attempts.
+      state.status = 'incomplete';
+      state.failureReason = `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s) — search budget exhausted mid-progress (incomplete, not a crash).`;
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
@@ -2811,7 +3400,7 @@ export async function runWorkflow(
         iteration,
         detail: state.status,
       });
-      log.info({ runId, iteration }, 'Max iterations reached, run failed');
+      log.info({ runId, iteration }, 'Max iterations reached, run incomplete (budget exhausted mid-search)');
       return state;
     }
 
@@ -2830,6 +3419,9 @@ export async function runWorkflow(
 
   // Should not reach here, but safety net
   const finalState = readRunState(projectDir, runId);
+  // GAP-1 belt-and-suspenders: if the loop already reached a terminal status,
+  // do NOT overwrite it with the safety-net 'failed' — return the truthful state.
+  if (isTerminalStatus(finalState.status)) return finalState;
   finalState.status = 'failed';
   finalState.failureReason = 'Workflow ended unexpectedly.';
   finalState.completedAt = new Date().toISOString();
@@ -3004,6 +3596,7 @@ async function executeIteration(
   resolvedAgentsDir: string,
   roleRegistry: Map<string, { name: string; description: string }>,
   injectedDispatchStages: Set<string>,
+  planStageRetries: Map<string, number>,
   skills?: string,
   taskDescription?: string,
   availableSkills?: string,
@@ -3036,32 +3629,67 @@ async function executeIteration(
             s.id !== stage.id && state.stages[s.id]?.status === 'pending'
           );
           if (!hasStaticFollowUp) {
+            // A dynamic_dispatch (plan) stage exited 0 (worker.ts marks exit-0
+            // 'complete' with no semantic check) but produced ZERO valid injected
+            // stages and there is no static follow-up. This is usually a TRANSIENT
+            // LLM flake (truncated/empty/unparseable dispatch.yaml) — previously
+            // fatal, which punted to the human and bypassed the re-plan + retry
+            // machinery. Make it a BOUNDED RETRY of the plan stage instead, and
+            // only escalate (with the SPECIFIC parse/unknown-role detail) once the
+            // budget is exhausted — or immediately if the failure is genuine (every
+            // stage names an unknown role: re-planning the same brief just repeats it).
             const dispatchPath = join(runDir(projectDir, runId), 'dispatch.yaml');
             const dispatchExists = existsSync(dispatchPath);
-            let reason: string;
-            if (dispatchExists) {
-              // Diagnose why all stages were rejected
-              let detail = '';
-              try {
-                const raw = parseYaml(readFileSync(dispatchPath, 'utf-8'));
-                const items = Array.isArray(raw) ? raw : (raw?.stages ?? []);
-                const unknownRoles = (items as Record<string, unknown>[])
-                  .filter(i => i?.role && !roleRegistry.has(i.role as string))
-                  .map(i => `"${i.role}"`)
-                  .filter((v, idx, arr) => arr.indexOf(v) === idx);
-                if (unknownRoles.length > 0) {
-                  detail = ` Unknown role(s): ${unknownRoles.join(', ')}. Available: ${[...roleRegistry.keys()].join(', ')}.`;
-                }
-              } catch { /* best effort */ }
-              reason = `Planner wrote dispatch.yaml but it contained no valid stages.${detail} Refine the task brief and try again.`;
-            } else {
-              reason = 'Planner did not produce an execution plan (dispatch.yaml). Refine the task brief and try again.';
+            let rawDispatchText: string | null = null;
+            if (dispatchExists) { try { rawDispatchText = readFileSync(dispatchPath, 'utf-8'); } catch { /* best effort */ } }
+            const diagnosis = diagnoseEmptyDispatch(dispatchExists, rawDispatchText, [...roleRegistry.keys()]);
+            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
+            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
+            const decision = decideEmptyDispatchAction(diagnosis, retriesUsed, maxPlanRetries);
+
+            if (decision.action === 'retry') {
+              // Bounded re-plan: delete the bad dispatch.yaml, re-pend the plan
+              // stage (so it re-runs), bump its retry counter, and stamp the
+              // specific error into status.json so buildRetryPreamble injects the
+              // dispatch-specific re-prompt ("you failed to emit a valid
+              // dispatch.yaml — here is the parse error / required schema — write
+              // ONLY the file"). Then loop so the plan stage runs again.
+              try { if (dispatchExists) unlinkSync(dispatchPath); } catch { /* already gone */ }
+              planStageRetries.set(stage.id, decision.nextRetry);
+              injectedDispatchStages.delete(stage.id); // allow re-injection after the re-run
+              const replanStatus: StageStatus = {
+                ...state.stages[stage.id],
+                status: 'pending',
+                retries: decision.nextRetry,
+                error: decision.error,
+              };
+              writeStageStatus(projectDir, runId, stage.id, replanStatus);
+              state.stages[stage.id] = replanStatus;
+              writeRunState(projectDir, runId, state);
+              log.warn({ stage: stage.id, retry: decision.nextRetry, max: maxPlanRetries, detail: decision.detail }, 'Plan stage emitted no valid dispatch — bounded re-plan retry');
+              recordRunEvent(projectDir, runId, {
+                type: 'plan_dispatch_retry',
+                runId,
+                timestamp: new Date().toISOString(),
+                iteration: state.currentIteration ?? 1,
+                detail: `plan retry ${decision.nextRetry}/${maxPlanRetries}: ${decision.detail}`,
+              });
+              break; // restart the while(true) loop → ready stages now include the re-pended plan stage
             }
-            log.error({ stage: stage.id }, reason);
-            state.status = 'failed';
-            state.failureReason = reason;
+
+            // Escalate with specifics (NOT the generic "refine the brief" punt).
+            log.error({ stage: stage.id, status: decision.status, unknownRoles: decision.unknownRoles }, decision.reason);
+            state.status = decision.status;
+            state.failureReason = decision.reason;
             state.completedAt = new Date().toISOString();
             writeRunState(projectDir, runId, state);
+            recordRunEvent(projectDir, runId, {
+              type: 'run_completed',
+              runId,
+              timestamp: state.completedAt,
+              iteration: state.currentIteration ?? 1,
+              detail: `${decision.status}: ${decision.reason}`,
+            });
             return state;
           }
           log.info({ stage: stage.id }, 'No dispatch.yaml — falling back to static stages');
@@ -3145,7 +3773,16 @@ async function executeIteration(
       let availableRoles: string | undefined;
       let availableChecks: string | undefined;
       let resultSchema: string | undefined;
+      let contextInventory: string | undefined;
+      let ledgerDigest: string | undefined;
       if (stage.dynamic_dispatch) {
+        // Context primitive: inject the on-disk data/asset inventory so the planner's Propose
+        // step works from the real world-model (never signposts acquiring data already present).
+        contextInventory = summarizeContext(projectDir, state.research?.contextRoots ?? ['data']);
+        // Ledger primitive: inject the campaign's tried directions + dead-ends so Propose does
+        // not repeat prior work. Always computed (not gated by --no-inherit: it is the compact
+        // dedup ledger, not the verbose narrative context that flag suppresses).
+        ledgerDigest = summarizeLedger(projectDir, state.campaignId);
         availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
         // Inject the self-describing deterministic-check vocabulary so the planner
         // composes gates from real checks, not only free-text QA prose.
@@ -3264,6 +3901,8 @@ async function executeIteration(
         availableChecks,
         availableSkills,
         resultSchema,
+        contextInventory,
+        ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
       });

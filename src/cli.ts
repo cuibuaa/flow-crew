@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { campaignDir, runsRoot, extractTaskTitle } from './store.js';
+import { campaignDir, runsRoot, extractTaskTitle, isSuccessfulRunStatus } from './store.js';
 import { ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
 import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
 import { diffVersions, readHead, rollback } from './brief-versioning.js';
@@ -319,6 +319,7 @@ async function cmdQuick() {
   let task = '';
   let adapter = '';
   let workflow = 'default';
+  let workflowExplicit = false; // true once the user passes --workflow, so we don't override their choice
   let maxIterations: number | undefined;
   let timeout: number | undefined;
   let supervise = true; // supervisor brain on by default; opt out with --no-supervise
@@ -335,7 +336,7 @@ async function cmdQuick() {
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
     if (args[i] === '--adapter' && args[i + 1]) { adapter = args[++i]; launchArgs.push('--adapter', adapter); continue; }
-    if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; launchArgs.push('--workflow', workflow); continue; }
+    if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; workflowExplicit = true; launchArgs.push('--workflow', workflow); continue; }
     if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); launchArgs.push('--max-iterations', String(maxIterations)); continue; }
     if (args[i] === '--timeout' && args[i + 1]) { timeout = parseInt(args[++i], 10); launchArgs.push('--timeout', String(timeout)); continue; }
     if (args[i] === '--supervise') { supervise = true; launchArgs.push('--supervise'); continue; }
@@ -367,6 +368,20 @@ async function cmdQuick() {
         if (typeof runJson.taskDescription === 'string') task = runJson.taskDescription;
       } catch { /* ignore */ }
     }
+  }
+
+  // Auto-select the research workflow when the brief carries a `research:` frontmatter block and
+  // the user did not explicitly choose a workflow. A research brief run under the default
+  // plan-execute-review loop terminates after a single round (supervisor completion-detection)
+  // rather than running the policy's multi-round loop — so honor the brief's intent.
+  const hasResearchBlock = (text: string): boolean => {
+    const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text.replace(/^﻿?\s*/, ''));
+    return !!fm && /^research\s*:/m.test(fm[1]);
+  };
+  if (!workflowExplicit && workflow === 'default' && hasResearchBlock(task)) {
+    workflow = 'research';
+    launchArgs.push('--workflow', 'research');
+    console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
   }
 
   if (!task) {
@@ -522,13 +537,16 @@ async function cmdQuick() {
   } catch { /* non-critical */ }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
-  const icon = finalState.status === 'complete' ? '✓' : '✗';
+  const succeeded = isSuccessfulRunStatus(finalState.status);
+  const icon = succeeded ? '✓' : '✗';
   console.log(`\n${icon} Workflow "${config.name}" ${finalState.status} (${totalTime}s total)`);
   for (const [id, st] of Object.entries(finalState.stages) as [string, { status: string; duration_ms?: number }][]) {
     const si = st.status === 'complete' ? '✓' : st.status === 'failed' ? '✗' : st.status === 'skipped' ? '⊘' : '·';
     console.log(`  ${si} ${id}: ${st.status}${st.duration_ms ? ` (${(st.duration_ms / 1000).toFixed(1)}s)` : ''}`);
   }
-  process.exitCode = finalState.status === 'complete' ? 0 : 1;
+  // A research ceiling (honest negative) and a shipped beat are successes, not failures —
+  // exit 0 so a spawning parent (campaign outer loop's execSync) doesn't read it as a crash.
+  process.exitCode = succeeded ? 0 : 1;
 }
 
 /**
@@ -966,6 +984,128 @@ Environment:
 `);
 }
 
+/**
+ * P3 autonomous outer loop: campaign_planner proposes a direction → a full inner research run
+ * explores it → the same policy decides → repeat until the policy ships/ceilings or the planner
+ * runs dry. Each direction is a real ~45min inner run, so this command runs for hours.
+ */
+async function cmdCampaignLoop(): Promise<void> {
+  let projectDir = detectProjectDir();
+  let campaignArg: string | undefined;
+  let task = '';
+  let maxDirections: number | undefined;
+  let noScout = false;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
+    if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; continue; }
+    if (args[i] === '--max-directions' && args[i + 1]) { maxDirections = parseInt(args[++i], 10); continue; }
+    if (args[i] === '--no-scout') { noScout = true; continue; } // skip the up-front literature scout
+    if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
+    if (args[i] === '-') { task = readFileSync(0, 'utf-8').trim(); continue; }
+  }
+  if (!task || !campaignArg) {
+    console.error('Usage: flowcrew campaign-loop - --project <dir> --campaign <name> [--max-directions N]');
+    console.error('  Autonomous outer loop: proposes a NEW direction, runs a full inner research loop on it, repeats until frontier/ship.');
+    process.exit(1); return;
+  }
+  const { parseBriefFrontmatter } = await import('./scheduler.js');
+  const { research } = parseBriefFrontmatter(task);
+  if (!research) { console.error('campaign-loop needs a brief with a research:/objective: block (baseline + policy + stop).'); process.exit(1); return; }
+  const objective = { ...research, stop: { ...(research.stop ?? {}), ...(maxDirections !== undefined ? { maxRounds: maxDirections } : {}) } };
+
+  const cfgRole = join(import.meta.dirname ?? '.', '..', 'config', 'agents', 'campaign_planner.yaml');
+  const localRole = join(projectDir, 'config', 'agents', 'campaign_planner.yaml');
+  const proposeRole = parseYaml(readFileSync(existsSync(localRole) ? localRole : cfgRole, 'utf-8')) as { name: string; description: string; model: string; reasoning_effort: string; tools: string[]; prompt: string };
+
+  const projDefaults = loadProjectDefaults(projectDir);
+  // The inner `quick` runs get the project's pinned model via the scheduler, but this propose
+  // call hits the adapter directly — so apply the project default here too. Otherwise a role
+  // model of 'default' lets the codex adapter fall back to its built-in default (gpt-5.3-codex),
+  // which 400s on a ChatGPT account, and the failed propose would masquerade as a frontier.
+  if ((!proposeRole.model || proposeRole.model === 'default') && projDefaults.model) proposeRole.model = projDefaults.model;
+  const adapterName = projDefaults.adapter || 'codex';
+  const adapterInstance = adapterName === 'claude'
+    ? new (await import('./adapters/claude.js')).ClaudeAdapter()
+    : new (await import('./adapters/codex.js')).CodexAdapter();
+
+  const cliPath = process.argv[1];
+  const proposeDir = join(runsRoot(), `campaign-loop-propose-${process.pid}`);
+  mkdirSync(proposeDir, { recursive: true });
+
+  const { runLiveCampaign, scoutDirections } = await import('./campaign-loop-live.js');
+
+  // LITERATURE SCOUT (before exploring): web_search the external literature for methods not in the
+  // ledger that are expressible on the on-disk assets, and EXPAND the portfolio with them — so the
+  // campaign can autonomously discover breakthroughs outside the brief's static list (and a frontier
+  // is literature-backed, not confabulated from the ledger alone). Merged into objective.directions,
+  // which the deterministic coverage floor then forces to be tried before any frontier.
+  if (!noScout) {
+    const scoutCfg = join(import.meta.dirname ?? '.', '..', 'config', 'agents', 'campaign_scout.yaml');
+    const scoutLocal = join(projectDir, 'config', 'agents', 'campaign_scout.yaml');
+    const scoutPath = existsSync(scoutLocal) ? scoutLocal : scoutCfg;
+    if (existsSync(scoutPath)) {
+      const scoutRole = parseYaml(readFileSync(scoutPath, 'utf-8')) as { name: string; description: string; model: string; reasoning_effort: string; tools: string[]; prompt: string };
+      if ((!scoutRole.model || scoutRole.model === 'default') && projDefaults.model) scoutRole.model = projDefaults.model;
+      console.log('Campaign-loop: running the literature scout (web_search) to expand the portfolio before exploring...');
+      try {
+        const found = await scoutDirections({
+          projectDir, campaignId: campaignArg, objective,
+          scoutRole, adapter: adapterInstance as unknown as import('./adapters/base.js').Adapter,
+          runOpts: { timeout_ms: 600000, workDir: proposeDir, runDir: proposeDir, stageId: 'campaign_scout' },
+          briefContext: task,
+        });
+        const existing = new Set((objective.directions ?? []).map((d) => d.toLowerCase()));
+        const fresh = found.filter((d) => !existing.has(d.toLowerCase()));
+        if (fresh.length) {
+          objective.directions = [...(objective.directions ?? []), ...fresh];
+          console.log(`Scout added ${fresh.length} literature-found direction(s) to the portfolio: ${fresh.join(', ')}`);
+        } else {
+          console.log('Scout found no new literature-expressible direction beyond the ledger/portfolio.');
+        }
+      } catch (e) {
+        console.error(`Scout failed (proceeding with the brief portfolio): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  console.log(`Campaign-loop: autonomous outer loop on '${campaignArg}' (adapter=${adapterName}). Each direction spawns a full inner run — this runs for hours.`);
+  const result = await runLiveCampaign({
+    projectDir, campaignId: campaignArg, objective,
+    proposeRole, adapter: adapterInstance as unknown as import('./adapters/base.js').Adapter,
+    proposeRunOpts: { timeout_ms: 600000, workDir: proposeDir, runDir: proposeDir, stageId: 'campaign_propose' },
+    briefContext: task, // give the proposer the campaign brief (goal + gates + historical ledger) so it does not re-propose dead directions
+    launchInner: async (direction) => {
+      const seeded = task + `\n\n## OUTER-LOOP DIRECTIVE\nFocus this entire run on ONE direction: ${direction}\n`;
+      let out = '';
+      try {
+        out = execSync(`node ${JSON.stringify(cliPath)} quick - --project ${JSON.stringify(projectDir)} --campaign ${JSON.stringify(campaignArg)} --no-inherit-campaign`, { input: seeded, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
+      } catch (e) { out = String((e as { stdout?: string }).stdout ?? '') + String((e as { stderr?: string }).stderr ?? ''); }
+      const m = /"runId":"([^"]+)"/.exec(out);
+      if (!m) throw new Error(`inner run for '${direction}' produced no runId`);
+      console.log(`  ↳ direction '${direction}' → run ${m[1]}`);
+      return m[1];
+    },
+    readBest: (runId) => {
+      try {
+        const j = JSON.parse(readFileSync(join(runsRoot(), runId, 'research_journal.json'), 'utf-8')) as { rounds?: { result?: number }[] };
+        const rs = (j.rounds ?? []).map((r) => r.result).filter((v): v is number => typeof v === 'number');
+        if (!rs.length) return objective.baseline;
+        return objective.higherIsBetter === false ? Math.min(...rs) : Math.max(...rs);
+      } catch { return objective.baseline; }
+    },
+    readRunStatus: (runId) => {
+      // The inner run's terminal verdict. A reality_gate_failed run had its claim rejected by the
+      // inner safety net — the outer loop must not ship its journaled number.
+      try {
+        const r = JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')) as { status?: string };
+        return typeof r.status === 'string' ? r.status : 'complete';
+      } catch { return 'complete'; }
+    },
+  });
+  console.log(`Campaign-loop ${result.decision}: ${result.reason}`);
+  console.log(`Directions explored: ${result.outcomes.map((o) => `${o.direction}=${o.rejected ? `REJECTED(${o.status})` : o.bestResult}`).join(', ') || '(none)'}`);
+}
+
 // Main
 switch (command) {
   case 'init':
@@ -991,6 +1131,9 @@ switch (command) {
     break;
   case 'campaign':
     cmdCampaign().catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'campaign-loop':
+    cmdCampaignLoop().catch((err) => { console.error(err); process.exit(1); });
     break;
   case 'daemon':
     import('./cli-daemon.js').then(({ cmdDaemon }) => cmdDaemon(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });

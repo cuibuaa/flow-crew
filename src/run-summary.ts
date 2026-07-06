@@ -225,8 +225,26 @@ function renderResearchOutcome(state: StoreState, data: ResearchData): string {
   const baseline = rc?.baseline;
   const best = data.decision?.runningBest;
   const lines: string[] = [];
-  const decisionLabel = data.decision?.decision ?? (state.status === 'shipped' ? 'ship' : state.status === 'ceiling_hit' ? 'stop_ceiling' : state.status);
-  lines.push(`- **Decision:** ${decisionLabel}${data.decision?.reason ? ` — ${data.decision.reason}` : ''}`);
+  // FIX C — the Decision label must derive from the TERMINAL run.json status, not the
+  // research_decision.json snapshot, which can be STALE: rounds integrity-rejected after the
+  // last decision write never refresh it, so a snapshot reading `continue`/`ship` can contradict
+  // a true terminal `ceiling_hit`/`incomplete`. When the run is terminal, the run.json status is
+  // authoritative; the snapshot `reason` is only used as supplementary text and only when the
+  // snapshot is consistent with the terminal status (else it would echo a stale rationale).
+  const TERMINAL = new Set(['shipped', 'ceiling_hit', 'incomplete', 'complete', 'failed', 'reality_gate_failed', 'escalated', 'stopped', 'phase_complete']);
+  const isTerminal = TERMINAL.has(state.status);
+  // Map the terminal status to the policy-decision vocabulary used in the summary.
+  const terminalDecisionLabel = state.status === 'shipped' ? 'ship'
+    : state.status === 'ceiling_hit' ? 'stop_ceiling'
+    : state.status; // incomplete / failed / reality_gate_failed / etc. shown verbatim
+  // The snapshot is "consistent" with the terminal only when it agrees (e.g. a real ship snapshot
+  // on a shipped run, or a stop_ceiling snapshot on a ceiling_hit run). A `continue` snapshot on a
+  // terminal run is by definition stale.
+  const snapshotConsistent = isTerminal && data.decision?.decision === terminalDecisionLabel;
+  const decisionLabel = isTerminal ? terminalDecisionLabel : (data.decision?.decision ?? state.status);
+  const reasonSuffix = snapshotConsistent && data.decision?.reason ? ` — ${data.decision.reason}`
+    : (!isTerminal && data.decision?.reason ? ` — ${data.decision.reason}` : '');
+  lines.push(`- **Decision:** ${decisionLabel}${reasonSuffix}`);
   if (typeof baseline === 'number' && typeof best === 'number') {
     const delta = best - baseline;
     const improved = higherIsBetter ? delta > 0 : delta < 0;
