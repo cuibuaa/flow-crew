@@ -105,6 +105,24 @@ function cleanupRunEndArtifacts(codexHome: string): void {
   }
 }
 
+/**
+ * Finalize a stage's codex_home once the stage's codex process has exited.
+ * On SUCCESS (exitCode 0) purge it entirely — the codex CLI home is transient
+ * cruft (~90M/stage, dominated by the `.tmp/plugins` git packs) with zero
+ * post-run value; the stage's captured output (`live.log`) and deliverables live
+ * OUTSIDE codex_home (siblings under stages/<id>/) and are untouched. On any
+ * FAILURE / abort / timeout keep codex_home for debugging, dropping only the
+ * already-checkpointed SQLite WAL/SHM. This bounds ~/.fc/runs disk growth: before
+ * this, codex_home was 99% of a run's size and accumulated unboundedly.
+ */
+export function finalizeCodexHome(codexHome: string, exitCode: number): void {
+  if (exitCode === 0) {
+    try { rmSync(codexHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  } else {
+    cleanupRunEndArtifacts(codexHome);
+  }
+}
+
 export function writeCodexConfig(codexHome: string, role: AgentConfig): string {
   mkdirSync(codexHome, { recursive: true });
   syncCodexAuthFiles(codexHome);
@@ -156,8 +174,9 @@ export class CodexAdapter implements Adapter {
     args.push('--');
     args.push(prompt);
 
+    let result: RunResult | undefined;
     try {
-      const result = await execWithTimeout('codex', args, {
+      result = await execWithTimeout('codex', args, {
         cwd: opts.workDir,
         timeout_ms: opts.timeout_ms,
         liveLogPath: join(opts.runDir, 'stages', opts.stageId, 'live.log'),
@@ -175,7 +194,8 @@ export class CodexAdapter implements Adapter {
       result.output = extractFinalMessage(result.output);
       return result;
     } finally {
-      cleanupRunEndArtifacts(codexHome);
+      // Stage done: purge codex_home on success, keep on failure (see finalizeCodexHome).
+      finalizeCodexHome(codexHome, result?.exitCode ?? 1);
     }
   }
 
