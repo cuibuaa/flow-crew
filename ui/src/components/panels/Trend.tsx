@@ -11,7 +11,7 @@ export default function Trend({ campaign }: { campaign?: Partial<Campaign> | nul
   const max = Math.max(...values, target?.max ?? 0, target?.min ?? 0, 1);
   return (
     <div className="section" data-testid="panel-trend">
-      <h2>Iteration trend <span className="h2-hint">{iterations.length} entries · format={fmt}{target ? ` · target=${JSON.stringify(target)}` : ""}</span></h2>
+      <h2>Result trend <span className="h2-hint">{iterations.length} recorded outcomes</span></h2>
       <div className="trend-chart">
         {iterations.map((item, index) => {
           const value = item.value ?? 0;
@@ -21,7 +21,7 @@ export default function Trend({ campaign }: { campaign?: Partial<Campaign> | nul
           const verdict = item.verdict ?? "interim";
           return (
             <div className="trend-row" key={`${item.label}-${index}`}>
-              <span className="label">{item.label}</span>
+              <span className="label" title={item.label}>Result</span>
               <div className="bar-container">
                 {target ? <div className="valid-range-band" data-testid="valid-range-band" style={{ left: `${left.toFixed(1)}%`, right: `${right.toFixed(1)}%` }} /> : null}
                 <div className={`bar ${verdict}`} data-testid={`trend-bar-${verdict}`} style={{ width: `${width.toFixed(1)}%` }}>

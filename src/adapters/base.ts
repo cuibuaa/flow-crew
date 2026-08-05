@@ -10,19 +10,43 @@ export interface RunResult {
   duration_ms: number;
   timedOut?: boolean;
   adapterError?: boolean;
+  /** One actionable sentence explaining a diagnosed failure (see adapters/diagnose.ts). */
+  friendlyError?: string;
   tokens_in?: number;
   tokens_out?: number;
+  /** Structured adapter attribution for files written during this invocation. */
+  writes?: string[];
+  writeAttribution?: 'structured' | 'snapshot' | 'unknown';
+  /** Exact conversation UUID captured from adapter event output. */
+  sessionId?: string;
+  /** Worker-owned effective soft budget after any accepted extension. */
+  effectiveTimeoutMs?: number;
+  /** Worker-owned authoritative termination attribution. */
+  timeoutTerminationCause?: string;
+  /** Scheduler refused to launch because no strictly larger budget fit the chain cap. */
+  hardCapExhausted?: boolean;
 }
 
 export interface RunOpts {
+  /** Attempt-local effective soft budget, retained for adapter/test observability. */
   timeout_ms: number;
+  /** Child-local hard timer derived from the aggregate technical-chain remainder. */
+  hard_timeout_ms?: number;
   workDir: string;
   runDir: string;
   stageId: string;
+  /** Resume only this explicit UUID; global-most-recent selection is forbidden. */
+  resumeSessionId?: string;
+  /** Stage whose isolated adapter home owns resumeSessionId. */
+  sessionOwnerStageId?: string;
+  /** Keep the owning adapter home for one eligible direct successor. */
+  preserveSession?: boolean;
   /** When triggered, the spawned child process group is SIGKILLed and the adapter returns
    *  exitCode=137 ("Aborted by supervisor"). Used by worker.ts to honor supervisor ABORT
    *  verdicts that previously only wrote a signal file with no consumer. */
   abortSignal?: AbortSignal;
+  /** Aggregate technical-chain cancellation. Adapters must not reset this deadline. */
+  hardAbortSignal?: AbortSignal;
 }
 
 export interface AgentConfig {
@@ -100,7 +124,7 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
       resolve({
         output: aborted
-          ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage aborted by supervisor]\n')
+          ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage cancelled by control plane]\n')
           : (output ?? Buffer.concat(chunks).toString('utf-8')),
         exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
         duration_ms: Date.now() - start,
@@ -192,7 +216,7 @@ export function execWithStdin(
       clearTimeout(timer);
       if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
       resolve({
-        output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage aborted by supervisor]\n' : ''),
+        output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
         exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
         duration_ms: Date.now() - start,
         timedOut,

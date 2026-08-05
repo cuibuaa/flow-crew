@@ -11,7 +11,7 @@
  * the CLI (`flowcrew campaign-loop`) supplies the production launcher/reader.
  */
 import type { Adapter, AgentConfig, RunOpts } from './adapters/base.js';
-import { type ResearchConfig, isSuccessfulRunStatus } from './store.js';
+import { type ResearchConfig, isPausedRunStatus, isSuccessfulRunStatus } from './store.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { runCampaignLoop, type CampaignLoopDeps, type CampaignLoopResult, type DirectionOutcome } from './campaign-loop.js';
@@ -133,6 +133,18 @@ export interface LiveCampaignDepsOpts {
   briefContext?: string;
 }
 
+/** The inner run is suspended, so the outer loop has no outcome to score yet. */
+export class CampaignAwaitingApprovalError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly direction: string,
+    readonly status: string,
+  ) {
+    super(`campaign direction '${direction}' is awaiting approval in run ${runId} (${status})`);
+    this.name = 'CampaignAwaitingApprovalError';
+  }
+}
+
 /** Build the real {propose, executeDirection, objective} for runCampaignLoop. */
 export function createLiveCampaignDeps(opts: LiveCampaignDepsOpts): CampaignLoopDeps {
   return {
@@ -160,6 +172,12 @@ export function createLiveCampaignDeps(opts: LiveCampaignDepsOpts): CampaignLoop
       // it at baseline (no improvement) instead of its journaled claim is what stops a caught false
       // positive from leaking out of the outer loop as a false ship.
       const status = opts.readRunStatus ? opts.readRunStatus(runId) : 'complete';
+      // A pause is not a rejected experiment: no verdict exists yet. Abort this
+      // outer invocation before runCampaignLoop appends an outcome or marks the
+      // direction tried; the operator can resume after resolving the inbox.
+      if (isPausedRunStatus(status)) {
+        throw new CampaignAwaitingApprovalError(runId, direction, status);
+      }
       if (!isSuccessfulRunStatus(status)) {
         return { direction, bestResult: opts.objective.baseline, status, rejected: true };
       }

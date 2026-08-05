@@ -1,29 +1,22 @@
-import { useCallback } from "react";
-import type { Campaign, CampaignKGEdge, CampaignKGNode, WorkspaceRun } from "../types";
-import BriefRevisions from "./panels/BriefRevisions";
-import CampaignKnowledge from "./panels/CampaignKnowledge";
-import Header from "./panels/Header";
-import KPIs from "./panels/KPIs";
-import Phases from "./panels/Phases";
-import RunsList from "./panels/RunsList";
-import Trend from "./panels/Trend";
+import CampaignPage from "./campaign/CampaignPage";
+import type { CampaignOperatorView, CampaignRunPage, SourceResult } from "./campaign/types";
 
-export default function Workspace({ campaign, kgNodes, onRunClick, onClickIterate }: { campaign: Campaign; kgNodes?: CampaignKGNode[]; kgEdges?: CampaignKGEdge[]; onRunClick?: (run: WorkspaceRun) => void; onClickIterate?: () => void }) {
-  const viewBrief = useCallback(() => {
-    const panel = document.querySelector<HTMLElement>('[data-testid="panel-brief-revisions"]');
-    panel?.scrollIntoView({ behavior: "smooth", block: "start" });
-    panel?.focus({ preventScroll: true });
-  }, []);
+// Keep the former panel entry points importable for downstream component consumers.
+// The operator page below intentionally does not mount this legacy presentation model.
+export { default as LegacyBriefRevisions } from "./panels/BriefRevisions";
+export { default as LegacyCampaignHeader } from "./panels/Header";
+export { default as LegacyCampaignKPIs } from "./panels/KPIs";
+export { default as LegacyCampaignPhases } from "./panels/Phases";
+export { default as LegacyCampaignTrend } from "./panels/Trend";
 
-  return (
-    <div data-testid="workspace">
-      <Header campaign={campaign} onViewBrief={viewBrief} onClickIterate={onClickIterate} />
-      <KPIs campaign={campaign} />
-      <Trend campaign={campaign} />
-      <Phases phases={campaign.phases} />
-      <BriefRevisions revisions={campaign.brief_revisions} />
-      <CampaignKnowledge campaignId={campaign.id} nodes={kgNodes} phases={campaign.phases} />
-      <RunsList runs={campaign.runs ?? []} metricFormat={campaign.metric?.format ?? "raw"} onRunClick={onRunClick} />
-    </div>
-  );
+export default function Workspace({
+  view,
+  refreshError,
+  loadOlder,
+}: {
+  view: CampaignOperatorView;
+  refreshError?: string | null;
+  loadOlder?: (id: string, cursor: string) => Promise<SourceResult<CampaignRunPage>>;
+}) {
+  return <CampaignPage view={view} refreshError={refreshError} loadOlder={loadOlder} />;
 }

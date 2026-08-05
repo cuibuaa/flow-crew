@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { BriefPatch } from './campaign.js';
+import { readJsonlFile } from './jsonl.js';
 import { runsRoot } from './store.js';
 
 const BriefPatchSchema = z.object({
@@ -32,13 +33,7 @@ export interface CampaignRevisionRequest {
 
 function readJsonl(path: string): unknown[] {
   if (!existsSync(path)) return [];
-  const out: unknown[] = [];
-  for (const line of readFileSync(path, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try { out.push(JSON.parse(trimmed) as unknown); } catch { /* skip malformed escalation lines */ }
-  }
-  return out;
+  return readJsonlFile<unknown>(path);
 }
 
 export function readEscalations(runDir: string): CampaignRevisionRequest[] {

@@ -1,0 +1,10 @@
+# Paths kept in the repository but excluded from `git archive`, which is the delivery
+# surface a release is cut from. Excluding here is not deletion: the file stays in the
+# working tree and in history, so a later decision to publish it costs one line.
+#
+# assets/architecture.png — owner decision 2026-08-04: no user-facing purpose. It was the
+# only asset under assets/ with zero references from README, guide/, CONTRIBUTING,
+# CHANGELOG or ui/ (the other three each have one), and it is 160K in every release
+# package. The four "references" that do exist are audit documents recording that it has
+# none. `package.json` `files` already omits assets/, so the npm view was never affected.
+assets/architecture.png export-ignore

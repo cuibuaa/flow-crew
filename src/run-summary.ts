@@ -2,29 +2,26 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
-import { runsRoot } from './store.js';
+import { RUN_STATUS, runsRoot, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './store.js';
 import type { StoreState } from './store.js';
 import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
+import { readRunEvents } from './run-events.js';
 // Re-exported for back-compat + the unit test. The codex adapter now applies this
 // at the source (output.md/handoff/summary all get clean text); re-applying it
 // here is idempotent.
 import { extractFinalMessage } from './adapters/transcript.js';
 export { extractFinalMessage };
-import pino from 'pino';
+import { createLogger } from './logging.js';
 
-const log = pino({ name: 'run-summary' });
+const log = createLogger({ name: 'run-summary' });
 
 // Statuses for which a human-readable summary is worth generating. Note this
 // now includes the research terminal states (`shipped`, `ceiling_hit`) — those
 // runs previously produced no summary at all.
-const TERMINAL_STATUSES = new Set([
-  'complete',
-  'failed',
-  'shipped',
-  'ceiling_hit',
-  'escalated',
-  'reality_gate_failed',
-]);
+// Derived from the engine's single source of truth — this set was hand-copied
+// and had already drifted (missing phase_complete / stopped / incomplete).
+// A paused ('parked') run is deliberately absent: it has no verdict to narrate.
+const TERMINAL_STATUSES = new Set<string>(STORE_TERMINAL_STATUSES);
 
 const CODE_NARRATIVE_PROMPT = `You are summarizing a multi-agent coding run for the operator who launched it.
 Write ONLY the following markdown sections, in this order, and nothing else:
@@ -182,13 +179,33 @@ function renderTestsSection(stageOutputs: string[]): string {
 
 function renderStagesSection(state: StoreState): string {
   const ids = Object.keys(state.stages);
-  if (ids.length === 0) return '';
+  if (ids.length === 0 && !state.supervisor) return '';
   const lines = ids.map((id) => {
     const st = state.stages[id];
-    const dur = st?.duration_ms ? ` (${Math.round(st.duration_ms / 1000)}s)` : '';
-    return `- ${id}: ${st?.status ?? 'unknown'}${dur}`;
+    const attempts = st?.attempts?.length ?? 0;
+    const dur = Math.round((st?.duration_ms ?? 0) / 1000);
+    const history = attempts > 0
+      ? ` — ran ${attempts} ${attempts === 1 ? 'time' : 'times'}, ${dur}s cumulative`
+      : (st?.duration_ms ? ` (${dur}s)` : '');
+    return `- ${id}: ${st?.status ?? 'unknown'}${history}`;
   });
+  if (state.supervisor) {
+    const tokensTotal = state.supervisor.tokens_in + state.supervisor.tokens_out;
+    lines.push(`- _supervisor: ${state.supervisor.calls} calls, ${Math.round(state.supervisor.duration_ms / 1000)}s cumulative, ${tokensTotal} tokens total (${state.supervisor.tokens_in} in + ${state.supervisor.tokens_out} out)`);
+  }
   return `## Stages\n${lines.join('\n')}`;
+}
+
+function renderOrchestrationEvents(projectDir: string, runId: string): string {
+  const events = readRunEvents(projectDir, runId).filter((event) =>
+    event.type === 'parallel_scope_serialized' || event.type === 'parallel_write_conflict',
+  );
+  if (events.length === 0) return '';
+  const lines = events.map((event) => {
+    const label = event.type === 'parallel_write_conflict' ? 'WARNING write conflict' : 'scope serialization';
+    return `- ${label}: ${event.detail ?? event.stageIds?.join(' ↔ ') ?? 'no detail'}`;
+  });
+  return `## Orchestration notes\n${lines.join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +223,23 @@ function readJson<T>(path: string): T | null {
   } catch { /* missing or malformed */
     return null;
   }
+}
+
+function renderRealityGateAdvisories(runDir: string): string {
+  const report = readJson<{
+    results?: Array<{ name?: unknown; type?: unknown; pass?: unknown; advisory?: unknown; details?: unknown }>;
+  }>(join(runDir, '.reality-gate.json'));
+  const advisories = Array.isArray(report?.results)
+    ? report.results.filter((item) => item.advisory === true && item.pass === false)
+    : [];
+  if (advisories.length === 0) return '';
+  const lines = advisories.map((item) => {
+    const name = typeof item.name === 'string' ? item.name : 'unnamed check';
+    const type = typeof item.type === 'string' ? ` (${item.type})` : '';
+    const details = typeof item.details === 'string' ? `: ${item.details}` : '';
+    return `- ${name}${type}${details}`;
+  });
+  return `## Reality-Gate advisories\n${lines.join('\n')}`;
 }
 
 function readResearchData(runDir: string): ResearchData {
@@ -231,11 +265,10 @@ function renderResearchOutcome(state: StoreState, data: ResearchData): string {
   // a true terminal `ceiling_hit`/`incomplete`. When the run is terminal, the run.json status is
   // authoritative; the snapshot `reason` is only used as supplementary text and only when the
   // snapshot is consistent with the terminal status (else it would echo a stale rationale).
-  const TERMINAL = new Set(['shipped', 'ceiling_hit', 'incomplete', 'complete', 'failed', 'reality_gate_failed', 'escalated', 'stopped', 'phase_complete']);
-  const isTerminal = TERMINAL.has(state.status);
+  const isTerminal = TERMINAL_STATUSES.has(state.status);
   // Map the terminal status to the policy-decision vocabulary used in the summary.
-  const terminalDecisionLabel = state.status === 'shipped' ? 'ship'
-    : state.status === 'ceiling_hit' ? 'stop_ceiling'
+  const terminalDecisionLabel = state.status === RUN_STATUS.SHIPPED ? 'ship'
+    : state.status === RUN_STATUS.CEILING_HIT ? 'stop_ceiling'
     : state.status; // incomplete / failed / reality_gate_failed / etc. shown verbatim
   // The snapshot is "consistent" with the terminal only when it agrees (e.g. a real ship snapshot
   // on a shipped run, or a stop_ceiling snapshot on a ceiling_hit run). A `continue` snapshot on a
@@ -380,6 +413,9 @@ export async function generateRunSummary(
     const { joined: stageOutputs, raw: rawOutputs } = collectStageOutputs(runDir, state);
     const git = collectGitChanges(projectDir, state.baseCommit);
     const filesSection = renderFilesSection(git);
+    const advisorySection = renderRealityGateAdvisories(runDir);
+    const orchestrationSection = renderOrchestrationEvents(projectDir, runId);
+    const stagesSection = renderStagesSection(state);
     const isResearch = !!state.research || existsSync(join(runDir, 'research_journal.json'));
 
     let summary: string;
@@ -388,7 +424,7 @@ export async function generateRunSummary(
       const research = readResearchData(runDir);
       const outcomeSection = renderResearchOutcome(state, research);
       const roundsSection = renderRoundsSection(research);
-      const factsBlock = [outcomeSection, roundsSection, filesSection].filter(Boolean).join('\n\n');
+      const factsBlock = [outcomeSection, roundsSection, advisorySection, orchestrationSection, stagesSection, filesSection].filter(Boolean).join('\n\n');
       const narrative = await generateNarrative(
         projectDir, runDir, runId, state, RESEARCH_NARRATIVE_PROMPT, factsBlock, stageOutputs, adapter,
       );
@@ -396,19 +432,23 @@ export async function generateRunSummary(
         '# Research Summary',
         outcomeSection,
         roundsSection,
+        advisorySection,
+        orchestrationSection,
         narrative ?? '## What was tried & learned\n_Summary narrative unavailable; see rounds and stage outputs above._',
         filesSection,
+        stagesSection,
       ]);
     } else {
       const testsSection = renderTestsSection(rawOutputs);
-      const stagesSection = renderStagesSection(state);
-      const factsBlock = [filesSection, testsSection].filter(Boolean).join('\n\n');
+      const factsBlock = [advisorySection, orchestrationSection, filesSection, testsSection, stagesSection].filter(Boolean).join('\n\n');
       const narrative = await generateNarrative(
         projectDir, runDir, runId, state, CODE_NARRATIVE_PROMPT, factsBlock, stageOutputs, adapter,
       );
       summary = assemble([
         '# Run Summary',
         narrative ?? '## What was done\n_Summary narrative unavailable; see stages and files below._',
+        advisorySection,
+        orchestrationSection,
         filesSection,
         testsSection,
         stagesSection,

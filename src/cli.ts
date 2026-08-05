@@ -1,18 +1,47 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { campaignDir, runsRoot, extractTaskTitle, isSuccessfulRunStatus } from './store.js';
+import {
+  campaignDir,
+  extractTaskTitle,
+  isPausedRunStatus,
+  isRunningRunStatus,
+  isSuccessfulRunStatus,
+  RUN_STATUS,
+  runsRoot,
+  STAGE_STATUS,
+} from './store.js';
 import { ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
 import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
 import { diffVersions, readHead, rollback } from './brief-versioning.js';
 import { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
+import { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } from './adapters/loader.js';
+import type { RegisterRpcResponse } from './orchestrator-rpc.js';
+import type { TaskCreateInput } from './task-registry.js';
+import type { BriefAdmissionRecord } from './brief-preflight.js';
+import {
+  isLiveFlowcrewSchedulerForRun,
+  parseSchedulerPidMarker,
+} from './run-lock.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
+const CAMPAIGN_PENDING_SUBCOMMAND = 'pending';
+
+function encodeBriefAdmission(record: BriefAdmissionRecord): string {
+  return Buffer.from(JSON.stringify(record), 'utf8').toString('base64url');
+}
+
+function decodeBriefAdmission(value: string): BriefAdmissionRecord {
+  try {
+    return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as BriefAdmissionRecord;
+  } catch {
+    throw new Error('Invalid internal brief admission record');
+  }
+}
 
 function detectProjectDir(): string {
   return process.env.PROJECT_DIR || process.cwd();
@@ -30,6 +59,13 @@ function detectAdapter(): string {
     } catch { /* not found */ }
   }
   return 'claude';
+}
+
+async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
+  const { defaultSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
+  const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
+  const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task });
+  console.log(formatDaemonRegistration(response));
 }
 
 function cmdInit() {
@@ -78,7 +114,7 @@ function cmdInit() {
   }
 
   // Create global ~/.fc/runs/ directory (all runs stored centrally)
-  const globalFcDir = join(homedir(), '.fc', 'runs');
+  const globalFcDir = runsRoot(projectDir);
   mkdirSync(globalFcDir, { recursive: true });
   console.log(`✅ Global runs directory: ${globalFcDir}`);
 
@@ -123,9 +159,34 @@ interface DoctorCheck {
   message: string;
 }
 
+function commandExists(commandName: string): boolean {
+  try {
+    execFileSync('which', [commandName], { stdio: 'ignore', timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
+  try {
+    execFileSync(commandName, commandArgs, { stdio: 'ignore', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function cmdDoctor() {
   const projectDir = detectProjectDir();
   const checks: DoctorCheck[] = [];
+
+  const flowcrewOnPath = commandExists('flowcrew');
+  checks.push({
+    name: 'flowcrew CLI',
+    status: flowcrewOnPath ? 'ok' : 'warn',
+    message: flowcrewOnPath ? 'available on PATH' : 'not found on PATH. Run `npm link` from the repository.',
+  });
 
   // Node.js version
   const nodeVersion = process.version;
@@ -140,22 +201,26 @@ async function cmdDoctor() {
   });
 
   // Adapter CLIs
-  const adapters: [string, string, string][] = [
-    ['claude', 'Claude Code CLI', 'Install: npm i -g @anthropic/claude-code'],
-    ['codex', 'OpenAI Codex CLI', 'Install: npm i -g @openai/codex'],
+  const adapters: [string, string, string, string[], string][] = [
+    ['claude', 'Claude Code CLI', 'Install: npm i -g @anthropic/claude-code', ['auth', 'status'], 'Run `claude auth login`.'],
+    ['codex', 'OpenAI Codex CLI', 'Install: npm i -g @openai/codex', ['login', 'status'], 'Run `codex login`.'],
   ];
   let anyAdapter = false;
-  for (const [cmd, label, installHint] of adapters) {
-    try {
-      execSync(`which ${cmd}`, { stdio: 'ignore' });
-      checks.push({ name: label, status: 'ok', message: 'installed' });
+  for (const [cmd, label, installHint, authArgs, loginHint] of adapters) {
+    if (commandExists(cmd)) {
       anyAdapter = true;
-    } catch { /* expected - optional resource */
+      const authenticated = commandSucceeds(cmd, authArgs);
+      checks.push({
+        name: label,
+        status: authenticated ? 'ok' : 'warn',
+        message: authenticated ? 'installed and logged in' : `installed, but login was not confirmed. ${loginHint}`,
+      });
+    } else {
       checks.push({ name: label, status: 'warn', message: `not found. ${installHint}` });
     }
   }
   if (!anyAdapter) {
-    checks.push({ name: 'Any adapter CLI', status: 'fail', message: 'No adapter CLI found. Install Claude Code or Codex.' });
+    checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });
   }
 
   // Config files
@@ -171,11 +236,15 @@ async function cmdDoctor() {
       const adapterCmd: Record<string, string> = { codex: 'codex', claude: 'claude' };
       const cmd = adapterCmd[adapter];
       if (cmd) {
-        try {
-          execSync(`which ${cmd}`, { stdio: 'ignore' });
-        } catch { /* expected - optional resource */
-          checks.push({ name: `Configured adapter (${adapter})`, status: 'fail', message: `${cmd} not found. Install it or change adapter in config/defaults.yaml` });
+        if (!commandExists(cmd)) {
+          checks.push({ name: `Configured adapter (${adapter})`, status: 'warn', message: `${cmd} not found. Install it or change adapter in config/defaults.yaml` });
         }
+      } else if (!AVAILABLE_ADAPTER_NAMES.includes(adapter as typeof AVAILABLE_ADAPTER_NAMES[number])) {
+        checks.push({
+          name: `Configured adapter (${adapter})`,
+          status: 'fail',
+          message: `Unknown adapter. Available adapters: ${AVAILABLE_ADAPTER_NAMES.join(', ')}`,
+        });
       }
     } catch { /* expected - optional resource */
       checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Invalid YAML. Run `flowcrew init` to regenerate.' });
@@ -207,43 +276,95 @@ async function cmdDoctor() {
     checks.push({ name: 'Agent configs', status: 'fail', message: 'config/agents/ missing. Run `flowcrew init`.' });
   }
 
-  // Port availability
+  // Port occupancy is not the same fact as "your dashboard is running". The previous probe
+  // resolved on any response at all — a 404 from an unrelated server counted, and so did a
+  // FlowCrew dashboard serving a different checkout. On a machine with a real dashboard
+  // already up, a fresh install was told its own server was running.
   const port = parseInt(process.env.PORT || '3000', 10);
+  const packageRootForPort = resolve(import.meta.dirname ?? '.', '..');
   try {
     const http = await import('node:http');
-    await new Promise<void>((resolve, reject) => {
-      const req = http.get(`http://localhost:${port}/api/settings`, (res) => {
-        res.resume();
-        resolve();
+    const body = await new Promise<string>((resolve_, reject) => {
+      const req = http.get(`http://localhost:${port}/api/dashboard/status`, (res) => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          reject(new Error(`status ${res.statusCode}`));
+          return;
+        }
+        let text = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk: string) => { text += chunk; });
+        res.on('end', () => resolve_(text));
       });
       req.on('error', reject);
       req.setTimeout(2000, () => { req.destroy(); reject(new Error('timeout')); });
     });
-    checks.push({ name: `Port ${port}`, status: 'ok', message: 'FlowCrew server is running' });
+    let identity: { pid?: number; loadedBuild?: { algorithm?: string } } | undefined;
+    try { identity = JSON.parse(body) as typeof identity; } catch { /* not JSON */ }
+    if (!identity?.loadedBuild?.algorithm) {
+      checks.push({
+        name: `Port ${port}`,
+        status: 'warn',
+        message: 'Something is listening, but it does not answer as a FlowCrew dashboard.',
+      });
+    } else {
+      // The status payload names the pid, so /proc resolves which checkout it serves. Where
+      // /proc is unavailable, say the install is unconfirmed rather than claim it is this one.
+      let servedRoot: string | undefined;
+      if (identity.pid !== undefined) {
+        try { servedRoot = realpathSync(`/proc/${identity.pid}/cwd`); } catch { /* not readable */ }
+      }
+      if (servedRoot === undefined) {
+        checks.push({
+          name: `Port ${port}`,
+          status: 'warn',
+          message: `A FlowCrew dashboard is running (pid ${identity.pid ?? 'unknown'}), but which install it serves could not be confirmed.`,
+        });
+      } else if (servedRoot === realpathSync(packageRootForPort)) {
+        checks.push({ name: `Port ${port}`, status: 'ok', message: `This install's dashboard is running (pid ${identity.pid}).` });
+      } else {
+        checks.push({
+          name: `Port ${port}`,
+          status: 'warn',
+          message: `The port is held by a FlowCrew dashboard for a different install: ${servedRoot} (pid ${identity.pid}). Start this one on another port with PORT=<n> flowcrew start.`,
+        });
+      }
+    }
   } catch { /* expected - optional resource */
     checks.push({ name: `Port ${port}`, status: 'warn', message: 'Server not running. Start with `flowcrew start`.' });
   }
 
-  // UI build
-  const uiDist = join(import.meta.dirname ?? '.', '..', 'ui', 'dist', 'index.html');
+  // Engine and UI builds
+  const packageRoot = resolve(import.meta.dirname ?? '.', '..');
+  const engineDist = join(packageRoot, 'dist', 'cli.js');
+  checks.push({
+    name: 'Engine build',
+    status: existsSync(engineDist) ? 'ok' : 'warn',
+    message: existsSync(engineDist) ? 'built' : 'Not built. Run: npm run build',
+  });
+  const uiDist = join(packageRoot, 'ui', 'dist', 'index.html');
   checks.push({
     name: 'UI build',
     status: existsSync(uiDist) ? 'ok' : 'warn',
-    message: existsSync(uiDist) ? 'built' : 'Not built. Run: cd ui && npm run build',
+    message: existsSync(uiDist) ? 'built' : 'Not built. Run: npm run build:ui',
   });
 
   // Print results
   console.log('\n🩺 FlowCrew Doctor\n');
   let hasFailure = false;
+  let hasWarning = false;
   for (const c of checks) {
     const icon = c.status === 'ok' ? '✅' : c.status === 'warn' ? '⚠️ ' : '❌';
     console.log(`  ${icon} ${c.name}: ${c.message}`);
     if (c.status === 'fail') hasFailure = true;
+    if (c.status === 'warn') hasWarning = true;
   }
   console.log('');
   if (hasFailure) {
     console.log('Some checks failed. Fix the issues above and run `flowcrew doctor` again.');
     process.exit(1);
+  } else if (hasWarning) {
+    console.log('Some checks need attention before a live run. Review the warnings above.');
   } else {
     console.log('All checks passed! 🎉');
   }
@@ -325,9 +446,14 @@ async function cmdQuick() {
   let supervise = true; // supervisor brain on by default; opt out with --no-supervise
   let campaignArg: string | undefined; // --campaign <name> wins over defaults.yaml; --no-campaign forces undefined
   let campaignDisabled = false;
-  let inheritCampaignContext = true; // --no-inherit-campaign stays attached but skips prior-phase context injection
+  let inheritCampaignContext = true; // Context is independent from campaign ownership; legacy alias maps to skip.
   let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
   let background = false;
+  let acknowledgementPresent = false;
+  let acknowledgementDigest: string | undefined;
+  let transportedAdmission: BriefAdmissionRecord | undefined;
+  let storedAdmission: BriefAdmissionRecord | undefined;
+  let taskSupplied = false;
   const launchArgs: string[] = [];
   const taskParts: string[] = [];
 
@@ -343,52 +469,75 @@ async function cmdQuick() {
     if (args[i] === '--no-supervise') { supervise = false; launchArgs.push('--no-supervise'); continue; }
     if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; launchArgs.push('--campaign', campaignArg); continue; }
     if (args[i] === '--no-campaign') { campaignDisabled = true; launchArgs.push('--no-campaign'); continue; }
+    if (args[i].startsWith('--campaign-context=')) {
+      const mode = args[i].slice('--campaign-context='.length);
+      if (mode !== 'inherit' && mode !== 'skip') {
+        throw new Error(`Invalid --campaign-context value "${mode}"; expected inherit or skip.`);
+      }
+      inheritCampaignContext = mode === 'inherit';
+      launchArgs.push(args[i]);
+      continue;
+    }
+    if (args[i] === '--campaign-context') {
+      throw new Error('Invalid --campaign-context syntax; use --campaign-context=inherit or --campaign-context=skip.');
+    }
     if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; launchArgs.push('--no-inherit-campaign'); continue; }
-    if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
+    if (args[i] === '--task' && args[i + 1]) { task = args[++i]; taskSupplied = true; continue; }
+    if (args[i] === '--brief-input-base64' && args[i + 1]) {
+      try {
+        task = Buffer.from(args[++i], 'base64url').toString('utf8');
+        taskSupplied = true;
+      } catch {
+        throw new Error('Invalid internal brief input');
+      }
+      continue;
+    }
     if (args[i] === '--existing-run-id' && args[i + 1]) { existingRunId = args[++i]; continue; }
     if (args[i] === '--background') { background = true; continue; }
-    if (args[i] === '-') { task = readFileSync(0, 'utf-8').trim(); continue; }
+    if (args[i] === '--acknowledge-brief-warnings') { acknowledgementPresent = true; continue; }
+    if (args[i].startsWith('--acknowledge-brief-warnings=')) {
+      acknowledgementPresent = true;
+      acknowledgementDigest = args[i].slice('--acknowledge-brief-warnings='.length);
+      continue;
+    }
+    if (args[i] === '--brief-admission-record' && args[i + 1]) {
+      transportedAdmission = decodeBriefAdmission(args[++i]);
+      continue;
+    }
+    if (args[i] === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; continue; }
     taskParts.push(args[i]);
   }
-  if (!task && taskParts.length > 0) task = taskParts.join(' ');
+  if (!task && taskParts.length > 0) {
+    task = taskParts.join(' ');
+    taskSupplied = true;
+  }
 
   // --existing-run-id path: dashboard handing off a rerun/execute to a detached
   // scheduler process. Reuse the existing run state and read the task brief
-  // from the run dir instead of requiring --task.
-  if (existingRunId && !task) {
+  // from the run dir unless an internal launcher transported the already
+  // admitted exact bytes and record together.
+  if (existingRunId) {
     const { runsRoot: getRunsRoot } = await import('./store.js');
+    let storedTaskDescription: string | undefined;
+    try {
+      const runJson = JSON.parse(readFileSync(join(getRunsRoot(), existingRunId, 'run.json'), 'utf-8'));
+      if (typeof runJson.taskDescription === 'string') storedTaskDescription = runJson.taskDescription;
+      storedAdmission = runJson.briefAdmission as BriefAdmissionRecord | undefined;
+    } catch { /* an uninitialized reservation has no run state yet */ }
+
+    const hasTransportedExactTask = taskSupplied && transportedAdmission !== undefined;
     const briefPath = join(getRunsRoot(), existingRunId, 'task_brief.md');
-    if (existsSync(briefPath)) {
+    if (!hasTransportedExactTask && existsSync(briefPath)) {
       try { task = readFileSync(briefPath, 'utf-8'); } catch { /* ignore */ }
     }
-    if (!task) {
-      // Fall back to taskDescription in run.json
-      try {
-        const runJson = JSON.parse(readFileSync(join(getRunsRoot(), existingRunId, 'run.json'), 'utf-8'));
-        if (typeof runJson.taskDescription === 'string') task = runJson.taskDescription;
-      } catch { /* ignore */ }
-    }
+    if (!task.trim() && storedTaskDescription !== undefined) task = storedTaskDescription;
   }
 
-  // Auto-select the research workflow when the brief carries a `research:` frontmatter block and
-  // the user did not explicitly choose a workflow. A research brief run under the default
-  // plan-execute-review loop terminates after a single round (supervisor completion-detection)
-  // rather than running the policy's multi-round loop — so honor the brief's intent.
-  const hasResearchBlock = (text: string): boolean => {
-    const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text.replace(/^﻿?\s*/, ''));
-    return !!fm && /^research\s*:/m.test(fm[1]);
-  };
-  if (!workflowExplicit && workflow === 'default' && hasResearchBlock(task)) {
-    workflow = 'research';
-    launchArgs.push('--workflow', 'research');
-    console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
-  }
-
-  if (!task) {
+  if (!task.trim()) {
     console.error('Usage: flowcrew quick "task description" [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --adapter claude|codex  Agent backend (defaults to config/defaults.yaml)');
+    console.error('  --adapter codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
     console.error('  --max-iterations <n>    Max plan-execute-review cycles (default: 5)');
     console.error('  --timeout <ms>          Per-stage timeout in ms (default: 300000)');
@@ -396,38 +545,108 @@ async function cmdQuick() {
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
     console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug(basename(projectDir)))');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
-    console.error('  --no-inherit-campaign   Stay in campaign but skip injecting prior-phase context into planner prompts');
+    console.error('  --campaign-context=inherit|skip  Planner history context; skip preserves campaign ownership (default: inherit)');
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
     console.error('  --background            Register and launch under the flowcrew daemon');
+    console.error('  --acknowledge-brief-warnings[=<digest>]  Continue after reviewing consequential findings (never skips inspection)');
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
     process.exit(1);
   }
 
+  const {
+    createBriefAdmission,
+    formatBriefPreflightReport,
+    inspectBrief,
+    verifyBriefAdmission,
+  } = await import('./brief-preflight.js');
+  const preflight = inspectBrief(task);
+  console.log(`${formatBriefPreflightReport(preflight)}\n`);
+
+  if (acknowledgementDigest !== undefined && acknowledgementDigest !== preflight.digest) {
+    console.error(`Brief acknowledgement digest mismatch: received ${acknowledgementDigest || '(empty)'}, current digest is ${preflight.digest}.`);
+    console.error(`Review the report and rerun with --acknowledge-brief-warnings=${preflight.digest}`);
+    process.exit(2);
+  }
+
+  const transportedExistingRun = Boolean(existingRunId && taskSupplied && transportedAdmission);
+  const transportedVerification = transportedAdmission
+    ? verifyBriefAdmission(task, transportedAdmission)
+    : undefined;
+  const storedVerification = storedAdmission
+    ? verifyBriefAdmission(task, storedAdmission)
+    : undefined;
+  const transportedContinuationIsBound = transportedExistingRun
+    && transportedVerification?.status === 'valid'
+    && storedVerification?.status === 'valid'
+    && transportedAdmission!.digest === storedAdmission!.digest;
+  // A first launch of a daemon-registered task always arrives with BOTH a
+  // pre-allocated --existing-run-id and a transported record, but the reserved run
+  // has no run.json yet — so storedAdmission is ABSENT, not conflicting. Requiring
+  // a stored record here threw away a valid transported admission and paused every
+  // backgrounded brief that needed acknowledgement, with exit 2 asking for a flag
+  // the orchestrator deliberately strips. An absent stored record is not evidence
+  // of a mismatch; a PRESENT one that disagrees still is, and keeps failing closed
+  // — that is the TOCTOU guard, and it must survive this.
+  const priorAdmission = transportedExistingRun
+    ? (transportedContinuationIsBound
+        ? transportedAdmission
+        : (storedAdmission ?? (transportedVerification?.status === 'valid' ? transportedAdmission : undefined)))
+    : (transportedAdmission ?? storedAdmission);
+  const priorVerification = priorAdmission ? verifyBriefAdmission(task, priorAdmission) : undefined;
+  let briefAdmission: BriefAdmissionRecord;
+  if (priorVerification?.status === 'valid') {
+    briefAdmission = priorAdmission!;
+  } else {
+    const continuationNeedsFreshDecision = Boolean(existingRunId || transportedAdmission);
+    if ((preflight.requiresAcknowledgement || continuationNeedsFreshDecision) && !acknowledgementPresent) {
+      const reason = priorVerification
+        ? ` Stored admission status: ${priorVerification.status}.`
+        : '';
+      console.error(`Launch paused before run creation.${reason}`);
+      console.error('Review the complete report above, then explicitly continue this exact brief with:');
+      console.error(`  --acknowledge-brief-warnings=${preflight.digest}`);
+      console.error('For deterministic CI/cron policy, the bare --acknowledge-brief-warnings flag accepts the current inspected input without prompting.');
+      process.exit(2);
+    }
+    briefAdmission = createBriefAdmission(
+      preflight,
+      acknowledgementPresent
+        ? {
+            kind: 'explicit',
+            source: acknowledgementDigest === undefined ? 'cli_current_input_flag' : 'cli_digest_flag',
+            at: new Date().toISOString(),
+          }
+        : { kind: 'not_required' },
+    );
+  }
+
+  // Auto-select the research workflow only after the shared report is visible.
+  // The canonical frontmatter parser owns this decision; quick has no YAML regex.
+  const { parseBriefFrontmatter } = await import('./scheduler.js');
+  if (!workflowExplicit && workflow === 'default' && parseBriefFrontmatter(task).research) {
+    workflow = 'research';
+    launchArgs.push('--workflow', 'research');
+    console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
+  }
+
   if (background) {
+    if (adapter) adapter = normalizeAdapterName(adapter);
     try {
-      const { defaultSocketPath, sendRpc } = await import('./orchestrator-rpc.js');
-      const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
-      const res = await sendRpc<{ id: number; unit: string }>(socketPath, {
-        cmd: 'register',
-        task: {
-          kind: 'quick',
-          name: task.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || 'Quick task',
-          brief_text: task,
-          projectDir,
-          launch_args: launchArgs,
-        },
+      await registerBackgroundTask({
+        kind: 'quick',
+        name: task.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || 'Quick task',
+        brief_text: task,
+        brief_admission: briefAdmission,
+        projectDir,
+        launch_args: launchArgs,
       });
-      console.log(`Task #${res.id} registered. Unit: ${res.unit}`);
       return;
     } catch (err) {
-      if (err instanceof (await import('./orchestrator-rpc.js')).DaemonUnavailableError) {
-        console.error('daemon not running. Start with: flowcrew daemon start');
-      } else {
-        console.error(err instanceof Error ? err.message : String(err));
-      }
-      process.exit(1);
+      console.error(err instanceof Error ? err.message : String(err));
+      const { rpcErrorExitCode } = await import('./orchestrator-rpc.js');
+      process.exit(rpcErrorExitCode(err));
     }
   }
 
@@ -435,6 +654,7 @@ async function cmdQuick() {
     const fromDefaults = loadProjectDefaults(projectDir).adapter;
     adapter = fromDefaults || detectAdapter();
   }
+  adapter = normalizeAdapterName(adapter);
 
   const configRoot = join(import.meta.dirname ?? '.', '..', 'config', 'workflows');
   const localRoot = join(projectDir, 'config', 'workflows');
@@ -458,14 +678,7 @@ async function cmdQuick() {
   const resolvedAgentsDir = existsSync(agentsDir) ? agentsDir : fallbackAgentsDir;
   const agents = new Map<string, unknown>();
 
-  let adapterInstance: unknown;
-  if (adapter === 'claude') {
-    const { ClaudeAdapter } = await import('./adapters/claude.js');
-    adapterInstance = new ClaudeAdapter();
-  } else {
-    const { CodexAdapter } = await import('./adapters/codex.js');
-    adapterInstance = new CodexAdapter();
-  }
+  const adapterInstance = await loadAdapterByName(adapter);
 
   // Only write docs/task_brief.md on a fresh ship. For --existing-run-id path
   // the brief already lives in <run_dir>/task_brief.md; rewriting docs/ would
@@ -473,7 +686,11 @@ async function cmdQuick() {
   if (!existingRunId) {
     const docsDir = join(projectDir, 'docs');
     mkdirSync(docsDir, { recursive: true });
-    writeFileSync(join(docsDir, 'task_brief.md'), task, 'utf-8');
+    const taskBriefPath = join(docsDir, 'task_brief.md');
+    if (existsSync(taskBriefPath) && readFileSync(taskBriefPath, 'utf-8') !== task) {
+      console.warn(`⚠️  Overwriting existing brief with different content: ${taskBriefPath}`);
+    }
+    writeFileSync(taskBriefPath, task, 'utf-8');
   }
 
   console.log(`FlowCrew: shipping task with workflow "${config.name}"...`);
@@ -495,7 +712,7 @@ async function cmdQuick() {
     : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
   if (resolvedCampaign && !inheritCampaignContext) {
-    console.log(`Campaign context: not inherited (--no-inherit-campaign)`);
+    console.log('Campaign context: skipped (campaign ownership preserved)');
   }
   console.log(`Auto-approve: true\n`);
 
@@ -515,20 +732,23 @@ async function cmdQuick() {
         if (prev === ss.status) continue;
         seenStatus.set(id, ss.status);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-        if (ss.status === 'running') process.stdout.write(`  [${elapsed}s] ⟳ ${id} started\n`);
-        else if (ss.status === 'complete') { const dur = ss.duration_ms ? `${(ss.duration_ms / 1000).toFixed(0)}s` : ''; process.stdout.write(`  [${elapsed}s] ✓ ${id} complete${dur ? ' (' + dur + ')' : ''}\n`); }
-        else if (ss.status === 'failed') process.stdout.write(`  [${elapsed}s] ✗ ${id} failed${ss.error ? ': ' + ss.error : ''}\n`);
-        else if (ss.status === 'skipped') process.stdout.write(`  [${elapsed}s] ⊘ ${id} skipped\n`);
+        if (ss.status === STAGE_STATUS.RUNNING) process.stdout.write(`  [${elapsed}s] ⟳ ${id} started\n`);
+        else if (ss.status === STAGE_STATUS.COMPLETE) { const dur = ss.duration_ms ? `${(ss.duration_ms / 1000).toFixed(0)}s` : ''; process.stdout.write(`  [${elapsed}s] ✓ ${id} complete${dur ? ' (' + dur + ')' : ''}\n`); }
+        else if (ss.status === STAGE_STATUS.FAILED) process.stdout.write(`  [${elapsed}s] ✗ ${id} failed${ss.error ? ': ' + ss.error : ''}\n`);
+        else if (ss.status === STAGE_STATUS.SKIPPED) process.stdout.write(`  [${elapsed}s] ⊘ ${id} skipped\n`);
       }
     } catch { /* non-critical */ }
   }, 2000);
 
-  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext);
+  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext, briefAdmission);
   clearInterval(progressTimer);
 
   // Desktop notification
   try {
-    const title = finalState.status === 'complete' ? 'FlowCrew: Task Complete' : 'FlowCrew: Task Failed';
+    const title = finalState.status === RUN_STATUS.COMPLETE ? 'FlowCrew: Task Complete'
+      : isPausedRunStatus(finalState.status) ? 'FlowCrew: Awaiting Your Approval'
+      : isSuccessfulRunStatus(finalState.status) ? `FlowCrew: ${finalState.status}`
+      : 'FlowCrew: Task Failed';
     const body = task.slice(0, 80);
     if (process.platform === 'darwin') {
       const { execSync: es } = await import('node:child_process');
@@ -538,15 +758,23 @@ async function cmdQuick() {
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
   const succeeded = isSuccessfulRunStatus(finalState.status);
-  const icon = succeeded ? '✓' : '✗';
+  const parked = isPausedRunStatus(finalState.status);
+  const icon = succeeded ? '✓' : parked ? '⏸' : '✗';
   console.log(`\n${icon} Workflow "${config.name}" ${finalState.status} (${totalTime}s total)`);
+  if (parked && finalState.parked) {
+    console.log(`  ⏸ awaiting approval: ${finalState.parked.action}${finalState.parked.target ? ` → ${finalState.parked.target}` : ''}`);
+    console.log(`     resolve with: flowcrew inbox approve ${finalState.parked.requestId}   (or: flowcrew inbox deny ${finalState.parked.requestId})`);
+  }
   for (const [id, st] of Object.entries(finalState.stages) as [string, { status: string; duration_ms?: number }][]) {
-    const si = st.status === 'complete' ? '✓' : st.status === 'failed' ? '✗' : st.status === 'skipped' ? '⊘' : '·';
+    const si = st.status === STAGE_STATUS.COMPLETE ? '✓' : st.status === STAGE_STATUS.FAILED ? '✗' : st.status === STAGE_STATUS.SKIPPED ? '⊘' : '·';
     console.log(`  ${si} ${id}: ${st.status}${st.duration_ms ? ` (${(st.duration_ms / 1000).toFixed(1)}s)` : ''}`);
   }
   // A research ceiling (honest negative) and a shipped beat are successes, not failures —
   // exit 0 so a spawning parent (campaign outer loop's execSync) doesn't read it as a crash.
-  process.exitCode = succeeded ? 0 : 1;
+  // A PARK is likewise not a failure: exiting non-zero would make systemd report
+  // the unit failed, and the daemon would relaunch the brief as a BRAND-NEW run —
+  // i.e. re-run the very consequential action that is waiting for approval.
+  process.exitCode = (succeeded || parked) ? 0 : 1;
 }
 
 /**
@@ -615,7 +843,7 @@ function cmdStatus() {
   console.log('## Stages');
   for (const [id, ss] of Object.entries(state.stages) as [string, any][]) {
     const dur = ss.duration_ms ? ` (${(ss.duration_ms / 1000).toFixed(0)}s)` : '';
-    const icon = ss.status === 'complete' ? '✓' : ss.status === 'running' ? '⟳' : ss.status === 'failed' ? '✗' : '·';
+    const icon = ss.status === STAGE_STATUS.COMPLETE ? '✓' : ss.status === STAGE_STATUS.RUNNING ? '⟳' : ss.status === STAGE_STATUS.FAILED ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
   }
   printResearchProgress(runDir);
@@ -635,7 +863,7 @@ function cmdList() {
   for (const runId of runs) {
     try {
       const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8'));
-      const status = state.status === 'complete' ? '✓ complete' : state.status === 'failed' ? '✗ failed  ' : state.status === 'running' ? '⟳ running ' : '· ' + state.status.padEnd(8);
+      const status = state.status === RUN_STATUS.COMPLETE ? '✓ complete' : state.status === RUN_STATUS.FAILED ? '✗ failed  ' : state.status === RUN_STATUS.RUNNING ? '⟳ running ' : '· ' + state.status.padEnd(8);
       const startMs = new Date(state.startedAt).getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
       const duration = `${Math.round((endMs - startMs) / 1000)}s`.padEnd(8);
@@ -646,16 +874,133 @@ function cmdList() {
   console.log('');
 }
 
-function cmdGuide() {
+interface GuideRunCandidate {
+  id: string;
+  title: string;
+  status: string;
+}
 
-  const message = args.slice(1).join(' ');
-  if (!message) { console.error('Usage: flowcrew guide "your guidance message"'); process.exit(1); }
+function printGuideUsage(): void {
+  console.log('Usage: flowcrew guide [--run <run-id>] "your guidance message"');
+  console.log('');
+  console.log('Omit --run only when exactly one run is currently executing.');
+}
+
+function guideArgumentError(message: string): never {
+  console.error(message);
+  console.error('Usage: flowcrew guide [--run <run-id>] "your guidance message"');
+  process.exit(1);
+}
+
+function parseGuideArguments(): { message: string; targetRunId?: string } {
+  const messageParts: string[] = [];
+  let targetRunId: string | undefined;
+  for (let index = 1; index < args.length; index++) {
+    const value = args[index];
+    if (value === '--run') {
+      const selected = args[index + 1];
+      if (!selected || selected.startsWith('--')) guideArgumentError('--run requires a run id.');
+      if (targetRunId !== undefined) guideArgumentError('--run may be specified only once.');
+      targetRunId = selected;
+      index++;
+      continue;
+    }
+    if (value.startsWith('--run=')) {
+      const selected = value.slice('--run='.length);
+      if (!selected) guideArgumentError('--run requires a run id.');
+      if (targetRunId !== undefined) guideArgumentError('--run may be specified only once.');
+      targetRunId = selected;
+      continue;
+    }
+    messageParts.push(value);
+  }
+  const message = messageParts.join(' ').trim();
+  if (!message) guideArgumentError('Guidance message must not be empty.');
+  return { message, targetRunId };
+}
+
+function safeGuideRunId(runId: string): boolean {
+  return runId.length > 0
+    && runId.length <= 255
+    && runId !== '.'
+    && runId !== '..'
+    && !runId.includes('/')
+    && !runId.includes('\\')
+    && !runId.includes('\0');
+}
+
+function readGuideCandidate(root: string, runId: string): GuideRunCandidate | undefined {
+  if (!safeGuideRunId(runId)) return undefined;
+  try {
+    const directory = join(root, runId);
+    const entry = lstatSync(directory);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) return undefined;
+    const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as {
+      runId?: string;
+      status?: string;
+      taskDescription?: string;
+      workflowName?: string;
+    };
+    if (state.runId !== undefined && state.runId !== runId) return undefined;
+    return {
+      id: runId,
+      status: typeof state.status === 'string' ? state.status : '',
+      title: extractTaskTitle(state.taskDescription) || state.workflowName || '(untitled task)',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function cmdGuide() {
+  if (args.includes('--help') || args.includes('-h')) {
+    printGuideUsage();
+    return;
+  }
+  const { message, targetRunId } = parseGuideArguments();
   const root = runsRoot();
   if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
   const runs = runIdsByRecency(root);
   if (runs.length === 0) { console.error('No runs found.'); process.exit(1); }
-  writeFileSync(join(root, runs[0], 'user_input.md'), message, 'utf-8');
-  console.log(`Guidance sent to run ${runs[0]}:`);
+
+  let selected: GuideRunCandidate;
+  if (targetRunId !== undefined) {
+    if (!safeGuideRunId(targetRunId) || !runs.includes(targetRunId)) {
+      console.error(`Run "${targetRunId}" was not found; guidance was not sent.`);
+      process.exit(1);
+    }
+    const candidate = readGuideCandidate(root, targetRunId);
+    if (!candidate) {
+      console.error(`Run "${targetRunId}" is unreadable or unsafe; guidance was not sent.`);
+      process.exit(1);
+    }
+    if (!isRunningRunStatus(candidate.status)) {
+      console.error(`Run "${targetRunId}" is ${candidate.status || 'in an unknown state'}, not running; guidance was not sent.`);
+      process.exit(1);
+    }
+    selected = candidate;
+  } else {
+    const running = runs
+      .map((runId) => readGuideCandidate(root, runId))
+      .filter((candidate): candidate is GuideRunCandidate => (
+        candidate !== undefined && isRunningRunStatus(candidate.status)
+      ));
+    if (running.length === 0) {
+      console.error('No running runs found; guidance was not sent.');
+      process.exit(1);
+    }
+    if (running.length > 1) {
+      console.error('Multiple runs are currently executing; guidance was not sent. Choose one explicitly:');
+      for (const candidate of running) {
+        console.error(`  flowcrew guide --run ${candidate.id} "message"  # ${candidate.title}`);
+      }
+      process.exit(1);
+    }
+    selected = running[0];
+  }
+
+  writeFileSync(join(root, selected.id, 'user_input.md'), message, 'utf-8');
+  console.log(`Guidance sent to run ${selected.id}:`);
   console.log(`  "${message}"`);
   console.log(`\nThe supervisor will pick this up on its next tick (within 15s).`);
 }
@@ -674,10 +1019,24 @@ function cmdClean() {
   const runs = readdirSync(root).sort().reverse();
   const toDelete = runs.slice(keep);
   if (toDelete.length === 0) { console.log(`Nothing to clean (${runs.length} runs, keeping ${keep}).`); return; }
+  let skippedLive = 0;
+  let cleaned = 0;
   for (const runId of toDelete) {
-    try { rmSync(join(root, runId), { recursive: true, force: true }); } catch { /* non-critical */ }
+    try {
+      const runPath = join(root, runId);
+      const pid = parseSchedulerPidMarker(readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'));
+      if (pid !== null && isLiveFlowcrewSchedulerForRun(pid, runId, runPath)) {
+        skippedLive += 1;
+        continue;
+      }
+    } catch { /* no validated live scheduler; historical run is cleanable */ }
+    try {
+      rmSync(join(root, runId), { recursive: true, force: true });
+      cleaned += 1;
+    } catch { /* non-critical */ }
   }
-  console.log(`Cleaned ${toDelete.length} old runs (kept ${keep} most recent).`);
+  console.log(`Cleaned ${cleaned} old runs (kept ${keep} most recent).`);
+  if (skippedLive > 0) console.log(`Skipped ${skippedLive} live run(s); stop them before cleaning their history.`);
 }
 
 function cmdExport() {
@@ -718,7 +1077,7 @@ function cmdExport() {
 
 async function cmdCampaign() {
   const subcommand = args[1];
-  if (subcommand === 'pending') {
+  if (subcommand === CAMPAIGN_PENDING_SUBCOMMAND) {
     const id = args[2];
     if (!id || args.includes('--help') || args.includes('-h')) {
       console.log('Usage: flowcrew campaign pending <campaign_id>');
@@ -789,24 +1148,19 @@ async function cmdCampaign() {
     }
     if (args.includes('--background')) {
       try {
-        const { defaultSocketPath, sendRpc } = await import('./orchestrator-rpc.js');
-        const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
         const launchArgs = args.slice(3).filter((arg) => arg !== '--background');
-        const res = await sendRpc<{ id: number; unit: string }>(socketPath, {
-          cmd: 'register',
-          task: {
-            kind: 'campaign',
-            name: `Campaign ${configPath}`,
-            config_path: resolve(configPath),
-            projectDir: detectProjectDir(),
-            launch_args: launchArgs,
-          },
+        await registerBackgroundTask({
+          kind: 'campaign',
+          name: `Campaign ${configPath}`,
+          config_path: resolve(configPath),
+          projectDir: detectProjectDir(),
+          launch_args: launchArgs,
         });
-        console.log(`Task #${res.id} registered. Unit: ${res.unit}`);
         return;
       } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
+        const { rpcErrorExitCode } = await import('./orchestrator-rpc.js');
+        process.exit(rpcErrorExitCode(err));
       }
     }
     const cfg = await loadCampaignConfig(resolve(configPath));
@@ -865,7 +1219,7 @@ async function cmdCampaign() {
       console.error('Usage: flowcrew campaign stop <campaign_id>');
       process.exit(1);
     }
-    stopCampaign(id);
+    await stopCampaign(id);
     console.log(`Campaign ${id}: stop requested`);
     return;
   }
@@ -948,19 +1302,23 @@ Usage: flowcrew <command>
 
 Commands:
   init      Initialize FlowCrew in the current project
-  quick     Ship a task directly from the CLI (no server needed)
+  quick     Inspect, then run or enqueue an authored brief (no server needed)
   status    Show progress of the latest run
   list      Show all recent runs with status and duration
   guide     Send guidance to the running supervisor
   clean     Delete old runs (keeps 5 most recent by default)
   export    Export a run as JSON bundle
   campaign  Run, inspect, or stop an outer-loop research campaign
-  daemon    Start, stop, and inspect the background orchestrator
+  campaign-loop  Run the long-lived autonomous research direction loop
+  daemon    Operate the background orchestrator (restart/status; serve is foreground/internal)
+  dashboard Query the running web dashboard (status)
   task      List and manage background tasks
   audit-reality  Run declared checks against task history
+  inbox     Review and resolve approval requests that parked a run
+  rehearse  Wind-tunnel a research brief pre-launch: real scheduler + scripted fake agent, 0 tokens
   brief     Inspect, diff, or roll back versioned briefs
-  doctor    Check system requirements and configuration
-  start     Start the FlowCrew dashboard server
+  doctor    Check system requirements; repair/compact the task registry (dry-run by default)
+  start     Start the web dashboard (this is NOT the background orchestrator daemon)
   version   Show version
 
 Examples:
@@ -968,11 +1326,17 @@ Examples:
   flowcrew quick "task" --supervise --max-iterations 3
   flowcrew status
   flowcrew list --limit 20
-  flowcrew daemon start
+  flowcrew daemon status
+  flowcrew daemon restart
+  flowcrew dashboard status
+  flowcrew doctor --repair-registry
+  flowcrew doctor --repair-registry --apply
+  flowcrew doctor --compact-registry
+  flowcrew start  # web dashboard only
   flowcrew task list
-  flowcrew guide "try a different approach"
+  flowcrew guide --run <run-id> "try a different approach"
   flowcrew clean --keep 3
-  flowcrew campaign run docs/framework_campaign/example_campaign.yaml --dry-run
+  flowcrew campaign run examples/example_campaign.yaml --dry-run
   flowcrew brief head docs/brief
 
 Options:
@@ -995,19 +1359,54 @@ async function cmdCampaignLoop(): Promise<void> {
   let task = '';
   let maxDirections: number | undefined;
   let noScout = false;
+  let acknowledgementPresent = false;
+  let acknowledgementDigest: string | undefined;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
     if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; continue; }
     if (args[i] === '--max-directions' && args[i + 1]) { maxDirections = parseInt(args[++i], 10); continue; }
     if (args[i] === '--no-scout') { noScout = true; continue; } // skip the up-front literature scout
     if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
-    if (args[i] === '-') { task = readFileSync(0, 'utf-8').trim(); continue; }
+    if (args[i] === '--acknowledge-brief-warnings') { acknowledgementPresent = true; continue; }
+    if (args[i].startsWith('--acknowledge-brief-warnings=')) {
+      acknowledgementPresent = true;
+      acknowledgementDigest = args[i].slice('--acknowledge-brief-warnings='.length);
+      continue;
+    }
+    if (args[i] === '-') { task = readFileSync(0, 'utf-8'); continue; }
   }
-  if (!task || !campaignArg) {
-    console.error('Usage: flowcrew campaign-loop - --project <dir> --campaign <name> [--max-directions N]');
+  if (!task.trim() || !campaignArg) {
+    console.error('Usage: flowcrew campaign-loop - --project <dir> --campaign <name> [--max-directions N] [--acknowledge-brief-warnings[=<digest>]]');
     console.error('  Autonomous outer loop: proposes a NEW direction, runs a full inner research loop on it, repeats until frontier/ship.');
     process.exit(1); return;
   }
+  const {
+    canDeriveBriefAdmission,
+    createBriefAdmission,
+    formatBriefPreflightReport,
+    inspectBrief,
+  } = await import('./brief-preflight.js');
+  const parentReport = inspectBrief(task);
+  console.log(`${formatBriefPreflightReport(parentReport)}\n`);
+  if (acknowledgementDigest !== undefined && acknowledgementDigest !== parentReport.digest) {
+    console.error(`Brief acknowledgement digest mismatch: received ${acknowledgementDigest || '(empty)'}, current digest is ${parentReport.digest}.`);
+    process.exit(2); return;
+  }
+  if (parentReport.requiresAcknowledgement && !acknowledgementPresent) {
+    console.error('Campaign launch paused before adapter or proposer loading. Review the report above, then rerun with:');
+    console.error(`  --acknowledge-brief-warnings=${parentReport.digest}`);
+    process.exit(2); return;
+  }
+  const parentAdmission = createBriefAdmission(
+    parentReport,
+    acknowledgementPresent
+      ? {
+          kind: 'explicit',
+          source: acknowledgementDigest === undefined ? 'cli_current_input_flag' : 'cli_digest_flag',
+          at: new Date().toISOString(),
+        }
+      : { kind: 'not_required' },
+  );
   const { parseBriefFrontmatter } = await import('./scheduler.js');
   const { research } = parseBriefFrontmatter(task);
   if (!research) { console.error('campaign-loop needs a brief with a research:/objective: block (baseline + policy + stop).'); process.exit(1); return; }
@@ -1018,15 +1417,14 @@ async function cmdCampaignLoop(): Promise<void> {
   const proposeRole = parseYaml(readFileSync(existsSync(localRole) ? localRole : cfgRole, 'utf-8')) as { name: string; description: string; model: string; reasoning_effort: string; tools: string[]; prompt: string };
 
   const projDefaults = loadProjectDefaults(projectDir);
-  // The inner `quick` runs get the project's pinned model via the scheduler, but this propose
-  // call hits the adapter directly — so apply the project default here too. Otherwise a role
-  // model of 'default' lets the codex adapter fall back to its built-in default (gpt-5.3-codex),
-  // which 400s on a ChatGPT account, and the failed propose would masquerade as a frontier.
+  // The inner `quick` runs get the project's model via the scheduler, but this propose
+  // call hits the adapter directly — apply the project default here too so both paths
+  // resolve identically. ('default' now inherits the user's global codex config in the
+  // adapter; the historical hazard was the CLI built-in default drifting to a model the
+  // account lacked — gpt-5.3-codex, HTTP 400 — and the failed propose masquerading as a frontier.)
   if ((!proposeRole.model || proposeRole.model === 'default') && projDefaults.model) proposeRole.model = projDefaults.model;
-  const adapterName = projDefaults.adapter || 'codex';
-  const adapterInstance = adapterName === 'claude'
-    ? new (await import('./adapters/claude.js')).ClaudeAdapter()
-    : new (await import('./adapters/codex.js')).CodexAdapter();
+  const adapterName = normalizeAdapterName(projDefaults.adapter || 'codex');
+  const adapterInstance = await loadAdapterByName(adapterName);
 
   const cliPath = process.argv[1];
   const proposeDir = join(runsRoot(), `campaign-loop-propose-${process.pid}`);
@@ -1076,9 +1474,31 @@ async function cmdCampaignLoop(): Promise<void> {
     briefContext: task, // give the proposer the campaign brief (goal + gates + historical ledger) so it does not re-propose dead directions
     launchInner: async (direction) => {
       const seeded = task + `\n\n## OUTER-LOOP DIRECTIVE\nFocus this entire run on ONE direction: ${direction}\n`;
-      let out = '';
+      const childReport = inspectBrief(seeded);
+      console.log(`${formatBriefPreflightReport(childReport)}\n`);
+      if (!canDeriveBriefAdmission(parentAdmission, parentReport, childReport)) {
+        console.error(`Generated brief ${childReport.digest} has a new consequential finding or degraded contract readiness.`);
+        console.error(`Review it and launch explicitly with --acknowledge-brief-warnings=${childReport.digest}`);
+        throw new Error(`inner run for '${direction}' stopped before reservation because its exact brief was not admitted`);
+      }
+      const childAdmission = createBriefAdmission(childReport, {
+        kind: 'derived',
+        source: 'campaign_loop',
+        at: new Date().toISOString(),
+        parentDigest: parentReport.digest,
+        transformation: 'outer_loop_directive_v1',
+      });
+      let out: string;
       try {
-        out = execSync(`node ${JSON.stringify(cliPath)} quick - --project ${JSON.stringify(projectDir)} --campaign ${JSON.stringify(campaignArg)} --no-inherit-campaign`, { input: seeded, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
+        out = execFileSync(process.execPath, [
+          cliPath,
+          'quick',
+          '-',
+          '--project', projectDir,
+          '--campaign', campaignArg,
+          '--campaign-context=skip',
+          '--brief-admission-record', encodeBriefAdmission(childAdmission),
+        ], { input: seeded, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
       } catch (e) { out = String((e as { stdout?: string }).stdout ?? '') + String((e as { stderr?: string }).stderr ?? ''); }
       const m = /"runId":"([^"]+)"/.exec(out);
       if (!m) throw new Error(`inner run for '${direction}' produced no runId`);
@@ -1112,7 +1532,7 @@ switch (command) {
     cmdInit();
     break;
   case 'quick':
-    cmdQuick().catch((err) => { console.error(err); process.exit(1); });
+    cmdQuick().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
     break;
   case 'status':
     cmdStatus();
@@ -1130,7 +1550,7 @@ switch (command) {
     cmdExport();
     break;
   case 'campaign':
-    cmdCampaign().catch((err) => { console.error(err); process.exit(1); });
+    cmdCampaign().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
     break;
   case 'campaign-loop':
     cmdCampaignLoop().catch((err) => { console.error(err); process.exit(1); });
@@ -1138,17 +1558,32 @@ switch (command) {
   case 'daemon':
     import('./cli-daemon.js').then(({ cmdDaemon }) => cmdDaemon(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
     break;
+  case 'dashboard':
+    import('./cli-dashboard.js').then(({ cmdDashboard }) => cmdDashboard(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
   case 'task':
     import('./cli-task.js').then(({ cmdTask }) => cmdTask(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
     break;
   case 'audit-reality':
     import('./reality-gate/audit-reality.js').then(({ cmdAuditReality }) => cmdAuditReality(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
     break;
+  case 'inbox':
+    import('./cli-inbox.js').then(({ cmdInbox }) => cmdInbox(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'rehearse':
+    import('./rehearse.js').then(({ cmdRehearse }) => cmdRehearse(args.slice(1))).catch((err) => { console.error(err); process.exit(1); });
+    break;
   case 'brief':
     try { cmdBrief(); } catch (err) { console.error(err); process.exit(1); }
     break;
   case 'doctor':
-    cmdDoctor().catch((err) => { console.error(err); process.exit(1); });
+    if (args.includes('--repair-registry') || args.includes('--compact-registry') || args.includes('--apply')) {
+      import('./cli-doctor.js')
+        .then(({ cmdDoctorMaintenance }) => { process.exitCode = cmdDoctorMaintenance(args); })
+        .catch((err) => { console.error(err); process.exit(1); });
+    } else {
+      cmdDoctor().catch((err) => { console.error(err); process.exit(1); });
+    }
     break;
   case 'start':
     cmdStart().catch((err) => { console.error(err); process.exit(1); });

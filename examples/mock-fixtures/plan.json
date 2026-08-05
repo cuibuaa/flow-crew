@@ -1,0 +1,10 @@
+{
+  "output_text": "Created one deterministic demo stage.",
+  "exit_code": 0,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "simulated_duration_ms": 5,
+  "write_files": {
+    "dispatch.yaml": "- id: single\n  role: coder\n  prompt_template: |\n    Return the deterministic mock greeting and make no project changes.\n"
+  }
+}

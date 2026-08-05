@@ -38,6 +38,12 @@ export interface ResearchRound {
   resultStd?: number;
   /** Cumulative wall hours across the program up to and including this round. */
   wallHoursCumulative?: number;
+  /** True when the brief-declared confirm gate rejected this round's ship attempt.
+   *  A confirm-failed round is UNCONFIRMED: it must never be kept or count as
+   *  running-best (else the same unconfirmed number re-triggers ship→confirm→fail
+   *  on every subsequent evaluation), but it still counts toward round budgets
+   *  and the no-improvement streak. */
+  confirmFailed?: boolean;
 }
 
 export interface ResearchEvaluation {
@@ -81,6 +87,10 @@ function applyPolicy(
     let best = baseline;
     let bestLabel: string | null = null;
     for (const r of rounds) {
+      if (r.confirmFailed) {
+        perRoundKept.push(false);
+        continue;
+      }
       if (isBetter(r.result, best, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
         best = r.result;
         bestLabel = r.label;
@@ -97,6 +107,10 @@ function applyPolicy(
   // gains accumulate.
   let runningBest = baseline;
   for (const r of rounds) {
+    if (r.confirmFailed) {
+      perRoundKept.push(false);
+      continue;
+    }
     if (isBetter(r.result, runningBest, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
       runningBest = r.result;
       keptLabels.push(r.label);
@@ -106,6 +120,34 @@ function applyPolicy(
     }
   }
   return { keptLabels, runningBest, perRoundKept };
+}
+
+/**
+ * Floor check for a research-loop ceiling claim, mirroring the unified
+ * terminal-state gate's evaluateTerminalFloor but with RESEARCH semantics:
+ * measured rounds ARE the attempted stages. Nothing in the engine writes
+ * stage_*_verdict.md files — they exist only when a brief instructs a stage to — so
+ * globbing for them here would read 0 for every research run and either always block or
+ * never fire. Counting rounds is what makes this floor satisfiable without asking the
+ * brief to arrange evidence files. Same precedence as the stage-verdict variant:
+ * when min_attempted_stages is set and satisfied, wall time is advisory only.
+ */
+export function evaluateResearchCeilingFloor(
+  floor: { minAttemptedStages?: number; minWallMinutes?: number } | undefined,
+  roundsAttempted: number,
+  elapsedMinutes: number,
+): { passed: boolean; reason?: string } {
+  if (!floor) return { passed: true };
+  if (floor.minAttemptedStages !== undefined) {
+    if (roundsAttempted < floor.minAttemptedStages) {
+      return { passed: false, reason: `only ${roundsAttempted} research round(s) measured; ceiling floor requires ${floor.minAttemptedStages}` };
+    }
+    return { passed: true };
+  }
+  if (floor.minWallMinutes !== undefined && elapsedMinutes < floor.minWallMinutes) {
+    return { passed: false, reason: `wall time ${elapsedMinutes.toFixed(1)} min < required ${floor.minWallMinutes} min` };
+  }
+  return { passed: true };
 }
 
 export function evaluateResearch(config: ResearchConfig, rounds: ResearchRound[]): ResearchEvaluation {

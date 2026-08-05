@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { StoreState } from './store.js';
-import { homedir } from 'node:os';
+import {
+  campaignsRoot as storeCampaignsRoot,
+  runsRoot as storeRunsRoot,
+  type StoreState,
+} from './store.js';
 import { readRunIndexRecords, recordToPartialState } from './run-index.js';
 
 export interface CampaignHistoryEntry {
@@ -28,6 +31,9 @@ export interface CampaignHistoryEntry {
   workflowSatisfied?: boolean;
   terminalStudyComplete?: boolean;
   modelSuccess?: boolean;
+  /** Read-side delivery evidence; writers may persist either a tip or full chain. */
+  completing_commit?: string;
+  commit_chain?: string[];
 }
 
 export interface CampaignSummaryRecord {
@@ -53,7 +59,7 @@ export interface CampaignSelection {
 }
 
 function runsRoot(_projectDir: string): string {
-  return join(homedir(), '.fc', 'runs');
+  return storeRunsRoot();
 }
 
 function campaignsRoot(projectDir: string): string {
@@ -61,7 +67,7 @@ function campaignsRoot(projectDir: string): string {
 }
 
 function globalCampaignsRoot(): string {
-  return join(homedir(), '.fc', 'campaigns');
+  return storeCampaignsRoot();
 }
 
 function campaignHistoryRoots(projectDir: string): string[] {
@@ -277,6 +283,10 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
             workflowSatisfied: parsed.workflowSatisfied === true ? true : undefined,
             terminalStudyComplete: parsed.terminalStudyComplete === true ? true : undefined,
             modelSuccess: typeof parsed.modelSuccess === 'boolean' ? parsed.modelSuccess : undefined,
+            completing_commit: typeof parsed.completing_commit === 'string' ? parsed.completing_commit : undefined,
+            commit_chain: Array.isArray(parsed.commit_chain)
+              ? parsed.commit_chain.filter((value): value is string => typeof value === 'string' && value.length > 0)
+              : undefined,
           };
           // Domain-agnostic: a gate verdict may declare "study complete without model
           // success" (a valid terminal negative result). Recognized by the verdict

@@ -1,0 +1,192 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { parse as parseYaml } from 'yaml';
+import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
+import {
+  findAllReady,
+  runWorkflow,
+  selectRunnableBatch,
+  StageConfigSchema,
+  WorkflowConfigSchema,
+  type StageConfig,
+} from '../src/scheduler.js';
+import { createRun, runDir, type StoreState } from '../src/store.js';
+import { readRunEvents } from '../src/run-events.js';
+
+let projectDir: string;
+
+function stage(input: Partial<StageConfig> & Pick<StageConfig, 'id'>): StageConfig {
+  return StageConfigSchema.parse({ role: 'coder', prompt_template: 'work', ...input });
+}
+
+function stateFor(stages: StageConfig[]): StoreState {
+  return {
+    runId: 'r', workflowName: 'w', projectDir, status: 'running',
+    startedAt: new Date().toISOString(),
+    stages: Object.fromEntries(stages.map((item) => [item.id, { status: 'pending', retries: 0 }])),
+  };
+}
+
+function writeAgent(): string {
+  const agentsDir = join(projectDir, 'config', 'agents');
+  mkdirSync(agentsDir, { recursive: true });
+  writeFileSync(join(agentsDir, 'coder.yaml'), [
+    'name: coder', 'description: test coder', 'model: default',
+    'reasoning_effort: default', 'tools: []', 'prompt: test',
+  ].join('\n'));
+  return agentsDir;
+}
+
+async function runStatic(scopes: [string[], string[]], reportedWrites: string[] = []) {
+  const yaml = [
+    'name: scope-test',
+    'defaults:',
+    '  max_iterations: 1',
+    'stages:',
+    '  - id: left',
+    '    role: coder',
+    `    scope: ${JSON.stringify(scopes[0])}`,
+    '  - id: right',
+    '    role: coder',
+    `    scope: ${JSON.stringify(scopes[1])}`,
+  ].join('\n');
+  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
+  writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+  let active = 0;
+  let maxActive = 0;
+  const adapter: Adapter = {
+    async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      if (opts.stageId === '_summary') return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      active--;
+      return { output: opts.stageId, exitCode: 0, duration_ms: 25, writes: reportedWrites, writeAttribution: 'structured' };
+    },
+  };
+  const final = await runWorkflow(workflow, yaml, projectDir, adapter, new Map(), undefined, writeAgent(), created.runId);
+  return { final, maxActive, events: readRunEvents(projectDir, created.runId) };
+}
+
+beforeEach(() => {
+  projectDir = join(tmpdir(), `flowcrew-e6-parallel-${randomBytes(6).toString('hex')}`);
+  mkdirSync(projectDir, { recursive: true });
+});
+
+afterEach(() => rmSync(projectDir, { recursive: true, force: true }));
+
+describe('safe scope batching', () => {
+  it('admits both independent ready stages into the same batch', async () => {
+    const stages = [
+      stage({ id: 'left', scope: ['src/left.ts'] }),
+      stage({ id: 'right', scope: ['spec/right/**'] }),
+    ];
+    const ready = findAllReady(stages, stateFor(stages));
+    expect(ready).toHaveLength(2);
+    expect(selectRunnableBatch(ready).selected.map((item) => item.id)).toEqual(['left', 'right']);
+
+    const measured = await runStatic([['src/left.ts'], ['spec/right/**']]);
+    expect(measured.final.status).toBe('complete');
+    expect(measured.maxActive).toBe(2);
+  });
+
+  it('serializes overlapping scopes and records the reason without failing the run', async () => {
+    const stages = [
+      stage({ id: 'left', scope: ['src/shared/**'] }),
+      stage({ id: 'right', scope: ['src/shared/file.ts'] }),
+    ];
+    const batch = selectRunnableBatch(stages);
+    expect(batch.selected.map((item) => item.id)).toEqual(['left']);
+    expect(batch.deferred[0].conflict.reason).toContain('may overlap');
+
+    const measured = await runStatic([['src/shared/**'], ['src/shared/file.ts']]);
+    expect(measured.final.status).toBe('complete');
+    expect(measured.maxActive).toBe(1);
+    expect(measured.events.some((event) => event.type === 'parallel_scope_serialized' && event.detail?.includes('right deferred'))).toBe(true);
+  });
+
+  it('conservatively serializes an unmarked directory ancestor without conflating sibling names', () => {
+    const nested = selectRunnableBatch([
+      stage({ id: 'directory', scope: ['src'] }),
+      stage({ id: 'child', scope: ['src/child.ts'] }),
+    ]);
+    expect(nested.selected.map((item) => item.id)).toEqual(['directory']);
+    expect(nested.deferred[0].conflict.reason).toContain('may overlap');
+
+    const siblings = selectRunnableBatch([
+      stage({ id: 'backend', scope: ['src'] }),
+      stage({ id: 'frontend', scope: ['src-ui/child.ts'] }),
+    ]);
+    expect(siblings.selected.map((item) => item.id)).toEqual(['backend', 'frontend']);
+    expect(siblings.deferred).toEqual([]);
+  });
+
+  it('canonicalizes explicit directory and dot-segment aliases without conflating path-segment siblings', () => {
+    for (const directoryScope of ['packages/core/', './packages/core/.']) {
+      const nested = selectRunnableBatch([
+        stage({ id: 'directory', scope: [directoryScope] }),
+        stage({ id: 'child', scope: ['packages/core/index.ts'] }),
+      ]);
+      expect(nested.selected.map((item) => item.id)).toEqual(['directory']);
+      expect(nested.deferred).toHaveLength(1);
+    }
+
+    const equivalent = selectRunnableBatch([
+      stage({ id: 'explicit', scope: ['packages/core/'] }),
+      stage({ id: 'bare', scope: ['packages/core'] }),
+    ]);
+    expect(equivalent.selected.map((item) => item.id)).toEqual(['explicit']);
+    expect(equivalent.deferred).toHaveLength(1);
+
+    const siblings = selectRunnableBatch([
+      stage({ id: 'core', scope: ['packages/core/.'] }),
+      stage({ id: 'core_ui', scope: ['packages/core-ui/index.ts'] }),
+    ]);
+    expect(siblings.selected.map((item) => item.id)).toEqual(['core', 'core_ui']);
+    expect(siblings.deferred).toEqual([]);
+  });
+
+  it('warns and fails when disjoint declarations hide the same factual structured write', async () => {
+    const measured = await runStatic([['src/left.ts'], ['src/right.ts']], ['src/shared.ts']);
+    const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
+    expect(measured.maxActive).toBe(2);
+    expect(warning).toMatchObject({ level: 'warning', stageIds: ['left', 'right'], files: ['src/shared.ts'] });
+    expect(measured.final.status).toBe('failed');
+    expect(measured.final.stages.left.constraintAudit).toMatchObject({ violationCount: 1 });
+    expect(measured.final.stages.right.constraintAudit).toMatchObject({ violationCount: 1 });
+  });
+
+  it('preserves an identical ../ factual write in both the event and summary warning', async () => {
+    const reported = '../fc-home/runs/example/./knowledge_graph.json';
+    const canonical = '../fc-home/runs/example/knowledge_graph.json';
+    const measured = await runStatic([['src/left.ts'], ['src/right.ts']], [reported]);
+    const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
+    expect(measured.maxActive).toBe(2);
+    expect(warning).toMatchObject({
+      level: 'warning',
+      stageIds: ['left', 'right'],
+      files: [canonical],
+    });
+    expect(measured.final.status).toBe('failed');
+    expect(measured.final.stages.left.error).toContain('scope_violation');
+    expect(measured.final.stages.right.error).toContain('scope_violation');
+  });
+
+  it('keeps a linear DAG one-stage-at-a-time', () => {
+    const stages = [
+      stage({ id: 'a', scope: ['a.ts'] }),
+      stage({ id: 'b', depends_on: ['a'], scope: ['b.ts'] }),
+      stage({ id: 'c', depends_on: ['b'], scope: ['c.ts'] }),
+    ];
+    const state = stateFor(stages);
+    expect(findAllReady(stages, state).map((item) => item.id)).toEqual(['a']);
+    state.stages.a = { status: 'complete', retries: 0 };
+    expect(findAllReady(stages, state).map((item) => item.id)).toEqual(['b']);
+    state.stages.b = { status: 'complete', retries: 0 };
+    expect(findAllReady(stages, state).map((item) => item.id)).toEqual(['c']);
+  });
+});

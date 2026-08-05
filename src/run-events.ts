@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readJsonlFile } from './jsonl.js';
 import type { StageStatus } from './store.js';
-import { atomicWrite, runDir } from './store.js';
+import { atomicWrite, isSettledStageStatus, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
   | 'stage_complete'
@@ -17,7 +18,16 @@ export type RunEventType =
   | 'supervisor_reject'
   | 'plan_dispatch_retry'
   | 'research_mode_degraded'
-  | 'attempt_summary_refresh_requested';
+  | 'reality_gate_advisory'
+  | 'parallel_scope_serialized'
+  | 'parallel_write_conflict'
+  | 'attempt_summary_refresh_requested'
+  // Approval inbox: the run suspended on a consequential action, and the
+  // resolution that released it. Part of the run's audit narrative — the only
+  // place an operator sees WHY a run stopped without a verdict. Deliberately
+  // NOT a summary-refresh trigger: an approval is not new measurable work.
+  | 'approval_parked'
+  | 'approval_resolved';
 
 export interface RunEvent {
   type: RunEventType;
@@ -28,6 +38,9 @@ export interface RunEvent {
   status?: StageStatus['status'];
   artifacts?: string[];
   detail?: string;
+  level?: 'info' | 'warning';
+  stageIds?: string[];
+  files?: string[];
 }
 
 export interface AttemptSummaryRefreshState {
@@ -110,21 +123,11 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
 }
 
 export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
-  let raw: string;
   try {
-    raw = readFileSync(eventsPath(projectDir, runId), 'utf-8');
+    return readJsonlFile<RunEvent>(eventsPath(projectDir, runId));
   } catch { /* no events file yet */
     return [];
   }
-  // Parse per line, tolerating a single corrupt/truncated row (an append-only file
-  // can be torn by a crash mid-write). Previously one bad line threw and dropped
-  // the ENTIRE event history — inconsistent with every other jsonl reader here.
-  const out: RunEvent[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    try { out.push(JSON.parse(line) as RunEvent); } catch { /* skip bad row */ }
-  }
-  return out;
 }
 
 export function requestAttemptSummaryRefresh(
@@ -220,19 +223,15 @@ export function recordStageOutcome(
   status: StageStatus,
   options?: { debounceMs?: number },
 ): void {
-  if (
-    status.status !== 'complete' &&
-    status.status !== 'failed' &&
-    status.status !== 'skipped'
-  ) {
+  if (!isSettledStageStatus(status.status) && status.status !== STAGE_STATUS.SKIPPED) {
     return;
   }
 
   const timestamp = status.completedAt ?? new Date().toISOString();
   const stageEvent: RunEvent = {
-    type: status.status === 'complete'
+    type: status.status === STAGE_STATUS.COMPLETE
       ? 'stage_complete'
-      : status.status === 'failed'
+      : status.status === STAGE_STATUS.FAILED
         ? 'stage_failed'
         : 'stage_skipped',
     runId,

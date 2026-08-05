@@ -1,33 +1,105 @@
-import { readFileSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, renameSync, copyFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readlinkSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
+import {
+  APPROVAL_REQUEST_FILE,
+  APPROVALS_DIR,
+  approvalArtifactPath,
+  isValidApprovalRequestId,
+} from './approval-artifacts.js';
 import { evaluateCondition } from './condition.js';
-import { createRun, enforceRealityGateBeforeTerminal, readRunState, writeRunState, writeStageStatus, readStageStatus, runDir, stageDir, runsRoot, isTerminalRunStatus } from './store.js';
+import {
+  enforceRealityGateBeforeTerminal,
+  initializeReservedRun,
+  readRunReservation,
+  readRunState,
+  reserveRun,
+  writeRunState,
+  writeStageStatus,
+  readStageStatus,
+  completeStageAttempt,
+  attachStageConstraintAudit,
+  rependStageStatus,
+  runDir,
+  stageDir,
+  isAwaitingApprovalRunStatus,
+  isPendingStageStatus,
+  isRunningStageStatus,
+  isSatisfiedStageDependencyStatus,
+  isTerminalRunStatus,
+  isPausedRunStatus,
+  RUN_STATUS,
+  STAGE_STATUS,
+  TERMINAL_STATUSES,
+} from './store.js';
+import {
+  claimLaunchIntent,
+  describeLiveRunOwner,
+  findLiveRunOwnerForProject,
+  invalidateRunLockCache,
+  isLiveFlowcrewSchedulerForRun,
+  parseSchedulerPidMarker,
+  releaseLaunchIntent,
+  removeSchedulerProcessIdentity,
+  writeSchedulerProcessIdentity,
+} from './run-lock.js';
+import {
+  foldItems,
+  INBOX_ITEM_STATE,
+  isPendingInboxItemState,
+  matchStandingRule,
+  recordRequest,
+  resolveRequest,
+  type ApprovalRisk,
+} from './inbox.js';
 import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
 import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
-import { evaluateResearch, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
+import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
 import { runStage } from './worker.js';
 import {
+  TechnicalChainController,
+  createTechnicalRetryBudgetState,
+  transitionTechnicalRetryBudget,
+  type TechnicalRetryBudgetState,
+} from './technical-chain.js';
+import {
+  buildScopeNegotiationTrace,
+  negotiationRequestDigest,
+  parseScopeRevisionRequest,
+  publishConstraintDecision,
+  publishJsonCreateOnly,
+  readConstraintDecision,
+  rejectedScopeDigest,
+  scopePathDigest,
+  type RuntimeConstraintDecisionV1,
+  type ScopeStageKind,
+  type ScopeRevisionRequestV1,
+} from './runtime-negotiation.js';
+import {
   canonicalCampaignId,
   collapseEntriesForHealth,
   readCampaignEntries,
   resolveCampaignStorageKey,
-  summarizeCampaignPhaseProgress,
 } from './campaigns.js';
+import { formatCampaignContextBlock, selectRelevantCampaignContext } from './campaign-context.js';
 import { recordRunEvent, recordStageOutcome } from './run-events.js';
 import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
 import { appendTraceEvent } from './trace.js';
 import { generateRunSummary } from './run-summary.js';
 import { Supervisor } from './supervisor.js';
-import { loadProjectDefaults, loadSupervisorConfig } from './config.js';
-import pino from 'pino';
+import { isSessionReuseEnabled, loadProjectDefaults, loadSupervisorConfig } from './config.js';
+import { readCodexSession, type CodexSessionMetadata } from './adapters/codex.js';
+import { createLogger } from './logging.js';
+import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
 
-const log = pino({ name: 'scheduler' });
+const log = createLogger({ name: 'scheduler' });
+const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
 
 /**
  * FIX D — confirm-gate observability on non-ship terminals. The confirm gate runs ONLY on a
@@ -66,6 +138,14 @@ function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig 
  *     paths: [docs/.../ceiling_report.md]
  *     floor: { min_attempted_stages: 4, min_wall_minutes: 60 }
  *     stage_glob: docs/v8_research/stage_*_verdict.md   (used to count attempted stages)
+ *
+ * `min_attempted_stages` counts files matching `stage_glob` — inferred as
+ * `<dir of the first declared path>/stage_*_verdict.md` when it is absent. NOTHING IN THIS
+ * ENGINE WRITES THOSE FILES: they exist only when the brief itself tells a stage to write
+ * them, so a floor declared without that instruction can never be satisfied. `brief-preflight`
+ * reports that case rather than letting the run spend its whole budget unable to terminate.
+ * The research-loop ceiling is the one exception and it does not glob at all — it counts
+ * measured rounds instead, for exactly this reason; see `evaluateResearchCeilingFloor`.
  *
  * Returns the stripped brief (with frontmatter removed so the planner doesn't
  * see internal config) plus the parsed config. Briefs without frontmatter,
@@ -202,6 +282,15 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
   if (!raw || typeof raw !== 'object') return out;
   const ts: TerminalStatesConfig = {};
   for (const [status, val] of Object.entries(raw as Record<string, unknown>)) {
+    // Only a REAL terminal status may be declared here. Without this check a
+    // brief could declare e.g. `terminal_states: { parked: ... }` and the
+    // terminal gate would blind-cast it into run.json WITH completedAt while
+    // every terminal guard reports false — an agent-reachable way to forge a
+    // zombie run that no consumer treats as finished or alive.
+    if (!isTerminalRunStatus(status)) {
+      log.warn({ status, allowed: TERMINAL_STATUSES }, 'terminal_states declares a non-terminal status — ignoring that key');
+      continue;
+    }
     let entry: TerminalStateEntry | null = null;
     if (typeof val === 'string') entry = { paths: [val] };
     else if (Array.isArray(val)) {
@@ -273,7 +362,11 @@ function evaluateTerminalFloor(
 ): { passed: boolean; reason?: string } {
   if (!entry.floor) return { passed: true };
   const { floor, stageGlob, paths } = entry;
-  const elapsedMin = ((Date.now() - (state.startedAt ? new Date(state.startedAt).getTime() : Date.now())) / 60000);
+  const startedAtMs = Date.parse(state.startedAt);
+  if (!Number.isFinite(startedAtMs)) {
+    return { passed: false, reason: `run startedAt '${state.startedAt}' is invalid; freshness cannot be proven` };
+  }
+  const elapsedMin = ((Date.now() - startedAtMs) / 60000);
 
   // Bug #7 fix: minAttemptedStages is the PRIMARY proof-of-work gate. Counting
   // real stage_*_verdict.md files (each backed by selection/OOS/checkpoint
@@ -288,14 +381,23 @@ function evaluateTerminalFloor(
       const dir = first.includes('/') ? first.substring(0, first.lastIndexOf('/')) : '.';
       glob = `${dir}/stage_*_verdict.md`;
     }
-    const matches = glob ? countGlobMatches(projectDir, glob) : 0;
-    if (matches < floor.minAttemptedStages) {
-      return { passed: false, reason: `only ${matches} stage verdict file(s) match '${glob}'; need ${floor.minAttemptedStages}` };
+    const matches = glob
+      ? countGlobMatches(projectDir, glob, startedAtMs)
+      : { fresh: 0, stale: 0 };
+    if (matches.fresh < floor.minAttemptedStages) {
+      const globSource = stageGlob ? 'configured stage_glob' : 'inferred stage_glob';
+      const staleDetail = matches.stale > 0
+        ? `; ${matches.stale} matching file(s) exist but predate this run start`
+        : '';
+      return {
+        passed: false,
+        reason: `only ${matches.fresh} fresh stage verdict file(s) match ${globSource} '${glob}'${staleDetail}; need ${floor.minAttemptedStages}`,
+      };
     }
     // Stages satisfied → floor passes. Wall time is informational only.
     if (floor.minWallMinutes !== undefined && elapsedMin < floor.minWallMinutes) {
       log.info(
-        { minAttemptedStages: floor.minAttemptedStages, matches, elapsedMin: Number(elapsedMin.toFixed(1)), minWallMinutes: floor.minWallMinutes },
+        { minAttemptedStages: floor.minAttemptedStages, matches: matches.fresh, elapsedMin: Number(elapsedMin.toFixed(1)), minWallMinutes: floor.minWallMinutes },
         'Terminal floor: stages satisfied; passing despite wall time below min_wall_minutes (wall is advisory when stages are set)',
       );
     }
@@ -307,6 +409,21 @@ function evaluateTerminalFloor(
     return { passed: false, reason: `wall time ${elapsedMin.toFixed(1)} min < required ${floor.minWallMinutes} min (no min_attempted_stages set)` };
   }
   return { passed: true };
+}
+
+/**
+ * Mark all still-pending stages as skipped when a run commits a terminal
+ * status mid-iteration (research loop termination, terminal-state file), so
+ * run.json never shows stages silently frozen at 'pending' forever
+ * (event-drift audit, engine bug #3: verify_r4_pead/fix_r4_pead left pending).
+ */
+function markLeftoverStagesSkipped(state: StoreState, note: string): void {
+  for (const st of Object.values(state.stages ?? {})) {
+    if (isPendingStageStatus(st.status)) {
+      st.status = STAGE_STATUS.SKIPPED;
+      st.error = note;
+    }
+  }
 }
 
 /**
@@ -431,46 +548,392 @@ export function isTerminalStatus(status: string | undefined): boolean {
   return status !== undefined && isTerminalRunStatus(status);
 }
 
-/**
- * Single-in-flight enforcement: find another run for the same projectDir that
- * is genuinely active (status='running' AND a live scheduler.pid). Returns its
- * runId, or null. Orphans (status running but dead pid) are ignored so a
- * crashed prior run doesn't block new launches.
- *
- * This prevents the Phase A failure mode: an agent spawned a second run for
- * the same project while the first was still active, causing two concurrent
- * runs to race on shared artifacts. The "single in-flight" invariant was prose
- * in the brief (which the agent's sandbox couldn't verify) — now framework-
- * enforced at run start.
- */
-function findActiveSiblingRun(projectDir: string, selfRunId: string): string | null {
-  let dirs: string[];
-  try { dirs = readdirSync(runsRoot()); } catch { return null; }
-  for (const dir of dirs) {
-    if (dir === selfRunId) continue;
+// A PID alone cannot distinguish two concurrent runWorkflow() calls inside
+// one Node process. Track paths claimed by this module so a same-process
+// duplicate is rejected, while legacy/in-process callers that pre-created
+// scheduler.pid with the current PID can safely transfer that claim here.
+const localSchedulerClaims = new Set<string>();
+
+function establishLocalSchedulerClaim(schedulerPidPath: string, runId: string): boolean {
+  const claimPath = resolve(schedulerPidPath);
+  try {
+    writeSchedulerProcessIdentity(dirname(claimPath), runId);
+    localSchedulerClaims.add(claimPath);
+    return true;
+  } catch {
     try {
-      const rs = JSON.parse(readFileSync(join(runsRoot(), dir, 'run.json'), 'utf-8'));
-      if (rs.projectDir !== projectDir) continue;
-      if (rs.status !== 'running') continue;
-      // Check the pid is alive.
-      const pidRaw = readFileSync(join(runsRoot(), dir, 'scheduler.pid'), 'utf-8').trim();
-      const pid = parseInt(pidRaw, 10);
-      if (!Number.isFinite(pid)) continue;
-      try {
-        process.kill(pid, 0); // process exists
-        // Guard against PID reuse: after a crash the OS may recycle the dead
-        // scheduler's PID for an unrelated process, which would falsely read as a
-        // live sibling and block this project from launching. Confirm it's actually
-        // a node/flowcrew process via /proc/<pid>/cmdline (best-effort on Linux).
-        try {
-          const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
-          if (cmdline && !/cli\.js|flowcrew|node/.test(cmdline)) continue; // recycled PID, not us
-        } catch { /* /proc unavailable (non-Linux) — trust kill(0) */ }
-        return dir;
-      } catch { /* dead pid → orphan, ignore */ }
-    } catch { /* missing run.json / pid → skip */ }
+      if (readFileSync(schedulerPidPath, 'utf-8').trim() === String(process.pid)) {
+        unlinkSync(schedulerPidPath);
+      }
+    } catch { /* absent or replaced */ }
+    removeSchedulerProcessIdentity(dirname(claimPath), process.pid);
+    return false;
   }
-  return null;
+}
+
+function claimSchedulerPid(schedulerPidPath: string, runId: string): boolean {
+  const claimPath = resolve(schedulerPidPath);
+  const runPath = dirname(claimPath);
+  if (localSchedulerClaims.has(claimPath)) return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(schedulerPidPath, String(process.pid), { encoding: 'utf-8', flag: 'wx' });
+      return establishLocalSchedulerClaim(schedulerPidPath, runId);
+    } catch {
+      let owner: number | null = null;
+      try { owner = parseSchedulerPidMarker(readFileSync(schedulerPidPath, 'utf-8')); } catch { /* missing again */ }
+      if (owner === process.pid) {
+        return establishLocalSchedulerClaim(schedulerPidPath, runId);
+      }
+      if (owner !== null && isLiveFlowcrewSchedulerForRun(owner, runId, runPath)) return false;
+      try { unlinkSync(schedulerPidPath); } catch { return false; }
+      removeSchedulerProcessIdentity(runPath);
+    }
+  }
+  return false;
+}
+
+function removeSchedulerPidIfOwned(schedulerPidPath: string): void {
+  localSchedulerClaims.delete(resolve(schedulerPidPath));
+  try {
+    if (readFileSync(schedulerPidPath, 'utf-8').trim() === String(process.pid)) {
+      unlinkSync(schedulerPidPath);
+      removeSchedulerProcessIdentity(dirname(resolve(schedulerPidPath)), process.pid);
+    }
+  } catch { /* already removed or replaced by a newer owner */ }
+}
+
+interface ApprovalRequestSource {
+  path: string;
+  stageId?: string;
+}
+
+/**
+ * Stable multi-request scan. The root file remains supported for old briefs;
+ * new stages get an isolated slot at stages/<stageId>/approval_request.json.
+ * Named root slots are accepted as an additional compatibility path.
+ */
+function approvalRequestSources(runDirPath: string): ApprovalRequestSource[] {
+  const sources: ApprovalRequestSource[] = [];
+  try {
+    for (const name of readdirSync(runDirPath).sort()) {
+      if (name === APPROVAL_REQUEST_FILE || /^approval_request[._-][A-Za-z0-9._-]+\.json$/.test(name)) {
+        sources.push({ path: join(runDirPath, name) });
+      }
+    }
+  } catch { /* run directory disappeared */ }
+
+  const stagesPath = join(runDirPath, 'stages');
+  try {
+    for (const entry of readdirSync(stagesPath, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory()) continue;
+      const path = join(stagesPath, entry.name, APPROVAL_REQUEST_FILE);
+      if (existsSync(path)) sources.push({ path, stageId: entry.name });
+    }
+  } catch { /* no stages directory */ }
+  return sources;
+}
+
+function archiveApprovalRequest(runDirPath: string, sourcePath: string, requestId: string): void {
+  const target = approvalArtifactPath(runDirPath, requestId, 'request');
+  mkdirSync(join(runDirPath, APPROVALS_DIR), { recursive: true });
+  if (existsSync(target)) {
+    // Keep the first audit copy, matching the append log's first-request-wins
+    // arbitration, and merely consume a duplicate slot.
+    if (sourcePath !== target) unlinkSync(sourcePath);
+    return;
+  }
+  renameSync(sourcePath, target);
+}
+
+/**
+ * Approval park gate — the engine-side half of the approval inbox.
+ *
+ * The agent↔engine contract is a FILE, like every other one in this engine
+ * (dispatch.yaml, round_result.json, terminal artifacts): a stage writes its
+ * isolated `<run_dir>/stages/<stageId>/approval_request.json` slot containing
+ * {id, action, target?, risk?, title, body?}. The legacy root slot remains
+ * readable. This function ingests every slot and then either
+ *   (a) auto-approves it, when a standing rule already authorizes exactly this
+ *       action→target for this project (rules are only mintable for
+ *       external-risk targeted actions), or
+ *   (b) PARKS the run: status='parked', request recorded durably in the inbox,
+ *       and the caller returns so the process exits — freeing the project lock
+ *       and the daemon queue slot while a human decides.
+ *
+ * Idempotent by (runId, requestId): re-ingesting the same request appends
+ * nothing, so a resumed run that still sees the file cannot double-create it.
+ * The request file is consumed (moved under approvals/) once recorded, and the
+ * decision is written back beside it for the resumed agent to read.
+ *
+ * Returns the parked state, or null when there is nothing to park on.
+ */
+async function tryParkOnApprovalRequest(
+  state: StoreState,
+  ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
+): Promise<StoreState | null> {
+  // Ingestion is deliberately separate from choosing which request parks the
+  // run: parallel stages may produce several slots in one batch, and all must
+  // reach the append-only inbox before the first pending item suspends us.
+  for (const source of approvalRequestSources(ctx.runDirPath)) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(readFileSync(source.path, 'utf-8')); } catch {
+      log.warn({ runId: ctx.runId, reqPath: source.path }, 'approval request is not valid JSON — ignoring');
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      log.warn({ runId: ctx.runId, reqPath: source.path }, 'approval request is not a JSON object — ignoring');
+      continue;
+    }
+    const raw = parsed as {
+      id?: unknown;
+      requestId?: unknown;
+      action?: unknown;
+      target?: unknown;
+      risk?: unknown;
+      title?: unknown;
+      body?: unknown;
+      stageId?: unknown;
+    };
+    const requestIdRaw = typeof raw.requestId === 'string' ? raw.requestId : typeof raw.id === 'string' ? raw.id : '';
+    const requestId = requestIdRaw.trim();
+    const action = typeof raw.action === 'string' ? raw.action.trim() : '';
+    if (!requestId || !action) {
+      log.warn({ runId: ctx.runId, reqPath: source.path }, 'approval request needs at least {id, action} — ignoring');
+      continue;
+    }
+    if (!isValidApprovalRequestId(requestId)) {
+      log.warn({ runId: ctx.runId, requestId, reqPath: source.path }, 'unsafe approval request id — rejecting artifact');
+      continue;
+    }
+    const target = typeof raw.target === 'string' && raw.target.trim() ? raw.target.trim() : undefined;
+    const risk: ApprovalRisk = raw.risk === 'external' || raw.risk === 'exec' || raw.risk === 'write' ? raw.risk : 'unknown';
+    const stageId = typeof raw.stageId === 'string' && raw.stageId.trim() ? raw.stageId.trim() : source.stageId;
+    const req = {
+      runId: ctx.runId,
+      projectDir: ctx.projectDir,
+      requestId,
+      action,
+      ...(target ? { target } : {}),
+      risk,
+      title: typeof raw.title === 'string' && raw.title.trim()
+        ? raw.title.trim()
+        : `${action}${target ? ` → ${target}` : ''}`,
+      ...(typeof raw.body === 'string' && raw.body ? { body: raw.body } : {}),
+      createdAt: new Date().toISOString(),
+      atIteration: ctx.iteration,
+      ...(stageId ? { stageId } : {}),
+    };
+    try {
+      recordRequest(req);
+      archiveApprovalRequest(ctx.runDirPath, source.path, requestId);
+    } catch (err) {
+      log.warn({ runId: ctx.runId, requestId, reqPath: source.path, err }, 'failed to ingest approval request');
+    }
+  }
+
+  // Resolve every rule-covered request and materialize every settled decision
+  // before selecting the first still-pending item.
+  let items = [...foldItems(ctx.runId).values()];
+  for (const item of items) {
+    if (!isValidApprovalRequestId(item.requestId)) {
+      log.warn({ runId: ctx.runId, requestId: item.requestId }, 'unsafe stored approval request id — ignoring');
+      continue;
+    }
+    if (isPendingInboxItemState(item.state)) {
+      const rule = matchStandingRule(item);
+      if (rule) {
+        const resolution = resolveRequest(ctx.projectDir, ctx.runId, item.requestId, 'approve', {
+          by: 'standing-rule',
+          viaRule: `${rule.action}→${rule.target}`,
+        });
+        if (resolution.won) {
+          recordRunEvent(ctx.projectDir, ctx.runId, {
+            type: 'approval_resolved',
+            runId: ctx.runId,
+            timestamp: new Date().toISOString(),
+            iteration: ctx.iteration,
+            detail: `auto-approved ${item.action}${item.target ? ` → ${item.target}` : ''} via standing rule (${item.requestId})`,
+          });
+          log.info({ runId: ctx.runId, requestId: item.requestId, rule: `${rule.action}→${rule.target}` }, 'Approval auto-granted by standing rule');
+        }
+      }
+    }
+  }
+  items = [...foldItems(ctx.runId).values()];
+  for (const item of items) {
+    if (!isValidApprovalRequestId(item.requestId) || isPendingInboxItemState(item.state)) continue;
+    writeApprovalDecision(
+      ctx.runDirPath,
+      item.requestId,
+      item.state === INBOX_ITEM_STATE.APPROVED ? 'approve' : 'deny',
+      item.resolution?.reason,
+    );
+  }
+  const item = items
+    .filter((candidate) => isPendingInboxItemState(candidate.state) && isValidApprovalRequestId(candidate.requestId))
+    .sort((a, b) => {
+      const aTime = Date.parse(a.createdAt);
+      const bTime = Date.parse(b.createdAt);
+      const byTime = (Number.isFinite(aTime) ? aTime : 0) - (Number.isFinite(bTime) ? bTime : 0);
+      return byTime || a.requestId.localeCompare(b.requestId);
+    })[0];
+  if (!item) return null;
+  const { requestId, action } = item;
+
+  // ---- park ----
+  // The requesting stage must NOT be left 'running': findAllReady only picks
+  // 'pending', so a stage frozen mid-flight can never be re-dispatched and the
+  // resumed iteration would fall through to the re-plan boundary that deletes
+  // dispatch.yaml — losing the DAG this park exists to preserve.
+  for (const [stageId, st] of Object.entries(state.stages)) {
+    if (isRunningStageStatus(st.status)) {
+      st.status = STAGE_STATUS.COMPLETE;
+      st.completedAt = new Date().toISOString();
+      log.info({ runId: ctx.runId, stageId }, 'Normalizing in-flight stage to complete for park');
+    }
+  }
+  const pausedAt = new Date().toISOString();
+  state.status = RUN_STATUS.PARKED;
+  state.parked = {
+    requestId, action,
+    ...(item.target ? { target: item.target } : {}),
+    reason: item.title,
+    atIteration: ctx.iteration,
+    ...(item.stageId ? { stageId: item.stageId } : {}),
+    requestedAt: item.createdAt,
+    pausedAt,
+  };
+  // Deliberately NO completedAt: that field is what every reader treats as
+  // "this run finished".
+  writeRunState(ctx.projectDir, ctx.runId, state);
+  writeCampaignEntryUnlessPaused(ctx.projectDir, state);
+  recordRunEvent(ctx.projectDir, ctx.runId, {
+    type: 'approval_parked', runId: ctx.runId, timestamp: pausedAt, iteration: ctx.iteration,
+    detail: `${action}${item.target ? ` → ${item.target}` : ''} awaiting approval (${requestId})`,
+  });
+  appendApprovalGuidance(ctx.runDirPath, requestId, item.title);
+  log.warn({ runId: ctx.runId, requestId, action, target: item.target },
+    'PARKED awaiting human approval — resolve with `flowcrew inbox approve <requestId>`');
+  return state;
+}
+
+/** The agent-readable decision record, written beside the consumed request. */
+function writeApprovalDecision(runDirPath: string, requestId: string, decision: 'approve' | 'deny', reason?: string): void {
+  try {
+    const target = approvalArtifactPath(runDirPath, requestId, 'decision');
+    mkdirSync(join(runDirPath, APPROVALS_DIR), { recursive: true });
+    writeFileSync(target,
+      JSON.stringify({ requestId, decision, reason: reason ?? '', at: new Date().toISOString() }, null, 2) + '\n', 'utf-8');
+  } catch (err) {
+    log.warn({ requestId, err }, 'failed to write approval decision artifact');
+  }
+}
+
+/**
+ * Pin the approval outcome where the resumed agent will actually see it.
+ * supervisor_guidance.md is rotated per iteration and re-injected only for the
+ * planner, so the durable copy lives in approvals/<id>.decision.json (above)
+ * and this note is the human-readable breadcrumb.
+ */
+function appendApprovalGuidance(runDirPath: string, requestId: string, title: string): void {
+  try {
+    const guidancePath = join(runDirPath, 'supervisor_guidance.md');
+    const marker = `[approval-parked:${requestId}]`;
+    const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+    if (prior.includes(marker)) return;
+    writeFileSync(guidancePath, prior + `\n\n${marker}\nThis run PARKED awaiting human approval for: ${title}.\n`
+      + `When you resume, read approvals/${requestId}.decision.json FIRST. If decision is "deny", do NOT perform the action — `
+      + `record the denial and continue with the remaining work (or write an honest terminal artifact explaining what the denial blocks).\n`, 'utf-8');
+  } catch { /* non-critical */ }
+}
+
+function appendApprovalRequestContract(prompt: string, runDirPath: string, stageId: string): string {
+  return `${prompt}\n\nApproval artifact contract: if this stage needs human authorization before a consequential action, `
+    + `write exactly one JSON request ({id, action, target?, risk?, title?, body?}) to `
+    + `${join(runDirPath, 'stages', stageId, APPROVAL_REQUEST_FILE)} and stop before performing the action. `
+    + `Each stage has its own slot so parallel requests are not overwritten.`;
+}
+
+const SCOPE_REVISION_REQUEST_FILE = 'scope_revision_request.json';
+
+function appendScopeRevisionContract(
+  prompt: string,
+  runDirPath: string,
+  runId: string,
+  stage: StageConfig,
+): string {
+  const declaredScope = stage.scope ?? [];
+  const scopePresence = stage.scope === undefined ? 'missing' : 'present';
+  const gateIsolation = stage.is_gate
+    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or an OS temporary probe lane.'
+    : '';
+  return `${prompt}\n\nDeclared project-write scope: ${JSON.stringify(declaredScope)} (declaration ${scopePresence}). `
+    + `A missing declaration is closed, never allow-all. Before any project write outside this initial capability, produce `
+    + `exactly one JSON request to ${join(runDirPath, 'stages', stage.id, SCOPE_REVISION_REQUEST_FILE)} `
+    + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${runId}","stageId":"${stage.id}",`
+    + `"attemptIndex":<current attempt>,"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
+    + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/attempt/path binding. `
+    + `Wait for a scope_revision_decision_*.json file with the same requestId. Write the new path only when accepted; `
+    + `a rejection is an auditable request to stop or re-plan, not permission to bypass scope with casts or indirection.`
+    + gateIsolation;
+}
+
+function appendTimeoutExtensionContract(
+  prompt: string,
+  runDirPath: string,
+  stageId: string,
+  initialBudgetMs: number,
+  hardTotalMs: number,
+): string {
+  return `${prompt}\n\nRuntime timeout contract: this technical chain starts with ${initialBudgetMs}ms and has an immutable `
+    + `total hard cap of ${hardTotalMs}ms across attempts, adapter retries, backoff, and fallback. If verified work requires `
+    + `more than the current soft budget, request it before the deadline by writing exactly one JSON object to `
+    + `${join(runDirPath, 'stages', stageId, 'timeout_extension_request.json')} with `
+    + `{"version":1,"kind":"timeout_extension","requestId":"<unique id>","stageId":"${stageId}",`
+    + `"attemptIndex":<current attempt>,"requestedExtensionMs":<positive integer>,"reason":"<verified progress or added workload>"}. `
+    + `Worker policy records its decision before moving the soft deadline; no request can raise the hard cap or cancel ABORT.`;
+}
+
+function appendGateConstraintAuditContext(
+  prompt: string,
+  stage: StageConfig,
+  allStages: StageConfig[],
+  state: StoreState,
+  runDirPath: string,
+): string {
+  if (!stage.is_gate) return prompt;
+  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
+  const closure = new Set<string>();
+  const queue = [...(stage.depends_on ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (closure.has(id)) continue;
+    closure.add(id);
+    queue.push(...(byId.get(id)?.depends_on ?? []));
+  }
+  const rows = [...closure].flatMap((id) => {
+    const status = state.stages[id];
+    return (status?.attempts ?? []).flatMap((attempt) => {
+      if (!attempt.constraintAudit) return [];
+      const summary = attempt.constraintAudit;
+      return [`- ${id} attempt ${attempt.index}: ${join(runDirPath, summary.path)} `
+        + `(accepted=${summary.acceptedRevisionCount}, rejected=${summary.rejectedRevisionCount}, `
+        + `mismatch=${summary.mismatchCount}, violations=${summary.violationCount}, unverified=${summary.unverifiedCount})`];
+    });
+  });
+  if (rows.length === 0) return prompt;
+  return `${prompt}\n\n# Runtime Constraint Audits\nRead these dependency-closure audits as gate evidence:\n${rows.join('\n')}`;
+}
+
+/**
+ * Campaign ledger rows carry pass/fail + live status and feed the
+ * regression/plateau/repeated-failure heuristics. A paused run has no outcome
+ * to score, so parking must not append a row.
+ */
+function writeCampaignEntryUnlessPaused(projectDir: string, state: StoreState): void {
+  if (isPausedRunStatus(state.status)) return;
+  writeCampaignEntry(projectDir, state);
 }
 
 async function tryTerminateOnTerminalState(
@@ -492,8 +955,32 @@ async function tryTerminateOnTerminalState(
       // the run-dir copy is the authoritative control-plane source.
       const projPath = join(ctx.projectDir, path);
       const snapPath = join(ctx.runDirPath, `terminal_${path.split('/').pop()}`);
-      const sourcePath = existsSync(projPath) ? projPath : (existsSync(snapPath) ? snapPath : null);
-      if (!sourcePath) continue;
+      const startedAtMs = Date.parse(state.startedAt);
+      const candidates = [projPath, snapPath].flatMap((candidate) => {
+        if (!existsSync(candidate)) return [];
+        try { return [{ path: candidate, mtimeMs: statSync(candidate).mtimeMs }]; } catch { return []; }
+      });
+      if (candidates.length === 0) continue;
+      const source = Number.isFinite(startedAtMs)
+        ? candidates.find((candidate) => candidate.mtimeMs >= startedAtMs)
+        : undefined;
+      if (!source) {
+        const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:freshness]`;
+        const newestMtime = candidates.reduce((latest, candidate) => Math.max(latest, candidate.mtimeMs), Number.NEGATIVE_INFINITY);
+        const reason = Number.isFinite(startedAtMs)
+          ? `${path} exists but predates this run start: newest mtime ${new Date(newestMtime).toISOString()} < startedAt ${state.startedAt}`
+          : `${path} exists, but run startedAt '${state.startedAt}' is invalid; freshness cannot be proven`;
+        try {
+          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
+          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+          if (!prior.includes(hintMarker)) {
+            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\nTerminal artifact rejected: ${reason}. Continue planned work and produce a fresh terminal artifact after a non-plan stage completes.\n`, 'utf-8');
+          }
+        } catch { /* non-critical */ }
+        log.warn({ runId: ctx.runId, terminalStatus, path, reason }, 'Terminal-state file exists but is stale — NOT terminating');
+        continue;
+      }
+      const sourcePath = source.path;
       const floorCheck = evaluateTerminalFloor(state, entry, ctx.projectDir);
       if (!floorCheck.passed) {
         // Floor unmet — don't terminate. Write a one-time hint to
@@ -514,9 +1001,56 @@ async function tryTerminateOnTerminalState(
         );
         continue;
       }
+      const hasCompletedNonPlanStage = Object.entries(state.stages ?? {})
+        .some(([stageId, stage]) => stageId !== 'plan' && stage.status === STAGE_STATUS.COMPLETE);
+      if (!hasCompletedNonPlanStage) {
+        const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:non-plan-complete]`;
+        try {
+          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
+          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+          if (!prior.includes(hintMarker)) {
+            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} is fresh, but terminal status '${terminalStatus}' requires at least one non-plan stage to complete during this run. Continue planned work; the plan stage alone is not proof of execution.\n`, 'utf-8');
+          }
+        } catch { /* non-critical */ }
+        log.warn({ runId: ctx.runId, terminalStatus, path }, 'Fresh terminal-state file exists before any non-plan stage completed — NOT terminating');
+        continue;
+      }
+      // Engine hole #5 (found by the engine-fix validation campaign): the research-loop
+      // ship path runs the brief-declared confirm gate, but an agent could bypass it
+      // entirely by writing the shipped terminal FILE directly — this gate would commit
+      // 'shipped' without confirm ever running. Verify-before-trust must hold on both
+      // doors: a 'shipped' terminal file on a research run must pass the same confirm
+      // command; on failure the file is rejected (run continues), like the floor path.
+      if (terminalStatus === RUN_STATUS.SHIPPED && state.research?.confirm) {
+        let confirmReport: { pass: boolean; results: Array<{ details: string }> };
+        try {
+          confirmReport = await runAllChecks(
+            [{ name: 'research_confirm', type: 'exec-script-exit-zero', params: { script: state.research.confirm.command, timeout_seconds: state.research.confirm.timeoutSeconds ?? 300 } }],
+            { taskDir: ctx.runDirPath, projectDir: ctx.projectDir },
+          );
+        } catch (err) {
+          confirmReport = { pass: false, results: [{ details: `confirm command threw: ${err instanceof Error ? err.message : String(err)}` }] };
+        }
+        try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: state.research.confirm.command, requires: state.research.confirm.requires, trigger: `terminal file ${path}` }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+        if (!confirmReport.pass) {
+          const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
+          const hintMarker = `[scheduler-hint:shipped-confirm:${path}]`;
+          try {
+            const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
+            const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+            if (!prior.includes(hintMarker)) {
+              writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} declares a ship but the brief's confirm gate REJECTED it: ${detail}. A ship claim must pass confirm — remove/replace the premature ship artifact and either continue measuring or write an honest ceiling/escalation.\n`, 'utf-8');
+            }
+          } catch { /* non-critical */ }
+          log.warn({ runId: ctx.runId, terminalStatus, path, detail }, 'Shipped terminal file REJECTED by confirm gate — NOT terminating');
+          continue;
+        }
+        log.info({ runId: ctx.runId, path }, 'Shipped terminal file passed confirm gate');
+      }
       state.status = terminalStatus as StoreState['status'];
       state.terminalArtifact = path.split('/').pop();
       state.completedAt = new Date().toISOString();
+      markLeftoverStagesSkipped(state, `terminal state '${terminalStatus}' reached before this stage ran`);
       // Bug #8 defense: snapshot the terminal artifact into the run dir
       // immediately. The artifact lives in the project's git tree, which the
       // agent also manipulates (a fix-stage `git clean`/hygiene op deleted a
@@ -541,7 +1075,7 @@ async function tryTerminateOnTerminalState(
       await generateRunSummary(ctx.projectDir, ctx.runId, ctx.adapter).catch(() => { /* non-critical */ });
       // Auto-append ledger row only on phase_complete (other terminal states
       // are program-level, not phase-level).
-      if (state.program && terminalStatus === 'phase_complete') {
+      if (state.program && terminalStatus === RUN_STATUS.PHASE_COMPLETE) {
         const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
         const wallHours = (Date.now() - startedMs) / 3600000;
         appendProgramLedger(ctx.projectDir, state.program, {
@@ -810,6 +1344,7 @@ async function tryAdvanceResearch(
 
   // ship | stop_ceiling → terminate the run via a framework-owned status.
   let terminalDecision: 'ship' | 'stop_ceiling' = evalResult.decision === 'ship' ? 'ship' : 'stop_ceiling';
+  let finalEval = evalResult;
 
   // A+(a) CONFIRM gate (verify-before-trust): before ACCEPTING a 'ship', run the brief-declared
   // confirm command (generic mechanism — the exact exec-script-exit-zero check the reality gate
@@ -830,18 +1365,78 @@ async function tryAdvanceResearch(
     try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
     if (!confirmReport.pass) {
       const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
-      log.warn({ runId: ctx.runId, command: rc.confirm.command, detail }, 'Confirm gate FAILED — downgrading ship → ceiling_hit (candidate unconfirmed)');
-      recordRunEvent(ctx.projectDir, ctx.runId, {
-        type: 'run_completed',
-        runId: ctx.runId,
-        timestamp: new Date().toISOString(),
-        iteration: ctx.iteration,
-        detail: `Confirm gate failed — ship downgraded to ceiling_hit: ${detail}`,
-      });
+      log.warn({ runId: ctx.runId, command: rc.confirm.command, detail }, 'Confirm gate FAILED — candidate unconfirmed; excluding round and re-evaluating');
+      // Event-drift audit fix (engine bug #1a): a confirm failure kills THIS CANDIDATE,
+      // not the research program. Mark the round confirm-failed so the policy excludes
+      // it from kept/running-best (else the same unconfirmed number re-triggers
+      // ship→confirm→fail forever), then let the NORMAL stop rules decide continue vs ceiling.
+      const lastRound = journal.rounds[journal.rounds.length - 1];
+      if (lastRound) lastRound.confirmFailed = true;
+      try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+      try {
+        const manifestDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
+        writeFileSync(join(manifestDir, 'run_manifest.json'), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+      } catch { /* non-critical */ }
+      finalEval = evaluateResearch(rc, journal.rounds);
+      finalEval.reason = `confirm gate failed on '${label}' (${detail}) — candidate excluded from kept stack | ${finalEval.reason}`;
+      try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+      if (finalEval.decision === 'continue') {
+        const marker = `[research-confirm-fail:round-${journal.rounds.length}]`;
+        try {
+          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
+          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+          if (!prior.includes(marker)) {
+            writeFileSync(guidancePath, prior + `\n\n${marker}\nRound '${label}' = ${round.result} FAILED the confirm gate: ${detail}. The candidate is UNCONFIRMED and has been excluded from the kept stack (running-best ${finalEval.runningBest}).\n`
+              + `▶ START ROUND ${journal.rounds.length + 1} — a NEW, genuinely DIFFERENT mechanism (do not re-tune the failed candidate; fix what the confirm gate named only if a distinct mechanism addresses it). Write its measured result to ${resultRel}.\n`, 'utf-8');
+          }
+        } catch { /* non-critical */ }
+        try {
+          mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
+          writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, confirmFailed: label, timestamp: new Date().toISOString() }), 'utf-8');
+        } catch { /* non-critical */ }
+        log.info({ runId: ctx.runId, label, decision: finalEval.decision }, 'Confirm-failed candidate excluded — research budget remains, continuing loop');
+        return null;
+      }
       terminalDecision = 'stop_ceiling';
-      evalResult.reason = `${evalResult.reason} | confirm gate failed (ship downgraded to ceiling_hit): ${detail}`;
     } else {
       log.info({ runId: ctx.runId, command: rc.confirm.command }, 'Confirm gate PASSED — ship confirmed');
+    }
+  }
+
+  // Engine bug #1b (event-drift audit): a ceiling claim must satisfy the brief-declared
+  // floor on terminal_states.ceiling_hit — the research loop previously bypassed the
+  // unified terminal gate entirely and could commit ceiling_hit at 4 rounds / 32 min
+  // against a declared floor of 5 stages / 180 min. Research semantics: rounds are the
+  // attempted stages. If the floor is unmet and round/wall budget remains, keep
+  // researching; if hard budgets are exhausted, commit but say so honestly.
+  if (terminalDecision === 'stop_ceiling') {
+    const ceilingEntry = state.terminalStates?.['ceiling_hit'];
+    const elapsedMinutes = (Date.now() - startedMs) / 60000;
+    const floorCheck = evaluateResearchCeilingFloor(ceilingEntry?.floor, journal.rounds.length, elapsedMinutes);
+    if (!floorCheck.passed) {
+      const stop = rc.stop ?? {};
+      const budgetRemains = (stop.maxRounds === undefined || journal.rounds.length < stop.maxRounds)
+        && (stop.maxWallHours === undefined || (elapsedMinutes / 60) < stop.maxWallHours);
+      if (budgetRemains) {
+        const marker = `[research-floor:round-${journal.rounds.length}]`;
+        try {
+          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
+          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
+          if (!prior.includes(marker)) {
+            writeFileSync(guidancePath, prior + `\n\n${marker}\nA ceiling was proposed (${finalEval.reason}) but the brief's ceiling floor is unmet: ${floorCheck.reason}.\n`
+              + `▶ START ROUND ${journal.rounds.length + 1} — a NEW direction from the brief's portfolio. Write its measured result to ${resultRel}.\n`, 'utf-8');
+          }
+        } catch { /* non-critical */ }
+        try {
+          mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
+          writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, floorDeferred: floorCheck.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        } catch { /* non-critical */ }
+        finalEval.reason = `${finalEval.reason} | ceiling deferred: floor unmet (${floorCheck.reason})`;
+        try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+        log.warn({ runId: ctx.runId, reason: floorCheck.reason }, 'Ceiling floor unmet — NOT terminating; steering next research round');
+        return null;
+      }
+      finalEval.reason = `${finalEval.reason} | WARNING: ceiling committed with floor unmet (${floorCheck.reason}) — hard round/wall budget exhausted`;
     }
   }
 
@@ -850,6 +1445,28 @@ async function tryAdvanceResearch(
   // (the confirm gate above only writes research_confirm.json on a ship). Observability only.
   if (terminalDecision !== 'ship') recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
   state.completedAt = new Date().toISOString();
+  // Engine bug #3 (event-drift audit): the research loop terminates the run between
+  // iterations, so stages dispatched for the current iteration (verify_*/fix_*) can be
+  // left 'pending' forever in run.json. Mark them skipped with the reason, honestly.
+  markLeftoverStagesSkipped(state, `research loop terminated (${state.status}) before this stage ran`);
+  // Engine bug #2 (event-drift audit): the brief declares terminal artifact paths
+  // (terminal_states.<status>.paths); an engine-initiated terminal used to write only
+  // the framework-owned program_*_report.md, leaving the declared contract path
+  // nonexistent. Mirror the report to the first declared path (never clobbering an
+  // agent-authored one) so the terminal contract is truthful.
+  const declaredPath = state.terminalStates?.[state.status]?.paths?.[0];
+  if (declaredPath) state.terminalArtifact = declaredPath.split('/').pop();
+  // Engine bug #4 (found by the engine-fix validation run): each round's result file is
+  // consumed (renamed into the run dir) so the next iteration doesn't re-process it — but
+  // planner-authored reality checks may reference the result file at its project path, and
+  // the terminal gate re-runs those checks AFTER consumption, false-blocking an honest
+  // terminal (FileNotFoundError → reality_gate_failed on a truthful ceiling). Restore the
+  // latest consumed round result to its declared path before the gate: it is the agent's
+  // real, engine-evaluated measurement, not a fabrication.
+  try {
+    const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
+    if (!existsSync(resultAbs) && existsSync(lastConsumed)) copyFileSync(lastConsumed, resultAbs);
+  } catch { /* non-critical */ }
   const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
   // GAP-1: write a campaign jsonl row on the reality_gate_failed downgrade too, so the
   // outer loop sees the truthful terminal status (not a silent return with no envelope).
@@ -861,10 +1478,10 @@ async function tryAdvanceResearch(
     runId: ctx.runId,
     timestamp: state.completedAt,
     iteration: ctx.iteration,
-    detail: `Research ${terminalDecision}: ${evalResult.reason}`,
+    detail: `Research ${terminalDecision}: ${finalEval.reason}`,
   });
   // Write a program report (framework-owned location, in project for visibility).
-  // Use terminalDecision (not evalResult.decision) so a confirm-gate downgrade is
+  // Use terminalDecision (not finalEval.decision) so a confirm-gate downgrade is
   // reported as a ceiling, not a ship.
   try {
     const reportDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
@@ -872,14 +1489,22 @@ async function tryAdvanceResearch(
     const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
     const body = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
       + `Decision: ${terminalDecision}\n`
-      + `Running-best: ${evalResult.runningBest}\n`
+      + `Running-best: ${finalEval.runningBest}\n`
       + `Baseline: ${rc.baseline}\n`
-      + `Kept directions: ${evalResult.keptLabels.join(', ') || 'none'}\n`
-      + `Reason: ${evalResult.reason}\n\n`
-      + `## Rounds\n` + journal.rounds.map((r) => `- ${r.label}: ${r.result}`).join('\n') + '\n';
+      + `Kept directions: ${finalEval.keptLabels.join(', ') || 'none'}\n`
+      + `Reason: ${finalEval.reason}\n\n`
+      + `## Rounds\n` + journal.rounds.map((r) => `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n') + '\n';
     writeFileSync(join(reportDir, reportName), body, 'utf-8');
+    if (declaredPath) {
+      const declaredAbs = join(ctx.projectDir, declaredPath);
+      if (!existsSync(declaredAbs)) {
+        const declaredDir = declaredPath.includes('/') ? join(ctx.projectDir, declaredPath.substring(0, declaredPath.lastIndexOf('/'))) : ctx.projectDir;
+        mkdirSync(declaredDir, { recursive: true });
+        writeFileSync(declaredAbs, `> Engine-authored terminal artifact (research loop terminated the run; the declared path is part of the brief's terminal contract).\n\n${body}`, 'utf-8');
+      }
+    }
   } catch { /* non-critical */ }
-  log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: evalResult.runningBest }, 'Research loop terminated');
+  log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: finalEval.runningBest }, 'Research loop terminated');
   await generateRunSummary(ctx.projectDir, ctx.runId, ctx.adapter).catch(() => { /* non-critical */ });
   return state;
 }
@@ -975,7 +1600,7 @@ async function runPostTerminateHook(
 // A genuine stage verdict (markdown headers + a result line) is well over this.
 const MIN_STAGE_VERDICT_BYTES = 40;
 
-function countGlobMatches(projectDir: string, glob: string): number {
+function countGlobMatches(projectDir: string, glob: string, startedAtMs: number): { fresh: number; stale: number } {
   const slash = glob.lastIndexOf('/');
   const dir = slash >= 0 ? glob.substring(0, slash) : '.';
   const pattern = slash >= 0 ? glob.substring(slash + 1) : glob;
@@ -983,15 +1608,23 @@ function countGlobMatches(projectDir: string, glob: string): number {
   const re = new RegExp('^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
   try {
     const fullDir = join(projectDir, dir);
-    if (!existsSync(fullDir)) return 0;
-    return readdirSync(fullDir).filter((f) => {
-      if (!re.test(f)) return false;
+    if (!existsSync(fullDir)) return { fresh: 0, stale: 0 };
+    let fresh = 0;
+    let stale = 0;
+    for (const f of readdirSync(fullDir)) {
+      if (!re.test(f)) continue;
       // Realness filter: ignore empty/stub files so the floor reflects
       // substantive stage work, not placeholder touches.
-      try { return statSync(join(fullDir, f)).size >= MIN_STAGE_VERDICT_BYTES; } catch { return false; }
-    }).length;
+      try {
+        const stat = statSync(join(fullDir, f));
+        if (stat.size < MIN_STAGE_VERDICT_BYTES) continue;
+        if (stat.mtimeMs >= startedAtMs) fresh += 1;
+        else stale += 1;
+      } catch { /* a disappearing/unreadable file does not count */ }
+    }
+    return { fresh, stale };
   } catch {
-    return 0;
+    return { fresh: 0, stale: 0 };
   }
 }
 
@@ -1008,9 +1641,13 @@ const DISPATCH_SCHEMA_REMINDER = [
   '    role: <one of the available roles named above>',
   '    prompt_template: |',
   '      <short, stage-specific instructions>',
+  '    scope: [<project-relative file paths or globs>]',
   '    depends_on: [<stage_ids>]   # optional',
+  '    dependency_reasons: {<stage_id>: <one-sentence reason>}   # required for each dependency',
   '    is_gate: true               # optional — quality gate (writes a verdict file)',
   '    retry_to: [<gate_ids>]      # optional',
+  '    timeout_ms: <positive integer>        # optional initial soft budget',
+  '    timeout_total_ms: <positive integer>  # optional immutable chain cap (>= timeout_ms)',
 ].join('\n');
 
 /**
@@ -1020,7 +1657,13 @@ const DISPATCH_SCHEMA_REMINDER = [
  * the previous attempt's status.error string written by worker.ts (or, for the
  * dispatch case, by the empty-dispatch handler in executeIteration).
  */
-export function buildRetryPreamble(retries: number, timeoutMs: number, runDirPath: string, stageId: string): string {
+export function buildRetryPreamble(
+  retries: number,
+  timeoutMs: number,
+  runDirPath: string,
+  stageId: string,
+  timeoutContext?: { previousBudgetMs: number; nextBudgetMs: number; chargedElapsedMs: number; remainingHardTotalMs: number },
+): string {
   const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
   let prevError: string | undefined;
   try {
@@ -1044,6 +1687,10 @@ export function buildRetryPreamble(retries: number, timeoutMs: number, runDirPat
     cause = `Previous attempt was ${prevError}. The supervisor judged that the previous attempt was stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this attempt, and START making file edits within a few minutes; do NOT spend the whole attempt only inspecting code.`;
   } else if (prevError && prevError.startsWith('adapter connection failed')) {
     cause = `Previous attempt failed with an adapter connection error (transient). Retry the same plan.`;
+  } else if (timeoutContext) {
+    cause = `Previous attempt timed out with an effective budget of ${timeoutContext.previousBudgetMs}ms. `
+      + `This attempt has ${timeoutContext.nextBudgetMs}ms; the technical chain has charged ${timeoutContext.chargedElapsedMs}ms `
+      + `and had ${timeoutContext.remainingHardTotalMs}ms remaining when this retry was selected.`;
   } else {
     cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
   }
@@ -1260,7 +1907,7 @@ function consumeSupervisorReject(
   // iteration. A run-level reject (no target) maps to the most-recently-completed
   // dispatched stage in this iteration.
   const completedThisIter = (id: string) =>
-    state.stages[id]?.status === 'complete' &&
+    state.stages[id]?.status === STAGE_STATUS.COMPLETE &&
     (iterationDispatchedIds.includes(id) || sorted.some((s) => s.id === id));
   let resolved: string | null = null;
   if (pending.signal.targetStage && completedThisIter(pending.signal.targetStage)) {
@@ -1290,7 +1937,7 @@ function consumeSupervisorReject(
   // clear verdict for) any gate stage that depends on it so the gate re-evaluates
   // the re-worked deliverable instead of the stale pass.
   const repend = (id: string) => {
-    state.stages[id] = { status: 'pending', retries: 0 };
+    state.stages[id] = rependStageStatus(state.stages[id], 0);
     try { mkdirSync(join(ctx.runDirPath, 'stages', id), { recursive: true }); } catch { /* ignore */ }
     const v = join(ctx.runDirPath, `verdict_${id}.json`);
     try { if (existsSync(v)) unlinkSync(v); } catch { /* ignore */ }
@@ -1370,29 +2017,64 @@ export const StageConfigSchema = z.object({
   id: z.string(),
   role: z.string(),
   depends_on: z.array(z.string()).optional().default([]),
+  /** Project-relative write capability. Missing is closed for writes and conflicting for parallel dispatch. */
+  scope: z.array(z.string()).optional(),
+  /** One concrete planner explanation per real dependency edge. */
+  dependency_reasons: z.record(z.string(), z.string()).optional(),
   condition: z.string().optional(),
   prompt_template: z.string().optional().default(''),
-  timeout_ms: z.number().optional(),
+  timeout_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** Immutable total technical-chain cap; defaults to three times timeout_ms/T0. */
+  timeout_total_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   max_retries: z.number().optional(),
   skills: z.array(z.string()).optional().default([]),
   dynamic_dispatch: z.boolean().optional().default(false),
   is_gate: z.boolean().optional().default(false),
   retry_to: z.array(z.string()).optional(),
+}).superRefine((stage, ctx) => {
+  if (stage.timeout_ms !== undefined && stage.timeout_total_ms !== undefined && stage.timeout_total_ms < stage.timeout_ms) {
+    ctx.addIssue({ code: 'custom', path: ['timeout_total_ms'], message: 'timeout_total_ms must be at least timeout_ms' });
+  }
 });
 
 export const WorkflowConfigSchema = z.object({
   name: z.string(),
   description: z.string().optional().default(''),
   defaults: z.object({
-    timeout_ms: z.number().optional(),
+    timeout_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     max_retries: z.number().optional(),
     max_iterations: z.number().optional(),
   }).optional().default({}),
   stages: z.array(StageConfigSchema).min(1),
+}).superRefine((workflow, ctx) => {
+  for (let index = 0; index < workflow.stages.length; index++) {
+    const stage = workflow.stages[index];
+    const initial = stage.timeout_ms ?? workflow.defaults.timeout_ms;
+    if (initial !== undefined && stage.timeout_total_ms !== undefined && stage.timeout_total_ms < initial) {
+      ctx.addIssue({ code: 'custom', path: ['stages', index, 'timeout_total_ms'], message: 'timeout_total_ms must be at least the resolved initial timeout' });
+    }
+  }
 });
 
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
+
+/** Normalize the quality topology for both static workflows and dynamic dispatch. */
+export function normalizeRetryGateRelationships(stages: StageConfig[]): StageConfig[] {
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  for (const repair of stages) {
+    if (repair.is_gate || !repair.retry_to?.length) continue;
+    repair.dependency_reasons ??= {};
+    for (const gateId of repair.retry_to) {
+      const gate = byId.get(gateId);
+      if (!gate) continue;
+      gate.is_gate = true;
+      if (!repair.depends_on.includes(gateId)) repair.depends_on = [...repair.depends_on, gateId];
+      repair.dependency_reasons[gateId] ??= 'Framework retry dependency: fixes run only after this gate reports a failure.';
+    }
+  }
+  return stages;
+}
 
 type CampaignMetric = { score: number; metric: string; gate: string; pass: boolean; threshold?: number };
 type CampaignPhaseMetadata = {
@@ -1452,21 +2134,844 @@ function topoSort(stages: StageConfig[]): StageConfig[] {
 
 export function findAllReady(stages: StageConfig[], state: StoreState): StageConfig[] {
   const ready: StageConfig[] = [];
+  const stagesById = new Map(stages.map((stage) => [stage.id, stage]));
+  let contract: ReturnType<typeof loadGateContract> | undefined;
   for (const s of stages) {
     const ss = state.stages[s.id];
-    if (!ss || ss.status !== 'pending') continue;
+    if (!ss || !isPendingStageStatus(ss.status)) continue;
     const depsReady = (s.depends_on ?? []).every((d) => {
       const ds = state.stages[d];
-      return ds && (ds.status === 'complete' || ds.status === 'skipped');
+      if (!ds || !isSatisfiedStageDependencyStatus(ds.status)) return false;
+      const dependency = stagesById.get(d);
+      const hasRunLocation = typeof state.projectDir === 'string' && typeof state.runId === 'string';
+      if (hasRunLocation && contract === undefined) {
+        contract = loadGateContract(state.projectDir, state.runId, state.campaignStorageKey);
+      }
+      const hasSpecificVerdict = hasRunLocation && existsSync(join(
+        runDir(state.projectDir, state.runId),
+        `verdict_${d}.json`,
+      ));
+      const verdict = hasRunLocation && (dependency?.is_gate === true || hasSpecificVerdict)
+        ? readGateVerdict(state.projectDir, d, state.runId, contract)
+        : undefined;
+      // A negative verdict is authoritative even if an older/static workflow
+      // forgot to mark the producing stage as a gate. Stage status describes
+      // process completion; it must never turn an explicit rejection into a
+      // satisfied dependency.
+      if (verdict?.pass === false) return false;
+      // A `retry_to` edge is retry wiring, not an ordinary dependency.
+      // `normalizeRetryGateRelationships` puts the gate into `depends_on` so a fix can be
+      // dispatched when the gate REJECTS, and records exactly that on the edge: "fixes run
+      // only after this gate reports a failure". Letting a PASSING gate satisfy the same
+      // edge dispatches the fix again after the work was accepted — the opposite of the
+      // recorded reason — and lets an unreviewed change land on a verified state. Rejection
+      // reaches the fix through the retry loop ("Reset and run all active retry stages"),
+      // never through here, so refusing the edge cannot strand a failing gate.
+      //
+      // Measured before this guard: a run whose gate passed on its second attempt then ran
+      // fix → gate → fix → gate for another 46 minutes and 20M input tokens, committing
+      // nothing. `gate_retry_loops` does not bound it, because this path is not the retry
+      // loop, so within one iteration the cycle had no bound of its own.
+      if (s.retry_to?.includes(d)) return false;
+      if (dependency?.is_gate !== true) return true;
+      // A conditionally skipped gate keeps its historical compatibility
+      // semantics unless an explicit negative verdict exists. A completed gate,
+      // however, is not a satisfied dependency until it has said `pass: true`.
+      if (ds.status === STAGE_STATUS.SKIPPED) return true;
+      return verdict?.pass === true;
     });
     if (depsReady) ready.push(s);
   }
   return ready;
 }
 
+type ParsedScope =
+  | { kind: 'exact'; raw: string; value: string }
+  | { kind: 'tree'; raw: string; value: string }
+  | { kind: 'glob'; raw: string; directoryPrefix: string }
+  | { kind: 'unknown'; raw: string; reason: string };
+
+function parseDeclaredScope(rawValue: string): ParsedScope {
+  const raw = rawValue.trim();
+  const slashNormalized = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  if (!slashNormalized) return { kind: 'unknown', raw, reason: 'empty scope entry' };
+  if (isAbsolute(slashNormalized) || /^[A-Za-z]:\//.test(slashNormalized)) {
+    return { kind: 'unknown', raw, reason: 'scope must be project-relative' };
+  }
+  const segments = slashNormalized.split('/');
+  if (segments.includes('..')) return { kind: 'unknown', raw, reason: 'scope may not traverse outside the project' };
+  // Preserve an explicit directory marker while canonicalizing harmless path
+  // aliases. In particular, `dir/`, `dir/.`, and `./dir/` must all conflict
+  // with the ambiguous bare literal `dir` and with descendants of `dir`.
+  const explicitDirectory = slashNormalized.endsWith('/') || slashNormalized.endsWith('/.');
+  const normalized = segments.filter((segment) => segment && segment !== '.').join('/');
+  if (!normalized) return { kind: 'unknown', raw, reason: 'empty scope entry' };
+  const globAt = normalized.search(/[*!?[{]/);
+  if (globAt >= 0) {
+    const literal = normalized.slice(0, globAt);
+    const slash = literal.lastIndexOf('/');
+    return { kind: 'glob', raw, directoryPrefix: slash >= 0 ? literal.slice(0, slash) : '' };
+  }
+  if (explicitDirectory) return { kind: 'tree', raw, value: normalized };
+  return { kind: 'exact', raw, value: normalized };
+}
+
+function prefixesAreProvablyDisjoint(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const left = a.replace(/\/$/, '').split('/');
+  const right = b.replace(/\/$/, '').split('/');
+  const length = Math.min(left.length, right.length);
+  for (let i = 0; i < length; i++) {
+    if (left[i] !== right[i]) return true;
+  }
+  return false;
+}
+
+function parsedScopesMayOverlap(a: ParsedScope, b: ParsedScope): boolean {
+  if (a.kind === 'unknown' || b.kind === 'unknown') return true;
+  // A literal without a trailing slash is ambiguous: it may name either a
+  // file or a directory. Treat path-segment ancestry as a possible overlap,
+  // while still proving similarly named siblings (for example src vs src-ui)
+  // disjoint.
+  if (a.kind !== 'glob' && b.kind !== 'glob') {
+    return !prefixesAreProvablyDisjoint(a.value, b.value);
+  }
+
+  const aPrefix = a.kind === 'glob' ? a.directoryPrefix : a.kind === 'tree' ? a.value : a.value;
+  const bPrefix = b.kind === 'glob' ? b.directoryPrefix : b.kind === 'tree' ? b.value : b.value;
+  // A differing literal directory segment is a proof of disjointness. Any
+  // ambiguity inside the same directory is conservatively serialized.
+  return !prefixesAreProvablyDisjoint(aPrefix, bPrefix);
+}
+
+export interface ScopeConflict {
+  leftStageId: string;
+  rightStageId: string;
+  leftScope?: string;
+  rightScope?: string;
+  reason: string;
+}
+
+export function findScopeConflict(left: StageConfig, right: StageConfig): ScopeConflict | undefined {
+  if (!left.scope) return { leftStageId: left.id, rightStageId: right.id, reason: `${left.id} has no declared scope` };
+  if (!right.scope) return { leftStageId: left.id, rightStageId: right.id, reason: `${right.id} has no declared scope` };
+  // An explicitly empty scope means the stage declares no project writes.
+  if (left.scope.length === 0 || right.scope.length === 0) return undefined;
+  const leftParsed = left.scope.map(parseDeclaredScope);
+  const rightParsed = right.scope.map(parseDeclaredScope);
+  for (const a of leftParsed) {
+    if (a.kind === 'unknown') return { leftStageId: left.id, rightStageId: right.id, leftScope: a.raw, reason: `${left.id}: ${a.reason}` };
+    for (const b of rightParsed) {
+      if (b.kind === 'unknown') return { leftStageId: left.id, rightStageId: right.id, rightScope: b.raw, reason: `${right.id}: ${b.reason}` };
+      if (parsedScopesMayOverlap(a, b)) {
+        return {
+          leftStageId: left.id,
+          rightStageId: right.id,
+          leftScope: a.raw,
+          rightScope: b.raw,
+          reason: `declared scopes may overlap: ${a.raw} ↔ ${b.raw}`,
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+export function selectRunnableBatch(ready: StageConfig[]): {
+  selected: StageConfig[];
+  deferred: Array<{ stage: StageConfig; conflict: ScopeConflict }>;
+} {
+  const selected: StageConfig[] = [];
+  const deferred: Array<{ stage: StageConfig; conflict: ScopeConflict }> = [];
+  for (const stage of ready) {
+    let conflict: ScopeConflict | undefined;
+    for (const admitted of selected) {
+      conflict = findScopeConflict(admitted, stage);
+      if (conflict) break;
+    }
+    if (conflict) deferred.push({ stage, conflict });
+    else selected.push(stage);
+  }
+  return { selected, deferred };
+}
+
+export interface ParallelWriteConflict {
+  stageIds: [string, string];
+  files: string[];
+  attribution: [string, string];
+}
+
+function latestAttemptWrites(status: StageStatus | undefined): { files: string[]; attribution: string } {
+  const attempt = status?.attempts?.at(-1);
+  const files = (attempt?.writes ?? [])
+    .map((file) => file.trim().replace(/\\/g, '/'))
+    .filter((file) => !!file)
+    // These are factual adapter observations, not declared project scopes.
+    // Normalize lexically for comparison but retain `../` paths so two stages
+    // writing the same run-owned artifact outside the project remain visible.
+    .map((file) => posix.normalize(file));
+  return { files: [...new Set(files)], attribution: attempt?.writeAttribution ?? 'unknown' };
+}
+
+export function detectParallelWriteConflicts(
+  stageIds: string[],
+  statuses: Record<string, StageStatus>,
+): ParallelWriteConflict[] {
+  const conflicts: ParallelWriteConflict[] = [];
+  for (let i = 0; i < stageIds.length; i++) {
+    const left = latestAttemptWrites(statuses[stageIds[i]]);
+    const leftSet = new Set(left.files);
+    for (let j = i + 1; j < stageIds.length; j++) {
+      const right = latestAttemptWrites(statuses[stageIds[j]]);
+      const files = [...new Set(right.files.filter((file) => leftSet.has(file)))].sort();
+      if (files.length > 0) {
+        conflicts.push({
+          stageIds: [stageIds[i], stageIds[j]],
+          files,
+          attribution: [left.attribution, right.attribution],
+        });
+      }
+    }
+  }
+  return conflicts;
+}
+
+export function isValidationStage(stage: StageConfig): boolean {
+  const tagged = `${stage.id} ${stage.role}`;
+  return stage.role.toLowerCase() === 'qa'
+    || stage.is_gate === true
+    || /(^|[\s_-])(gate|verify|verification)(?=$|[\s_-])/i.test(tagged);
+}
+
+function reusableDirectSuccessors(stage: StageConfig, allStages: StageConfig[]): StageConfig[] {
+  if (isValidationStage(stage)) return [];
+  return allStages.filter((candidate) =>
+    candidate.depends_on.length === 1
+    && candidate.depends_on[0] === stage.id
+    && !isValidationStage(candidate),
+  );
+}
+
+export function canReuseCodexSession(input: {
+  stage: StageConfig;
+  predecessor: StageConfig;
+  allStages: StageConfig[];
+  predecessorStatus: StageStatus | undefined;
+  destinationStatus: StageStatus | undefined;
+  session: CodexSessionMetadata | undefined;
+}): boolean {
+  const { stage, predecessor, allStages, predecessorStatus, destinationStatus, session } = input;
+  if (stage.depends_on.length !== 1 || stage.depends_on[0] !== predecessor.id) return false;
+  if (isValidationStage(stage) || isValidationStage(predecessor)) return false;
+  const successors = reusableDirectSuccessors(predecessor, allStages);
+  if (successors.length !== 1 || successors[0].id !== stage.id) return false;
+  if (!session) return false;
+  if (predecessorStatus?.status !== STAGE_STATUS.COMPLETE) return false;
+  const attempts = predecessorStatus.attempts ?? [];
+  if (attempts.length !== 1 || attempts[0].status !== STAGE_STATUS.COMPLETE) return false;
+  if ((predecessorStatus.retries ?? 0) !== 0 || (predecessorStatus.reruns ?? 0) !== 0) return false;
+  if ((destinationStatus?.retries ?? 0) !== 0 || (destinationStatus?.attempts?.length ?? 0) !== 0) return false;
+  return true;
+}
+
+function sessionResumeForStage(
+  stage: StageConfig,
+  allStages: StageConfig[],
+  state: StoreState,
+  runDirPath: string,
+  enabled: boolean,
+): { sessionId: string; ownerStageId: string } | undefined {
+  if (!enabled || stage.depends_on.length !== 1) return undefined;
+  const predecessor = allStages.find((candidate) => candidate.id === stage.depends_on[0]);
+  if (!predecessor) return undefined;
+  const session = readCodexSession(runDirPath, predecessor.id);
+  if (!canReuseCodexSession({
+    stage,
+    predecessor,
+    allStages,
+    predecessorStatus: state.stages[predecessor.id],
+    destinationStatus: state.stages[stage.id],
+    session,
+  })) return undefined;
+  return { sessionId: session!.sessionId, ownerStageId: session!.ownerStageId };
+}
+
+export const GATE_VERDICT_CORRECTION_VERSION = 1;
+
+export interface GateVerdictCorrection {
+  version: typeof GATE_VERDICT_CORRECTION_VERSION;
+  gateId: string;
+  previousVerdictWrong: true;
+  reason: string;
+  evidence: string;
+}
+
+export function gateVerdictCorrectionPath(runDirPath: string, gateId: string): string {
+  return join(runDirPath, 'gate_reevaluation', `verdict_correction_${gateId}.json`);
+}
+
+function readAndConsumeGateVerdictCorrection(runDirPath: string, gateId: string): GateVerdictCorrection | undefined {
+  const path = gateVerdictCorrectionPath(runDirPath, gateId);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<GateVerdictCorrection>;
+    if (
+      parsed.version !== GATE_VERDICT_CORRECTION_VERSION
+      || parsed.gateId !== gateId
+      || parsed.previousVerdictWrong !== true
+      || typeof parsed.reason !== 'string'
+      || !parsed.reason.trim()
+      || typeof parsed.evidence !== 'string'
+      || !parsed.evidence.trim()
+    ) return undefined;
+    return parsed as GateVerdictCorrection;
+  } catch {
+    return undefined;
+  } finally {
+    // A correction applies to exactly one re-evaluation. Invalid files are also
+    // consumed so stale/malformed run-local state cannot poison later rounds.
+    try { unlinkSync(path); } catch { /* best effort */ }
+  }
+}
+
+export function canResumeOwnGateSession(
+  stage: StageConfig,
+  session: CodexSessionMetadata | undefined,
+  previousVerdictWrong: boolean,
+): boolean {
+  return stage.is_gate === true
+    && previousVerdictWrong === false
+    && session !== undefined
+    && session.ownerStageId === stage.id;
+}
+
+function clearGateContinuationArtifacts(runDirPath: string, gateId: string): void {
+  try { rmSync(join(runDirPath, 'stages', gateId, 'codex_home'), { recursive: true, force: true }); } catch { /* best effort */ }
+  try { unlinkSync(join(runDirPath, 'stages', gateId, 'session.json')); } catch { /* best effort */ }
+  try { unlinkSync(gateVerdictCorrectionPath(runDirPath, gateId)); } catch { /* best effort */ }
+}
+
+function clearGateContinuationsForStages(runDirPath: string, stages: StageConfig[]): void {
+  for (const gate of stages) {
+    if (gate.is_gate && stages.some((candidate) => candidate.retry_to?.includes(gate.id))) {
+      clearGateContinuationArtifacts(runDirPath, gate.id);
+    }
+  }
+}
+
+function gateContinuationSessionForStage(
+  stage: StageConfig,
+  runDirPath: string,
+  isReevaluation: boolean,
+): { sessionId: string; ownerStageId: string } | undefined {
+  if (!isReevaluation || stage.is_gate !== true) return undefined;
+  const correction = readAndConsumeGateVerdictCorrection(runDirPath, stage.id);
+  if (correction) {
+    // Persisting a disproved line of reasoning is worse than rebuilding it.
+    clearGateContinuationArtifacts(runDirPath, stage.id);
+    return undefined;
+  }
+  const session = readCodexSession(runDirPath, stage.id);
+  if (!canResumeOwnGateSession(stage, session, false)) return undefined;
+  return { sessionId: session!.sessionId, ownerStageId: stage.id };
+}
+
+function shouldPreserveSession(stage: StageConfig, allStages: StageConfig[], enabled: boolean): boolean {
+  // Gate continuation is deliberately independent of ordinary predecessor
+  // reuse. It retains only this gate's own isolated home when a fix loop can
+  // bring the same gate back; validation still never inherits a builder home.
+  if (stage.is_gate === true) {
+    return allStages.some((candidate) => candidate.retry_to?.includes(stage.id));
+  }
+  if (!enabled || isValidationStage(stage)) return false;
+  // Dynamic children do not exist until this stage returns; retain its home
+  // provisionally, then the eligibility check still requires exactly one child.
+  return stage.dynamic_dispatch || reusableDirectSuccessors(stage, allStages).length === 1;
+}
+
+const REPAIR_DIFF_SKIP_DIRS = new Set([
+  '.git', '.fc', 'node_modules', '.cache', '__pycache__', '.venv', 'venv', '.tox', '.gradle',
+]);
+
+interface RepairFileImage {
+  exists: boolean;
+  sha256?: string;
+  binary?: boolean;
+  text?: string;
+  /** In-memory rollback bytes; omitted from serialized audit artifacts. */
+  bytes?: Buffer;
+  symlink?: boolean;
+  type?: 'file' | 'symlink';
+  mode?: number;
+}
+
+interface RepairFileFingerprint {
+  sha256: string;
+  type: 'file' | 'symlink';
+  mode: number;
+}
+
+export interface RepairRoundSnapshot {
+  startedAt: string;
+  declaredScopes: Record<string, string[] | null>;
+  captureAll: boolean;
+  /** Full-tree fingerprints detect content, type, and mode changes, including scope escapes. */
+  allFileFingerprints: Map<string, RepairFileFingerprint>;
+  /** Full preimages make definite unauthorized writes atomically reversible. */
+  allFileImages: Map<string, RepairFileImage>;
+  files: Map<string, RepairFileImage>;
+}
+
+function normalizedProjectPath(value: string): string | undefined {
+  const normalized = posix.normalize(value.trim().replace(/\\/g, '/').replace(/^\.\//, ''));
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized)) return undefined;
+  return normalized;
+}
+
+function listProjectFiles(projectDir: string): string[] {
+  const files: string[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    let names: string[];
+    try { names = readdirSync(dir); } catch { return; }
+    for (const name of names) {
+      if (REPAIR_DIFF_SKIP_DIRS.has(name)) continue;
+      const absolute = join(dir, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      try {
+        const stat = lstatSync(absolute);
+        if (stat.isSymbolicLink()) files.push(relative);
+        else if (stat.isDirectory()) walk(absolute, relative);
+        else if (stat.isFile()) files.push(relative);
+      } catch { /* file changed while being enumerated */ }
+    }
+  };
+  walk(projectDir, '');
+  return files.sort();
+}
+
+function scopeMatchesProjectPath(scope: ParsedScope, path: string): boolean {
+  if (scope.kind === 'unknown') return true;
+  if (scope.kind === 'glob') {
+    // Capturing the complete literal-prefix tree is intentionally conservative:
+    // it cannot miss brace/extglob variants that a narrow home-grown matcher would.
+    return !scope.directoryPrefix
+      || path === scope.directoryPrefix
+      || path.startsWith(`${scope.directoryPrefix}/`);
+  }
+  return path === scope.value || path.startsWith(`${scope.value}/`);
+}
+
+function readRepairFileImage(projectDir: string, relativePath: string): RepairFileImage {
+  const normalized = normalizedProjectPath(relativePath);
+  if (!normalized) return { exists: false };
+  const absolute = join(projectDir, normalized);
+  try {
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(absolute);
+      const bytes = Buffer.from(target, 'utf-8');
+      return {
+        exists: true,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        binary: false,
+        text: target,
+        symlink: true,
+        type: 'symlink',
+        mode: stat.mode & 0o7777,
+      };
+    }
+    if (!stat.isFile()) return { exists: false };
+    const bytes = readFileSync(absolute);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    let text: string | undefined;
+    if (!bytes.includes(0)) {
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary/non-UTF8 */ }
+    }
+    return text === undefined
+      ? { exists: true, sha256, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777 }
+      : { exists: true, sha256, binary: false, text, type: 'file', mode: stat.mode & 0o7777 };
+  } catch {
+    return { exists: false };
+  }
+}
+
+function repairFileFingerprint(image: RepairFileImage): RepairFileFingerprint | undefined {
+  if (!image.exists || image.sha256 === undefined || image.type === undefined || image.mode === undefined) return undefined;
+  return { sha256: image.sha256, type: image.type, mode: image.mode };
+}
+
+function repairFileFingerprintsEqual(
+  before: RepairFileFingerprint | undefined,
+  after: RepairFileFingerprint | undefined,
+): boolean {
+  if (before === undefined || after === undefined) return before === after;
+  return before.sha256 === after.sha256
+    && before.type === after.type
+    && before.mode === after.mode;
+}
+
+function changedProjectPathsSinceSnapshot(
+  snapshot: RepairRoundSnapshot,
+  projectDir: string,
+): string[] {
+  const currentFingerprints = new Map<string, RepairFileFingerprint>();
+  for (const path of listProjectFiles(projectDir)) {
+    const fingerprint = repairFileFingerprint(readRepairFileImage(projectDir, path));
+    if (fingerprint) currentFingerprints.set(path, fingerprint);
+  }
+  return [...new Set([
+    ...snapshot.allFileFingerprints.keys(),
+    ...currentFingerprints.keys(),
+  ])]
+    .sort()
+    .filter((path) => !repairFileFingerprintsEqual(
+      snapshot.allFileFingerprints.get(path),
+      currentFingerprints.get(path),
+    ));
+}
+
+export function captureRepairRoundSnapshot(projectDir: string, repairStages: StageConfig[]): RepairRoundSnapshot {
+  const declaredScopes: Record<string, string[] | null> = {};
+  const parsedScopes: ParsedScope[] = [];
+  let captureAll = false;
+  for (const stage of repairStages) {
+    declaredScopes[stage.id] = stage.scope ?? null;
+    if (stage.scope === undefined) {
+      captureAll = true;
+      continue;
+    }
+    for (const raw of stage.scope) {
+      const parsed = parseDeclaredScope(raw);
+      parsedScopes.push(parsed);
+      if (parsed.kind === 'unknown') captureAll = true;
+    }
+  }
+
+  const files = new Map<string, RepairFileImage>();
+  const allFileFingerprints = new Map<string, RepairFileFingerprint>();
+  const allFileImages = new Map<string, RepairFileImage>();
+  for (const path of listProjectFiles(projectDir)) {
+    const image = readRepairFileImage(projectDir, path);
+    const fingerprint = repairFileFingerprint(image);
+    if (fingerprint) {
+      allFileFingerprints.set(path, fingerprint);
+      allFileImages.set(path, image);
+    }
+    if (captureAll || parsedScopes.some((scope) => scopeMatchesProjectPath(scope, path))) {
+      files.set(path, image);
+    }
+  }
+  // Exact paths need an explicit absent preimage so a newly-created file is
+  // distinguishable from an out-of-scope write whose preimage was unavailable.
+  for (const scope of parsedScopes) {
+    if (scope.kind === 'exact' && !files.has(scope.value)) {
+      files.set(scope.value, readRepairFileImage(projectDir, scope.value));
+    }
+  }
+  return { startedAt: new Date().toISOString(), declaredScopes, captureAll, allFileFingerprints, allFileImages, files };
+}
+
+function restoreProjectPath(
+  projectDir: string,
+  rawPath: string,
+  before: RepairFileImage,
+): boolean {
+  const normalized = normalizedProjectPath(rawPath);
+  if (!normalized) return false;
+  const absolute = join(projectDir, normalized);
+  try {
+    let currentIsDirectory = false;
+    try { currentIsDirectory = lstatSync(absolute).isDirectory(); } catch { /* absent */ }
+    // Never recursively erase an unexpected directory as part of rollback.
+    if (currentIsDirectory) return false;
+    if (!before.exists) {
+      rmSync(absolute, { force: true });
+      return !readRepairFileImage(projectDir, normalized).exists;
+    }
+    rmSync(absolute, { force: true });
+    mkdirSync(dirname(absolute), { recursive: true });
+    if (before.symlink) {
+      symlinkSync(before.text ?? '', absolute);
+    } else {
+      writeFileSync(absolute, before.binary ? (before.bytes ?? Buffer.alloc(0)) : (before.text ?? ''));
+      if (before.mode !== undefined) chmodSync(absolute, before.mode);
+    }
+    return repairFileFingerprintsEqual(
+      repairFileFingerprint(before),
+      repairFileFingerprint(readRepairFileImage(projectDir, normalized)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+type ScopeRevisionDecision = RuntimeConstraintDecisionV1;
+
+function readScopeRevisionRequest(stagePath: string, runId: string): ScopeRevisionRequestV1 | undefined {
+  try {
+    const parsed = parseScopeRevisionRequest(
+      JSON.parse(readFileSync(join(stagePath, SCOPE_REVISION_REQUEST_FILE), 'utf-8')),
+      'stage',
+      { runId },
+    );
+    return parsed.ok ? parsed.request : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function currentStageAttemptIndex(projectDir: string, runId: string, stageId: string): number | undefined {
+  try {
+    const attempts = readStageStatus(projectDir, runId, stageId).attempts ?? [];
+    for (let index = attempts.length - 1; index >= 0; index--) {
+      if (attempts[index].status === STAGE_STATUS.RUNNING) return attempts[index].index;
+    }
+  } catch { /* the request will be rejected until a running attempt exists */ }
+  return undefined;
+}
+
+function scopeRevisionRejection(
+  request: ScopeRevisionRequestV1,
+  priorScope: string[] | null,
+  rejectionReason: string,
+  conflictingStageId?: string,
+): Record<string, unknown> & { accepted: false; decision: 'rejected' } {
+  return {
+    accepted: false,
+    decision: 'rejected',
+    decidedAt: new Date().toISOString(),
+    policyBasis: rejectionReason,
+    requestedPaths: request.requestedPaths,
+    authorizedPaths: [],
+    priorScope,
+    effectiveScope: priorScope ?? [],
+    rejectionReason,
+    ...(conflictingStageId ? { conflictingStageId } : {}),
+  };
+}
+
+function decideScopeRevision(input: {
+  request: ScopeRevisionRequestV1;
+  stage: StageConfig;
+  priorScope: string[] | null;
+  activePeers: StageConfig[];
+  projectDir: string;
+  runId: string;
+  snapshot?: RepairRoundSnapshot;
+}): Record<string, unknown> & { accepted: boolean; decision: 'accepted' | 'rejected' } {
+  const { request, stage, priorScope, activePeers, projectDir, runId, snapshot } = input;
+  if (request.runId !== runId) {
+    return scopeRevisionRejection(request, priorScope, `request runId ${request.runId} does not match ${runId}`);
+  }
+  if (request.stageId !== stage.id) {
+    return scopeRevisionRejection(request, priorScope, `request stageId ${request.stageId} does not match ${stage.id}`);
+  }
+  const attemptIndex = currentStageAttemptIndex(projectDir, runId, stage.id);
+  if (!Number.isInteger(request.attemptIndex) || request.attemptIndex < 1 || request.attemptIndex !== attemptIndex) {
+    return scopeRevisionRejection(request, priorScope, `request attempt ${String(request.attemptIndex)} does not match running attempt ${String(attemptIndex)}`);
+  }
+  if (!request.reason) {
+    return scopeRevisionRejection(request, priorScope, 'scope revision reason must be non-empty');
+  }
+  if (!Array.isArray(request.requestedPaths) || request.requestedPaths.length === 0) {
+    return scopeRevisionRejection(request, priorScope, 'requestedPaths must contain at least one project-relative path');
+  }
+  if (request.pathDigest !== scopePathDigest(request.requestedPaths)) {
+    return scopeRevisionRejection(request, priorScope, 'pathDigest does not match canonical requestedPaths');
+  }
+  const normalizedPaths: string[] = [];
+  for (const rawPath of request.requestedPaths) {
+    if (typeof rawPath !== 'string') {
+      return scopeRevisionRejection(request, priorScope, 'every requested path must be a string');
+    }
+    const normalized = normalizedProjectPath(rawPath);
+    if (!normalized) {
+      return scopeRevisionRejection(request, priorScope, `requested path is not project-relative: ${rawPath}`);
+    }
+    normalizedPaths.push(normalized);
+  }
+  const requestedPaths = [...new Set(normalizedPaths)];
+  const effectiveScope = [...new Set([...(priorScope ?? []), ...requestedPaths])];
+  const expanded: StageConfig = { ...stage, scope: effectiveScope };
+  for (const peer of activePeers) {
+    const conflict = findScopeConflict(expanded, peer);
+    if (conflict) {
+      return scopeRevisionRejection(
+        { ...request, requestedPaths },
+        priorScope,
+        `scope revision conflicts with running peer ${peer.id}: ${conflict.reason}`,
+        peer.id,
+      );
+    }
+  }
+  if (snapshot) {
+    const requestedScopes = requestedPaths.map(parseDeclaredScope);
+    const changedPath = changedProjectPathsSinceSnapshot(snapshot, projectDir)
+      .find((path) => requestedScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
+    if (changedPath) {
+      return scopeRevisionRejection(request, priorScope, `requested path changed before scope approval: ${changedPath}`);
+    }
+  }
+
+  // Capture the exact preimage before acknowledging the request. This turns the
+  // newly accepted path into first-class repair-diff evidence rather than a
+  // post-hoc scope escape with an unavailable preimage.
+  if (snapshot) {
+    for (const path of requestedPaths) snapshot.files.set(path, readRepairFileImage(projectDir, path));
+  }
+  return {
+    requestedPaths,
+    authorizedPaths: requestedPaths,
+    accepted: true,
+    decision: 'accepted',
+    decidedAt: new Date().toISOString(),
+    policyBasis: 'current attempt, unchanged preimage, valid project path, and no active-peer scope conflict',
+    priorScope,
+    effectiveScope,
+  };
+}
+
+function readScopeRevisionDecisions(runDirPath: string, stageIds: string[]): ScopeRevisionDecision[] {
+  const decisions: ScopeRevisionDecision[] = [];
+  for (const stageId of stageIds) {
+    const stagePath = join(runDirPath, 'stages', stageId);
+    let files: string[];
+    try { files = readdirSync(stagePath); } catch { continue; }
+    for (const file of files.filter((name) => /^scope_revision_decision_.*\.json$/.test(name)).sort()) {
+      try { decisions.push(JSON.parse(readFileSync(join(stagePath, file), 'utf-8')) as ScopeRevisionDecision); } catch { /* incomplete artifact */ }
+    }
+  }
+  return decisions;
+}
+
+function serializableRepairFileMode(mode: number): string {
+  return mode.toString(8).padStart(4, '0');
+}
+
+function serializableRepairFileImage(image: RepairFileImage): Record<string, unknown> {
+  if (!image.exists) return { exists: false };
+  return {
+    exists: true,
+    sha256: image.sha256,
+    binary: image.binary === true,
+    type: image.type,
+    mode: image.mode === undefined ? undefined : serializableRepairFileMode(image.mode),
+    ...(image.symlink ? { symlink: true } : {}),
+    ...(image.binary ? {} : { text: image.text ?? '' }),
+  };
+}
+
+export function writeRepairRoundDiffArtifact(input: {
+  snapshot: RepairRoundSnapshot;
+  projectDir: string;
+  runDirPath: string;
+  iteration: number;
+  round: number;
+  repairStages: StageConfig[];
+  statuses: Record<string, StageStatus>;
+}): string {
+  const { snapshot, projectDir, runDirPath, iteration, round, repairStages, statuses } = input;
+  const postScope = captureRepairRoundSnapshot(projectDir, repairStages);
+  const writeOwners = new Map<string, Set<string>>();
+  for (const stage of repairStages) {
+    const { files } = latestAttemptWrites(statuses[stage.id]);
+    for (const raw of files) {
+      const path = normalizedProjectPath(raw);
+      if (!path) continue;
+      const owners = writeOwners.get(path) ?? new Set<string>();
+      owners.add(stage.id);
+      writeOwners.set(path, owners);
+    }
+  }
+
+  const allPaths = new Set<string>([
+    ...snapshot.files.keys(),
+    ...postScope.files.keys(),
+    ...writeOwners.keys(),
+  ]);
+  for (const path of new Set([...snapshot.allFileFingerprints.keys(), ...postScope.allFileFingerprints.keys()])) {
+    if (!repairFileFingerprintsEqual(
+      snapshot.allFileFingerprints.get(path),
+      postScope.allFileFingerprints.get(path),
+    )) allPaths.add(path);
+  }
+  const files: Record<string, unknown>[] = [];
+  for (const path of [...allPaths].sort()) {
+    const before = snapshot.files.get(path);
+    const after = readRepairFileImage(projectDir, path);
+    const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
+    const beforeFingerprint = repairFileFingerprint(before ?? { exists: false })
+      ?? snapshot.allFileFingerprints.get(path);
+    const afterFingerprint = repairFileFingerprint(after);
+    const beforeExisted = before?.exists ?? beforeFingerprint !== undefined;
+    const same = beforeExisted === after.exists
+      && repairFileFingerprintsEqual(beforeFingerprint, afterFingerprint);
+    if (same && authoritativeOwners.length === 0) continue;
+
+    let status: string;
+    if (!beforeExisted && after.exists) status = 'added';
+    else if (beforeExisted && !after.exists) status = 'deleted';
+    else if (same) status = 'reported-touched';
+    else status = 'modified';
+    const declaredScopeMatch = before !== undefined || postScope.files.has(path);
+    const preimageAvailable = before !== undefined || (!beforeExisted && declaredScopeMatch);
+    files.push({
+      path,
+      status,
+      preimageAvailable,
+      declaredScopeMatch,
+      authoritativeWriteStageIds: authoritativeOwners,
+      before: before
+        ? serializableRepairFileImage(before)
+        : beforeExisted
+          ? {
+              exists: true,
+              sha256: beforeFingerprint?.sha256,
+              type: beforeFingerprint?.type,
+              mode: beforeFingerprint === undefined ? undefined : serializableRepairFileMode(beforeFingerprint.mode),
+              contentCaptured: false,
+            }
+          : { exists: false, contentCaptured: false },
+      after: serializableRepairFileImage(after),
+      ...(!preimageAvailable ? { note: 'The path was outside the captured declared scope. Its full-tree fingerprint proves the change; the complete postimage is included when present, but preimage content was unavailable.' } : {}),
+    });
+  }
+
+  const coordinate = gateArchiveCoordinate(iteration, round);
+  const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
+  mkdirSync(artifactDir, { recursive: true });
+  const artifactPath = join(artifactDir, 'repair_diff.json');
+  const scopeRevisions = readScopeRevisionDecisions(
+    runDirPath,
+    repairStages.map((stage) => stage.id),
+  );
+  const effectiveRepairScopes = Object.fromEntries(repairStages.map((stage) => {
+    const accepted = scopeRevisions
+      .filter((decision) => decision.stageId === stage.id && decision.accepted === true && Array.isArray(decision.effectiveScope))
+      .sort((left, right) => left.attemptIndex - right.attemptIndex)
+      .at(-1);
+    return [stage.id, accepted?.effectiveScope ?? stage.scope ?? []];
+  }));
+  writeFileSync(artifactPath, JSON.stringify({
+    version: 1,
+    iteration,
+    round,
+    truncated: false,
+    capturedAt: snapshot.startedAt,
+    completedAt: new Date().toISOString(),
+    repairStageIds: repairStages.map((stage) => stage.id),
+    declaredScopes: snapshot.declaredScopes,
+    effectiveScopes: effectiveRepairScopes,
+    scopeRevisions,
+    authoritativeWrites: [...writeOwners.entries()].map(([path, owners]) => ({ path, stageIds: [...owners].sort() })),
+    files,
+  }, null, 2) + '\n', 'utf-8');
+  return artifactPath;
+}
+
 function allDone(state: StoreState): boolean {
   return Object.values(state.stages).every(
-    (s) => s.status === 'complete' || s.status === 'skipped',
+    (s) => isSatisfiedStageDependencyStatus(s.status),
   );
 }
 
@@ -1516,13 +3021,14 @@ Rules:
 }
 
 function anyFailed(state: StoreState): boolean {
-  return Object.values(state.stages).some((s) => s.status === 'failed');
+  return Object.values(state.stages).some((s) => s.status === STAGE_STATUS.FAILED);
 }
 
 export function loadWorkflow(yamlPath: string): { config: WorkflowConfig; raw: string } {
   const raw = readFileSync(yamlPath, 'utf-8');
   const parsed = parseYaml(raw);
   const config = WorkflowConfigSchema.parse(parsed);
+  normalizeRetryGateRelationships(config.stages);
   return { config, raw };
 }
 
@@ -1610,7 +3116,7 @@ export function parseDispatchBlock(
       log.warn({ id: item.id }, 'Invalid stage in DISPATCH block, skipping');
     }
   }
-  return stages;
+  return normalizeRetryGateRelationships(stages);
 }
 
 export function resolveDispatchDependencies(dispatched: StageConfig[], dispatchStageId: string): void {
@@ -1620,12 +3126,20 @@ export function resolveDispatchDependencies(dispatched: StageConfig[], dispatchS
   const nonPlannedIds = dispatched.filter((s) => !plannedDependents.has(s.id)).map((s) => s.id);
 
   for (const s of dispatched) {
+    s.dependency_reasons ??= {};
     if (s.depends_on.length === 0) {
       s.depends_on = [dispatchStageId];
+      s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
     }
     if (s.depends_on.includes('__planned__')) {
+      const plannedReason = s.dependency_reasons.__planned__ ?? 'Consumes the outputs of all planned work stages.';
       s.depends_on = [...new Set(s.depends_on.filter((d) => d !== '__planned__').concat(nonPlannedIds))];
-      if (s.depends_on.length === 0) s.depends_on = [dispatchStageId];
+      delete s.dependency_reasons.__planned__;
+      for (const id of nonPlannedIds) s.dependency_reasons[id] ??= plannedReason;
+      if (s.depends_on.length === 0) {
+        s.depends_on = [dispatchStageId];
+        s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
+      }
     }
   }
 }
@@ -1723,16 +3237,33 @@ function injectDispatchedStages(
     return [];
   }
 
+  applyScopePlanningDispositions(runDirPath, state.currentIteration ?? 1, items, dispatched);
+
   resolveDispatchDependencies(dispatched, dispatchStageId);
 
   // Validate dependencies: remove references to non-existent stages and self-references to prevent hangs
   const allKnownIds = new Set([...sorted.map(s => s.id), ...dispatched.map(s => s.id)]);
+  const allKnownStages = new Map([...sorted, ...dispatched].map((stage) => [stage.id, stage]));
   for (const s of dispatched) {
     const invalid = s.depends_on.filter(d => !allKnownIds.has(d) || d === s.id);
     if (invalid.length > 0) {
       log.warn({ stage: s.id, invalidDeps: invalid }, 'Removing invalid depends_on references');
       s.depends_on = s.depends_on.filter(d => allKnownIds.has(d) && d !== s.id);
-      if (s.depends_on.length === 0) s.depends_on = [dispatchStageId];
+      for (const dep of invalid) delete s.dependency_reasons?.[dep];
+      if (s.depends_on.length === 0) {
+        s.depends_on = [dispatchStageId];
+        s.dependency_reasons ??= {};
+        s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
+      }
+    }
+    const missingReasons = s.depends_on.filter((dep) => !s.dependency_reasons?.[dep]?.trim());
+    if (missingReasons.length > 0) {
+      log.warn({ stage: s.id, missingReasons }, 'Planner omitted dependency_reasons entries; dependency retained for backward compatibility');
+    }
+    const extraReasons = Object.keys(s.dependency_reasons ?? {}).filter((dep) => !s.depends_on.includes(dep));
+    if (extraReasons.length > 0) {
+      log.warn({ stage: s.id, extraReasons }, 'Ignoring dependency_reasons entries without matching depends_on edges');
+      for (const dep of extraReasons) delete s.dependency_reasons?.[dep];
     }
     // Validate retry_to references
     if (s.retry_to && s.retry_to.length > 0) {
@@ -1749,10 +3280,22 @@ function injectDispatchedStages(
         }
         // Auto-add gate IDs to depends_on so retry_to stages wait for the gate
         if (s.retry_to) {
+          for (const gateId of s.retry_to) {
+            const target = allKnownStages.get(gateId);
+            if (target && target.is_gate !== true) {
+              target.is_gate = true;
+              log.warn(
+                { stage: s.id, gate: gateId },
+                'retry_to target was not declared as a gate — normalizing it to a gate',
+              );
+            }
+          }
           const missing = s.retry_to.filter(g => !s.depends_on.includes(g));
           if (missing.length > 0) {
             log.info({ stage: s.id, addedDeps: missing }, 'Auto-adding gate IDs to depends_on for retry_to stage');
             s.depends_on = [...new Set([...s.depends_on, ...missing])];
+            s.dependency_reasons ??= {};
+            for (const gateId of missing) s.dependency_reasons[gateId] = 'Framework retry dependency: fixes run only after this gate reports a failure.';
           }
         }
       }
@@ -1782,6 +3325,9 @@ function injectDispatchedStages(
       if (hasCycle(s.id)) {
         log.warn({ stage: s.id }, 'Cycle detected in dispatched stages — breaking cycle by resetting depends_on to dispatch stage');
         s.depends_on = [dispatchStageId];
+        s.dependency_reasons = {
+          [dispatchStageId]: 'Framework recovery dependency: cycle was removed and the stage now follows dispatch.',
+        };
       }
     }
   }
@@ -1793,15 +3339,15 @@ function injectDispatchedStages(
     if (state.stages[s.id]) {
       isReinjection = true;
     } else {
-      state.stages[s.id] = { status: 'pending', retries: 0 };
+      state.stages[s.id] = { status: STAGE_STATUS.PENDING, retries: 0 };
     }
   }
 
   // Mark static stages that transitively depend on dispatch stage as skipped
   const transitive = collectTransitiveDependents(dispatchStageId, sorted);
   for (const id of transitive) {
-    if (state.stages[id]?.status === 'pending') {
-      state.stages[id] = { status: 'skipped', retries: 0 };
+    if (state.stages[id] && isPendingStageStatus(state.stages[id].status)) {
+      state.stages[id] = { status: STAGE_STATUS.SKIPPED, retries: 0 };
       log.info({ stage: id }, 'Skipped (replaced by dispatched stages)');
     }
   }
@@ -1815,7 +3361,21 @@ function injectDispatchedStages(
     const wfRaw = readFileSync(wfPath, 'utf-8');
     const wfParsed = parseYaml(wfRaw) ?? {};
     if (!Array.isArray(wfParsed.stages)) wfParsed.stages = [];
-    for (const s of dispatched) wfParsed.stages.push({ id: s.id, role: s.role, depends_on: s.depends_on, prompt_template: s.prompt_template, is_gate: s.is_gate || undefined, retry_to: s.retry_to?.length ? s.retry_to : undefined });
+    for (const s of dispatched) wfParsed.stages.push({
+      id: s.id,
+      role: s.role,
+      scope: s.scope,
+      depends_on: s.depends_on,
+      dependency_reasons: s.dependency_reasons,
+      prompt_template: s.prompt_template,
+      timeout_ms: s.timeout_ms,
+      timeout_total_ms: s.timeout_total_ms,
+      max_retries: s.max_retries,
+      skills: s.skills.length ? s.skills : undefined,
+      dynamic_dispatch: s.dynamic_dispatch || undefined,
+      is_gate: s.is_gate || undefined,
+      retry_to: s.retry_to?.length ? s.retry_to : undefined,
+    });
     writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
   } catch { /* best effort */ }
 
@@ -1874,6 +3434,13 @@ export function appendIterationLog(
     if (metricLookup.metric) {
       const m = metricLookup.metric;
       lines.push(`Metric: ${m.metric} = ${m.score}${m.threshold !== undefined ? ` (threshold: ${m.threshold})` : ''}`);
+    }
+  }
+  const pendingScope = pendingScopePlanningInputs(runDirPath);
+  if (pendingScope.length > 0) {
+    lines.push('## Pending scope-negotiation planning input');
+    for (const entry of pendingScope) {
+      lines.push(`- ${entry.digest}: ${entry.stageKind} requested ${entry.requestedPaths.join(', ')}; ${entry.rejectionReason}`);
     }
   }
   lines.push('');
@@ -2398,32 +3965,144 @@ export function readGateVerdict(
   return v as { pass: boolean; reason?: string };
 }
 
-/** Check all is_gate stages. Returns { allPass, failedGateIds } */
-export function checkGates(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): { allPass: boolean; failedGateIds: string[] } {
+interface GateRuntimeFacts {
+  allPass: boolean;
+  failedGateIds: string[];
+  /** Completed gates with a validated pass:false fact; pending gates are excluded. */
+  rejectedGateIds: string[];
+  evaluations: Array<{
+    id: string;
+    status?: string;
+    attempts: number;
+    effectiveVerdict: { pass: boolean; reason?: string } | null;
+  }>;
+}
+
+interface GateRetryDiagnosticArtifact {
+  file: string;
+  pass?: boolean;
+  parseError?: string;
+}
+
+function gateRetryDiagnosticSnapshot(
+  allStages: StageConfig[],
+  state: StoreState,
+  projectDir: string,
+  runId: string,
+  runDirPath: string,
+  runtimeFacts: GateRuntimeFacts,
+): {
+  verdictArtifacts: GateRetryDiagnosticArtifact[];
+  gates: Array<{
+    id: string;
+    status?: string;
+    attempts: number;
+    effectiveVerdict: { pass: boolean; reason?: string } | null;
+    metricArtifact?: Record<string, unknown>;
+    metricParseError?: string;
+  }>;
+  contract: GateContract | null;
+} {
+  const verdictArtifacts: GateRetryDiagnosticArtifact[] = [];
+  let verdictFiles: string[] = [];
+  try {
+    verdictFiles = readdirSync(runDirPath)
+      .filter((file) => /^verdict_.*\.json$/.test(file))
+      .sort();
+  } catch { /* run directory is expected to exist; retain an empty diagnostic on failure */ }
+  for (const file of verdictFiles) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(runDirPath, file), 'utf-8')) as Record<string, unknown>;
+      verdictArtifacts.push({ file, ...(typeof parsed.pass === 'boolean' ? { pass: parsed.pass } : {}) });
+    } catch (error) {
+      verdictArtifacts.push({ file, parseError: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
+  const evaluations = new Map(runtimeFacts.evaluations.map((evaluation) => [evaluation.id, evaluation]));
+  const seen = new Set<string>();
+  const gates = allStages.filter((stage) => {
+    if (!stage.is_gate || seen.has(stage.id)) return false;
+    seen.add(stage.id);
+    return true;
+  }).map((stage) => {
+    const status = state.stages[stage.id];
+    const metricPath = join(runDirPath, 'stages', stage.id, 'metric.json');
+    let metricArtifact: Record<string, unknown> | undefined;
+    let metricParseError: string | undefined;
+    if (existsSync(metricPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(metricPath, 'utf-8')) as Record<string, unknown>;
+        metricArtifact = Object.fromEntries([
+          'hasMetric', 'metric', 'value', 'score', 'higherIsBetter', 'threshold', 'pass',
+          'phaseComplete', 'phase_complete', 'nextPhase', 'next_phase',
+        ].flatMap((key) => key in parsed ? [[key, parsed[key]]] : []));
+      } catch (error) {
+        metricParseError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const evaluation = evaluations.get(stage.id);
+    return {
+      id: stage.id,
+      status: status?.status,
+      attempts: status?.attempts?.length ?? 0,
+      effectiveVerdict: evaluation?.effectiveVerdict ?? null,
+      ...(metricArtifact ? { metricArtifact } : {}),
+      ...(metricParseError ? { metricParseError } : {}),
+    };
+  });
+  return { verdictArtifacts, gates, contract };
+}
+
+function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): GateRuntimeFacts {
   const seenGateIds = new Set<string>();
   const gateStages = allStages.filter((s) => {
     if (!s.is_gate || seenGateIds.has(s.id)) return false;
     seenGateIds.add(s.id);
     return true;
   });
-  if (gateStages.length === 0) return { allPass: true, failedGateIds: [] };
+  if (gateStages.length === 0) return { allPass: true, failedGateIds: [], rejectedGateIds: [], evaluations: [] };
   // Load the campaign gate contract once per check; reused across all gates.
   const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
   const failedGateIds: string[] = [];
+  const rejectedGateIds: string[] = [];
+  const evaluations: GateRuntimeFacts['evaluations'] = [];
   for (const g of gateStages) {
     const gateStatus = state.stages[g.id]?.status;
     // A gate only passes after it completed and wrote an explicit pass verdict.
     // Pending/running/skipped/missing gates must block run completion.
-    if (gateStatus !== 'complete') {
+    if (gateStatus !== STAGE_STATUS.COMPLETE) {
       failedGateIds.push(g.id);
+      evaluations.push({
+        id: g.id,
+        status: gateStatus,
+        attempts: state.stages[g.id]?.attempts?.length ?? 0,
+        effectiveVerdict: null,
+      });
       continue;
     }
     const verdict = readGateVerdict(projectDir, g.id, runId, contract);
+    evaluations.push({
+      id: g.id,
+      status: gateStatus,
+      attempts: state.stages[g.id]?.attempts?.length ?? 0,
+      effectiveVerdict: verdict
+        ? { pass: verdict.pass, ...(verdict.reason ? { reason: verdict.reason } : {}) }
+        : null,
+    });
     if (verdict && verdict.pass === true) continue; // explicit pass (contract-honored if any)
     // Missing verdict or explicit fail → treat as failure
     failedGateIds.push(g.id);
+    if (verdict?.pass === false) rejectedGateIds.push(g.id);
   }
-  return { allPass: failedGateIds.length === 0, failedGateIds };
+  return { allPass: failedGateIds.length === 0, failedGateIds, rejectedGateIds, evaluations };
+}
+
+/** Check all is_gate stages. Preserve the established public result shape. */
+export function checkGates(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): { allPass: boolean; failedGateIds: string[] } {
+  const { allPass, failedGateIds } = collectGateRuntimeFacts(allStages, state, projectDir, runId);
+  return { allPass, failedGateIds };
 }
 
 /** Find the retry_to stage that references any of the failed gate IDs */
@@ -2474,8 +4153,8 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
   return terminalIds.every(id => {
     const ss = state.stages[id];
     if (!ss) return false;
-    if (ss.status === 'skipped') return true;
-    return ss.status === 'complete' && (ss.exitCode === undefined || ss.exitCode === 0);
+    if (ss.status === STAGE_STATUS.SKIPPED) return true;
+    return ss.status === STAGE_STATUS.COMPLETE && (ss.exitCode === undefined || ss.exitCode === 0);
   });
 }
 
@@ -2484,7 +4163,7 @@ export function shouldContinuePhaseAfterGatePass(projectDir: string, state: Stor
   if (!phase) return false;
   if (phase.phaseComplete === false) return true;
   const nextPhase = phase.nextPhase?.trim().toLowerCase();
-  return phase.phaseComplete === true && Boolean(nextPhase && nextPhase !== 'complete');
+  return phase.phaseComplete === true && Boolean(nextPhase && nextPhase !== CAMPAIGN_PHASE_COMPLETE_SENTINEL);
 }
 
 export function recoverTerminalStudyCompletion(projectDir: string, runId: string, state: StoreState): StoreState | null {
@@ -2495,16 +4174,16 @@ export function recoverTerminalStudyCompletion(projectDir: string, runId: string
     writeTerminalStudyCompletionArtifacts(projectDir, runId, gateId, evidence);
     const next: StoreState = {
       ...state,
-      status: 'complete',
+      status: RUN_STATUS.COMPLETE,
       completedAt: state.completedAt ?? new Date().toISOString(),
       campaignAlert: undefined,
       researchInjection: undefined,
       stages: { ...state.stages },
     };
-    next.stages[gateId] = { ...(next.stages[gateId] ?? { retries: 0 }), status: 'complete', retries: next.stages[gateId]?.retries ?? 0 };
+    next.stages[gateId] = { ...(next.stages[gateId] ?? { retries: 0 }), status: STAGE_STATUS.COMPLETE, retries: next.stages[gateId]?.retries ?? 0 };
     for (const stage of (state.dispatchedStages ?? []) as StageConfig[]) {
       if (stage.retry_to?.includes(gateId) && next.stages[stage.id]) {
-        next.stages[stage.id] = { ...next.stages[stage.id], status: 'skipped' };
+        next.stages[stage.id] = { ...next.stages[stage.id], status: STAGE_STATUS.SKIPPED };
       }
     }
     return next;
@@ -2538,16 +4217,74 @@ export async function runWorkflow(
   supervise?: boolean,
   campaignId?: string,
   inheritCampaignContext: boolean = true,
+  briefAdmission?: BriefAdmissionRecord,
 ): Promise<StoreState> {
+  if (briefAdmission) {
+    if (taskDescription === undefined) {
+      throw new Error('A brief admission record was supplied without the exact brief text');
+    }
+    const verification = verifyBriefAdmission(taskDescription, briefAdmission);
+    if (verification.status !== 'valid') {
+      throw new Error(
+        `Brief admission ${verification.status}; scheduler launch stopped before run creation `
+        + `(current digest ${verification.report.digest.slice(0, 12)}).`,
+      );
+    }
+  }
+  normalizeRetryGateRelationships(workflow.stages);
+  // The run-local workflow is the normalized executable contract, including
+  // inferred gate/dependency facts and timeout caps, not the stale input text.
+  workflowYaml = stringifyYaml(workflow);
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
   let maxIterations = workflow.defaults.max_iterations ?? loadDefaults(projectDir).max_iterations;
 
   let runId: string;
   let runDirPath: string;
+  let launchIntentOwned: boolean;
+  // Set when this launch is RESUMING a parked run rather than relaunching a
+  // finished one: the loop then continues the park's own iteration instead of
+  // restarting at 1 with a fresh budget.
+  let resumingFromPark = false;
+  let resumeAtIteration = 1;
   if (existingRunId) {
     runId = existingRunId;
     runDirPath = runDir(projectDir, runId);
+    const hasRunState = existsSync(join(runDirPath, 'run.json'));
+    const reservation = hasRunState ? undefined : readRunReservation(projectDir, runId);
+    if (!hasRunState && !reservation) {
+      throw new Error(`Existing run is unreadable and has no valid reservation: ${runId}`);
+    }
+    const launchClaim = claimLaunchIntent(projectDir, runId);
+    if (!launchClaim.claimed) {
+      if (hasRunState) return readRunState(projectDir, runId);
+      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
+      const blocked = readRunState(projectDir, runId);
+      if (taskDescription) blocked.taskDescription = taskDescription;
+      if (briefAdmission) blocked.briefAdmission = briefAdmission;
+      if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
+        writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+      }
+      blocked.status = 'failed';
+      blocked.failureReason = `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.`;
+      blocked.completedAt = new Date().toISOString();
+      writeRunState(projectDir, runId, blocked);
+      return blocked;
+    }
+    launchIntentOwned = true;
+    if (reservation) {
+      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
+      const state = readRunState(projectDir, runId);
+      state.maxIterations = maxIterations;
+      state.currentIteration = 1;
+      state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+      if (taskDescription) state.taskDescription = taskDescription;
+      if (briefAdmission) state.briefAdmission = briefAdmission;
+      if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
+        writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+      }
+      writeRunState(projectDir, runId, state);
+    }
     mkdirSync(join(runDirPath, 'stages'), { recursive: true });
     for (const s of baseStages) {
       mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
@@ -2557,43 +4294,149 @@ export async function runWorkflow(
     for (const s of baseStages) {
       if (!state.stages[s.id]) state.stages[s.id] = { status: 'pending', retries: 0 };
     }
-    state.status = 'running';
-    state.workflowName = workflow.name;
-    state.maxIterations = maxIterations;
-    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
-    state.currentIteration = 1;
-    // Relaunch hygiene: this run previously reached a terminal state. Refresh the
-    // lifecycle markers and purge prior-run signals so we don't (a) compute a
-    // stale/negative duration off the old completedAt, (b) honor a leftover
-    // goal_met.json/replan.json and terminate the rerun prematurely, or (c) let
-    // tryAdvanceResearch journal a stale result file from the previous run as a
-    // phantom round (its freshness check keys off startedAt).
-    state.startedAt = new Date().toISOString();
-    delete state.completedAt;
-    delete state.failureReason;
-    delete state.terminalArtifact;
-    try { rmSync(join(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
-    // Reset the integrity-rejection tally so a prior run's rejections don't shrink
-    // this rerun's budget.
-    try { unlinkSync(join(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
-    writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
-    writeRunState(projectDir, runId, state);
+    // RESUMING a park is not RELAUNCHING a finished run. A resume continues the
+    // same run — same iteration budget, same lifecycle clock, same signals — so
+    // it must skip the hygiene below. Applying it to a park would (a) hand back
+    // a full fresh iteration budget on every park cycle, (b) reset startedAt and
+    // thereby make tryAdvanceResearch discard the round measured just before the
+    // park as "stale", and (c) delete signals/ mid-flight.
+    resumingFromPark = isPausedRunStatus(state.status);
+    if (resumingFromPark) {
+      resumeAtIteration = state.parked?.atIteration ?? state.currentIteration ?? 1;
+    }
+    if (briefAdmission) {
+      state.briefAdmission = briefAdmission;
+      writeRunState(projectDir, runId, state);
+    }
+    if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
+      writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+    }
+    if (!resumingFromPark && !reservation) {
+      state.status = 'running';
+      state.workflowName = workflow.name;
+      state.maxIterations = maxIterations;
+      state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+      state.currentIteration = 1;
+      // Relaunch hygiene: this run previously reached a terminal state. Refresh the
+      // lifecycle markers and purge prior-run signals so we don't (a) compute a
+      // stale/negative duration off the old completedAt, (b) honor a leftover
+      // goal_met.json/replan.json and terminate the rerun prematurely, or (c) let
+      // tryAdvanceResearch journal a stale result file from the previous run as a
+      // phantom round (its freshness check keys off startedAt).
+      state.startedAt = new Date().toISOString();
+      delete state.completedAt;
+      delete state.failureReason;
+      delete state.terminalArtifact;
+      try { rmSync(join(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
+      // Reset the integrity-rejection tally so a prior run's rejections don't shrink
+      // this rerun's budget.
+      try { unlinkSync(join(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
+      writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
+      writeRunState(projectDir, runId, state);
+    }
   } else {
-    const created = createRun(projectDir, workflow.name, workflowYaml, stageIds);
-    runId = created.runId;
-    runDirPath = created.runDirPath;
+    const reserved = reserveRun(projectDir);
+    runId = reserved.runId;
+    runDirPath = reserved.runDirPath;
+    const launchClaim = claimLaunchIntent(projectDir, runId);
+    launchIntentOwned = launchClaim.claimed;
+    initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
     const state = readRunState(projectDir, runId);
+    if (taskDescription) state.taskDescription = taskDescription;
+    if (briefAdmission) state.briefAdmission = briefAdmission;
+    if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
+      writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+    }
+    if (!launchClaim.claimed) {
+      state.status = 'failed';
+      state.failureReason = `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.`;
+      state.completedAt = new Date().toISOString();
+      writeRunState(projectDir, runId, state);
+      return state;
+    }
     state.maxIterations = maxIterations;
     state.currentIteration = 1;
     state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
     writeRunState(projectDir, runId, state);
   }
 
+  // Claim liveness before probing siblings. In particular, a parked run remains
+  // durably parked during admission, but this pid makes its resume-start window
+  // visible to another concurrent launcher.
+  const schedulerPidPath = join(runDirPath, 'scheduler.pid');
+  if (!claimSchedulerPid(schedulerPidPath, runId)) {
+    const state = readRunState(projectDir, runId);
+    if (launchIntentOwned) {
+      // Another scheduler already owns the durable pid marker for this same
+      // run, so the short-lived launch hand-off is no longer needed.
+      releaseLaunchIntent(projectDir, runId);
+      invalidateRunLockCache();
+    }
+    log.warn({ runId, projectDir }, 'Scheduler launch already claimed for this run');
+    return state;
+  }
+  if (!resumingFromPark && launchIntentOwned) {
+    // run.json is running and scheduler.pid is now live: the durable liveness
+    // probe has taken over from the short launch-window intent.
+    releaseLaunchIntent(projectDir, runId);
+    launchIntentOwned = false;
+    invalidateRunLockCache();
+  }
+
+  const sibling = findLiveRunOwnerForProject(projectDir, runId);
+  if (sibling) {
+    const siblingDescription = describeLiveRunOwner(sibling);
+    const state = readRunState(projectDir, runId);
+    removeSchedulerPidIfOwned(schedulerPidPath);
+    if (resumingFromPark) {
+      // Approval remains consumed in the append log, but the run itself must
+      // stay resumable. Do not erase parked metadata or manufacture a failure.
+      log.warn({ runId, sibling: siblingDescription, projectDir }, 'Resume deferred: another active run exists for this project');
+      if (launchIntentOwned) {
+        releaseLaunchIntent(projectDir, runId);
+        invalidateRunLockCache();
+      }
+      return state;
+    }
+    state.status = 'failed';
+    state.failureReason = `Single-in-flight: another active run (${siblingDescription}) exists for this project. Stop it first or wait for it to finish.`;
+    state.completedAt = new Date().toISOString();
+    writeRunState(projectDir, runId, state);
+    log.error({ runId, sibling: siblingDescription, projectDir }, 'Refusing to start: another active run exists for this project');
+    return state;
+  }
+
+  // Admission succeeded: only now consume the parked lifecycle marker.
+  if (resumingFromPark) {
+    const state = readRunState(projectDir, runId);
+    if (!isPausedRunStatus(state.status)) {
+      removeSchedulerPidIfOwned(schedulerPidPath);
+      return state;
+    }
+    state.status = 'running';
+    state.workflowName = workflow.name;
+    state.maxIterations = maxIterations;
+    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+    state.currentIteration = resumeAtIteration;
+    delete state.parked;
+    writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
+    writeRunState(projectDir, runId, state);
+    if (launchIntentOwned) {
+      releaseLaunchIntent(projectDir, runId);
+      launchIntentOwned = false;
+      invalidateRunLockCache();
+    }
+  }
+
+  // Supervisor and pid cleanup cover every return after admission, including
+  // brief/frontmatter validation failures before the iteration loop.
+  let supervisor: Supervisor | undefined;
+  try {
   log.info({ runId, workflow: workflow.name }, 'Run started');
 
-  if (taskDescription || autoApprove || supervise || campaignId) {
+  if (taskDescription || autoApprove || supervise || campaignId || briefAdmission) {
     const initState = readRunState(projectDir, runId);
-    if (taskDescription) {
+    if (taskDescription && !resumingFromPark) {
       initState.taskDescription = taskDescription;
       // Persist the brief into the run dir so CLI-spawned tasks (which only
       // write task_brief.md to <project>/docs/) carry their own task_brief.md.
@@ -2608,6 +4451,7 @@ export async function runWorkflow(
     }
     if (autoApprove) initState.autoApprove = true;
     if (supervise) initState.supervise = true;
+    if (briefAdmission) initState.briefAdmission = briefAdmission;
     if (campaignId) {
       initState.campaignId = campaignId;
       initState.campaignName = campaignId;
@@ -2623,8 +4467,10 @@ export async function runWorkflow(
   // The frontmatter is stripped from the brief before it reaches stage prompts so the
   // planner doesn't waste tokens reading scheduler-internal config.
   const briefPath = join(runDirPath, 'task_brief.md');
-  if (existsSync(briefPath)) {
-    const briefContent = readFileSync(briefPath, 'utf-8').trim();
+  if (taskDescription !== undefined || existsSync(briefPath)) {
+    const briefContent = (taskDescription !== undefined
+      ? taskDescription
+      : readFileSync(briefPath, 'utf-8')).trim();
     if (briefContent) {
       const { terminalStates, program, research, stripped, frontmatterError } = parseBriefFrontmatter(briefContent);
       taskDescription = stripped || briefContent;
@@ -2704,29 +4550,7 @@ export async function runWorkflow(
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
   const availableSkillsList = listAvailableSkills(projectDir);
 
-  // Single-in-flight enforcement: refuse to start if another run for this same
-  // project is genuinely active (prevents the Phase A concurrent-run race).
-  {
-    const sibling = findActiveSiblingRun(projectDir, runId);
-    if (sibling) {
-      const s = readRunState(projectDir, runId);
-      s.status = 'failed';
-      s.failureReason = `Single-in-flight: another active run (${sibling}) exists for this project. Stop it first or wait for it to finish.`;
-      s.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, s);
-      log.error({ runId, sibling, projectDir }, 'Refusing to start: another active run exists for this project');
-      return s;
-    }
-  }
-
-  // Write scheduler.pid so the dashboard's startup-recovery sweep can tell whether
-  // this run is genuinely alive (vs orphaned in run.json after a dashboard restart).
-  // Removed in the finally block so re-spawned schedulers don't see stale pids.
-  const schedulerPidPath = join(runDirPath, 'scheduler.pid');
-  try { writeFileSync(schedulerPidPath, String(process.pid), 'utf-8'); } catch { /* non-critical */ }
-
   // Supervisor brain: start before the iteration loop if enabled, stop in finally.
-  let supervisor: Supervisor | undefined;
   if (supervise) {
     try {
       const supCfg = loadSupervisorConfig(projectDir);
@@ -2743,7 +4567,6 @@ export async function runWorkflow(
     }
   }
 
-  try {
   // Policy-owned terminal for a research/loop run whose iteration budget is exhausted without
   // the policy shipping/ceilinging (e.g. the agent produced too few measured rounds). Keeps the
   // research policy as the SOLE terminal authority — a research run never resolves as 'complete'.
@@ -2802,17 +4625,50 @@ export async function runWorkflow(
     // FIX D — a budget-exhaustion terminal is always non-ship; record any declared confirm as not-run.
     recordConfirmNotRun(runDir(projectDir, runId), state.research?.confirm, state.status);
     state.completedAt = new Date().toISOString();
+    // Engine bug #7 (found by `flowcrew rehearse` on the event-drift brief): this third
+    // terminal exit door committed ceiling_hit with none of the honesty treatment the
+    // research-loop and unified-gate doors carry — leftover stages froze pending, the
+    // brief-declared terminal artifact path was never written, terminalArtifact stayed
+    // unset. Every door must honor the same contract.
+    markLeftoverStagesSkipped(state, `research terminal '${state.status}' committed (budget exhausted) before this stage ran`);
+    const declaredPathBE = state.terminalStates?.[state.status]?.paths?.[0];
+    if (declaredPathBE) state.terminalArtifact = declaredPathBE.split('/').pop();
     const rg = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
     if (!rg.allowed) return rg.state;
     writeRunState(projectDir, runId, state);
     writeCampaignEntry(projectDir, state);
     recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration: iterationNum, detail: terminalDetail });
+    try {
+      const rc2 = state.research;
+      const reportDir = join(projectDir, rc2?.reportDir ?? 'docs');
+      mkdirSync(reportDir, { recursive: true });
+      let roundsMd = '';
+      try {
+        const j2 = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: Array<{ label: string; result: number; confirmFailed?: boolean }> };
+        roundsMd = (j2.rounds ?? []).map((r) => `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n');
+      } catch { /* no journal */ }
+      const body = `# Research ${state.status === RUN_STATUS.CEILING_HIT ? 'Ceiling' : 'Incomplete'} Report\n\n`
+        + `Decision: budget-exhausted ${state.status}\n`
+        + `Reason: ${terminalDetail}\n\n`
+        + `## Rounds\n${roundsMd}\n`;
+      writeFileSync(join(reportDir, state.status === RUN_STATUS.CEILING_HIT ? 'program_ceiling_report.md' : 'program_incomplete_report.md'), body, 'utf-8');
+      if (declaredPathBE) {
+        const declaredAbs = join(projectDir, declaredPathBE);
+        if (!existsSync(declaredAbs)) {
+          const declaredDir = declaredPathBE.includes('/') ? join(projectDir, declaredPathBE.substring(0, declaredPathBE.lastIndexOf('/'))) : projectDir;
+          mkdirSync(declaredDir, { recursive: true });
+          writeFileSync(declaredAbs, `> Engine-authored terminal artifact (research budget exhausted; the declared path is part of the brief's terminal contract).\n\n${body}`, 'utf-8');
+        }
+      }
+    } catch { /* non-critical */ }
     log.info({ runId, iteration: iterationNum, status: state.status, bankedRounds, requiredRounds, totalRejected }, 'Research run: iteration budget exhausted — policy-owned terminal (no gate-pass complete)');
     await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
     return state;
   };
   // Iteration loop
-  for (let iteration = 1; iteration <= maxIterations; iteration++) {
+  // A resumed park continues its own iteration; a fresh/relaunched run starts at 1.
+  for (let iteration = resumeAtIteration; iteration <= maxIterations; iteration++) {
+    const isResumedIteration = resumingFromPark && iteration === resumeAtIteration;
     let state = readRunState(projectDir, runId);
 
     // Exit if run was cancelled externally or already terminated
@@ -2823,6 +4679,12 @@ export async function runWorkflow(
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
     // written by a PRIOR iteration (or present at start). Takes precedence
     // over supervisor-DONE below. Floor-unmet writes a hint and falls through.
+    // [Approval park gate, call site 1 of 2] An unresolved approval request
+    // written by a previous iteration (or still unresolved at relaunch) parks
+    // again instead of re-executing the consequential action.
+    const parkedTop = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration });
+    if (parkedTop) return parkedTop;
+
     const terminatedTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
     if (terminatedTop) return terminatedTop;
 
@@ -2883,7 +4745,7 @@ export async function runWorkflow(
     // injected into the planner's system prompt by worker.ts, so prior-iter
     // GUIDE messages still impact this iteration's plan — but they no longer
     // mix with this iteration's fresh GUIDE messages in the same file.
-    if (iteration > 1) {
+    if (iteration > 1 && !isResumedIteration) {
       try {
         const runDirAbs = runDir(projectDir, runId);
         const guidancePath = join(runDirAbs, 'supervisor_guidance.md');
@@ -2948,19 +4810,28 @@ export async function runWorkflow(
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
-    if (iteration > 1 && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
+    if (iteration > 1 && !isResumedIteration && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
 
     // Reset all base stages to pending for this iteration
     state = readRunState(projectDir, runId);
     // On iteration 2+, reset base stage statuses and clear old dispatched stages
-    if (iteration > 1) {
+    if (iteration > 1 && !isResumedIteration) {
       // Remove old dispatched stage entries from state
       const baseIds = new Set(baseStages.map(s => s.id));
       for (const sid of Object.keys(state.stages)) {
-        if (!baseIds.has(sid)) delete state.stages[sid];
+        if (!baseIds.has(sid)) {
+          const retired = state.stages[sid];
+          state.retiredStageUsage ??= [];
+          state.retiredStageUsage.push({
+            stageId: sid,
+            iteration: Math.max(1, iteration - 1),
+            status: retired,
+          });
+          delete state.stages[sid];
+        }
       }
       for (const s of baseStages) {
-        state.stages[s.id] = { status: 'pending', retries: 0 };
+        state.stages[s.id] = rependStageStatus(state.stages[s.id], 0);
         mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
       }
       state.dispatchedStages = undefined;
@@ -3043,10 +4914,15 @@ export async function runWorkflow(
     // If the eager post-batch gate inside executeIteration already terminated
     // the run (set a terminal status + fired the hook), exit now — do NOT fall
     // through to the gate/allDone exits below, which would re-fire the hook.
-    if (isTerminalStatus(state.status)) return state;
+    if (isTerminalStatus(state.status)) {
+      clearGateContinuationsForStages(runDirPath, sorted);
+      return state;
+    }
+    if (isPausedRunStatus(state.status)) return state;
 
     const recoveredTerminal = recoverTerminalStudyCompletion(projectDir, runId, state);
     if (recoveredTerminal) {
+      clearGateContinuationsForStages(runDirPath, sorted);
       writeRunState(projectDir, runId, recoveredTerminal);
       writeCampaignEntry(projectDir, recoveredTerminal);
       return recoveredTerminal;
@@ -3062,6 +4938,7 @@ export async function runWorkflow(
       const contSignal = join(runDir(projectDir, runId), 'signals', 'research_continue.json');
       if (existsSync(contSignal)) {
         try { unlinkSync(contSignal); } catch { /* non-critical */ }
+        clearGateContinuationsForStages(runDirPath, sorted);
         log.info({ runId, iteration }, 'Research advance decided CONTINUE — re-planning next round');
         continue;
       }
@@ -3076,70 +4953,157 @@ export async function runWorkflow(
     // === INNER LOOP (retry_to) ===
     const maxInnerRetries = Math.max(0, Math.floor(Number(state.maxRetries ?? loadDefaults(projectDir).gate_retry_loops)));
     let innerRetriesUsed = 0;
+    let revisitRuntimeFacts = true;
+    while (revisitRuntimeFacts) {
+    revisitRuntimeFacts = false;
+    state = readRunState(projectDir, runId);
     if (iterationDispatchedIds.length > 0) {
-      const { allPass, failedGateIds } = checkGates(sorted, state, projectDir, runId);
+      const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+      const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
+      log.info({
+        event: 'gate_retry_outer_check',
+        runId,
+        iteration,
+        source: 'fresh-runtime-collection',
+        allPass,
+        failedGateIds,
+        rejectedGateIds,
+        ...gateRetryDiagnosticSnapshot(sorted, state, projectDir, runId, runDirPath, outerCheck),
+      }, 'Gate retry outer check');
       if (!allPass) {
-        const retryStages = findAllRetryToStages(sorted, failedGateIds);
+        // Terminal incompleteness is not a repair verdict. Only a completed,
+        // validated pass:false fact can make its retry_to stage eligible.
+        const retryStages = findAllRetryToStages(sorted, rejectedGateIds);
         if (retryStages.length > 0) {
-          for (let inner = 0; inner < maxInnerRetries; inner++) {
+          for (let inner = innerRetriesUsed; inner < maxInnerRetries; inner++) {
 
             // Check for cancellation between retries
             state = readRunState(projectDir, runId);
             if (isTerminalRunStatus(state.status)) break;
 
             // Determine which retry stages need to run based on current failed gates
-            const currentCheck = inner === 0
-              ? { allPass: failedGateIds.length === 0, failedGateIds }
-              : checkGates(sorted, state, projectDir, runId);
-            const currentFailedGateIds = inner === 0 ? failedGateIds : currentCheck.failedGateIds;
-            if (inner > 0 && currentCheck.allPass) break;
+            // Mechanism fix: the entrance owns one coherent, current policy-aware
+            // fact read. Round zero must not inherit the outer snapshot because a
+            // verdict/metric/status may have been reconciled after that snapshot.
+            const currentCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+            const currentRejectedGateIds = currentCheck.rejectedGateIds;
+            const breakConditions = { allPass: currentCheck.allPass };
+            const shouldBreakForPassingGates = breakConditions.allPass;
+            log.info({
+              event: 'gate_retry_entry_check',
+              runId,
+              iteration,
+              inner,
+              source: 'fresh-runtime-collection',
+              allPass: currentCheck.allPass,
+              failedGateIds: currentCheck.failedGateIds,
+              rejectedGateIds: currentCheck.rejectedGateIds,
+              currentRejectedGateIds,
+              breakConditions,
+              decision: shouldBreakForPassingGates ? 'break' : 'continue',
+              unsatisfiedBreakConditions: Object.entries(breakConditions)
+                .filter(([, satisfied]) => !satisfied)
+                .map(([condition]) => condition),
+              ...gateRetryDiagnosticSnapshot(sorted, state, projectDir, runId, runDirPath, currentCheck),
+            }, 'Gate retry entry check');
+            if (shouldBreakForPassingGates) break;
 
-            const activeRetryStages = findAllRetryToStages(sorted, currentFailedGateIds);
-            if (activeRetryStages.length === 0) break;
+            const activeRetryStages = findAllRetryToStages(sorted, currentRejectedGateIds);
+            if (activeRetryStages.length === 0) {
+              log.info({ event: 'gate_retry_entry_break', runId, iteration, inner, reason: 'no-active-retry-stages' }, 'Gate retry entry break');
+              break;
+            }
+
+            const repairRound = inner + 1;
+            const activeGateIds = [...new Set(activeRetryStages.flatMap((stage) => stage.retry_to ?? []))];
+            // Defense in depth (not the mechanism fix): immediately before any
+            // evidence clearing, reset, or repair dispatch, re-read exactly the
+            // related gates. A stale entrance can never launch repair over a set
+            // that is now fully accepted.
+            const dispatchState = readRunState(projectDir, runId);
+            const activeGateSet = new Set(activeGateIds);
+            const dispatchCheck = collectGateRuntimeFacts(
+              sorted.filter((stage) => stage.is_gate && activeGateSet.has(stage.id)),
+              dispatchState,
+              projectDir,
+              runId,
+            );
+            if (dispatchCheck.allPass) {
+              state = dispatchState;
+              log.info({
+                event: 'gate_retry_dispatch_guard',
+                runId,
+                iteration,
+                inner,
+                activeGateIds,
+                allPass: dispatchCheck.allPass,
+                failedGateIds: dispatchCheck.failedGateIds,
+                rejectedGateIds: dispatchCheck.rejectedGateIds,
+                decision: 'skip-repair-dispatch',
+              }, 'Gate retry dispatch guard stopped a stale repair dispatch');
+              break;
+            }
+            // Preserve the rejected evidence before the live verdict/output paths
+            // are reused, then capture the repair preimage while it is still exact.
+            archiveGateRoundEvidence(
+              runDirPath,
+              gateArchiveCoordinate(iteration, repairRound),
+              activeGateIds,
+            );
+            const repairSnapshot = captureRepairRoundSnapshot(projectDir, activeRetryStages);
 
             // Clear verdict and metric files for all gates referenced by active retry stages
-            for (const retryStage of activeRetryStages) {
-              for (const gid of retryStage.retry_to!) {
-                const perGate = join(runDirPath, `verdict_${gid}.json`);
-                if (existsSync(perGate)) unlinkSync(perGate);
-                const gateMetric = join(runDirPath, 'stages', gid, 'metric.json');
-                if (existsSync(gateMetric)) unlinkSync(gateMetric);
-              }
+            for (const gid of activeGateIds) {
+              const perGate = join(runDirPath, `verdict_${gid}.json`);
+              if (existsSync(perGate)) unlinkSync(perGate);
+              const gateMetric = join(runDirPath, 'stages', gid, 'metric.json');
+              if (existsSync(gateMetric)) unlinkSync(gateMetric);
+              const staleCorrection = gateVerdictCorrectionPath(runDirPath, gid);
+              if (existsSync(staleCorrection)) unlinkSync(staleCorrection);
             }
             const sharedVerdict = join(runDirPath, 'verdict.json');
             if (existsSync(sharedVerdict)) unlinkSync(sharedVerdict);
 
             // Reset and run all active retry stages (possibly in parallel)
             for (const retryStage of activeRetryStages) {
-              state.stages[retryStage.id] = { status: 'pending', retries: 0 };
+              state.stages[retryStage.id] = rependStageStatus(state.stages[retryStage.id], 0);
               mkdirSync(join(runDirPath, 'stages', retryStage.id), { recursive: true });
               // Clear live.log so the SSE feed shows only the current attempt's output
               const liveLog = join(runDirPath, 'stages', retryStage.id, 'live.log');
               if (existsSync(liveLog)) unlinkSync(liveLog);
-              // Clear any stale supervisor abort signal: the worker only auto-cleans
-              // it on retries>0, but the inner loop re-runs with retries=0, so a
-              // leftover abort_<stage>.json would instantly self-kill this fresh attempt.
-              const staleAbort = join(runDirPath, 'signals', `abort_${retryStage.id}.json`);
-              if (existsSync(staleAbort)) unlinkSync(staleAbort);
             }
             writeRunState(projectDir, runId, state);
 
-            await Promise.all(activeRetryStages.map(retryStage =>
-              executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, availableSkillsList)
-            ));
+            await runScopeSafeStageGroup(
+              activeRetryStages,
+              projectDir,
+              runId,
+              state.currentIteration ?? 1,
+              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList),
+              repairSnapshot,
+            );
             innerRetriesUsed = inner + 1;
             syncStageStatuses(projectDir, runId, activeRetryStages.map(s => s.id));
             state = readRunState(projectDir, runId);
+            const roundDiffPath = writeRepairRoundDiffArtifact({
+              snapshot: repairSnapshot,
+              projectDir,
+              runDirPath,
+              iteration,
+              round: repairRound,
+              repairStages: activeRetryStages,
+              statuses: state.stages,
+            });
 
             // Check for cancellation after fix stages complete
             if (isTerminalRunStatus(state.status)) break;
 
             // Skip gate re-runs if any fix stage itself failed (saves wasted agent calls)
-            const anyFixFailed = activeRetryStages.some(s => state.stages[s.id]?.status === 'failed');
+            const anyFixFailed = activeRetryStages.some(s => state.stages[s.id]?.status === STAGE_STATUS.FAILED);
             if (anyFixFailed) {
               // If the failure is a transient adapter error, continue to next retry instead of aborting
               const allAdapterErrors = activeRetryStages
-                .filter(s => state.stages[s.id]?.status === 'failed')
+                .filter(s => state.stages[s.id]?.status === STAGE_STATUS.FAILED)
                 .every(s => state.stages[s.id]?.error === 'adapter connection failed');
               if (allAdapterErrors && inner < maxInnerRetries - 1) {
                 log.info({ runId, iteration, inner }, 'Fix stage failed due to adapter error — retrying');
@@ -3150,10 +5114,7 @@ export async function runWorkflow(
             }
 
             // Collect all gates referenced by all active retry stages
-            const allRetryGateIds = new Set<string>();
-            for (const retryStage of activeRetryStages) {
-              for (const gid of retryStage.retry_to!) allRetryGateIds.add(gid);
-            }
+            const allRetryGateIds = new Set(activeGateIds);
 
             // Determine which gates to re-run
             const gatesToRerun = sorted.filter(s => {
@@ -3164,7 +5125,7 @@ export async function runWorkflow(
             for (const gate of gatesToRerun) {
               const perGate = join(runDirPath, `verdict_${gate.id}.json`);
               if (existsSync(perGate)) unlinkSync(perGate);
-              state.stages[gate.id] = { status: 'pending', retries: 0 };
+              state.stages[gate.id] = rependStageStatus(state.stages[gate.id], 0);
               mkdirSync(join(runDirPath, 'stages', gate.id), { recursive: true });
               // Clear live.log so the SSE feed shows only the current re-evaluation's output
               const liveLog = join(runDirPath, 'stages', gate.id, 'live.log');
@@ -3175,15 +5136,19 @@ export async function runWorkflow(
 
             // Run gate stages (possibly in parallel), passing fix stage IDs for context
             if (gatesToRerun.length > 0) {
-              await Promise.all(gatesToRerun.map(gate =>
-                executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), availableSkillsList)
-              ));
+              await runScopeSafeStageGroup(
+                gatesToRerun,
+                projectDir,
+                runId,
+                state.currentIteration ?? 1,
+                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList),
+              );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
             state = readRunState(projectDir, runId);
 
             // Check gates again
-            const recheck = checkGates(sorted, state, projectDir, runId);
+            const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
             if (recheck.allPass) break;
             if (inner === maxInnerRetries - 1) {
               log.info({ runId, iteration }, 'Inner loop exhausted, falling back to outer re-plan');
@@ -3193,12 +5158,44 @@ export async function runWorkflow(
       }
     }
 
+    // A rejected gate blocks successors. Once no explicit rejection remains,
+    // resume the DAG even if later gates are still pending; then revisit runtime
+    // facts so a newly-run later gate can trigger only its own repair.
+    state = readRunState(projectDir, runId);
+    if (
+      iterationDispatchedIds.length > 0
+      && collectGateRuntimeFacts(sorted, state, projectDir, runId).rejectedGateIds.length === 0
+      && sorted.some((stage) => (
+        isPendingStageStatus(state.stages[stage.id]?.status ?? '')
+        && !(stage.retry_to?.length && !stage.is_gate)
+      ))
+    ) {
+      const beforeContinuation = JSON.stringify(Object.fromEntries(
+        sorted.map((stage) => [stage.id, [state.stages[stage.id]?.status, state.stages[stage.id]?.attempts?.length ?? 0]]),
+      ));
+      await executeIteration(
+        sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
+        skills, taskDescription, availableSkillsList,
+      );
+      state = readRunState(projectDir, runId);
+      const afterContinuation = JSON.stringify(Object.fromEntries(
+        sorted.map((stage) => [stage.id, [state.stages[stage.id]?.status, state.stages[stage.id]?.attempts?.length ?? 0]]),
+      ));
+      revisitRuntimeFacts = beforeContinuation !== afterContinuation;
+    }
+    }
+
+    // No gate session is useful beyond this iteration's bounded repair loop.
+    // Passed, exhausted, and outer-replan paths all converge here.
+    clearGateContinuationsForStages(runDirPath, sorted);
+
     state = readRunState(projectDir, runId);
 
     // Issue 12 fix: finalize any retry_to stages still marked "running" after inner loop
     for (const s of sorted) {
-      if (s.retry_to && s.retry_to.length > 0 && state.stages[s.id]?.status === 'running') {
-        state.stages[s.id] = { ...state.stages[s.id], status: 'skipped' };
+      if (s.retry_to && s.retry_to.length > 0 && state.stages[s.id] && isRunningStageStatus(state.stages[s.id].status)) {
+        state.stages[s.id] = { ...state.stages[s.id], status: STAGE_STATUS.SKIPPED };
         writeRunState(projectDir, runId, state);
       }
     }
@@ -3249,7 +5246,7 @@ export async function runWorkflow(
         resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription, availableSkillsList,
       );
       state = readRunState(projectDir, runId);
-      if (isTerminalStatus(state.status)) return state;
+      if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
     }
 
     // Check if last gate passed
@@ -3303,6 +5300,28 @@ export async function runWorkflow(
       state.completedAt = new Date().toISOString();
       const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
       if (!realityGate.allowed) return realityGate.state;
+      // A retry stage that never ran because every related gate accepted the
+      // work has a truthful terminal disposition: skipped, not indefinitely
+      // pending and not falsely complete.
+      const terminalContract = loadGateContract(projectDir, runId, state.campaignStorageKey);
+      const stageById = new Map(sorted.map((stage) => [stage.id, stage]));
+      for (const repair of sorted) {
+        if (repair.is_gate || !repair.retry_to?.length) continue;
+        const repairStatus = state.stages[repair.id];
+        if (!repairStatus || !isPendingStageStatus(repairStatus.status)) continue;
+        const relatedGates = repair.retry_to
+          .map((gateId) => stageById.get(gateId))
+          .filter((gate): gate is StageConfig => gate?.is_gate === true);
+        const allRelatedGatesPassed = relatedGates.length === repair.retry_to.length
+          && relatedGates.every((gate) => (
+            state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
+            && readGateVerdict(projectDir, gate.id, runId, terminalContract)?.pass === true
+          ));
+        if (!allRelatedGatesPassed) continue;
+        const skipped = { ...repairStatus, status: STAGE_STATUS.SKIPPED };
+        state.stages[repair.id] = skipped;
+        writeStageStatus(projectDir, runId, repair.id, skipped);
+      }
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
       recordRunEvent(projectDir, runId, {
@@ -3319,7 +5338,7 @@ export async function runWorkflow(
 
     // If no dispatched stages, check if all base stages passed
     if (iterationDispatchedIds.length === 0 && !anyFailed(state) && allDone(state)) {
-      if (state.status === 'failed') {
+      if (state.status === RUN_STATUS.FAILED) {
         writeCampaignEntry(projectDir, state);
         return state;
       }
@@ -3333,7 +5352,7 @@ export async function runWorkflow(
         return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
       }
       // Terminal-state already handled by the top + eager gates (see above).
-      state.status = 'complete';
+      state.status = RUN_STATUS.COMPLETE;
       state.completedAt = new Date().toISOString();
       const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
       if (!realityGate.allowed) return realityGate.state;
@@ -3355,13 +5374,13 @@ export async function runWorkflow(
     const hasGates = sorted.some(s => s.is_gate);
     if (anyFailed(state) && !hasGates) {
       const failedStageIds = Object.entries(state.stages)
-        .filter(([, s]) => s.status === 'failed')
+        .filter(([, s]) => s.status === STAGE_STATUS.FAILED)
         .map(([id]) => id);
       const details = failedStageIds.map(id => {
         const s = state.stages[id];
         return s?.error ? `${id} (${s.error})` : id;
       }).join(', ');
-      state.status = 'failed';
+      state.status = RUN_STATUS.FAILED;
       state.failureReason = `Stage(s) failed: ${details}`;
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
@@ -3384,7 +5403,7 @@ export async function runWorkflow(
       // (e.g. via tryAdvanceResearch or the reject-rework loop) is the truthful
       // verdict the outer loop must see — overwriting it to 'incomplete' here
       // would manufacture a false outcome.
-      if (isTerminalStatus(state.status)) return state;
+      if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
       // A+(c): budget/iteration exhausted mid-search WITHOUT a clean exhaustive
       // ceiling is `incomplete` — distinct from `failed` (crash) and `ceiling_hit`
       // (honest negative). The search simply ran out of attempts.
@@ -3439,7 +5458,595 @@ export async function runWorkflow(
     if (supervisor) {
       try { supervisor.stop(); } catch (err) { log.warn({ err }, 'Supervisor stop failed'); }
     }
-    try { if (existsSync(schedulerPidPath)) unlinkSync(schedulerPidPath); } catch { /* non-critical */ }
+    removeSchedulerPidIfOwned(schedulerPidPath);
+    if (launchIntentOwned) {
+      releaseLaunchIntent(projectDir, runId);
+      invalidateRunLockCache();
+    }
+  }
+}
+
+interface ScopeBatchContext {
+  snapshot: RepairRoundSnapshot;
+  declaredScopes: Map<string, string[] | null>;
+  attempts: Map<string, {
+    effectiveScope: string[];
+    decisionPaths: Set<string>;
+    mismatchPaths: Set<string>;
+  }>;
+}
+
+function createScopeBatchContext(
+  projectDir: string,
+  stages: StageConfig[],
+  snapshot?: RepairRoundSnapshot,
+): ScopeBatchContext {
+  const resolvedSnapshot = snapshot ?? captureRepairRoundSnapshot(projectDir, stages);
+  const declaredScopes = new Map<string, string[] | null>();
+  for (const stage of stages) {
+    const declared = resolvedSnapshot.declaredScopes[stage.id] ?? stage.scope ?? null;
+    const copy = declared === null ? null : [...declared];
+    declaredScopes.set(stage.id, copy);
+  }
+  return {
+    snapshot: resolvedSnapshot,
+    declaredScopes,
+    attempts: new Map(),
+  };
+}
+
+function scopeAttemptKey(stageId: string, attemptIndex: number): string {
+  return `${stageId}\u0000${attemptIndex}`;
+}
+
+function getScopeAttemptContext(
+  context: ScopeBatchContext,
+  stageId: string,
+  attemptIndex: number,
+): { effectiveScope: string[]; decisionPaths: Set<string>; mismatchPaths: Set<string> } {
+  const key = scopeAttemptKey(stageId, attemptIndex);
+  const existing = context.attempts.get(key);
+  if (existing) return existing;
+  const declared = context.declaredScopes.get(stageId) ?? null;
+  const created = {
+    // Missing scope is a closed capability, never an implicit allow-all.
+    effectiveScope: declared === null ? [] : [...declared],
+    decisionPaths: new Set<string>(),
+    mismatchPaths: new Set<string>(),
+  };
+  context.attempts.set(key, created);
+  return created;
+}
+
+function addScopeArtifactPath(collection: Set<string>, path: string, runDirPath: string): void {
+  collection.add(path.startsWith(runDirPath) ? path.slice(runDirPath.length + 1).replace(/\\/g, '/') : path);
+}
+
+async function monitorScopeRevisionRequests(input: {
+  selected: StageConfig[];
+  activeStageIds: Set<string>;
+  projectDir: string;
+  runId: string;
+  context: ScopeBatchContext;
+  isComplete: () => boolean;
+}): Promise<void> {
+  const processed = new Set<string>();
+  const runDirPath = runDir(input.projectDir, input.runId);
+  const inspect = (): void => {
+    for (const stage of input.selected) {
+      if (!input.activeStageIds.has(stage.id)) continue;
+      const stagePath = join(runDirPath, 'stages', stage.id);
+      const attemptIndex = currentStageAttemptIndex(input.projectDir, input.runId, stage.id);
+      const request = readScopeRevisionRequest(stagePath, input.runId);
+      if (!request) continue;
+      const key = negotiationRequestDigest(request);
+      if (attemptIndex === undefined) continue;
+      if (request.attemptIndex !== attemptIndex) {
+        // A request slot is transport, not authority. Leaving attempt N's body
+        // in place must never replay N's accepted decision into attempt N+1.
+        processed.add(key);
+        log.warn({ stage: stage.id, requestAttempt: request.attemptIndex, currentAttempt: attemptIndex }, 'Ignoring stale scope revision request from another attempt');
+        continue;
+      }
+      if (processed.has(key)) continue;
+      const attemptContext = getScopeAttemptContext(input.context, stage.id, attemptIndex);
+      const activePeers = input.selected.filter((peer) => (
+        peer.id !== stage.id && input.activeStageIds.has(peer.id)
+      )).map((peer) => {
+        const peerAttemptIndex = currentStageAttemptIndex(input.projectDir, input.runId, peer.id);
+        const peerScope = peerAttemptIndex === undefined
+          ? input.context.declaredScopes.get(peer.id) ?? null
+          : getScopeAttemptContext(input.context, peer.id, peerAttemptIndex).effectiveScope;
+        return { ...peer, scope: peerScope ?? undefined };
+      });
+      const policyDecision = decideScopeRevision({
+        request,
+        stage,
+        priorScope: attemptContext.effectiveScope,
+        activePeers,
+        projectDir: input.projectDir,
+        runId: input.runId,
+        snapshot: input.context.snapshot,
+      });
+      const publication = publishConstraintDecision({
+        stagePath,
+        request,
+        decidedBy: 'scheduler-policy',
+        decision: policyDecision as Parameters<typeof publishConstraintDecision>[0]['decision'],
+      });
+      processed.add(key);
+      if (publication.kind === 'mismatch') {
+        addScopeArtifactPath(attemptContext.mismatchPaths, publication.path, runDirPath);
+        log.warn({ stage: stage.id, requestId: request.requestId }, 'Scope revision request body mismatched an immutable decision');
+        continue;
+      }
+      addScopeArtifactPath(attemptContext.decisionPaths, publication.path, runDirPath);
+      if (publication.decision.accepted === true && Array.isArray(publication.decision.effectiveScope)) {
+        // The accepted record is durable before the effective scope changes.
+        attemptContext.effectiveScope = [...publication.decision.effectiveScope] as string[];
+      }
+      log.info(
+        { stage: stage.id, requestId: request.requestId, accepted: publication.decision.accepted, reason: publication.decision.rejectionReason },
+        'Scope revision decided',
+      );
+    }
+  };
+
+  while (!input.isComplete()) {
+    inspect();
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  inspect();
+}
+
+function scopeContainsPath(scope: string[], rawPath: string): boolean {
+  const normalized = normalizedProjectPath(rawPath);
+  if (!normalized) return false;
+  return scope.some((entry) => scopeMatchesProjectPath(parseDeclaredScope(entry), normalized));
+}
+
+interface ScopeWriteEnforcement {
+  rawWrites: string[];
+  appliedWrites: string[];
+  rolledBackWrites: string[];
+  rollbackFailures: string[];
+  durableWrites: string[];
+}
+
+function canonicalProjectWriteUnion(...collections: string[][]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const collection of collections) {
+    for (const rawPath of collection) {
+      const path = normalizedProjectPath(rawPath) ?? rawPath.trim().replace(/\\/g, '/');
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      result.push(path);
+    }
+  }
+  return result;
+}
+
+function peerScopeContainsPath(
+  context: ScopeBatchContext,
+  currentStageId: string,
+  rawPath: string,
+): boolean {
+  for (const [stageId, declaredScope] of context.declaredScopes) {
+    if (stageId === currentStageId) continue;
+    if (scopeContainsPath(declaredScope ?? [], rawPath)) return true;
+    const attemptPrefix = `${stageId}\u0000`;
+    for (const [key, attempt] of context.attempts) {
+      if (key.startsWith(attemptPrefix) && scopeContainsPath(attempt.effectiveScope, rawPath)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `effectiveScope: null` means the stage declared no scope AND never negotiated, so
+ * there is no policy to enforce. Auditing those writes is right; restoring their
+ * preimage is not — see the three-state note at the call site.
+ */
+function enforceStageScopeWrites(input: {
+  projectDir: string;
+  snapshot: RepairRoundSnapshot;
+  effectiveScope: string[] | null;
+  rawWrites: string[];
+  definiteWrites: ReadonlySet<string>;
+  preserveUnverifiedPath: (path: string) => boolean;
+}): ScopeWriteEnforcement {
+  const ungoverned = input.effectiveScope === null;
+  const rawWrites = [...new Set(input.rawWrites)];
+  const appliedWrites: string[] = [];
+  const rolledBackWrites: string[] = [];
+  const rollbackFailures: string[] = [];
+  const durableWrites: string[] = [];
+  for (const rawPath of rawWrites) {
+    const normalized = normalizedProjectPath(rawPath);
+    const definitelyAttributed = input.definiteWrites.has(normalized ?? rawPath);
+    if (!normalized) {
+      if (definitelyAttributed) rollbackFailures.push(rawPath);
+      continue;
+    }
+    const beforeFingerprint = input.snapshot.allFileFingerprints.get(normalized);
+    const currentFingerprint = repairFileFingerprint(readRepairFileImage(input.projectDir, normalized));
+    const changed = !repairFileFingerprintsEqual(beforeFingerprint, currentFingerprint);
+    if (ungoverned) {
+      if (changed) durableWrites.push(normalized);
+      continue;
+    }
+    if (scopeContainsPath(input.effectiveScope ?? [], normalized)) {
+      if (changed) {
+        appliedWrites.push(normalized);
+        durableWrites.push(normalized);
+      }
+      continue;
+    }
+    if (!changed) continue;
+    // Snapshot-only attribution can include another concurrently running stage.
+    // Preserve only paths covered by a peer's capability; every path outside
+    // the complete batch capability is safe to restore even when ownership is unknown.
+    if (!definitelyAttributed && input.preserveUnverifiedPath(normalized)) continue;
+    const before = input.snapshot.allFileImages.get(normalized) ?? { exists: false };
+    if (restoreProjectPath(input.projectDir, normalized, before)) {
+      rolledBackWrites.push(normalized);
+    } else {
+      rollbackFailures.push(normalized);
+      durableWrites.push(normalized);
+    }
+  }
+  return { rawWrites, appliedWrites, rolledBackWrites, rollbackFailures, durableWrites };
+}
+
+const SCOPE_PLANNING_INPUT_PREFIX = 'scope_negotiation_input_';
+const SCOPE_PLANNING_DISPOSITION_PREFIX = 'scope_negotiation_disposition_';
+
+interface ScopePlanningInputV1 {
+  version: 1;
+  kind: 'scope_negotiation_planning_input';
+  digest: string;
+  runId: string;
+  sourceIteration: number;
+  stageId: string;
+  stageKind: ScopeStageKind;
+  requestedPaths: string[];
+  pathDigest: string;
+  rejectionReason: string;
+  auditPath: string;
+}
+
+interface ScopePlanningDispositionV1 {
+  version: 1;
+  kind: 'scope_negotiation_disposition';
+  digest: string;
+  iteration: number;
+  disposition: 'resolve' | 'defer';
+  basis: string;
+  stageId?: string;
+  recordedAt: string;
+}
+
+function readJsonArtifacts<T>(runDirPath: string, prefix: string): T[] {
+  let files: string[];
+  try { files = readdirSync(runDirPath); } catch { return []; }
+  return files.filter((file) => file.startsWith(prefix) && file.endsWith('.json')).sort().flatMap((file) => {
+    try { return [JSON.parse(readFileSync(join(runDirPath, file), 'utf-8')) as T]; } catch { return []; }
+  });
+}
+
+function pendingScopePlanningInputs(runDirPath: string): ScopePlanningInputV1[] {
+  const inputs = readJsonArtifacts<ScopePlanningInputV1>(runDirPath, SCOPE_PLANNING_INPUT_PREFIX);
+  const disposed = new Set(
+    readJsonArtifacts<ScopePlanningDispositionV1>(runDirPath, SCOPE_PLANNING_DISPOSITION_PREFIX)
+      .map((entry) => entry.digest),
+  );
+  return inputs.filter((entry) => !disposed.has(entry.digest));
+}
+
+function appendScopePlanningInput(prompt: string, runDirPath: string): string {
+  const pending = pendingScopePlanningInputs(runDirPath);
+  if (pending.length === 0) return prompt;
+  const rows = pending.map((entry) => ({
+    digest: entry.digest,
+    stageKind: entry.stageKind,
+    requestedPaths: entry.requestedPaths,
+    rejectionReason: entry.rejectionReason,
+    auditPath: entry.auditPath,
+  }));
+  return `${prompt}\n\n# Pending scope-negotiation planning input\n${JSON.stringify(rows, null, 2)}\n`
+    + `For every digest, either resolve it by predeclaring all requested paths in one dispatched stage's scope, `
+    + `or defer it explicitly in dispatch.yaml as scope_negotiation: { defer: ["<digest>"] }. `
+    + `The scheduler records one immutable resolve/defer disposition and will not duplicate the same unresolved digest.`;
+}
+
+function applyScopePlanningDispositions(
+  runDirPath: string,
+  iteration: number,
+  rawDispatch: unknown,
+  dispatched: StageConfig[],
+): void {
+  const pending = pendingScopePlanningInputs(runDirPath);
+  if (pending.length === 0) return;
+  const wrapper = rawDispatch && typeof rawDispatch === 'object' && !Array.isArray(rawDispatch)
+    ? rawDispatch as Record<string, unknown>
+    : {};
+  const negotiation = wrapper.scope_negotiation && typeof wrapper.scope_negotiation === 'object'
+    ? wrapper.scope_negotiation as Record<string, unknown>
+    : {};
+  const deferred = new Set(
+    Array.isArray(negotiation.defer)
+      ? negotiation.defer.filter((value): value is string => typeof value === 'string')
+      : [],
+  );
+  for (const entry of pending) {
+    const resolvingStage = dispatched.find((stage) => (
+      stage.scope !== undefined
+      && entry.requestedPaths.every((path) => scopeContainsPath(stage.scope ?? [], path))
+    ));
+    const disposition: ScopePlanningDispositionV1 | undefined = resolvingStage
+      ? {
+          version: 1, kind: 'scope_negotiation_disposition', digest: entry.digest, iteration,
+          disposition: 'resolve', basis: `planner predeclared every requested path in ${resolvingStage.id}`,
+          stageId: resolvingStage.id, recordedAt: new Date().toISOString(),
+        }
+      : deferred.has(entry.digest)
+        ? {
+            version: 1, kind: 'scope_negotiation_disposition', digest: entry.digest, iteration,
+            disposition: 'defer', basis: 'planner explicitly deferred the digest in dispatch.yaml',
+            recordedAt: new Date().toISOString(),
+          }
+        : undefined;
+    if (!disposition) continue;
+    publishJsonCreateOnly(
+      join(runDirPath, `${SCOPE_PLANNING_DISPOSITION_PREFIX}${entry.digest}_iteration_${iteration}.json`),
+      disposition,
+    );
+  }
+}
+
+function reconcileStageScope(input: {
+  stage: StageConfig;
+  projectDir: string;
+  runId: string;
+  context: ScopeBatchContext;
+  attemptIndex: number;
+}): { status: StageStatus; violation: boolean } {
+  const status = readStageStatus(input.projectDir, input.runId, input.stage.id);
+  const attempt = status.attempts?.find((candidate) => candidate.index === input.attemptIndex);
+  if (!attempt) return { status, violation: false };
+  const declaredScope = input.context.declaredScopes.get(input.stage.id) ?? null;
+  const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attempt.index);
+  const effectiveScope = attemptContext.effectiveScope;
+  const decisions = [...attemptContext.decisionPaths];
+  const mismatches = [...attemptContext.mismatchPaths];
+  const attributedWrites = attempt.writes ?? [];
+  const schedulerObservedWrites = changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir);
+  const rawWrites = canonicalProjectWriteUnion(attributedWrites, schedulerObservedWrites);
+  const definiteWrites = new Set(
+    attempt.writeAttribution === 'structured'
+      ? canonicalProjectWriteUnion(attributedWrites)
+      : [],
+  );
+  // Three states, not two. A declared scope governs the stage. A missing declaration the
+  // stage NEGOTIATED is governed by the resulting decision — accepted paths apply, rejected
+  // ones are restored. A missing declaration the stage never negotiated has no policy to
+  // enforce: auditing those writes is right, destroying them is not.
+  //
+  // P3/M3 collapsed `string[] | null` into `string[]` (`stage.scope ?? []`) and dropped
+  // `scopeContainsPath`'s `scope === null → true` branch, which merged the third state into
+  // the second. Every brief that declares no scope then had its writes rolled back, so
+  // `terminal_states` artifacts never landed and a declared `result_file` never reached the
+  // engine — measured as 9 red tracked tests and a research loop that cannot finish a round.
+  // Keeping `null` distinct here does NOT reopen `undefined => allow all`: a missing
+  // declaration still grants nothing in the negotiation path, so a request can only ever
+  // authorize the exact paths it names.
+  const negotiated = attemptContext.decisionPaths.size > 0 || attemptContext.mismatchPaths.size > 0;
+  const governedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
+  const enforcement = enforceStageScopeWrites({
+    projectDir: input.projectDir,
+    snapshot: input.context.snapshot,
+    effectiveScope: governedScope,
+    rawWrites,
+    definiteWrites,
+    preserveUnverifiedPath: (path) => peerScopeContainsPath(input.context, input.stage.id, path),
+  });
+  const violations: Array<{ path: string; certainty: 'definite' | 'unverified'; reason: string }> = [];
+  for (const rawPath of enforcement.rawWrites) {
+    const normalized = normalizedProjectPath(rawPath);
+    const definitelyAttributed = definiteWrites.has(normalized ?? rawPath);
+    if (!definitelyAttributed && !normalized) continue;
+    if (governedScope === null || scopeContainsPath(governedScope, rawPath)) continue;
+    violations.push({
+      path: rawPath,
+      certainty: definitelyAttributed ? 'definite' : 'unverified',
+      reason: definitelyAttributed
+        ? enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
+          ? 'adapter attributed an unauthorized project write; enforcement restored its preimage before durable apply'
+          : 'adapter attributed a project write outside the accepted effective scope'
+        : enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
+          ? 'snapshot observed a change outside the complete batch capability; enforcement restored its preimage while ownership remains unverified'
+          : 'snapshot observed a change outside effective scope but cannot prove ownership',
+    });
+  }
+  const stagePath = join(runDir(input.projectDir, input.runId), 'stages', input.stage.id);
+  const decisionRecords = decisions.flatMap((path) => {
+    const decision = readConstraintDecision(join(runDir(input.projectDir, input.runId), path));
+    return decision ? [decision] : [];
+  });
+  const acceptedRevisionCount = decisionRecords.filter((decision) => decision.accepted === true).length;
+  const rejectedRevisionCount = decisionRecords.filter((decision) => decision.accepted === false).length;
+  const definite = violations.filter((violation) => violation.certainty === 'definite');
+  const unverified = violations.filter((violation) => violation.certainty === 'unverified');
+  const auditPath = join(stagePath, `constraint_audit_attempt_${attempt.index}.json`);
+  const runDirPath = runDir(input.projectDir, input.runId);
+  const auditRelativePath = auditPath.slice(runDirPath.length + 1).replace(/\\/g, '/');
+  const stageKind: ScopeStageKind = input.stage.is_gate ? 'gate' : 'ordinary';
+  const iteration = readRunState(input.projectDir, input.runId).currentIteration ?? 1;
+  const rejectedDecisions = decisionRecords.filter((decision) => decision.accepted === false);
+  const planningDigests = rejectedDecisions.flatMap((decision) => {
+    const requestedPaths = Array.isArray(decision.requestedPaths)
+      ? decision.requestedPaths.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (requestedPaths.length === 0) return [];
+    const digest = rejectedScopeDigest({ stageKind, requestedPaths });
+    const planningInput: ScopePlanningInputV1 = {
+      version: 1,
+      kind: 'scope_negotiation_planning_input',
+      digest,
+      runId: input.runId,
+      sourceIteration: iteration,
+      stageId: input.stage.id,
+      stageKind,
+      requestedPaths,
+      pathDigest: typeof decision.pathDigest === 'string' ? decision.pathDigest : scopePathDigest(requestedPaths),
+      rejectionReason: typeof decision.rejectionReason === 'string' ? decision.rejectionReason : decision.policyBasis,
+      auditPath: auditRelativePath,
+    };
+    publishJsonCreateOnly(join(runDirPath, `${SCOPE_PLANNING_INPUT_PREFIX}${digest}.json`), planningInput);
+    return [digest];
+  });
+  const stateTransitions = decisionRecords.flatMap((decision) => {
+    const requestedPaths = Array.isArray(decision.requestedPaths)
+      ? decision.requestedPaths.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (requestedPaths.length === 0) return [];
+    return [buildScopeNegotiationTrace({
+      stageKind,
+      scopePresence: declaredScope === null ? 'missing' : 'present',
+      declaredScope: declaredScope ?? [],
+      requestedPaths,
+      decision: decision.accepted === true ? 'accepted' : 'rejected',
+      effectiveScope: Array.isArray(decision.effectiveScope)
+        ? decision.effectiveScope.filter((value): value is string => typeof value === 'string')
+        : effectiveScope,
+      durableWrites: enforcement.durableWrites,
+    })];
+  });
+  const audit = {
+    version: 1,
+    stageId: input.stage.id,
+    attemptIndex: attempt.index,
+    requester: 'stage',
+    scopeApprover: 'scheduler-policy',
+    declaredScope,
+    effectiveScope,
+    decisionPaths: decisions,
+    mismatchPaths: mismatches,
+    decisions: decisionRecords,
+    rawWrites: enforcement.rawWrites,
+    appliedWrites: enforcement.appliedWrites,
+    rolledBackWrites: enforcement.rolledBackWrites,
+    rollbackFailures: enforcement.rollbackFailures,
+    durableWrites: enforcement.durableWrites,
+    planningDigests,
+    stateTransitions,
+    writes: attempt.writes ?? [],
+    writeAttribution: attempt.writeAttribution ?? 'unknown',
+    violations,
+    timeout: attempt.timeout,
+    completedAt: new Date().toISOString(),
+  };
+  publishJsonCreateOnly(auditPath, audit);
+  const summary = {
+    path: auditRelativePath,
+    declaredScope,
+    effectiveScope,
+    acceptedRevisionCount,
+    rejectedRevisionCount,
+    mismatchCount: mismatches.length,
+    violationCount: definite.length,
+    unverifiedCount: unverified.length,
+    rawWriteCount: enforcement.rawWrites.length,
+    appliedWriteCount: enforcement.appliedWrites.length,
+    rolledBackWriteCount: enforcement.rolledBackWrites.length,
+    rejectedDigestCount: planningDigests.length,
+  };
+  const error = definite.length > 0
+    ? `scope_violation: ${definite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope`
+    : undefined;
+  return {
+    status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, summary, error),
+    violation: definite.length > 0,
+  };
+}
+
+function reconcileCompletedStageAttempts(input: {
+  stage: StageConfig;
+  projectDir: string;
+  runId: string;
+  context: ScopeBatchContext;
+}): { status: StageStatus; violation: boolean } {
+  let status = readStageStatus(input.projectDir, input.runId, input.stage.id);
+  let violation = false;
+  for (const attempt of status.attempts ?? []) {
+    if (isRunningStageStatus(attempt.status) || attempt.constraintAudit) continue;
+    const reconciled = reconcileStageScope({ ...input, attemptIndex: attempt.index });
+    status = reconciled.status;
+    violation ||= reconciled.violation;
+  }
+  return { status, violation };
+}
+
+async function runScopeSafeStageGroup(
+  stages: StageConfig[],
+  projectDir: string,
+  runId: string,
+  iteration: number,
+  execute: (stage: StageConfig) => Promise<void>,
+  snapshot?: RepairRoundSnapshot,
+): Promise<void> {
+  let pending = [...stages];
+  while (pending.length > 0) {
+    const { selected, deferred } = selectRunnableBatch(pending);
+    for (const { stage, conflict } of deferred) {
+      const detail = `${stage.id} deferred behind ${conflict.leftStageId}: ${conflict.reason}`;
+      log.info({ stage: stage.id, conflict }, 'Serializing retry/gate stage because declared scopes are not provably disjoint');
+      recordRunEvent(projectDir, runId, {
+        type: 'parallel_scope_serialized', runId, timestamp: new Date().toISOString(),
+        iteration, stageId: stage.id, stageIds: [conflict.leftStageId, conflict.rightStageId],
+        level: 'info', detail,
+      });
+    }
+    const activeStageIds = new Set(selected.map((stage) => stage.id));
+    const context = createScopeBatchContext(projectDir, selected, snapshot);
+    let complete = false;
+    const executions = Promise.all(selected.map(async (stage) => {
+      try { await execute(stage); }
+      finally { activeStageIds.delete(stage.id); }
+    }));
+    const monitor = monitorScopeRevisionRequests({
+      selected,
+      activeStageIds,
+      projectDir,
+      runId,
+      context,
+      isComplete: () => complete,
+    });
+    let executionError: unknown;
+    try {
+      await executions;
+    } catch (error) {
+      executionError = error;
+    } finally {
+      complete = true;
+      await monitor;
+    }
+    if (executionError) throw executionError;
+    for (const stage of selected) reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
+    const statuses: Record<string, StageStatus> = {};
+    for (const stage of selected) {
+      try { statuses[stage.id] = readStageStatus(projectDir, runId, stage.id); } catch { /* missing status */ }
+    }
+    for (const conflict of detectParallelWriteConflicts(selected.map((stage) => stage.id), statuses)) {
+      const detail = `${conflict.stageIds[0]} and ${conflict.stageIds[1]} both wrote ${conflict.files.join(', ')} (attribution: ${conflict.attribution.join(' / ')})`;
+      log.warn({ conflict }, 'Parallel retry/gate stages wrote the same file');
+      recordRunEvent(projectDir, runId, {
+        type: 'parallel_write_conflict', runId, timestamp: new Date().toISOString(), iteration,
+        stageIds: conflict.stageIds, files: conflict.files, level: 'warning', detail,
+      });
+    }
+    pending = deferred.map(({ stage }) => stage);
   }
 }
 
@@ -3450,6 +6057,327 @@ function syncStageStatuses(projectDir: string, runId: string, stageIds: string[]
     try { state.stages[sid] = readStageStatus(projectDir, runId, sid); } catch { /* keep existing */ }
   }
   writeRunState(projectDir, runId, state);
+}
+
+interface GateArchiveCoordinate {
+  iteration: number;
+  round: number;
+}
+
+function gateArchiveCoordinate(iteration: number, round: number): GateArchiveCoordinate {
+  if (!Number.isSafeInteger(iteration) || iteration < 1) {
+    throw new Error(`Gate archive iteration must be a positive integer, got ${iteration}`);
+  }
+  if (!Number.isSafeInteger(round) || round < 1) {
+    throw new Error(`Gate archive round must be a positive integer, got ${round}`);
+  }
+  return { iteration, round };
+}
+
+function gateReevaluationArchiveRoot(runDirPath: string): string {
+  return join(runDirPath, 'gate_reevaluation');
+}
+
+function canonicalGateRoundArtifactDir(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+): string {
+  return join(
+    gateReevaluationArchiveRoot(runDirPath),
+    `iteration_${coordinate.iteration}`,
+    `round_${coordinate.round}`,
+  );
+}
+
+function legacyGateRoundArtifactDir(runDirPath: string, round: number): string {
+  return join(gateReevaluationArchiveRoot(runDirPath), `round_${round}`);
+}
+
+function hasIterationGateArchiveNamespace(runDirPath: string): boolean {
+  const archiveRoot = gateReevaluationArchiveRoot(runDirPath);
+  try {
+    return readdirSync(archiveRoot, { withFileTypes: true })
+      .some((entry) => /^iteration_\d+$/.test(entry.name));
+  } catch {
+    // Compatibility is allowed only when absence of an iteration namespace is
+    // observable. An unreadable/non-directory archive root therefore fails closed.
+    return existsSync(archiveRoot);
+  }
+}
+
+function canonicalGateArchiveArtifactPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  artifactName: string,
+): string {
+  return join(canonicalGateRoundArtifactDir(runDirPath, coordinate), artifactName);
+}
+
+function compatibleGateArchiveArtifactReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  artifactName: string,
+): string {
+  const canonicalPath = canonicalGateArchiveArtifactPath(runDirPath, coordinate, artifactName);
+  if (existsSync(canonicalPath) || hasIterationGateArchiveNamespace(runDirPath)) {
+    return canonicalPath;
+  }
+  const legacyPath = join(legacyGateRoundArtifactDir(runDirPath, coordinate.round), artifactName);
+  return existsSync(legacyPath) ? legacyPath : canonicalPath;
+}
+
+function archivedGateVerdictWritePath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `rejected_verdict_${gateId}.json`);
+}
+
+function archivedGateVerdictReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `rejected_verdict_${gateId}.json`);
+}
+
+function archivedGateOutputWritePath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `previous_output_${gateId}.md`);
+}
+
+function archivedGateOutputReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `previous_output_${gateId}.md`);
+}
+
+function archiveGateRoundEvidence(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateIds: string[],
+): void {
+  const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
+  mkdirSync(artifactDir, { recursive: true });
+  for (const gateId of gateIds) {
+    const perGateVerdict = join(runDirPath, `verdict_${gateId}.json`);
+    const verdict = existsSync(perGateVerdict) ? perGateVerdict : join(runDirPath, 'verdict.json');
+    const output = join(runDirPath, 'stages', gateId, 'output.md');
+    try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
+    try { if (existsSync(output)) copyFileSync(output, archivedGateOutputWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
+  }
+}
+
+export function buildGateReevaluationPreamble(input: {
+  evaluationRound: number;
+  iteration: number;
+  repairRound: number;
+  runDirPath: string;
+  gateId: string;
+  fixStageIds: string[];
+  roundDiffPath: string;
+}): string {
+  const fixOutputs = input.fixStageIds.map((id) => `- ${join(input.runDirPath, 'stages', id, 'output.md')}`).join('\n');
+  const coordinate = gateArchiveCoordinate(input.iteration, input.repairRound);
+  const firstCoverageCoordinate = gateArchiveCoordinate(input.iteration, 1);
+  const firstCoverageOutput = archivedGateOutputReadPath(input.runDirPath, firstCoverageCoordinate, input.gateId);
+  const previousOutput = archivedGateOutputReadPath(input.runDirPath, coordinate, input.gateId);
+  return [
+    `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a repair.`,
+    '',
+    'Evidence you must read:',
+    `- Rejected verdict: ${archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
+    `- Original first-pass validator-owned Coverage Map: ${firstCoverageOutput}`,
+    ...(input.repairRound > 1 ? [`- Immediately previous gate output: ${previousOutput}`] : []),
+    `- Complete, untruncated repair-round diff: ${input.roundDiffPath}`,
+    ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
+    '',
+    'This re-evaluation has exactly three responsibilities:',
+    '1. Reproduce every rejected finding and verify it is actually fixed with reproducible evidence; a repair summary or claim that code changed is not proof.',
+    '2. Run the full mechanical regression suites required by the task and project, not a targeted subset.',
+    '3. Read the complete repair diff and re-run every check from the prior Coverage Map that any changed path or hunk touches. A prior passing conclusion may not substitute for re-execution.',
+    '',
+    'Do not expand into unrelated audit dimensions or invent unrelated probes during re-evaluation. The first evaluation owned exhaustive discovery; this round owns rejected-item proof, full regression, and diff-touched revalidation.',
+  ].join('\n');
+}
+
+function buildGateFixCorrectionContract(
+  runDirPath: string,
+  gateIds: string[],
+  coordinate: GateArchiveCoordinate,
+): string {
+  const entries = gateIds.map((gateId) => [
+    `- Gate ${gateId}:`,
+    `  - archived rejected verdict: ${archivedGateVerdictReadPath(runDirPath, coordinate, gateId)}`,
+    `  - archived QA output: ${archivedGateOutputReadPath(runDirPath, coordinate, gateId)}`,
+    `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
+  ].join('\n')).join('\n');
+  return [
+    `Gate repair round ${coordinate.round}: read the archived rejection evidence before changing anything:`,
+    entries,
+    '',
+    'Wrong-verdict cold-start contract: only if reproducible evidence proves the previous rejection itself was wrong (rather than an implementation defect being repaired), write that gate\'s optional correction marker with exactly this JSON shape:',
+    `{"version":${GATE_VERDICT_CORRECTION_VERSION},"gateId":"<exact gate id>","previousVerdictWrong":true,"reason":"<why the prior reasoning was wrong>","evidence":"<reproducible command/probe and result>"}`,
+    'Do not write a correction marker for an ordinary fix. The marker invalidates only the prior validator session; it never changes the gate verdict or acceptance criteria.',
+  ].join('\n');
+}
+
+function stageInitialTimeout(
+  stage: StageConfig,
+  state: StoreState,
+  workflow: WorkflowConfig,
+  projectDir: string,
+): number {
+  return stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+}
+
+function stageHardTotal(stage: StageConfig, initialBudgetMs: number): number {
+  const total = stage.timeout_total_ms ?? initialBudgetMs * 3;
+  if (!Number.isSafeInteger(total) || total < initialBudgetMs) {
+    throw new Error(`Stage ${stage.id} timeout_total_ms must be a safe integer at least as large as its resolved timeout (${initialBudgetMs}ms)`);
+  }
+  return total;
+}
+
+function createSchedulerTechnicalChain(
+  stage: StageConfig,
+  initialBudgetMs: number,
+  runDirPath: string,
+  priorStatus?: StageStatus,
+  recover = false,
+): TechnicalRetryBudgetState {
+  // executeIteration claims a ready stage by changing pending -> running before
+  // this factory is called. The immutable prior attempt ledger + retry counter,
+  // not that transient top-level claim state, identify a recovered chain.
+  const retryRecovery = recover && (
+    isPendingStageStatus(priorStatus?.status ?? '')
+    || isRunningStageStatus(priorStatus?.status ?? '')
+  );
+  const hasRetryHistory = retryRecovery && (priorStatus?.retries ?? 0) > 0;
+  const candidateTimeout = hasRetryHistory ? priorStatus?.attempts?.at(-1)?.timeout : undefined;
+  // A completed attempt re-pended by plan validation or supervisor REJECT is a
+  // new semantic execution. Missing/non-complete evidence denotes a technical
+  // retry, whose old balance must be recovered or failed closed.
+  const recoveryExpected = hasRetryHistory && candidateTimeout?.terminationCause !== STAGE_STATUS.COMPLETE;
+  const priorTimeout = recoveryExpected ? candidateTimeout : undefined;
+  const canRecover = priorTimeout !== undefined
+    && Number.isSafeInteger(priorTimeout.hardTotalMs)
+    && priorTimeout.hardTotalMs >= initialBudgetMs
+    && Number.isSafeInteger(priorTimeout.effectiveBudgetMs)
+    && priorTimeout.effectiveBudgetMs > 0
+    && Number.isFinite(priorTimeout.chargedElapsedMs)
+    && priorTimeout.chargedElapsedMs >= 0
+    && priorTimeout.hardRemainingMs > 0
+    && typeof priorTimeout.childClosedAt === 'string';
+  const configuredHardTotal = stageHardTotal(stage, initialBudgetMs);
+  const controller = new TechnicalChainController({
+    initialBudgetMs,
+    hardTotalMs: canRecover ? priorTimeout.hardTotalMs : configuredHardTotal,
+    ledgerDir: join(runDirPath, 'stages', stage.id),
+    ...(canRecover ? {
+      chainId: priorTimeout.chainId,
+      recovery: {
+        hardDeadlineAt: priorTimeout.hardDeadlineAt,
+        lastObservedAt: priorTimeout.childClosedAt!,
+        persistedChargedMs: priorTimeout.chargedElapsedMs,
+        chainStartedAt: priorTimeout.chainStartedAt,
+      },
+    } : recoveryExpected ? {
+      // A technical retry with no trustworthy persisted balance must fail
+      // closed. Supplying deliberately invalid recovery evidence makes the
+      // controller attribute the stop as hard_cap_clock_uncertain instead of
+      // silently replenishing the chain.
+      recovery: {
+        hardDeadlineAt: 'unavailable',
+        lastObservedAt: new Date().toISOString(),
+        persistedChargedMs: configuredHardTotal,
+      },
+    } : {}),
+  });
+  return createTechnicalRetryBudgetState({
+    controller,
+    currentBudgetMs: canRecover ? priorTimeout.effectiveBudgetMs : initialBudgetMs,
+    previousEffectiveBudgetMs: canRecover ? priorTimeout.effectiveBudgetMs : undefined,
+    increaseAfterTimeout: canRecover && priorTimeout.terminationCause === 'soft_timeout',
+    attemptsStarted: recoveryExpected ? 1 : 0,
+  });
+}
+
+function prepareSchedulerTechnicalAttempt(chain: TechnicalRetryBudgetState): {
+  budgetMs: number;
+  retryContext?: { previousBudgetMs: number; nextBudgetMs: number; chargedElapsedMs: number; remainingHardTotalMs: number };
+} | undefined {
+  const transition = transitionTechnicalRetryBudget(chain, { type: 'prepare_attempt' });
+  if (transition.type !== 'attempt_prepared') return undefined;
+  return { budgetMs: transition.budgetMs, retryContext: transition.retryContext };
+}
+
+export function recordSchedulerTechnicalAttemptResult(
+  chain: TechnicalRetryBudgetState,
+  result: Pick<RunResult, 'effectiveTimeoutMs' | 'timedOut' | 'timeoutTerminationCause'>,
+  preparedBudgetMs: number,
+): boolean {
+  const effectiveBudgetMs = result.effectiveTimeoutMs ?? preparedBudgetMs;
+  const retryableTimeout = result.timedOut === true
+    && result.timeoutTerminationCause === 'soft_timeout';
+  transitionTechnicalRetryBudget(chain, retryableTimeout
+    ? { type: 'attempt_timed_out', effectiveBudgetMs }
+    : { type: 'attempt_finished', effectiveBudgetMs });
+  return retryableTimeout;
+}
+
+function recordHardCapExhausted(
+  stage: StageConfig,
+  projectDir: string,
+  runId: string,
+  retries: number,
+  chain: TechnicalRetryBudgetState,
+): RunResult {
+  const snapshot = chain.controller.snapshot();
+  const observedCause = chain.controller.terminationCause();
+  const terminationCause = observedCause === 'hard_cap_clock_uncertain' ? observedCause : 'hard_cap_exhausted';
+  completeStageAttempt(projectDir, runId, stage.id, retries, {
+    exitCode: 1,
+    duration_ms: 0,
+    error: terminationCause === 'hard_cap_clock_uncertain'
+      ? 'hard_cap_clock_uncertain: persisted technical-chain remaining time cannot be proven safely'
+      : 'hard_cap_exhausted: no strictly larger timeout retry budget fits the technical-chain total cap',
+    writeAttribution: 'unknown',
+    timeout: {
+      chainId: chain.controller.chainId,
+      initialBudgetMs: chain.controller.initialBudgetMs,
+      effectiveBudgetMs: chain.previousEffectiveBudgetMs ?? chain.currentBudgetMs,
+      hardTotalMs: chain.controller.hardTotalMs,
+      chainStartedAt: chain.controller.chainStartedAt,
+      hardDeadlineAt: chain.controller.hardDeadlineAt,
+      chargedElapsedMs: snapshot.chargedElapsedMs,
+      hardRemainingMs: snapshot.hardRemainingMs,
+      extensionCount: 0,
+      cumulativeGrantedMs: 0,
+      decisionPaths: [],
+      mismatchPaths: [],
+      terminationCause,
+      hardDeadlineReachedAt: snapshot.hardDeadlineReachedAt,
+      childClosedAt: new Date().toISOString(),
+      deadlineOverrunMs: chain.controller.deadlineOverrunMs(),
+    },
+  });
+  chain.controller.append('chain_terminated', { stageId: stage.id, reason: terminationCause });
+  return {
+    output: '',
+    exitCode: 1,
+    duration_ms: 0,
+    timedOut: false,
+    hardCapExhausted: true,
+    effectiveTimeoutMs: chain.previousEffectiveBudgetMs ?? chain.currentBudgetMs,
+    timeoutTerminationCause: terminationCause,
+  };
 }
 
 async function executeSingleStage(
@@ -3467,6 +6395,7 @@ async function executeSingleStage(
   taskDescription?: string,
   innerRetry?: number,
   fixStageIds?: string[],
+  roundDiffPath?: string,
   availableSkills?: string,
 ): Promise<void> {
   if (!agents.has(stage.role)) {
@@ -3476,7 +6405,8 @@ async function executeSingleStage(
     agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
   }
   const agent = agents.get(stage.role)!;
-  const timeout = stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+  const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
+  const hardTotal = stageHardTotal(stage, initialTimeout);
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
 
   let resolvedPrompt = stage.prompt_template || '';
@@ -3484,18 +6414,31 @@ async function executeSingleStage(
 
   // Inject inner retry context so the agent knows this is a repeated attempt
   if (innerRetry !== undefined) {
+    const archiveCoordinate = gateArchiveCoordinate(state.currentIteration ?? 1, innerRetry + 1);
+    const activeRetryGateIds = (stage.retry_to ?? []).filter((gateId) =>
+      existsSync(archivedGateOutputReadPath(runDirPath, archiveCoordinate, gateId)),
+    );
     if (stage.is_gate) {
-      const fixOutputRefs = (fixStageIds ?? []).map(id => `- ${runDirPath}/stages/${id}/output.md`).join('\n');
-      const fixContext = fixOutputRefs ? `\nFix stage output(s) to review:\n${fixOutputRefs}\n` : '';
-      const prevGateRef = `\nYour previous evaluation output: ${runDirPath}/stages/${stage.id}/output.md — read it to see what you already tested and avoid duplicating those tests.\n`;
-      resolvedPrompt = `RE-EVALUATION (round ${innerRetry + 1}): A fix was applied since the last evaluation. Write NEW and DIFFERENT tests targeting the fix — do not simply re-run the original tests.${fixContext}${prevGateRef}\n${resolvedPrompt}`;
+      if (!roundDiffPath) throw new Error(`Gate ${stage.id} re-evaluation is missing its complete repair diff`);
+      resolvedPrompt = `${buildGateReevaluationPreamble({
+        evaluationRound: innerRetry + 2,
+        iteration: archiveCoordinate.iteration,
+        repairRound: innerRetry + 1,
+        runDirPath,
+        gateId: stage.id,
+        fixStageIds: fixStageIds ?? [],
+        roundDiffPath,
+      })}\n\n${resolvedPrompt}`;
     } else if (innerRetry > 0) {
       // Build references to the gate verdicts and outputs that triggered this retry
-      const gateRefs = (stage.retry_to ?? []).map(gid =>
-        `- Verdict: ${runDirPath}/verdict_${gid}.json\n- QA output: ${runDirPath}/stages/${gid}/output.md`
+      const gateRefs = activeRetryGateIds.map(gid =>
+        `- Verdict: ${archivedGateVerdictReadPath(runDirPath, archiveCoordinate, gid)}\n- QA output: ${archivedGateOutputReadPath(runDirPath, archiveCoordinate, gid)}`
       ).join('\n');
       const gateContext = gateRefs ? `\nRead the latest gate results first:\n${gateRefs}\n` : '';
-      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nRead your previous output at ${runDirPath}/stages/${stage.id}/output.md to see what you already tried. Try a DIFFERENT approach — do not repeat the same fix.\n\n${resolvedPrompt}`;
+      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nRead your previous output at ${runDirPath}/stages/${stage.id}/output_attempt_${innerRetry}.md (falling back to output.md if that file is absent, which is the case for runs recorded before attempt-scoped outputs existed) to see what you already tried. Try a DIFFERENT approach — do not repeat the same fix.\n\n${resolvedPrompt}`;
+    }
+    if (!stage.is_gate && activeRetryGateIds.length) {
+      resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, activeRetryGateIds, archiveCoordinate)}\n\n${resolvedPrompt}`;
     }
   }
 
@@ -3504,6 +6447,13 @@ async function executeSingleStage(
     const kgSummary = summarizeKG(readKG(projectDir, runId));
     if (kgSummary) resolvedPrompt = kgSummary + '\n\n' + resolvedPrompt;
   } catch { /* no KG yet */ }
+
+  resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
+  resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
+  if (stage.dynamic_dispatch) resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+
+  resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
+  resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
 
   if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
@@ -3514,22 +6464,44 @@ async function executeSingleStage(
 
   const maxTechnicalRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
   let retries = 0;
+  const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
+  const resumeSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined)
+    ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
+  const technicalChain = createSchedulerTechnicalChain(stage, initialTimeout, runDirPath);
 
-  // eslint-disable-next-line no-constant-condition
+  try {
   while (true) {
-    state.stages[stage.id] = { status: 'running', retries, startedAt: new Date().toISOString() };
+    // A prior technical attempt is completed by runStage() directly in the
+    // per-stage status file. Re-read that authoritative ledger before marking
+    // the next attempt running; the scheduler's in-memory state predates the
+    // call and must never overwrite a just-recorded timeout/failure.
+    let latestStageStatus = state.stages[stage.id];
+    try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
+    state.stages[stage.id] = {
+      ...latestStageStatus,
+      status: STAGE_STATUS.RUNNING,
+      retries,
+      startedAt: latestStageStatus?.startedAt ?? new Date().toISOString(),
+    };
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
+    const prepared = prepareSchedulerTechnicalAttempt(technicalChain);
+    if (!prepared) {
+      recordHardCapExhausted(stage, projectDir, runId, retries, technicalChain);
+      break;
+    }
     const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
     const result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
       dependsOn: stage.depends_on ?? [],
       promptTemplate: retries > 0
-        ? `${buildRetryPreamble(retries, timeout, runDirPath, stage.id)}\n\n${resolvedPrompt}`
+        ? `${buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`
         : resolvedPrompt,
-      timeout_ms: timeout,
+      timeout_ms: prepared.budgetMs,
+      timeout_total_ms: hardTotal,
+      technicalChain: technicalChain.controller,
       projectDir,
       runId,
       runDir: runDirPath,
@@ -3540,15 +6512,30 @@ async function executeSingleStage(
       availableSkills,
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
+      resumeSessionId: resumeSession?.sessionId,
+      sessionOwnerStageId: resumeSession?.ownerStageId,
+      preserveSession: retries === 0 && shouldPreserveSession(stage, allStages, sessionReuseEnabled),
     });
 
-    if (result.timedOut && retries < maxTechnicalRetries) {
-      retries++;
-      log.warn({ stage: stage.id, retry: retries }, 'Retrying timed-out stage (inner loop)');
-      continue;
+    const retryableTimeout = recordSchedulerTechnicalAttemptResult(
+      technicalChain,
+      result,
+      prepared.budgetMs,
+    );
+
+    if (retryableTimeout) {
+      if (retries < maxTechnicalRetries) {
+        retries++;
+        log.warn({ stage: stage.id, retry: retries }, 'Retrying timed-out stage (inner loop)');
+        continue;
+      }
+      transitionTechnicalRetryBudget(technicalChain, { type: 'retry_exhausted' });
     }
 
     break;
+  }
+  } finally {
+    technicalChain.controller.dispose();
   }
 
   // Stage status is already written to individual status.json by runStage/worker.
@@ -3601,7 +6588,7 @@ async function executeIteration(
   taskDescription?: string,
   availableSkills?: string,
 ): Promise<StoreState> {
-  // eslint-disable-next-line no-constant-condition
+  const technicalChains = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
     let state = readRunState(projectDir, runId);
 
@@ -3610,8 +6597,15 @@ async function executeIteration(
       return state;
     }
 
+    // A park RETURNS (process exits, project frees, daemon queue advances) —
+    // deliberately NOT the legacy plan-review busy-poll below, which holds the
+    // process and the project lock while it waits.
+    if (isPausedRunStatus(state.status)) {
+      return state;
+    }
+
     // Poll while awaiting approval
-    if (state.status === 'awaiting_approval') {
+    if (isAwaitingApprovalRunStatus(state.status)) {
       await new Promise((r) => setTimeout(r, 2000));
       continue;
     }
@@ -3619,14 +6613,14 @@ async function executeIteration(
     // Inject dispatched stages
     for (const stage of sorted) {
       if (stage.dynamic_dispatch && !injectedDispatchStages.has(stage.id) &&
-          state.stages[stage.id]?.status === 'complete') {
+          state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) {
         injectedDispatchStages.add(stage.id);
         const injected = injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId);
 
         if (injected.length === 0) {
           // Check if there are static fallback stages
           const hasStaticFollowUp = sorted.some(s =>
-            s.id !== stage.id && state.stages[s.id]?.status === 'pending'
+            s.id !== stage.id && state.stages[s.id] && isPendingStageStatus(state.stages[s.id].status)
           );
           if (!hasStaticFollowUp) {
             // A dynamic_dispatch (plan) stage exited 0 (worker.ts marks exit-0
@@ -3659,7 +6653,7 @@ async function executeIteration(
               injectedDispatchStages.delete(stage.id); // allow re-injection after the re-run
               const replanStatus: StageStatus = {
                 ...state.stages[stage.id],
-                status: 'pending',
+                status: STAGE_STATUS.PENDING,
                 retries: decision.nextRetry,
                 error: decision.error,
               };
@@ -3699,13 +6693,13 @@ async function executeIteration(
       }
     }
 
-    if (state.status === 'awaiting_approval') {
+    if (isAwaitingApprovalRunStatus(state.status)) {
       // Auto-approve on iteration 2+ (re-plans) when autoApproveRetries is not explicitly false.
       // First iteration always requires manual approval so the user can review the plan,
       // unless autoApprove is explicitly true (API-created autonomous tasks).
       const currentIter = state.currentIteration ?? 1;
       if ((currentIter > 1 && state.autoApproveRetries !== false) || state.autoApprove === true) {
-        state.status = 'running';
+        state.status = RUN_STATUS.RUNNING;
         writeRunState(projectDir, runId, state);
         continue;
       }
@@ -3721,7 +6715,7 @@ async function executeIteration(
       return state;
     }
 
-    const toRun: StageConfig[] = [];
+    const runnableCandidates: StageConfig[] = [];
     const stageEvents: Array<{ stageId: string; status: StageStatus }> = [];
     for (const stage of ready) {
       if (stage.condition) {
@@ -3746,17 +6740,49 @@ async function executeIteration(
         recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, skipped);
         continue;
       }
-      toRun.push(stage);
+      runnableCandidates.push(stage);
+    }
+
+    const { selected: toRun, deferred: scopeDeferred } = selectRunnableBatch(runnableCandidates);
+    for (const { stage, conflict } of scopeDeferred) {
+      const detail = `${stage.id} deferred behind ${conflict.leftStageId}: ${conflict.reason}`;
+      log.info({ stage: stage.id, conflict }, 'Serializing ready stage because declared scopes are not provably disjoint');
+      recordRunEvent(projectDir, runId, {
+        type: 'parallel_scope_serialized',
+        runId,
+        timestamp: new Date().toISOString(),
+        iteration: state.currentIteration ?? 1,
+        stageId: stage.id,
+        stageIds: [conflict.leftStageId, conflict.rightStageId],
+        level: 'info',
+        detail,
+      });
     }
 
     if (toRun.length === 0) continue;
 
     for (const stage of toRun) {
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
-      state.stages[stage.id] = { status: 'running', retries: currentRetries, startedAt: new Date().toISOString() };
+      state.stages[stage.id] = {
+        ...state.stages[stage.id],
+        status: STAGE_STATUS.RUNNING,
+        retries: currentRetries,
+        startedAt: state.stages[stage.id]?.startedAt ?? new Date().toISOString(),
+      };
     }
     writeRunState(projectDir, runId, state);
 
+    const ordinaryScopeContext = createScopeBatchContext(projectDir, toRun);
+    const activeScopeStageIds = new Set(toRun.map((stage) => stage.id));
+    let ordinaryBatchComplete = false;
+    const ordinaryScopeMonitor = monitorScopeRevisionRequests({
+      selected: toRun,
+      activeStageIds: activeScopeStageIds,
+      projectDir,
+      runId,
+      context: ordinaryScopeContext,
+      isComplete: () => ordinaryBatchComplete,
+    });
     const results = await Promise.all(toRun.map(async (stage) => {
      try {
       if (!agents.has(stage.role)) {
@@ -3766,7 +6792,9 @@ async function executeIteration(
         agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
-      const timeout = stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+      const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
+      const hardTotal = stageHardTotal(stage, initialTimeout);
+      let technicalChain = technicalChains.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
 
@@ -3799,24 +6827,22 @@ async function executeIteration(
           : (taskDescription ?? '');
       }
 
-      // Plan stage: prefer task_brief.md over taskDescription
+      // Entry stages consume the task text captured and parsed at admission.
+      // Re-reading task_brief.md here would let a later sidecar edit replace
+      // the exact bytes that the launcher already admitted.
       if ((stage.depends_on ?? []).length === 0) {
-        const briefPath = join(runDirPath, 'task_brief.md');
-        if (existsSync(briefPath)) {
-          const briefContent = readFileSync(briefPath, 'utf-8').trim();
-          if (briefContent) {
-            resolvedPrompt = briefContent + '\nProject: ' + projectDir;
-          }
+        const admittedTask = taskDescription?.trim();
+        if (admittedTask) {
+          resolvedPrompt = admittedTask + '\nProject: ' + projectDir;
         }
         // On re-plan, include iteration_log.md reference
         const iterLogPath = join(runDirPath, 'iteration_log.md');
         if (existsSync(iterLogPath)) {
           resolvedPrompt += `\n\nRead ${runDirPath}/iteration_log.md for previous iteration results. Fix the issues identified there.`;
         }
-        // Campaign context: prepend history of previous runs.
-        // Skipped when state.inheritCampaignContext === false (set via --no-inherit-campaign)
-        // — the run stays attached to the campaign for telemetry, but the planner gets a
-        // clean prompt so it can't be misled by terminal phases from a different task arc.
+        // Campaign context: prepend only fresh, non-terminal, active-phase history.
+        // --campaign-context=skip (and its legacy alias) suppresses this verbose block;
+        // campaign ownership, telemetry and the compact dead-end ledger remain intact.
         const campaignStorageKey = resolveCampaignStorageKey({
           campaignId: state.campaignId,
           campaignStorageKey: state.campaignStorageKey,
@@ -3825,43 +6851,22 @@ async function executeIteration(
         if (campaignStorageKey && state.inheritCampaignContext !== false) {
           const entries = readCampaignEntries(projectDir, campaignStorageKey);
           if (entries.length > 0) {
-            const scoredEntries = collapseEntriesForHealth(entries);
-            const rows = scoredEntries
-              .map(e => `| ${e.seq} | ${e.iteration ?? 1} | ${e.score ?? '-'} | ${e.metric ?? '-'} | ${e.gate ?? '-'} | ${e.pass ? 'pass' : 'fail'} |`)
-              .join('\n');
-            const best = scoredEntries.reduce((max, e) => typeof e.score === 'number' && e.score > max ? e.score : max, -Infinity);
-            const phaseProgress = summarizeCampaignPhaseProgress(entries);
-            let ctx = `=== CAMPAIGN: ${state.campaignName ?? state.campaignId} ===\n`;
-            if (rows) {
-              ctx += `| # | Iteration | Score | Metric | Gate | Status |\n|---|-----------|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
-            }
-            if (phaseProgress.entries.length > 0) {
-              ctx += `\nPhase progress:\n`;
-              ctx += `- Completed phases: ${phaseProgress.completedPhases.length > 0 ? phaseProgress.completedPhases.join(', ') : 'none'}\n`;
-              ctx += `- Current recommended phase: ${phaseProgress.currentPhase ?? 'not specified'}\n`;
-              if (phaseProgress.latest) {
-                ctx += `- Latest phase event: seq ${phaseProgress.latest.seq}, iteration ${phaseProgress.latest.iteration ?? 1}, phase ${phaseProgress.latest.phase ?? '-'}, phaseComplete ${phaseProgress.latest.phaseComplete === true ? 'true' : 'false'}, nextPhase ${phaseProgress.latest.nextPhase ?? '-'}, outcome ${phaseProgress.latest.outcome ?? '-'}\n`;
-                if (phaseProgress.latest.artifactSummary) ctx += `- Latest artifact summary: ${phaseProgress.latest.artifactSummary}\n`;
-                if (phaseProgress.latest.reason) ctx += `- Latest reason: ${phaseProgress.latest.reason}\n`;
-              }
-              ctx += `Planner rule: for multi-phase tasks, dispatch only the current recommended phase unless the task explicitly asks to restart from phase 0. Do not pack all future phases into one dispatch.\n`;
-            }
+            const selection = selectRelevantCampaignContext(entries);
             const summaryPaths: string[] = [];
-            for (const e of entries) {
-              const prevRunDir = runDir(projectDir, e.runId);
+            for (const previousRunId of selection.summaryRunIds) {
+              const prevRunDir = runDir(projectDir, previousRunId);
               const iterLog = join(prevRunDir, 'iteration_log.md');
               if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
             }
-            if (summaryPaths.length > 0) {
-              ctx += `\nPrevious run summaries:\n${summaryPaths.map(p => `- ${p}`).join('\n')}\n`;
-            }
             const triggers = state.campaignTriggers;
-            const alert = checkCampaignHealth(entries, triggers);
-            if (alert) {
-              ctx += `\n⚠️ CAMPAIGN ALERT: ${alert.type} — ${alert.message}\nDO NOT retry approaches from failed runs. Propose a fundamentally different approach.\n`;
-            }
-            ctx += `=== END CAMPAIGN ===\n\n`;
-            resolvedPrompt = ctx + resolvedPrompt;
+            const alert = checkCampaignHealth(selection.entries, triggers);
+            const context = formatCampaignContextBlock({
+              campaignLabel: state.campaignName ?? state.campaignId ?? campaignStorageKey,
+              selection,
+              summaryPaths,
+              alert,
+            });
+            if (context) resolvedPrompt = context + resolvedPrompt;
           }
         }
       }
@@ -3878,19 +6883,37 @@ async function executeIteration(
       } catch { /* no KG yet */ }
 
       // Prepend retry context if this is a retry (timeout or supervisor abort)
-      if (currentRetries > 0) {
-        resolvedPrompt = `${buildRetryPreamble(currentRetries, timeout, runDirPath, stage.id)}\n\n${resolvedPrompt}`;
-      }
+      resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
+      resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
+      if (stage.dynamic_dispatch) resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+      resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
+      resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, sorted, readRunState(projectDir, runId), runDirPath);
 
       if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
 
       const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+      const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
+      const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled);
+      if (!technicalChain) {
+        technicalChain = createSchedulerTechnicalChain(stage, initialTimeout, runDirPath, state.stages[stage.id], true);
+        technicalChains.set(stage.id, technicalChain);
+      }
+      const prepared = prepareSchedulerTechnicalAttempt(technicalChain);
+      if (!prepared) {
+        const result = recordHardCapExhausted(stage, projectDir, runId, currentRetries, technicalChain);
+        return { stage, result, currentRetries };
+      }
+      if (currentRetries > 0) {
+        resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
+      }
       const result = await runStage(stageAdapter, {
         stageId: stage.id,
         role: agent,
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
-        timeout_ms: timeout,
+        timeout_ms: prepared.budgetMs,
+        timeout_total_ms: hardTotal,
+        technicalChain: technicalChain.controller,
         projectDir,
         runId,
         runDir: runDirPath,
@@ -3905,7 +6928,11 @@ async function executeIteration(
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
+        resumeSessionId: resumeSession?.sessionId,
+        sessionOwnerStageId: resumeSession?.ownerStageId,
+        preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
       });
+      recordSchedulerTechnicalAttemptResult(technicalChain, result, prepared.budgetMs);
       return { stage, result, currentRetries };
      } catch (err) {
        // A stage that THROWS (e.g. missing/invalid agent yaml at runtime) must not
@@ -3915,11 +6942,30 @@ async function executeIteration(
        const retriesNow = state.stages[stage.id]?.retries ?? 0;
        const msg = err instanceof Error ? err.message : String(err);
        log.error({ stage: stage.id, err: msg }, 'Stage threw before completion — degrading to failed');
-       try { writeStageStatus(projectDir, runId, stage.id, { status: 'failed', exitCode: 1, error: msg, retries: retriesNow }); } catch { /* non-critical */ }
+       try {
+         completeStageAttempt(projectDir, runId, stage.id, retriesNow, {
+           exitCode: 1,
+           duration_ms: 0,
+           error: msg,
+           writeAttribution: 'unknown',
+         });
+       } catch { /* non-critical */ }
        const failedResult: RunResult = { output: '', exitCode: 1, duration_ms: 0, timedOut: false, adapterError: false };
        return { stage, result: failedResult, currentRetries: retriesNow };
+     } finally {
+       activeScopeStageIds.delete(stage.id);
      }
     }));
+    ordinaryBatchComplete = true;
+    await ordinaryScopeMonitor;
+    for (const item of results) {
+      const reconciled = reconcileCompletedStageAttempts({ stage: item.stage, projectDir, runId, context: ordinaryScopeContext });
+      if (reconciled.violation) {
+        item.result.exitCode = 1;
+        item.result.timedOut = false;
+        item.result.timeoutTerminationCause = 'failed';
+      }
+    }
 
     state = readRunState(projectDir, runId);
     let failed = false;
@@ -3927,24 +6973,37 @@ async function executeIteration(
     for (const { stage, result, currentRetries } of results) {
       const maxRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
 
-      if (result.timedOut && currentRetries < maxRetries) {
+      if (!result.hardCapExhausted && result.timedOut && result.timeoutTerminationCause === 'soft_timeout' && currentRetries < maxRetries) {
         const nextRetry = currentRetries + 1;
-        const retryStatus: StageStatus = { status: 'pending', retries: nextRetry };
+        const retryStatus = rependStageStatus(readStageStatus(projectDir, runId, stage.id), nextRetry);
         writeStageStatus(projectDir, runId, stage.id, retryStatus);
         state.stages[stage.id] = retryStatus;
         log.warn({ stage: stage.id, retry: nextRetry }, 'Retrying timed-out stage');
         continue;
       }
 
-      if (result.exitCode !== 0 && currentRetries < maxRetries) {
-        const retryStatus: StageStatus = { status: 'pending', retries: currentRetries + 1 };
+      if (result.timedOut && result.timeoutTerminationCause === 'soft_timeout') {
+        const technicalChain = technicalChains.get(stage.id);
+        if (technicalChain) transitionTechnicalRetryBudget(technicalChain, { type: 'retry_exhausted' });
+      }
+
+      if (!result.hardCapExhausted && result.exitCode !== 0 && currentRetries < maxRetries) {
+        // Preserve the failed attempt's `error`: buildRetryPreamble reads it to
+        // tell the next attempt WHY the previous one died. Writing the pending
+        // status without it left that branch dead, so EVERY non-timeout failure
+        // was reported to the agent as "timed out" — including a diagnosed
+        // parameter rejection, which now explains itself.
+        const failedStatus = readStageStatus(projectDir, runId, stage.id);
+        const retryStatus = rependStageStatus(failedStatus, currentRetries + 1, failedStatus.error);
         writeStageStatus(projectDir, runId, stage.id, retryStatus);
         state.stages[stage.id] = retryStatus;
-        log.warn({ stage: stage.id, retry: currentRetries + 1 }, 'Retrying stage');
+        log.warn({ stage: stage.id, retry: currentRetries + 1, cause: retryStatus.error }, 'Retrying stage');
         continue;
       }
 
       if (result.exitCode !== 0) {
+        technicalChains.get(stage.id)?.controller.dispose();
+        technicalChains.delete(stage.id);
         log.error({ stage: stage.id }, 'Stage failed');
         failed = true;
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
@@ -3953,13 +7012,39 @@ async function executeIteration(
       }
 
       state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+      technicalChains.get(stage.id)?.controller.dispose();
+      technicalChains.delete(stage.id);
       stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');
+    }
+
+    for (const conflict of detectParallelWriteConflicts(toRun.map((stage) => stage.id), state.stages)) {
+      const detail = `${conflict.stageIds[0]} and ${conflict.stageIds[1]} both wrote ${conflict.files.join(', ')} (attribution: ${conflict.attribution.join(' / ')})`;
+      log.warn({ conflict }, 'Parallel stages wrote the same file');
+      recordRunEvent(projectDir, runId, {
+        type: 'parallel_write_conflict',
+        runId,
+        timestamp: new Date().toISOString(),
+        iteration: state.currentIteration ?? 1,
+        stageIds: conflict.stageIds,
+        files: conflict.files,
+        level: 'warning',
+        detail,
+      });
     }
 
     writeRunState(projectDir, runId, state);
     for (const event of stageEvents) {
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
+    }
+
+    // Scope admission may split one logical ready set into several physical
+    // waves. Do not park, terminate, or return a failure between those waves:
+    // the pre-E6 Promise.all batch let every ready peer finish, and its approval
+    // requests/artifacts remained observable even when another peer failed.
+    if (scopeDeferred.length > 0) {
+      log.info({ deferred: scopeDeferred.map(({ stage }) => stage.id) }, 'Continuing serialized waves before batch-level terminal handling');
+      continue;
     }
 
     // Bug #8 fix: EAGER terminal-state detection after each completed batch.
@@ -3971,6 +7056,12 @@ async function executeIteration(
     // after each batch catches the artifact while it still exists, snapshots
     // it to the run dir, fires the hook, and short-circuits the remaining
     // stages (terminal state means "we're done" — no need to keep churning).
+    // [Approval park gate, call site 2 of 2] Ingest every request the batch
+    // wrote even when a peer stage failed; a failure must not erase another
+    // stage's consequential-action request.
+    const parkedEager = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1 });
+    if (parkedEager) return parkedEager;
+
     if (!failed) {
       const terminatedEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
       if (terminatedEager) return terminatedEager;

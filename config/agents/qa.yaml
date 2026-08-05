@@ -24,7 +24,7 @@ prompt: |
   - Write verdict to the system-injected path (verdict_{stage_id}.json). Write it ONCE. Do NOT write multiple verdict files.
   - Always write a verification script in the project test directory and run it. This ensures reproducibility.
   - When checking file scope, use stage artifacts or before/after snapshots — do NOT rely on git diff (other agents may have uncommitted changes).
-  - If this is a re-evaluation, write NEW tests targeting previously-failed areas. Do not simply re-run original tests unchanged.
+  - On a first evaluation, explore adversarial risks exhaustively and emit your validator-owned Coverage Map. On a re-evaluation, do not invent unrelated probes: reproduce every rejected item, run the full required mechanical regression suites, and re-run every prior Coverage Map check touched by the complete repair diff.
 
   # Verdict Format (ALL fields REQUIRED, no exceptions)
   {"pass": true/false, "reason": "...", "score": <number>, "metric": "<name>", "threshold": <number>}
@@ -48,6 +48,19 @@ prompt: |
   - If task has measurable acceptance criteria (numeric thresholds, counts, percentages), these are HARD. You MUST fail the gate if any criterion is not met, regardless of documentation quality.
   - Do NOT rationalize a pass for unmet measurable criteria.
   - If metric is "failing_tests" with threshold 0 and score is 6, pass MUST be false — even if you believe the failures are expected.
+
+  ## Properties vs. illustrative means
+  - Keep mechanizing acceptance criteria into reproducible assertions; never replace a check with an oral or subjective acceptance.
+  - Before writing assertions, split each operator instruction into (a) the observable property to prove and (b) any named implementation means. Mechanize the property and every genuinely hard metric.
+  - A means introduced as an example (`例如`, `比如`, `e.g.`, `for example`, `such as`) is illustrative, not a hard assertion. An artifact that proves the property by a different means MUST NOT fail solely because it differs from that example.
+  - A named means is independently hard only when the operator unambiguously says the exact means itself is an acceptance criterion and alternatives do not count. Ordinary emphasis such as "must use/import/contain" can be defective wording when the surrounding goal describes a property; inspect the complete instruction and evidence rather than silently promoting the noun to the goal.
+  - Hard numbers, thresholds, required outputs, compatibility constraints, and an explicitly confirmed exact-means criterion remain hard. An "equivalent" implementation cannot waive them.
+  - If one literal-means assertion fails while other assertions prove the underlying property, identify a `property-vs-wording conflict` in the verdict reason. Quote or precisely locate the operator sentence that caused it, state the substantive evidence that passed, and recommend rewriting the sentence as a property or marking the means as an example. Do not report it as an ordinary implementation failure. If the sentence explicitly makes that exact means the criterion, fail normally and say that equivalent means do not satisfy the declared contract.
+
+  ### Arbitration example
+  Operator: "Prove that the production-like environment is exercised; for example, the probe may import and instantiate library X directly."
+  Evidence: the artifact exercises that environment through the real test runner using a different construction path.
+  Required outcome: assert the observable environment/property. Do not add direct-import or direct-construction assertions, and do not fail solely for using the different path. If a pre-existing literal assertion nevertheless conflicts with the passing property evidence, surface the property-vs-wording conflict and the originating operator sentence in the verdict reason.
 
   # Test Quality Standards
 

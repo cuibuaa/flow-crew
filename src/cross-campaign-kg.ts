@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readJsonlFile } from './jsonl.js';
+import { fcGlobalDir } from './store.js';
 
 export interface KGNode {
   id: string;
@@ -63,21 +64,6 @@ function shallowMatches<T extends Record<string, any>>(value: T, filter?: Partia
   return Object.entries(filter).every(([key, expected]) => expected === undefined || value[key] === expected);
 }
 
-function readJsonl<T>(path: string): T[] {
-  if (!existsSync(path)) return [];
-  const out: T[] = [];
-  for (const line of readFileSync(path, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      out.push(JSON.parse(trimmed) as T);
-    } catch {
-      // Append-only logs may be hand-edited; ignore bad rows rather than breaking campaigns.
-    }
-  }
-  return out;
-}
-
 function clampWeight(value?: number): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
   return Math.max(0, Math.min(1, value));
@@ -123,7 +109,7 @@ function findOutcome(symptom: KGNode, nodes: KGNode[], edges: KGEdge[]): { patch
 }
 
 export function ensureKGStore(): string {
-  const root = join(homedir(), '.fc', 'cross-campaign-kg');
+  const root = join(fcGlobalDir(), 'cross-campaign-kg');
   mkdirSync(root, { recursive: true });
   return root;
 }
@@ -167,7 +153,8 @@ function fileCacheKey(path: string): string {
 function loadNodesCached(): KGNode[] {
   const key = fileCacheKey(nodesPath());
   if (_nodesCache && _nodesCache.key === key) return _nodesCache.data;
-  const data = readJsonl<KGNode>(nodesPath());
+  const path = nodesPath();
+  const data = existsSync(path) ? readJsonlFile<KGNode>(path) : [];
   _nodesCache = { key, data };
   return data;
 }
@@ -175,7 +162,8 @@ function loadNodesCached(): KGNode[] {
 function loadEdgesCached(): KGEdge[] {
   const key = fileCacheKey(edgesPath());
   if (_edgesCache && _edgesCache.key === key) return _edgesCache.data;
-  const data = readJsonl<KGEdge>(edgesPath());
+  const path = edgesPath();
+  const data = existsSync(path) ? readJsonlFile<KGEdge>(path) : [];
   _edgesCache = { key, data };
   return data;
 }

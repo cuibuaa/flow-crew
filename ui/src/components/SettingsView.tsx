@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchSettings } from "../api";
 import type { SettingsData } from "../types";
+import { showToast } from "./Toast";
 
 function fmtMs(ms?: number): string {
   if (!ms) return "—";
@@ -10,13 +11,30 @@ function fmtMs(ms?: number): string {
 
 export default function SettingsView({ initialSettings }: { initialSettings?: SettingsData }) {
   const [settings, setSettings] = useState<SettingsData | null>(initialSettings ?? null);
+  const [loading, setLoading] = useState(initialSettings === undefined);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (initialSettings) return;
-    fetchSettings().then(setSettings).catch(() => setSettings(null));
+    fetchSettings()
+      .then((value) => {
+        setSettings(value);
+        setError(null);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        showToast(`Settings failed to load: ${message}`);
+      })
+      .finally(() => setLoading(false));
   }, [initialSettings]);
   return (
     <div data-testid="settings-view">
       <div className="campaign-header"><div><h1>Settings</h1><div className="subtitle">flow-crew config + per-project defaults</div></div></div>
+      {error ? <div className="empty-state error-state" role="alert">Settings unavailable: {error}</div> : null}
+      {!error && loading ? <div className="empty-state">Loading settings…</div> : null}
+      {!error && !loading && !settings ? <div className="empty-state">No settings data returned.</div> : null}
+      {settings ? (
+        <>
       <div className="section"><h2>Runtime</h2><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">adapter</span><span>{settings?.adapter ?? "codex"}</span></div>
         <div className="sd-meta-row"><span className="k">model</span><span>{settings?.model ?? "default"}</span></div>
@@ -49,6 +67,8 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
         <div className="sd-meta-row"><span className="k">campaigns log</span><span className="mono">~/.fc/campaigns/</span></div>
         <div className="sd-meta-row"><span className="k">cross-camp KG</span><span className="mono">~/.fc/cross-campaign-kg/</span></div>
       </div></details>
+        </>
+      ) : null}
     </div>
   );
 }

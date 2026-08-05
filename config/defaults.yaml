@@ -14,12 +14,17 @@ default_plan_stage_retries: 2
 # bound; the per-task "what counts as a valid deliverable" lives in the brief.
 default_supervisor_max_rejects: 2
 adapter: codex
-# Codex CLI's built-in default was bumped to gpt-5.3-codex which isn't
-# enabled for ChatGPT accounts yet (returns HTTP 400). Pin to the model
-# the user's global ~/.codex/config.toml declares so per-stage spawns
-# don't fall back to the broken default.
-model: gpt-5.5
-reasoning_effort: default
+# Resume only an explicitly captured per-stage UUID along one proven dependency
+# edge. The replicated same-brief A/B measured only 8.999% lower wall time
+# (below the 10% enable threshold) while output tokens increased 28.938%, so
+# reuse is opt-in; FC_SESSION_REUSE=1 enables an explicit measurement/run.
+session_reuse: false
+# model/reasoning_effort resolution (adapter, since 7aa5818): explicit value
+# here > user's global ~/.codex/config.toml > CLI built-in default. 'default'
+# auto-follows the user's own codex setup across CLI upgrades — pin an explicit
+# model here only to lock an experiment.
+model: default   # Inherit ~/.codex/config.toml; set a model here to override it.
+reasoning_effort: default   # Inherit model_reasoning_effort from the adapter config.
 paths:
   agents: config/agents
   workflows: config/workflows
@@ -31,10 +36,16 @@ campaign_triggers:
   repeated_failure_after: 3
 
 supervisor:
-  # Minimum idle duration (ms) before the supervisor is allowed to ABORT a stuck
-  # stage. Injected into the supervisor's system prompt so the LLM judge applies
-  # this floor when deciding WAIT vs ABORT. BTC explore V runs need ~50 min for
-  # audit-chain phases (A1-A4b) — a 10-min floor produced false-positive aborts
-  # at the 10-min mark for every V, preventing any finalize. Raised to 60 min
-  # to let real V runs survive while still bounding obvious stalls.
-  stuck_threshold_ms: 3600000
+  # A 30s cheap heartbeat detects transitions/anomalies. Ordinary semantic LLM
+  # review is throttled to 180s and 20 calls/iteration; anomalies bypass both.
+  poll_interval_ms: 30000
+  routine_assessment_interval_ms: 180000
+  min_delta_bytes: 4096
+  max_assessments_per_iteration: 20
+  # Minimum idle duration (ms) before the supervisor may abort a stage as stuck.
+  # Override this per project when a workload has predictably long quiet phases.
+  stuck_threshold_ms: 600000
+
+# Keep a stable campaign name when related tasks should inherit prior campaign
+# context and knowledge-graph findings instead of planning each task in isolation.
+campaign: flow-crew-refactor-2026h2

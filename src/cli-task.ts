@@ -1,26 +1,52 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
-import { defaultSocketPath, sendRpc, DaemonUnavailableError } from './orchestrator-rpc.js';
-import type { TaskEntry, TaskStatus } from './task-registry.js';
+import {
+  defaultSocketPath,
+  rpcErrorExitCode,
+  sendRpc,
+  type RpcRequest,
+  type RpcResponse,
+  type TaskListRpcResponse,
+} from './orchestrator-rpc.js';
+import {
+  cancelTaskThroughControlPlane,
+  type CancellationClientOptions,
+} from './cancellation-client.js';
+import { TASK_LIST_STATUS, TASK_STATUS, type TaskEntry, type TaskListStatus } from './task-registry.js';
+import { runsRoot } from './store.js';
 
-export async function cmdTask(args: string[], opts: { socketPath?: string; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}): Promise<number> {
+export async function cmdTask(
+  args: string[],
+  opts: {
+    socketPath?: string;
+    stdout?: NodeJS.WriteStream;
+    stderr?: NodeJS.WriteStream;
+    rpcTimeoutMs?: number;
+    cancellationClient?: Omit<CancellationClientOptions, 'socketPath' | 'rpcTimeoutMs'>;
+  } = {},
+): Promise<number> {
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
   const socketPath = opts.socketPath ?? socketFromArgs(args);
   const sub = args[1];
+  const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
+    sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
+  );
   try {
     if (sub === 'list') {
-      const status = valueAfter(args, '--status') as TaskStatus | 'active' | 'all' | undefined;
+      const status = valueAfter(args, '--status') as TaskListStatus | undefined;
       const limitRaw = valueAfter(args, '--limit');
-      const res = await sendRpc<{ tasks: TaskEntry[] }>(socketPath, { cmd: 'list', filter: { status: status ?? 'active', limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined } });
+      const res = await rpc<TaskListRpcResponse>({ cmd: 'list', filter: { status: status ?? TASK_LIST_STATUS.ACTIVE, limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined } });
       printTaskList(res.tasks, stdout, args.includes('--with-summary'));
+      if ((res.registry_unreadable_records ?? 0) > 0) {
+        stderr.write(`WARNING: registry has ${res.registry_unreadable_records} unreadable records; displayed task state may be incomplete.\n`);
+      }
       return 0;
     }
     if (sub === 'show') {
       const id = parseId(args[2]);
-      const res = await sendRpc<{ task: TaskEntry; recent_ticks: string[] }>(socketPath, { cmd: 'show', id });
+      const res = await rpc<{ task: TaskEntry; recent_ticks: string[] }>({ cmd: 'show', id });
       if (args.includes('--summary-only')) {
         if (!res.task.summary_full) {
           stderr.write(`Task #${id} has no parsed summary\n`);
@@ -34,13 +60,21 @@ export async function cmdTask(args: string[], opts: { socketPath?: string; stdou
     }
     if (sub === 'cancel') {
       const id = parseId(args[2]);
-      await sendRpc(socketPath, { cmd: 'cancel', id });
+      const cancellation = await cancelTaskThroughControlPlane(id, {
+        ...opts.cancellationClient,
+        socketPath,
+        rpcTimeoutMs: opts.rpcTimeoutMs,
+      });
+      if (!cancellation.ok) {
+        stderr.write(`Cancellation still in progress: ${cancellation.message}. Check progress with: flowcrew task show ${id}\n`);
+        return 1;
+      }
       stdout.write(`Task #${id} cancelled\n`);
       return 0;
     }
     if (sub === 'retry') {
       const id = parseId(args[2]);
-      const res = await sendRpc<{ new_attempt: number; unit: string }>(socketPath, { cmd: 'retry', id });
+      const res = await rpc<{ new_attempt: number; unit: string }>({ cmd: 'retry', id });
       stdout.write(`Task #${id} retry attempt ${res.new_attempt}. Unit: ${res.unit}\n`);
       return 0;
     }
@@ -49,21 +83,20 @@ export async function cmdTask(args: string[], opts: { socketPath?: string; stdou
       const follow = args.includes('--follow') || args.includes('-f');
       const lines = Number.parseInt(valueAfter(args, '--tail') ?? '100', 10);
       if (follow) {
-        const show = await sendRpc<{ task: TaskEntry; recent_ticks: string[] }>(socketPath, { cmd: 'show', id });
+        const show = await rpc<{ task: TaskEntry; recent_ticks: string[] }>({ cmd: 'show', id });
         const child = spawn('journalctl', ['--user', '-u', show.task.systemd_unit, '-f'], { stdio: 'inherit' });
         await new Promise((resolve) => child.on('exit', resolve));
         return child.exitCode ?? 0;
       }
-      const res = await sendRpc<{ output: string }>(socketPath, { cmd: 'tail', id, lines });
+      const res = await rpc<{ output: string }>({ cmd: 'tail', id, lines });
       stdout.write(res.output);
       return 0;
     }
     stderr.write('Usage: flowcrew task list|show|cancel|retry|tail ...\n');
     return 1;
   } catch (err) {
-    if (err instanceof DaemonUnavailableError) stderr.write(`${err.message}\n`);
-    else stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    return 1;
+    stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return rpcErrorExitCode(err);
   }
 }
 
@@ -76,7 +109,7 @@ function printTaskList(tasks: TaskEntry[], stdout: NodeJS.WriteStream, withSumma
     ? 'ID  Status        Attempt  Unit                         Name  Summary\n'
     : 'ID  Status        Attempt  Unit                         Name\n');
   for (const task of tasks) {
-    const status = task.status === 'reality_gate_failed' ? '✗ reality_gate_failed' : task.status;
+    const status = task.status === TASK_STATUS.REALITY_GATE_FAILED ? '✗ reality_gate_failed' : task.status;
     const line = `${String(task.id).padEnd(3)} ${status.padEnd(21)} ${String(task.attempt).padEnd(8)} ${task.systemd_unit.padEnd(28)} ${task.name}`;
     stdout.write(withSummary ? `${line}  ${truncate(task.summary_one_liner ?? '', 80)}\n` : `${line}\n`);
   }
@@ -94,7 +127,7 @@ function printTask(task: TaskEntry, ticks: string[], stdout: NodeJS.WriteStream)
   if (task.config_path) stdout.write(`Config: ${task.config_path}\n`);
   if (task.completed_at) stdout.write(`Completed: ${task.completed_at}\n`);
   if (task.notes) stdout.write(`Notes: ${task.notes}\n`);
-  const failurePath = task.run_id ? join(homedir(), '.fc', 'runs', task.run_id, '.reality-gate.failures.md') : undefined;
+  const failurePath = task.run_id ? join(runsRoot(), task.run_id, '.reality-gate.failures.md') : undefined;
   if (failurePath && existsSync(failurePath)) {
     stdout.write('\nReality gate failures:\n');
     stdout.write(readFileSync(failurePath, 'utf-8').trimEnd() + '\n');

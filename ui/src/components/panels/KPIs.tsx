@@ -1,5 +1,5 @@
 import { formatMetric } from "../../lib/metric-format";
-import type { Campaign } from "../../types";
+import { getCampaignRunTotal, type Campaign } from "../../types";
 
 export default function KPIs({ campaign }: { campaign?: Partial<Campaign> | null }) {
   const safeCampaign = campaign ?? {};
@@ -11,13 +11,12 @@ export default function KPIs({ campaign }: { campaign?: Partial<Campaign> | null
   return (
     <div className="kpis" data-testid="panel-kpis">
       <div className="kpi primary">
-        <div className="label">Best score · {metric.name || "metric"}</div>
+        <div className="label">Latest score · {metric.name || "metric"}</div>
         <div className="value">{formatMetric(metric.format, metric.value)}</div>
         <div className="sublabel">{metric.sublabel ?? deltaText}</div>
       </div>
-      {safeCampaign.iterations ? <div className="kpi"><div className="label">Iterations</div><div className="value">{safeCampaign.iterations.length}</div><div className="sublabel">trend rows</div></div> : null}
       {safeCampaign.phases ? <div className="kpi"><div className="label">Phases</div><div className="value">{safeCampaign.phases.filter((p) => p?.status === "complete").length}/{safeCampaign.phases.length}</div><div className="sublabel">complete</div></div> : null}
-      <div className="kpi"><div className="label">Runs</div><div className="value">{safeCampaign.runs?.length ?? 0}</div><div className="sublabel">recorded</div></div>
+      <div className="kpi"><div className="label">Runs</div><div className="value">{getCampaignRunTotal(safeCampaign)}</div><div className="sublabel">recorded</div></div>
     </div>
   );
 }

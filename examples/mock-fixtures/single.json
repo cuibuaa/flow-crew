@@ -1,0 +1,7 @@
+{
+  "output_text": "Hello from FlowCrew's mock adapter. No model was called.",
+  "exit_code": 0,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "simulated_duration_ms": 5
+}

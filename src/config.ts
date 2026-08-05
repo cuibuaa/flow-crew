@@ -1,7 +1,7 @@
-import { copyFileSync, mkdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 // --- Types ---
 
@@ -24,6 +24,8 @@ export interface ProjectDefaults {
   model: string;
   reasoning_effort: string;
   adapter: string;
+  /** UUID-scoped cross-stage Codex resume. Defaults off until measured benefit justifies enabling. */
+  sessionReuse: boolean;
   paths: FlowCrewPaths;
   /** Default campaign name for runs in this project; can be overridden by `flowcrew quick --campaign <name>`. */
   campaign?: string;
@@ -34,7 +36,10 @@ export interface SupervisorConfig {
   adapter: string;
   model: string;
   reasoningEffort: string;
+  /** Cheap state/output heartbeat cadence. */
   pollIntervalMs: number;
+  /** Minimum cadence between ordinary semantic LLM assessments. */
+  routineAssessmentIntervalMs: number;
   cooldownAfterActionMs: number;
   /** Budget: assessments per campaign iteration. Refills when state.currentIteration advances. */
   maxAssessmentsPerIteration: number;
@@ -56,16 +61,30 @@ const DEFAULT_PATHS: FlowCrewPaths = {
 const DEFAULT_SUPERVISOR: SupervisorConfig = {
   enabled: false,
   adapter: '',
-  model: 'sonnet',
-  reasoningEffort: 'default',
+  // 'default' resolves through the adapter chain (project pin > user's global
+  // codex config > CLI built-in). Never hardcode a vendor model here: this
+  // fallback previously said 'sonnet', which the codex backend would 400 on
+  // if the defaults.yaml fallback chain ever failed to supply a model.
+  model: 'default',
+  // ROLE default, deliberately NOT inherited from the work-agent/global effort:
+  // assess() runs under a 30s adapter timeout and verdicts are simple
+  // WAIT/ABORT judgments — an inherited global 'max' would risk timing out
+  // every tick and silently un-steering the run. This is a role property, not
+  // a mirror of external config, so it cannot go stale; override with
+  // supervisor.reasoning_effort in defaults.yaml if you want a smarter judge.
+  reasoningEffort: 'low',
   pollIntervalMs: 30000,
+  // Historical GUIDE→ABORT case lasted 2789s. Even allowing 30s per call,
+  // 180s routine spacing yields floor(2789/210)=13 opportunities for the
+  // observed 10 GUIDE decisions plus final ABORT.
+  routineAssessmentIntervalMs: 180000,
   cooldownAfterActionMs: 60000,
   // Budget: refills each time the campaign advances to a new iteration.
   // Sized so a typical iteration (plan→implement→qa→fix loop, often 1-3h)
   // gets steady-state coverage; adaptive backoff handles quiet phases.
-  maxAssessmentsPerIteration: 50,
+  maxAssessmentsPerIteration: 20,
   tailBytes: 16384,
-  minDeltaBytes: 200,
+  minDeltaBytes: 4096,
   // 10-min idle threshold before supervisor is allowed to ABORT. Codex agents
   // often spend several minutes silently editing files via tool calls; the
   // older 5-min default produced false-positive aborts mid-implementation.
@@ -113,7 +132,13 @@ export function ensureProjectDefaultsFile(projectDir?: string): string {
   try {
     mkdirSync(dirname(target), { recursive: true });
     if (resolve(source) !== resolve(target)) {
-      copyFileSync(source, target);
+      // The repository may carry a local default campaign while it is being
+      // developed. That operator-specific choice is not part of the package
+      // template: a new project should derive its campaign from its own
+      // directory unless the user explicitly configures one.
+      const publicDefaults = readYamlFile(source);
+      delete publicDefaults.campaign;
+      writeFileSync(target, stringifyYaml(publicDefaults), 'utf-8');
     }
     return target;
   } catch {
@@ -140,6 +165,12 @@ function stringValue(raw: Record<string, unknown>, template: Record<string, unkn
   return value;
 }
 
+function booleanValue(raw: Record<string, unknown>, template: Record<string, unknown>, key: string): boolean {
+  const value = raw[key] ?? template[key];
+  if (typeof value !== 'boolean') throw new Error(`config/defaults.yaml missing boolean ${key}`);
+  return value;
+}
+
 // --- Public API: Project Defaults ---
 
 export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
@@ -163,10 +194,19 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
     model: stringValue(raw, template, 'model'),
     reasoning_effort: stringValue(raw, template, 'reasoning_effort'),
     adapter: stringValue(raw, template, 'adapter'),
+    sessionReuse: booleanValue(raw, template, 'session_reuse'),
     paths: { ...DEFAULT_PATHS, ...templatePaths, ...rawPaths },
     campaign: typeof raw.campaign === 'string' && raw.campaign ? raw.campaign : undefined,
   };
   return _cache;
+}
+
+/** Per-process measurement override; only literal 0/1 are accepted. */
+export function isSessionReuseEnabled(projectDir?: string): boolean {
+  const override = process.env.FC_SESSION_REUSE;
+  if (override === '0') return false;
+  if (override === '1') return true;
+  return loadProjectDefaults(projectDir).sessionReuse;
 }
 
 export function getDefaultTimeout(projectDir?: string): string {
@@ -182,12 +222,16 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
   const fallbackString = (v: unknown, fb: string) => (typeof v === 'string' && v ? v : fb);
   return {
     enabled: sup.enabled === true,
-    // adapter / model / reasoning_effort fall back to top-level defaults.yaml when
-    // not explicitly set under the `supervisor:` block.
+    // adapter / model fall back to top-level defaults.yaml when not explicitly
+    // set under the `supervisor:` block. reasoning_effort deliberately does NOT
+    // inherit the work-agent effort — it falls to the supervisor's own role
+    // default (see DEFAULT_SUPERVISOR.reasoningEffort): the 30s assess timeout
+    // makes an inherited global 'max' a silent supervisor-killer.
     adapter: fallbackString(sup.adapter, projectDefaults.adapter),
     model: fallbackString(sup.model, projectDefaults.model),
-    reasoningEffort: fallbackString(sup.reasoning_effort, projectDefaults.reasoning_effort),
+    reasoningEffort: fallbackString(sup.reasoning_effort, DEFAULT_SUPERVISOR.reasoningEffort),
     pollIntervalMs: (sup.poll_interval_ms as number) ?? DEFAULT_SUPERVISOR.pollIntervalMs,
+    routineAssessmentIntervalMs: (sup.routine_assessment_interval_ms as number) ?? DEFAULT_SUPERVISOR.routineAssessmentIntervalMs,
     cooldownAfterActionMs: (sup.cooldown_after_action_ms as number) ?? DEFAULT_SUPERVISOR.cooldownAfterActionMs,
     maxAssessmentsPerIteration: (sup.max_assessments_per_iteration as number) ?? DEFAULT_SUPERVISOR.maxAssessmentsPerIteration,
     tailBytes: (sup.tail_bytes as number) ?? DEFAULT_SUPERVISOR.tailBytes,

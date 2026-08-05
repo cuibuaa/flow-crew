@@ -1,15 +1,18 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { bumpVersion, ensureBriefDir, readHead } from './brief-versioning.js';
 import type { BriefVersionInfo } from './brief-versioning.js';
-import { campaignDir, runDir, runsRoot, updateRunState } from './store.js';
+import { campaignDir, runDir, runsRoot, updateRunState, isTerminalRunStatus, RUN_STATUS } from './store.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { appendPendingReview } from './campaign-review.js';
 import { findSimilar, persistCampaignArc } from './cross-campaign-kg.js';
 import { readEscalations } from './supervisor-escalation.js';
+import { DaemonUnavailableError, defaultSocketPath, sendRpc } from './orchestrator-rpc.js';
+import type { CancellationResult } from './run-control.js';
+import { Orchestrator } from './orchestrator.js';
 
 export interface CampaignConfig {
   id: string;
@@ -75,6 +78,11 @@ interface RunOutcome {
   state?: any;
 }
 
+const CAMPAIGN_OUTCOME_STATUS = {
+  SHIPPED: RUN_STATUS.SHIPPED,
+  VALID_SHIP: 'valid_ship',
+} as const;
+
 export const BriefPatchSchema = z.object({
   type: z.literal('brief_patch'),
   section: z.string().min(1),
@@ -116,6 +124,9 @@ function normalizePath(value: string, baseDir: string): string {
 }
 
 export async function loadCampaignConfig(path: string): Promise<CampaignConfig> {
+  if (!existsSync(path)) {
+    throw new Error(`Campaign config not found: ${path}`);
+  }
   const raw = readFileSync(path, 'utf-8');
   const parsed = parseYaml(raw) as unknown;
   const candidate = parsed && typeof parsed === 'object' && 'campaign' in parsed
@@ -443,8 +454,15 @@ async function launchRun(cfg: CampaignConfig): Promise<string> {
   return runId;
 }
 
+/**
+ * Terminal per the ENGINE's single source of truth. This used to be an inverted
+ * denylist (anything not pending/running/awaiting_approval), which silently
+ * misread every newly-added status — e.g. a `parked` run waiting on a human
+ * would be treated as finished and pollRunCompletion would fabricate an outcome
+ * from an unfinished run.
+ */
 function isTerminalStatus(status?: string): boolean {
-  return !!status && !['pending', 'running', 'awaiting_approval'].includes(status);
+  return !!status && isTerminalRunStatus(status);
 }
 
 async function pollRunCompletion(cfg: CampaignConfig, runId: string): Promise<RunOutcome> {
@@ -473,7 +491,7 @@ async function pollRunCompletion(cfg: CampaignConfig, runId: string): Promise<Ru
 }
 
 function isValidShip(outcome: RunOutcome, goal: CampaignConfig['goal']): boolean {
-  if (outcome.status !== 'shipped' && outcome.status !== 'valid_ship') return false;
+  if (outcome.status !== CAMPAIGN_OUTCOME_STATUS.SHIPPED && outcome.status !== CAMPAIGN_OUTCOME_STATUS.VALID_SHIP) return false;
   if (typeof outcome.result !== 'number') return false;
   const [min, max] = goal.validRange;
   return outcome.result >= min && outcome.result <= max;
@@ -597,6 +615,15 @@ export async function runCampaign(cfg: CampaignConfig, opts: { dryRun?: boolean 
     const head = readHead(briefDir);
     writeFileSync(join(dir, 'active.json'), JSON.stringify({ id: cfg.id, iter, systemdUnit: cfg.launch.systemdUnit, briefVersion: head.version, briefDir, updatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf-8');
     const runId = await launchRun(cfg);
+    writeFileSync(join(dir, 'active.json'), JSON.stringify({
+      id: cfg.id,
+      iter,
+      runId,
+      systemdUnit: cfg.launch.systemdUnit,
+      briefVersion: head.version,
+      briefDir,
+      updatedAt: new Date().toISOString(),
+    }, null, 2) + '\n', 'utf-8');
     updateRunState(cfg.projectDir, runId, (state) => {
       state.campaign_id = cfg.id;
       state.brief_version = head.version;
@@ -670,13 +697,28 @@ export async function runCampaign(cfg: CampaignConfig, opts: { dryRun?: boolean 
   return { status: 'budget_exhausted', iter: cfg.budget.maxRuns };
 }
 
-export function stopCampaign(id: string): void {
+export async function stopCampaign(id: string): Promise<CancellationResult | undefined> {
   const dir = campaignDir(id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'halt'), new Date().toISOString() + '\n', 'utf-8');
   const active = readJsonIfExists(join(dir, 'active.json'));
   const unit = typeof active?.systemdUnit === 'string' ? active.systemdUnit : undefined;
-  if (unit) {
-    try { execFileSync('systemctl', ['stop', unit], { stdio: 'ignore' }); } catch { /* best effort */ }
+  const runId = typeof active?.runId === 'string' ? active.runId : undefined;
+  if (!runId) {
+    if (!unit) return undefined;
+    throw new Error(`Campaign ${id}: stop recorded, but the active scheduler run is not bound yet; retry once its run id is visible.`);
   }
+  let result: CancellationResult;
+  try {
+    result = await sendRpc<CancellationResult>(
+      defaultSocketPath(),
+      { cmd: 'cancel-run', runId, unit },
+      5_000,
+    );
+  } catch (error) {
+    if (!(error instanceof DaemonUnavailableError)) throw error;
+    result = await new Orchestrator().cancelRun(runId, unit);
+  }
+  if (!result.ok) throw new Error(result.message);
+  return result;
 }

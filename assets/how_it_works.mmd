@@ -1,0 +1,29 @@
+flowchart TD
+  brief["<b>You</b><br/><i>/ship from your coding agent</i>"]
+  plan["<b>Planner</b><br/>builds the execution DAG from the brief"]
+  code["<b>Coder stages</b><br/>implemented in parallel, each stage self-tested"]
+  gate{"<b>QA gate</b><br/>tests · audits · verdict"}
+  fix["<b>Coder fix</b><br/>bounded re-check"]
+  reality["<b>Reality-Gate</b><br/>the deterministic checks the brief declared"]
+  done(["<b>shipped</b> · <b>complete</b>"])
+  held(["<b>reality_gate_failed</b><br/>held for review"])
+  sup["<b>Supervisor</b><br/>observes · guides · aborts · re-plans<br/><i>never edits files, never runs commands</i>"]
+
+  brief -->|task brief| plan
+  plan -->|dispatch.yaml| code
+  code -->|code + verdicts| gate
+  gate -->|rejected| fix
+  fix -->|re-check| gate
+  gate -->|passed| reality
+  reality -->|every check passes| done
+  reality -->|a check fails| held
+  code -.->|progress| sup
+  sup -.->|"regression · plateau · repeated failure → re-plan"| plan
+
+%% Source of truth for assets/how_it_works{,_dark}.png. Regenerate with:
+%%   npx -y @mermaid-js/mermaid-cli -i assets/how_it_works.mmd \
+%%     -o assets/how_it_works.png -b white -w 1500 -s 2
+%%   (add -c a config with {"theme":"dark"} and -b '#0d1117' for the dark variant)
+%% Then LOOK at both PNGs before committing: the diagram this replaced shipped for
+%% months with two clipped labels, three overlapping text runs and a tofu glyph,
+%% and none of that is visible from the source.

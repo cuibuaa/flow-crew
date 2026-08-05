@@ -75,10 +75,12 @@ export class ClaudeAdapter implements Adapter {
     const POST_RESULT_GRACE_MS = 5000;
     const result = await execWithStdin('claude', args, prompt, {
       cwd: opts.workDir,
-      timeout_ms: opts.timeout_ms,
+      timeout_ms: opts.hard_timeout_ms ?? opts.timeout_ms,
       liveLogPath, // raw stream-json goes to live.log for debugging
       onChild: ({ kill }) => { childKill = kill; },
-      abortSignal: opts.abortSignal,
+      abortSignal: opts.abortSignal && opts.hardAbortSignal
+        ? AbortSignal.any([opts.abortSignal, opts.hardAbortSignal])
+        : (opts.abortSignal ?? opts.hardAbortSignal),
       onStdout: (chunk: string) => {
         // Parse stream-json lines and extract text content for clean live output
         lineBuf += chunk;

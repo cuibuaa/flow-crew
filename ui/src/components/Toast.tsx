@@ -34,6 +34,8 @@ export default function ToastContainer() {
       {toasts.map(t => (
         <div
           key={t.id}
+          role={t.type === 'error' ? 'alert' : 'status'}
+          aria-atomic="true"
           className={`px-4 py-3 rounded-lg shadow-lg text-sm animate-[slideIn_0.2s_ease-out] ${
             t.type === 'error' ? 'bg-red-900/90 text-red-100 border border-red-700' :
             t.type === 'success' ? 'bg-green-900/90 text-green-100 border border-green-700' :

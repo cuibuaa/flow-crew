@@ -4,8 +4,8 @@
  * Aggregates every prior run's measured candidates (research_journal rounds: label → result) and
  * dead-ends (KG `dead_end` nodes) into a compact, deduped digest injected as {ledger_digest}. The
  * Propose step reads it to AVOID re-proposing already-tried directions and converge toward the
- * frontier. Always injected (even under --no-inherit-campaign): it is the compact "what's been
- * tried" ledger, distinct from the verbose narrative prior-phase context that flag suppresses.
+ * frontier. Always injected (even with --campaign-context=skip or its legacy alias): it is the
+ * compact "what's been tried" ledger, distinct from the verbose narrative context that mode suppresses.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -60,7 +60,9 @@ export function summarizeLedger(projectDir: string, campaignId: string | undefin
     parts.push(`Tried directions (${tried.size} — do NOT re-propose the same mechanism):\n${lines.join('\n')}`);
   }
   if (deadEnds.size) {
-    const lines = [...deadEnds].slice(0, Math.floor(cap / 2)).map((d) => `- ${d}`);
+    // Dead ends are durable safety knowledge. The display cap only bounds tried
+    // directions; truncating this set can make a later planner repeat a known trap.
+    const lines = [...deadEnds].map((d) => `- ${d}`);
     parts.push(`Dead ends (${deadEnds.size} — avoid):\n${lines.join('\n')}`);
   }
   return parts.join('\n\n');

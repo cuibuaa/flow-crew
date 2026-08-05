@@ -1,0 +1,15 @@
+# This tracked template is safe to inspect with --dry-run. Replace both launch
+# values with a real campaign launcher before running it live.
+campaign:
+  id: hello-research-example
+  briefPath: examples/hello-research.brief.md
+  projectDir: .
+  goal:
+    metric: tracked_typescript_files
+    validRange: [0, 1000000]
+  budget:
+    maxRuns: 1
+  diagnosisRules: []
+  launch:
+    systemdUnit: flowcrew-example-campaign
+    launchScript: examples/replace-with-your-campaign-launcher

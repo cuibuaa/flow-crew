@@ -1,10 +1,10 @@
 import { formatMetric } from "../../lib/metric-format";
 import type { MetricFormat, WorkspaceRun } from "../../types";
 
-const iconByOutcome: Record<string, string> = { shipped: "✓", rejected: "✘", failed: "✘", running: "◐", complete: "✓", reality_gate_failed: "⊘", needs_summary: "…", awaiting_approval: "?", ceiling_hit: "⊟", escalated: "↑" };
-const iconClassByOutcome: Record<string, string> = { shipped: "success", rejected: "error", failed: "error", running: "running", complete: "success", reality_gate_failed: "error" };
+const iconByOutcome: Record<string, string> = { shipped: "✓", rejected: "✘", failed: "✘", running: "◐", parked: "◆", complete: "✓", reality_gate_failed: "⊘", needs_summary: "…", awaiting_approval: "?", ceiling_hit: "⊟", escalated: "↑" };
+const iconClassByOutcome: Record<string, string> = { shipped: "success", rejected: "error", failed: "error", running: "running", parked: "parked", complete: "success", reality_gate_failed: "error" };
 const badgeClassByOutcome: Record<string, string> = { failed: "rejected" };
-const badgeLabelByOutcome: Record<string, string> = { reality_gate_failed: "GATE FAIL", needs_summary: "NEEDS SUM", awaiting_approval: "AWAITING", ceiling_hit: "CEILING", escalated: "ESCALATED" };
+const badgeLabelByOutcome: Record<string, string> = { reality_gate_failed: "GATE FAIL", needs_summary: "NEEDS SUM", awaiting_approval: "AWAITING", parked: "WAITING", ceiling_hit: "CEILING", escalated: "ESCALATED" };
 
 function runStartedAt(run: WorkspaceRun): number {
   const value = run.started_at ?? run.startedAt;

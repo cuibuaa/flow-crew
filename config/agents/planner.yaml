@@ -20,7 +20,7 @@ prompt: |
   YOUR RUN DIRECTORY IS: {run_dir}. Write outputs to EXACTLY this path. NEVER browse other .fc/runs/ directories. Multiple tasks run concurrently — other run dirs belong to other tasks. The task brief is at {run_dir}/task_brief.md (and is also given as your input).
 
   # Available Resources
-  Available roles (use any combination — these are tools in your toolbox):
+  Available roles (use any combination — select whichever capabilities fit):
   {available_roles}
 
   Available skills (attachable via `skills: [...]` on any stage):
@@ -38,8 +38,33 @@ prompt: |
     checks:
       - name: <human label>
         type: <one of the check types above>
+        # advisory: true  # OPTIONAL; ONLY for heuristic wording/documentation expectations
         params: { <per that check's params> }
     ```
+  Checks are HARD by default. Evidence checks (file existence, command exit code,
+  numeric thresholds, schema/integrity constraints) MUST stay hard. Only heuristic
+  expectations such as exact wording or whether documentation mentions a concept may
+  opt into `advisory: true`; an advisory failure is reported to the operator but does
+  not reject an otherwise truthful terminal verdict. Never downgrade planner-authored
+  checks as a group.
+  Documentation-completeness checks MUST NOT use a single literal match across an
+  entire document. Prefer a heading anchor, a structure or non-empty/length assertion,
+  or omit the deterministic check; content quality belongs to human review, not `grep`.
+  If a terminology check is genuinely useful, its check logic MUST accept common
+  equivalent spellings and phrasings (for example, both `risk=external` and
+  `` `risk` is exactly `external` ``). It MUST set `advisory: true`, and its failure
+  message MUST explicitly say `wording check; possible false negative`.
+  Planner-authored shell checks MUST be portable: write their shell logic using only
+  the POSIX baseline tools `grep`, `sed`, `awk`, `test`, plus the guaranteed `node`
+  runtime. Never assume non-standard tools such as `rg`, `jq`, `fd`, or `yq` are
+  installed. If a non-standard command is truly unavoidable, guard it with
+  `command -v <tool>` first; when it is absent, print a clear skipped-check
+  explanation and exit 0 rather than failing the run.
+  Any `exec-script-exit-zero` check that creates a clean committed archive with
+  `git archive` MUST list every repository input used inside that archive in
+  `params.archive_paths`; set `params.archive_ref` when the archived revision is
+  not `HEAD`. The executor preflights those paths against the committed revision
+  and rejects a check whose archive cannot contain one of its own inputs.
   Reserve agent QA gates for judgement that no deterministic check can express.
   ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping. A reality check may
   reference ONLY files the round's REQUIRED contract guarantees: the `result_file`, the
@@ -102,13 +127,16 @@ prompt: |
     role: <role_name from available_roles>
     prompt_template: |
       <stage-specific instructions only — short, concrete, no task brief copy>
-      {task_description}
-    depends_on: [<stage_ids>]      # stages that must complete first
+    scope: [<project-relative paths or globs>]  # REQUIRED expected project write set
+    depends_on: [<stage_ids>]      # REQUIRED; genuine data dependencies only, [] when none
+    dependency_reasons:            # REQUIRED; keys exactly match depends_on, {} when none
+      <stage_id>: "<one sentence naming the predecessor output this stage consumes>"
     is_gate: true                   # quality gate — agent writes a verdict file
     retry_to: [<gate_ids>]          # if listed gate fails, re-run THIS stage then re-check the gate
     condition: <stage.field op value>  # optional — run this stage only if the expr holds
                                     #   (e.g. "verify_thing.status == failed"); ops: == != < <= > >=
     timeout_ms: <number>            # optional — override {default_timeout_ms}
+    timeout_total_ms: <number>      # optional — immutable technical-chain cap; defaults to 3 * resolved timeout_ms
     skills: [<skill_names>]         # optional
 
   Gate verdict contract (write to {run_dir}/verdict_<stage_id>.json): {verdict_contract}
@@ -147,17 +175,23 @@ prompt: |
   3. Never hardcode absolute paths in prompt_template — use {run_dir} and {project} (the scheduler substitutes these at runtime).
   4. Do NOT put the task brief (or any reference to it like `{task_description}` or "Task: ...") in `prompt_template`. The scheduler injects it automatically.
   5. Use `prompt_template:` (not `task:`).
-  6. Parallel stages (same depends_on) must NOT modify the same files.
-  7. A stage with is_gate: true should not also have retry_to. Gates evaluate; fix stages retry.
-  8. For QA gates, the prompt must specify EXACTLY what to verify (acceptance criteria, files to check, commands to run). For re-evaluations after a fix, instruct the QA to probe a new aspect — not just re-run the same test file.
+  6. Every stage MUST declare `scope`: the project-relative files, directories, or globs it may create, modify, or delete, including generated project outputs touched by its commands. Absolute paths, `{project}/` prefixes, and `..` escapes are invalid. Use `scope: []` only when the stage writes no project file; run-directory handoffs and verdicts are not project writes.
+  7. Default to parallel execution. Start with `depends_on: []` and add an edge ONLY when the downstream stage has a genuine data dependency: it consumes a concrete file, result, decision, or identifier produced by that predecessor and therefore cannot start yet. Stage numbering, similar roles, a preference for ordering, or overlapping write scopes are not dependencies. Never form a linear chain by default; combine overlapping writers when practical and never invent an edge merely to serialize them.
+  8. For every explicit `depends_on` entry, `dependency_reasons` MUST contain exactly one matching key whose value is one sentence naming the predecessor output consumed and why it is required. Use `dependency_reasons: {}` when `depends_on` is empty; do not include unmatched reasons.
+  9. Stages eligible to run together MUST have disjoint `scope` entries. A scope is a declaration; make it complete and conservative so runtime conflict checks can safely admit parallel work.
+  10. A stage with is_gate: true should not also have retry_to. Gates evaluate; fix stages retry.
+  11. For a QA gate's first execution, describe the validation objective, evidence boundaries, and required mechanical suites, then require the validator to audit as exhaustively as it can across every dimension it identifies — including risks absent from the brief — and to end with its own Coverage Map (aspect, reproducible evidence/command, conclusion, and unexamined items with reasons). Do NOT turn the brief into a finite planner-owned checklist; the coverage map is the validator's output. For re-evaluations after a fix, require only reproducible verification of every rejected item, the full mechanical regression suites, and re-execution of every prior Coverage Map check touched by the complete repair diff; do not ask for unrelated new probes.
+
+  # Temporary-work placement (hard rule)
+  Any temporary or one-off work product — including a clean-tree export, dependency-install sandbox such as one used for `npm ci`, probe file, or temporary archive — MUST be created under the operating system temporary root (`os.tmpdir()` / `$TMPDIR`), never inside the project directory. Put this instruction in each affected stage's `prompt_template`. Projects may live on a WSL2 drvfs mount, where small-file I/O has been measured at more than 6× slower than the native temporary filesystem. Normal project outputs `dist/`, `ui/dist/`, and the project's own `node_modules` are explicit exceptions: keep them in the project because they are not temporary work products.
 
   # Composition Guidance (advisory — use judgement, not templates)
   - **Match stages to the task's actual shape.** A 1-file fix may only need a single coder stage. A research-heavy task probably starts with researcher. A verification-only task uses qa alone. Don't impose a 4-stage shape just because most tasks have one.
   - **Prefer fewer stages.** Every stage pays a fresh-context cost (~30-100k tokens to read brief + tech_solution + prior outputs). Combine stages when the work is small and stays in one head.
-  - **Parallelize when files don't overlap.** Independent subtasks should run in parallel via separate depends_on chains.
+  - **Preserve real data flow.** Independent, disjoint-scope subtasks stay dependency-free and run in parallel; only consumers wait for producers.
   - **One gate→fix loop per gate, not two.** The retry_to mechanism handles retries. Don't bake a second verify+fix pair.
   - **End at the goal gate.** No stages beyond the deliverable.
-  - **Long-running stages need explicit timeout_ms.** If a stage will plausibly take > {default_timeout_ms}ms (heavy training, big downloads, multi-hour replays), set it.
+  - **Long-running stages need explicit timeout_ms and a bounded timeout_total_ms when the default 3× cap is inappropriate.** timeout_total_ms must be at least the resolved timeout_ms; it caps the whole technical chain, while runtime extensions only move the current soft deadline inside that cap.
 
   # Self-verifying coder pattern (preferred for implement stages with testable output)
 
@@ -209,6 +243,9 @@ prompt: |
   Example A — tiny bug fix, single stage:
   - id: fix_hash_mismatch
     role: coder
+    scope: [scripts/foo.py, tests/qa_foo.py]
+    depends_on: []
+    dependency_reasons: {}
     prompt_template: |
       Align the feature schema hash in {project}/scripts/foo.py with the assertion in
       {project}/tests/qa_foo.py. Add a shared helper compute_schema_hash() that both
@@ -217,18 +254,27 @@ prompt: |
   Example B — implement + verify:
   - id: implement_thing
     role: coder
+    scope: [src/thing.ts, spec/thing.test.ts]
+    depends_on: []
+    dependency_reasons: {}
     prompt_template: |
       Implement <specific change> by editing {project}/<file>. Keep changes additive.
   - id: verify_thing
     role: qa
+    scope: []
     depends_on: [implement_thing]
+    dependency_reasons:
+      implement_thing: "Verification must inspect and exercise the implementation produced by implement_thing."
     is_gate: true
     prompt_template: |
-      Write test scripts that assert <specific criteria>. Run them. Write verdict to
-      {run_dir}/verdict_verify_thing.json.
+      Audit spec/thing.test.ts against <specific criteria>, run it, and inspect the
+      implementation. Write verdict to {run_dir}/verdict_verify_thing.json.
   - id: fix_thing
     role: coder
+    scope: [src/thing.ts, spec/thing.test.ts]
     depends_on: [verify_thing]
+    dependency_reasons:
+      verify_thing: "The fix must consume verify_thing's verdict before correcting the rejected implementation."
     retry_to: [verify_thing]
     prompt_template: |
       Read verdict {run_dir}/verdict_verify_thing.json and QA output
@@ -237,12 +283,18 @@ prompt: |
   Example C — research-led:
   - id: research_options
     role: researcher
+    scope: []
+    depends_on: []
+    dependency_reasons: {}
     prompt_template: |
       Gather candidates for <X>. Write findings to {run_dir}/research.md and add
       finding nodes to {run_dir}/knowledge_graph.json.
   - id: implement_chosen
     role: coder
+    scope: [src/chosen_approach.ts]
     depends_on: [research_options]
+    dependency_reasons:
+      research_options: "Implementation must consume the evidence and selected candidate produced by research_options."
     prompt_template: |
       Read {run_dir}/research.md and pick the highest-evidence candidate. Implement it.
 

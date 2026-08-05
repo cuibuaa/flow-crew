@@ -1,15 +1,37 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import net from 'node:net';
 import type { Server } from 'node:net';
 import type { TaskCreateInput, TaskEntry, TaskListFilter } from './task-registry.js';
+import { fcGlobalDir } from './store.js';
+import type { CancellationResult } from './run-control.js';
+
+export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
 
 export class DaemonUnavailableError extends Error {
+  readonly exitCode = 1;
+
   constructor(message = 'daemon not running. Start with: flowcrew daemon start') {
     super(message);
     this.name = 'DaemonUnavailableError';
   }
+}
+
+export class RpcOutcomeUnknownError extends Error {
+  readonly exitCode = 2;
+
+  constructor(detail: string) {
+    super(
+      `${detail} The command may already have been delivered and taken effect. `
+      + 'Verify current state before retrying (for tasks: flowcrew task list). '
+      + 'Confirm the receiving daemon identity and build with: flowcrew daemon status.',
+    );
+    this.name = 'RpcOutcomeUnknownError';
+  }
+}
+
+export function rpcErrorExitCode(error: unknown): number {
+  return error instanceof RpcOutcomeUnknownError ? error.exitCode : 1;
 }
 
 export type RpcRequest =
@@ -17,56 +39,157 @@ export type RpcRequest =
   | { cmd: 'list'; filter?: TaskListFilter }
   | { cmd: 'show'; id: number }
   | { cmd: 'cancel'; id: number }
+  | { cmd: 'cancel-run'; runId: string; unit?: string }
   | { cmd: 'retry'; id: number }
   | { cmd: 'tail'; id: number; lines?: number; follow?: boolean }
   | { cmd: 'status' }
   | { cmd: 'stop' };
 
-export type RpcResponse =
-  | { id: number; unit: string }
-  | { tasks: TaskEntry[] }
-  | { task: TaskEntry; recent_ticks: string[] }
-  | { ok: true }
-  | { new_attempt: number; unit: string }
-  | { output: string }
-  | { uptime: number; watched_tasks: number }
-  | { error: string };
-
-export function defaultSocketPath(): string {
-  return join(homedir(), '.fc', 'daemon.sock');
+export interface RegisterRpcResponse {
+  id: number;
+  unit: string;
+  pid: number;
+  build: string;
 }
 
-export async function sendRpc<T extends RpcResponse = RpcResponse>(socketPath: string, request: RpcRequest, timeoutMs = 2000): Promise<T> {
+export interface TaskListRpcResponse {
+  tasks: TaskEntry[];
+  registry_unreadable_records?: number;
+}
+
+export interface DaemonStatusRpcResponse {
+  uptime: number;
+  watched_tasks: number;
+  registry_unreadable_records: number;
+  pid: number;
+  startedAt: string;
+  socketPath: string;
+  build: string;
+  buildFiles: number;
+  buildNewestMtimeMs: number;
+}
+
+export type RpcResponse =
+  | RegisterRpcResponse
+  | TaskListRpcResponse
+  | { task: TaskEntry; recent_ticks: string[] }
+  | { ok: true }
+  | CancellationResult
+  | { new_attempt: number; unit: string }
+  | { output: string }
+  | DaemonStatusRpcResponse
+  | { error: string };
+
+export interface RpcHandlerError {
+  request: RpcRequest;
+  error: Error;
+}
+
+export interface RpcServerOptions {
+  onHandlerError?: (failure: RpcHandlerError) => void;
+}
+
+export function formatDaemonRegistration(
+  response: Pick<RegisterRpcResponse, 'id' | 'unit'> & Partial<Pick<RegisterRpcResponse, 'pid' | 'build'>>,
+): string {
+  const pid = Number.isInteger(response.pid) && (response.pid ?? 0) > 0 ? response.pid : 'UNVERIFIED';
+  const build = typeof response.build === 'string' && response.build.length > 0 ? response.build : 'UNVERIFIED';
+  const suffix = pid === 'UNVERIFIED' || build === 'UNVERIFIED'
+    ? '. Confirm the receiving process with: flowcrew daemon status.'
+    : '';
+  return `Task #${response.id} registered (daemon pid=${pid}, build=${build}). Unit: ${response.unit}${suffix}`;
+}
+
+export function defaultSocketPath(): string {
+  return join(fcGlobalDir(), 'daemon.sock');
+}
+
+export async function sendRpc<T extends RpcResponse = RpcResponse>(
+  socketPath: string,
+  request: RpcRequest,
+  timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let raw = '';
-    const timer = setTimeout(() => {
-      socket.destroy();
-      reject(new DaemonUnavailableError());
+    let requestWritten = false;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const clearTimer = () => {
+      if (timer) clearTimeout(timer);
+    };
+    const rejectOnce = (error: Error, destroy = true) => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      if (destroy && !socket.destroyed) socket.destroy();
+      reject(error);
+    };
+    const resolveOnce = (response: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      resolve(response);
+    };
+    const transportFailure = (detail: string): Error => (
+      requestWritten ? new RpcOutcomeUnknownError(detail) : new DaemonUnavailableError()
+    );
+
+    timer = setTimeout(() => {
+      rejectOnce(transportFailure(`daemon response timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
 
     socket.on('connect', () => {
-      socket.write(JSON.stringify(request));
+      try {
+        socket.write(JSON.stringify(request), (error) => {
+          if (settled) return;
+          if (error) {
+            rejectOnce(transportFailure(`daemon connection failed while sending the request: ${error.message}.`));
+            return;
+          }
+          requestWritten = true;
+        });
+      } catch (error) {
+        rejectOnce(transportFailure(`daemon connection failed while sending the request: ${error instanceof Error ? error.message : String(error)}.`));
+      }
     });
     socket.on('data', (chunk) => { raw += chunk.toString('utf-8'); });
-    socket.on('error', () => {
-      clearTimeout(timer);
-      reject(new DaemonUnavailableError());
+    socket.on('error', (error) => {
+      rejectOnce(transportFailure(`daemon connection failed before a complete response: ${error.message}.`));
     });
     socket.on('end', () => {
-      clearTimeout(timer);
+      if (settled) return;
+      if (raw.trim().length === 0) {
+        rejectOnce(transportFailure('daemon connection closed without a response.'), false);
+        return;
+      }
       try {
         const parsed = JSON.parse(raw) as T;
-        if ('error' in parsed) reject(new Error(parsed.error));
-        else resolve(parsed);
-      } catch (err) {
-        reject(err);
+        if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
+          const daemonError = (parsed as { error?: unknown }).error;
+          if (typeof daemonError === 'string') rejectOnce(new Error(daemonError), false);
+          else rejectOnce(new RpcOutcomeUnknownError('daemon returned an invalid error response.'), false);
+        } else {
+          resolveOnce(parsed);
+        }
+      } catch {
+        rejectOnce(new RpcOutcomeUnknownError('daemon connection closed with an invalid response.'), false);
+      }
+    });
+    socket.on('close', () => {
+      if (!settled) {
+        rejectOnce(transportFailure('daemon connection closed before a complete response.'), false);
       }
     });
   });
 }
 
-export async function startRpcServer(socketPath: string, handler: (request: RpcRequest) => Promise<RpcResponse> | RpcResponse): Promise<Server> {
+export async function startRpcServer(
+  socketPath: string,
+  handler: (request: RpcRequest) => Promise<RpcResponse> | RpcResponse,
+  opts: RpcServerOptions = {},
+): Promise<Server> {
   mkdirSync(dirname(socketPath), { recursive: true });
   if (existsSync(socketPath)) {
     const live = await probeSocket(socketPath);
@@ -89,14 +212,22 @@ export async function startRpcServer(socketPath: string, handler: (request: RpcR
     socket.on('data', (chunk) => { raw += chunk.toString('utf-8'); });
     socket.on('data', async () => {
       if (handled) return;
+      let req: RpcRequest;
       try {
-        const req = JSON.parse(raw) as RpcRequest;
-        handled = true;
-        const res = await handler(req);
-        safeEnd(JSON.stringify(res));
+        req = JSON.parse(raw) as RpcRequest;
       } catch (err) {
         if (err instanceof SyntaxError) return;
         safeEnd(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        return;
+      }
+      handled = true;
+      try {
+        const res = await handler(req);
+        safeEnd(JSON.stringify(res));
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        try { opts.onHandlerError?.({ request: req, error }); } catch { /* logging must not hide the RPC error */ }
+        safeEnd(JSON.stringify({ error: error.message }));
       }
     });
   });

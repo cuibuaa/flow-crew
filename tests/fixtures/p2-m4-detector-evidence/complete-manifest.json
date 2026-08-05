@@ -1,0 +1,127 @@
+{
+  "schema": "flowcrew.detector-evidence/v1",
+  "detector": {
+    "id": "fixture.generic-row-detector",
+    "version": "1.0.0",
+    "argv": [
+      "node",
+      "--input-type=module",
+      "--eval",
+      "import{readFileSync as r}from'node:fs';const rows=r(process.argv[1],'utf8').split(/\\r?\\n/).filter(line=>line.length>0).map((line,index)=>{const[id,kind,disposition,reason]=line.split('|');if(!id||!kind||!disposition||!reason||!['keep','drop'].includes(disposition))throw new Error(`malformed fixture row ${index+1}`);return{id,kind,disposition,reason,line:index+1}});const rawCandidates=rows.filter(row=>row.kind==='candidate').map(row=>({id:row.id,attributes:{sourceLine:row.line,value:row.id}}));const candidateIds=new Set(rawCandidates.map(candidate=>candidate.id));const filters=rows.filter(row=>candidateIds.has(row.id)).map(row=>({candidateId:row.id,disposition:row.disposition,reason:row.reason}));process.stdout.write(JSON.stringify({schema:'flowcrew.detector-output/v1',detector:{id:'fixture.generic-row-detector',version:'1.0.0'},universe:{definition:'all non-empty rows in the committed fixture input',members:rows.map(row=>row.id)},rawCandidates,filters})+String.fromCharCode(10))",
+      "{{inputRoot}}/tests/fixtures/p2-m4-detector-evidence/input.txt"
+    ]
+  },
+  "input": {
+    "ref": "HEAD",
+    "commitOid": "0000000000000000000000000000000000000000",
+    "files": [
+      {
+        "path": "tests/fixtures/p2-m4-detector-evidence/input.txt",
+        "sha256": "1368983530a84bef8721031ecd57c07996917776fcb93489df4ffa3546b43065"
+      }
+    ],
+    "digest": "b888a1c900fbbe407c3f154a00003d5f09b83e35ec21eadc7217b61b3bc0885b"
+  },
+  "universe": {
+    "definition": "all non-empty rows in the committed fixture input",
+    "members": ["u-1", "u-2", "u-3", "u-4"],
+    "digest": "36cd2e01fd09b27e2c98805589d59b0dbc6c62c72c1f462bebd4470ed84049c3"
+  },
+  "rawCandidates": [
+    { "id": "u-1", "attributes": { "sourceLine": 1, "value": "u-1" } },
+    { "id": "u-2", "attributes": { "sourceLine": 2, "value": "u-2" } },
+    { "id": "u-3", "attributes": { "sourceLine": 3, "value": "u-3" } }
+  ],
+  "raw": {
+    "stdout": "{\"schema\":\"flowcrew.detector-output/v1\",\"detector\":{\"id\":\"fixture.generic-row-detector\",\"version\":\"1.0.0\"},\"universe\":{\"definition\":\"all non-empty rows in the committed fixture input\",\"members\":[\"u-1\",\"u-2\",\"u-3\",\"u-4\"]},\"rawCandidates\":[{\"id\":\"u-1\",\"attributes\":{\"sourceLine\":1,\"value\":\"u-1\"}},{\"id\":\"u-2\",\"attributes\":{\"sourceLine\":2,\"value\":\"u-2\"}},{\"id\":\"u-3\",\"attributes\":{\"sourceLine\":3,\"value\":\"u-3\"}}],\"filters\":[{\"candidateId\":\"u-1\",\"disposition\":\"keep\",\"reason\":\"independent review confirmed this candidate\"},{\"candidateId\":\"u-2\",\"disposition\":\"drop\",\"reason\":\"candidate duplicates u-1\"},{\"candidateId\":\"u-3\",\"disposition\":\"keep\",\"reason\":\"independent review confirmed this candidate\"}]}\n",
+    "stderr": ""
+  },
+  "exit": {
+    "code": 0,
+    "signal": null,
+    "timedOut": false
+  },
+  "parser": {
+    "id": "flowcrew.detector-output-json",
+    "version": "1",
+    "result": {
+      "schema": "flowcrew.detector-output/v1",
+      "detector": {
+        "id": "fixture.generic-row-detector",
+        "version": "1.0.0"
+      },
+      "universe": {
+        "definition": "all non-empty rows in the committed fixture input",
+        "members": ["u-1", "u-2", "u-3", "u-4"]
+      },
+      "rawCandidates": [
+        { "id": "u-1", "attributes": { "sourceLine": 1, "value": "u-1" } },
+        { "id": "u-2", "attributes": { "sourceLine": 2, "value": "u-2" } },
+        { "id": "u-3", "attributes": { "sourceLine": 3, "value": "u-3" } }
+      ],
+      "filters": [
+        {
+          "candidateId": "u-1",
+          "disposition": "keep",
+          "reason": "independent review confirmed this candidate"
+        },
+        {
+          "candidateId": "u-2",
+          "disposition": "drop",
+          "reason": "candidate duplicates u-1"
+        },
+        {
+          "candidateId": "u-3",
+          "disposition": "keep",
+          "reason": "independent review confirmed this candidate"
+        }
+      ]
+    }
+  },
+  "filters": [
+    {
+      "candidateId": "u-1",
+      "disposition": "keep",
+      "reason": "independent review confirmed this candidate"
+    },
+    {
+      "candidateId": "u-2",
+      "disposition": "drop",
+      "reason": "candidate duplicates u-1"
+    },
+    {
+      "candidateId": "u-3",
+      "disposition": "keep",
+      "reason": "independent review confirmed this candidate"
+    }
+  ],
+  "independentLabels": [
+    {
+      "candidateId": "u-1",
+      "verdict": "true_positive",
+      "reviewer": "independent-reviewer-a",
+      "rationale": "confirmed against the committed fixture row"
+    },
+    {
+      "candidateId": "u-2",
+      "verdict": "false_positive",
+      "reviewer": "independent-reviewer-a",
+      "rationale": "duplicate does not support a separate conclusion"
+    },
+    {
+      "candidateId": "u-3",
+      "verdict": "true_positive",
+      "reviewer": "independent-reviewer-a",
+      "rationale": "confirmed against the committed fixture row"
+    }
+  ],
+  "result": {
+    "count": 2,
+    "precision": 0.6666666666666666,
+    "disposition": "rankable",
+    "digest": "3beaa0195b9c8c4ca0104fa665222f07833c63fa6ea998d7adb88716a002d949",
+    "conclusion": {
+      "statement": "Two fixture candidates remain after evidence-backed filtering."
+    }
+  }
+}

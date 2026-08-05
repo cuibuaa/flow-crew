@@ -1,8 +1,7 @@
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import type { StoreState } from './store.js';
+import { fcGlobalDir, runsRoot, type StoreState } from './store.js';
 
 const require = createRequire(import.meta.url);
 
@@ -54,13 +53,8 @@ function countRunDirs(projectDir: string): number {
   }
 }
 
-function runsRoot(_projectDir: string): string {
-  return join(homedir(), '.fc', 'runs');
-}
-
 function dbPath(_projectDir: string): string {
-  const { homedir } = require('node:os') as typeof import('node:os');
-  return join(homedir(), '.fc', 'run-index.sqlite');
+  return join(fcGlobalDir(), 'run-index.sqlite');
 }
 
 function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | null {
@@ -77,8 +71,7 @@ function openDb(projectDir: string): DatabaseSync | null {
   if (cached) return cached;
   const sqlite = loadSqlite();
   if (!sqlite) return null;
-  const { homedir } = require('node:os') as typeof import('node:os');
-  mkdirSync(join(homedir(), '.fc'), { recursive: true });
+  mkdirSync(fcGlobalDir(), { recursive: true });
   const db = new sqlite.DatabaseSync(path);
   db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
   db.exec(`
@@ -313,6 +306,16 @@ export function listStandaloneRunIdsFromIndex(projectDir: string, limit: number)
     .prepare('SELECT run_id FROM runs WHERE campaign_storage_key IS NULL ORDER BY run_id DESC LIMIT ?')
     .all(limit)
     .map((row) => String(row.run_id));
+}
+
+/** Exact number of runs with no campaign attached. */
+export function countStandaloneRunsFromIndex(projectDir: string): number | null {
+  ensureIndexSeeded(projectDir);
+  const db = openDb(projectDir);
+  if (!db) return null;
+  const row = db.prepare('SELECT COUNT(*) AS count FROM runs WHERE campaign_storage_key IS NULL').get();
+  const count = Number(row?.count ?? 0);
+  return Number.isFinite(count) ? count : 0;
 }
 
 /** Run ids whose status is 'running' (for orphan reconciliation), newest first. */

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22.5
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.5.1
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:ui
+      - run: npm run lint
+      - run: npm test
+
+  public-spec-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22.5
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.5.1
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pull isolated test image
+        run: docker pull node:22.5.1-bookworm-slim
+
+      - name: Run public spec without network, agent CLIs, or existing state
+        run: |
+          docker run --rm \
+            --network none \
+            --tmpfs /home/flowcrew:rw,nosuid,nodev \
+            --env HOME=/home/flowcrew \
+            --env PATH=/usr/local/bin:/usr/bin:/bin \
+            --workdir /workspace \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            node:22.5.1-bookworm-slim \
+            sh -ceu '
+              test ! -e "$HOME/.fc"
+              ! command -v codex
+              ! command -v claude
+              node ./node_modules/vitest/vitest.mjs run spec
+            '

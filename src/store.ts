@@ -1,14 +1,102 @@
-import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync, statSync, rmdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { stripVTControlCharacters } from 'node:util';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
-import { parseChecksFromBrief, runAllChecks } from './reality-gate/index.js';
-import type { RealityGateReport } from './reality-gate/types.js';
+import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
+import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
+import type { BriefAdmissionRecord } from './brief-preflight.js';
+
+/** Exact run lifecycle vocabulary. Semantic groups and guards below derive from it. */
+export const RUN_STATUS = {
+  PENDING: 'pending',
+  RUNNING: 'running',
+  PARKED: 'parked',
+  COMPLETE: 'complete',
+  FAILED: 'failed',
+  AWAITING_APPROVAL: 'awaiting_approval',
+  SHIPPED: 'shipped',
+  CEILING_HIT: 'ceiling_hit',
+  ESCALATED: 'escalated',
+  REALITY_GATE_FAILED: 'reality_gate_failed',
+  PHASE_COMPLETE: 'phase_complete',
+  STOPPED: 'stopped',
+  INCOMPLETE: 'incomplete',
+} as const;
+export type RunStatus = typeof RUN_STATUS[keyof typeof RUN_STATUS];
+
+/** Stage execution is a separate state machine from the enclosing run. */
+export const STAGE_STATUS = {
+  PENDING: 'pending',
+  RUNNING: 'running',
+  COMPLETE: 'complete',
+  FAILED: 'failed',
+  SKIPPED: 'skipped',
+} as const;
+export type StageState = typeof STAGE_STATUS[keyof typeof STAGE_STATUS];
+
+export type StageAttemptState = 'running' | 'complete' | 'failed';
+export type AttemptTokenUsage = 'known' | 'unknown';
+export type WriteAttribution = 'structured' | 'snapshot' | 'unknown';
+
+export interface StageAttemptTimeoutSummary {
+  chainId: string;
+  initialBudgetMs: number;
+  effectiveBudgetMs: number;
+  hardTotalMs: number;
+  chainStartedAt: string;
+  hardDeadlineAt: string;
+  chargedElapsedMs: number;
+  hardRemainingMs: number;
+  extensionCount: number;
+  cumulativeGrantedMs: number;
+  decisionPaths: string[];
+  mismatchPaths: string[];
+  terminationCause?: 'complete' | 'supervisor_abort' | 'soft_timeout' | 'hard_cap_timeout' | 'hard_cap_exhausted' | 'hard_cap_clock_uncertain' | 'adapter_error' | 'failed';
+  hardDeadlineReachedAt?: string;
+  childClosedAt?: string;
+  deadlineOverrunMs?: number;
+}
+
+export interface StageConstraintAuditSummary {
+  path: string;
+  declaredScope: string[] | null;
+  effectiveScope: string[] | null;
+  acceptedRevisionCount: number;
+  rejectedRevisionCount: number;
+  mismatchCount: number;
+  violationCount: number;
+  unverifiedCount: number;
+  rawWriteCount?: number;
+  appliedWriteCount?: number;
+  rolledBackWriteCount?: number;
+  rejectedDigestCount?: number;
+}
+
+export interface StageAttempt {
+  index: number;
+  startedAt: string;
+  completedAt?: string;
+  status: StageAttemptState;
+  duration_ms?: number;
+  exitCode?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  /** Persisted evidence: both counters are known, or this settled attempt is explicitly unknown. */
+  tokenUsage?: AttemptTokenUsage;
+  error?: string;
+  writes?: string[];
+  writeAttribution?: WriteAttribution;
+  /** Small summary plus path to the immutable attempt-level constraint audit. */
+  constraintAudit?: StageConstraintAuditSummary;
+  /** Attempt-local soft budget and shared technical-chain hard-cap evidence. */
+  timeout?: StageAttemptTimeoutSummary;
+}
 
 export interface StageStatus {
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'skipped';
+  status: StageState;
   exitCode?: number;
   duration_ms?: number;
   artifacts?: string[];
@@ -19,6 +107,59 @@ export interface StageStatus {
   tokens_in?: number;
   tokens_out?: number;
   kgChanged?: boolean;
+  /** Append-only execution ledger. Top-level timing/token fields aggregate this array. */
+  attempts?: StageAttempt[];
+  /** Number of executions after the first; deliberately distinct from technical retries. */
+  reruns?: number;
+  /** Union of files attributed to this stage across its attempts. */
+  writes?: string[];
+  writeAttribution?: WriteAttribution;
+  constraintAudit?: StageConstraintAuditSummary;
+  timeout?: StageAttemptTimeoutSummary;
+}
+
+/**
+ * Usage from a dynamic stage that was retired by an outer re-plan. The active
+ * DAG intentionally drops those stages, but their completed work and cost are
+ * still facts about the run and must remain available to aggregators.
+ */
+export interface RetiredStageUsage {
+  stageId: string;
+  iteration: number;
+  status: StageStatus;
+}
+
+export interface SupervisorAttempt {
+  index: number;
+  startedAt: string;
+  completedAt: string;
+  status: 'complete' | 'failed';
+  duration_ms: number;
+  exitCode: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  /** Raw model output is retained for audit only and is never an effective action. */
+  unverifiedAssessment?: {
+    verdict: string;
+    targetStage: string | null;
+    reason: string;
+  };
+  /** Verdict and reason after supervisor-side fact validation and action guards. */
+  verdict?: string;
+  effectiveReason?: string;
+  error?: string;
+}
+
+/** Supervisor usage is separate from stages so it cannot affect DAG completion semantics. */
+export interface SupervisorUsage {
+  status: 'running' | 'complete';
+  calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  duration_ms: number;
+  startedAt: string;
+  completedAt?: string;
+  attempts: SupervisorAttempt[];
 }
 
 export interface CampaignTriggers {
@@ -263,13 +404,58 @@ export const CAMPAIGN_TRIGGER_TYPES = [
 ] as const;
 export type CampaignTriggerType = typeof CAMPAIGN_TRIGGER_TYPES[number]['id'];
 
+export interface RealityGateOutputTail {
+  tail: string;
+  /** Raw characters available in the durable check report. */
+  sourceChars: number;
+  sourceLines: number;
+  capturedChars: number;
+  capturedLines: number;
+  truncated: boolean;
+}
+
+export interface RealityGateCheckDiagnostic {
+  name: string;
+  type: string;
+  pass: boolean;
+  advisory: boolean;
+  details: string;
+  exit?: RealityGateExit;
+  stdout?: RealityGateOutputTail;
+  stderr?: RealityGateOutputTail;
+}
+
+export interface RealityGateDiagnostics {
+  /** Run-directory-relative canonical artifact; never reconstructed from this projection. */
+  artifactPath: string;
+  pass: boolean;
+  checkedAt: string;
+  checksRun: number;
+  results: RealityGateCheckDiagnostic[];
+}
+
 export interface StoreState {
   runId: string;
   workflowName: string;
   projectDir: string;
   /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
   baseCommit?: string;
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'awaiting_approval' | 'shipped' | 'ceiling_hit' | 'escalated' | 'reality_gate_failed' | 'phase_complete' | 'stopped' | 'incomplete';
+  status: RunStatus;
+  /**
+   * Set while status==='parked': the approval request this run suspended on.
+   * `pausedAt` freezes the elapsed clock so a park that waits a day does not
+   * render as a 24h hang.
+   */
+  parked?: {
+    requestId: string;
+    action: string;
+    target?: string;
+    reason: string;
+    atIteration: number;
+    stageId?: string;
+    requestedAt: string;
+    pausedAt: string;
+  };
   /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
   terminalStates?: TerminalStatesConfig;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
@@ -279,11 +465,17 @@ export interface StoreState {
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
   stages: Record<string, StageStatus>;
+  /** Append-only cost ledger for dynamic stages replaced by later outer plans. */
+  retiredStageUsage?: RetiredStageUsage[];
+  /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */
+  supervisor?: SupervisorUsage;
   startedAt: string;
   completedAt?: string;
   plan?: unknown[];
   dispatchedStages?: unknown[];
   taskDescription?: string;
+  /** Exact brief and visible acknowledgement decision admitted before launch. */
+  briefAdmission?: BriefAdmissionRecord;
   currentIteration?: number;
   maxIterations?: number;
   maxRetries?: number;
@@ -293,6 +485,8 @@ export interface StoreState {
   timeoutMs?: number;
   campaignTriggers?: CampaignTriggers;
   failureReason?: string;
+  /** Bounded, ANSI-free operator diagnostics copied from the terminal reality gate. */
+  realityGate?: RealityGateDiagnostics;
   campaignId?: string;
   campaign_id?: string;
   brief_version?: string;
@@ -331,14 +525,30 @@ export interface StoreState {
 }
 
 export const FC_DIR = '.fc';
-export const FC_GLOBAL_DIR = join(homedir(), FC_DIR);
+// FC_HOME (env) or setFcGlobalDir() override the global state root (~/.fc).
+// Consumers: engine-scenario tests and `flowcrew rehearse` run real workflows
+// against a temp dir so they can never write runs/campaign ledgers into the
+// developer's real ~/.fc (openworker lesson: tests once read real machine
+// state and emitted real telemetry; isolation must be structural, not
+// disciplinary). The env var works when set before module load; the setter
+// covers callers inside an already-loaded process (the CLI's rehearse path).
+let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
+export const FC_GLOBAL_DIR = _fcGlobalDir;
+
+export function fcGlobalDir(): string {
+  return _fcGlobalDir;
+}
+
+export function setFcGlobalDir(path: string): void {
+  _fcGlobalDir = path;
+}
 
 export function runsRoot(_projectDir?: string): string {
-  return join(FC_GLOBAL_DIR, 'runs');
+  return join(_fcGlobalDir, 'runs');
 }
 
 export function campaignsRoot(): string {
-  return join(FC_GLOBAL_DIR, 'campaigns');
+  return join(_fcGlobalDir, 'campaigns');
 }
 
 export function campaignDir(id: string): string {
@@ -370,7 +580,15 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
  * a second, drift-prone copy of these vocabularies.
  */
 export const TERMINAL_STATUSES = [
-  'complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'phase_complete', 'stopped', 'incomplete',
+  RUN_STATUS.COMPLETE,
+  RUN_STATUS.FAILED,
+  RUN_STATUS.SHIPPED,
+  RUN_STATUS.CEILING_HIT,
+  RUN_STATUS.ESCALATED,
+  RUN_STATUS.REALITY_GATE_FAILED,
+  RUN_STATUS.PHASE_COMPLETE,
+  RUN_STATUS.STOPPED,
+  RUN_STATUS.INCOMPLETE,
 ] as const;
 
 /** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
@@ -382,6 +600,47 @@ export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, 
 /** Single source of truth for "this run has reached a terminal state". */
 export function isTerminalRunStatus(status: string): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * PAUSED — alive in the lifecycle, but no process is running and no verdict has
+ * been reached. Today that means `parked`: the run suspended itself on an
+ * approval request and exited, and it resumes (same runId, same DAG, same
+ * iteration counter) once a human resolves the request.
+ *
+ * Deliberately NOT in TERMINAL_STATUSES: that array is stringified into every
+ * agent's system prompt as the terminal vocabulary, so listing a paused status
+ * there would teach agents to emit it as a verdict. It is also not 'running':
+ * a parked run holds no pid, so the orphan reaper must not see it as alive and
+ * the single-in-flight lock must not see it as busy.
+ */
+export const PAUSED_STATUSES = [RUN_STATUS.PARKED] as const;
+
+export function isPausedRunStatus(status: string): boolean {
+  return (PAUSED_STATUSES as readonly string[]).includes(status);
+}
+
+/** "The run is alive in the lifecycle" — running OR paused, i.e. not finished. */
+export function isActiveRunStatus(status: string): boolean {
+  return isRunningRunStatus(status) || isPausedRunStatus(status);
+}
+
+/** A scheduler process is presently executing this run. Parked is deliberately false. */
+export function isRunningRunStatus(status: string): boolean {
+  return status === RUN_STATUS.RUNNING;
+}
+
+/** Legacy plan approval transition; distinct from a parked approval-inbox suspension. */
+export function isAwaitingApprovalRunStatus(status: string): boolean {
+  return status === RUN_STATUS.AWAITING_APPROVAL;
+}
+
+/**
+ * Dashboard mutations that rewrite run/stage history must wait while execution,
+ * legacy plan approval, or a parked approval request still owns the run.
+ */
+export function isRunMutationBlockedStatus(status: string): boolean {
+  return isActiveRunStatus(status) || isAwaitingApprovalRunStatus(status);
 }
 
 /**
@@ -397,15 +656,37 @@ export function isTerminalRunStatus(status: string): boolean {
  * execSync) does not mistake a normal ceiling for a crash.
  */
 export function isSuccessfulRunStatus(status: string): boolean {
-  return status === 'complete' || status === 'shipped' || status === 'ceiling_hit';
+  return status === RUN_STATUS.COMPLETE || status === RUN_STATUS.SHIPPED || status === RUN_STATUS.CEILING_HIT;
 }
 
 function isRealityGatedTerminal(status: string): boolean {
-  return status === 'complete' || status === 'shipped' || status === 'ceiling_hit';
+  return isSuccessfulRunStatus(status);
+}
+
+const SETTLED_STAGE_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED] as const;
+const SATISFIED_STAGE_DEPENDENCY_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.SKIPPED] as const;
+
+export function isRunningStageStatus(status: string): boolean {
+  return status === STAGE_STATUS.RUNNING;
+}
+
+export function isPendingStageStatus(status: string): boolean {
+  return status === STAGE_STATUS.PENDING;
+}
+
+/** Complete or failed: execution has produced a settled stage outcome. */
+export function isSettledStageStatus(status: string): boolean {
+  return (SETTLED_STAGE_STATUSES as readonly string[]).includes(status);
+}
+
+/** Complete or skipped: downstream DAG dependencies may proceed. */
+export function isSatisfiedStageDependencyStatus(status: string): boolean {
+  return (SATISFIED_STAGE_DEPENDENCY_STATUSES as readonly string[]).includes(status);
 }
 
 function failureMarkdown(report: RealityGateReport, targetStatus: string): string {
-  const failed = report.results.filter((item) => !item.pass);
+  const failed = report.results.filter((item) => !item.pass && item.advisory !== true);
+  const advisories = report.results.filter((item) => !item.pass && item.advisory === true);
   return [
     `# Reality Gate Failed`,
     ``,
@@ -414,8 +695,81 @@ function failureMarkdown(report: RealityGateReport, targetStatus: string): strin
     ``,
     `## Failed checks`,
     ...(failed.length === 0 ? ['- none'] : failed.map((item) => `- ${item.name} (${item.type}): ${item.details}`)),
+    ...(advisories.length === 0 ? [] : [
+      ``,
+      `## Advisory checks`,
+      ...advisories.map((item) => `- ${item.name} (${item.type}): ${item.details}`),
+    ]),
     ``,
   ].join('\n');
+}
+
+const REALITY_GATE_OUTPUT_TAIL_CHARS = 2_048;
+const REALITY_GATE_FAILURE_DETAIL_CHARS = 240;
+const REALITY_GATE_ARTIFACT_PATH = '.reality-gate.json';
+
+function countOutputLines(value: string): number {
+  if (value.length === 0) return 0;
+  const lineBreaks = value.match(/\r\n|\r|\n/g)?.length ?? 0;
+  return lineBreaks + (/\r\n$|\r$|\n$/.test(value) ? 0 : 1);
+}
+
+function captureRealityGateOutput(value: string): RealityGateOutputTail {
+  const sanitized = stripVTControlCharacters(value);
+  const tail = sanitized.slice(-REALITY_GATE_OUTPUT_TAIL_CHARS);
+  return {
+    tail,
+    sourceChars: value.length,
+    sourceLines: countOutputLines(value),
+    capturedChars: tail.length,
+    capturedLines: countOutputLines(tail),
+    truncated: sanitized.length > tail.length,
+  };
+}
+
+function realityGateDiagnostics(report: RealityGateReport): RealityGateDiagnostics {
+  return {
+    artifactPath: REALITY_GATE_ARTIFACT_PATH,
+    pass: report.pass,
+    checkedAt: report.checkedAt,
+    checksRun: report.checksRun,
+    results: report.results.map((item) => {
+      const diagnostic: RealityGateCheckDiagnostic = {
+        name: stripVTControlCharacters(item.name),
+        type: stripVTControlCharacters(item.type),
+        pass: item.pass,
+        advisory: item.advisory === true,
+        details: stripVTControlCharacters(item.details),
+      };
+      if (!item.pass && item.evidence && typeof item.evidence === 'object' && !Array.isArray(item.evidence)) {
+        const evidence = item.evidence as Record<string, unknown>;
+        if (isRealityGateExit(evidence.exit)) diagnostic.exit = { ...evidence.exit };
+        if (typeof evidence.stdout === 'string') diagnostic.stdout = captureRealityGateOutput(evidence.stdout);
+        if (typeof evidence.stderr === 'string') diagnostic.stderr = captureRealityGateOutput(evidence.stderr);
+      }
+      return diagnostic;
+    }),
+  };
+}
+
+function isRealityGateExit(value: unknown): value is RealityGateExit {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const exit = value as Record<string, unknown>;
+  return (exit.code === null || Number.isInteger(exit.code))
+    && (exit.signal === null || typeof exit.signal === 'string')
+    && typeof exit.timedOut === 'boolean';
+}
+
+function realityGateFailureReason(report: RealityGateDiagnostics, targetStatus: string): string {
+  const failed = report.results.filter((item) => !item.pass && !item.advisory);
+  const summaries = failed.map((item) => {
+    const details = item.details.replace(/\s+/g, ' ').trim();
+    const excerpt = details.length > REALITY_GATE_FAILURE_DETAIL_CHARS
+      ? `${details.slice(0, REALITY_GATE_FAILURE_DETAIL_CHARS - 3)}...`
+      : details;
+    return `${item.name} (${item.type})${excerpt ? `: ${excerpt}` : ''}`;
+  });
+  return `Reality gate blocked terminal status ${targetStatus}; failed checks: ${summaries.join('; ')}`;
 }
 
 export async function enforceRealityGateBeforeTerminal(
@@ -437,17 +791,36 @@ export async function enforceRealityGateBeforeTerminal(
   if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
   if (checks.length === 0) return { allowed: true, state };
   const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath: existsSync(briefPath) ? briefPath : plannerChecksPath });
-  atomicWrite(join(dir, '.reality-gate.json'), JSON.stringify(report, null, 2) + '\n');
-  if (report.pass) return { allowed: true, state, report };
+  const artifactPath = join(dir, REALITY_GATE_ARTIFACT_PATH);
+  atomicWrite(artifactPath, JSON.stringify(report, null, 2) + '\n');
+  const durableReport = readRealityGateReport(artifactPath);
+  const advisoryFailures = durableReport.results.filter((item) => !item.pass && item.advisory === true);
+  if (advisoryFailures.length > 0) {
+    const { recordRunEvent } = await import('./run-events.js');
+    recordRunEvent(projectDir, runId, {
+      type: 'reality_gate_advisory',
+      runId,
+      timestamp: durableReport.checkedAt,
+      detail: advisoryFailures.map((item) => `${item.name}: ${item.details}`).join('; '),
+    });
+  }
+  const diagnostics = realityGateDiagnostics(durableReport);
+  if (durableReport.pass) {
+    // Callers persist the original state object after an allowed gate, so attach
+    // advisory evidence in place rather than returning an otherwise-lost copy.
+    state.realityGate = diagnostics;
+    return { allowed: true, state, report: durableReport };
+  }
   const next: StoreState = {
     ...state,
     status: 'reality_gate_failed',
-    failureReason: `Reality gate blocked terminal status ${targetStatus}`,
+    failureReason: realityGateFailureReason(diagnostics, targetStatus),
+    realityGate: diagnostics,
     completedAt: new Date().toISOString(),
   };
-  appendFileSync(join(dir, '.reality-gate.failures.md'), failureMarkdown(report, targetStatus), 'utf-8');
+  appendFileSync(join(dir, '.reality-gate.failures.md'), failureMarkdown(durableReport, targetStatus), 'utf-8');
   writeRunState(projectDir, runId, next);
-  return { allowed: false, state: next, report };
+  return { allowed: false, state: next, report: durableReport };
 }
 
 function oneLineOutcome(value: string): string | undefined {
@@ -535,7 +908,7 @@ export function extractTaskTitle(desc?: string): string {
 }
 
 export function ensureGlobalRunsDir(): void {
-  mkdirSync(join(FC_GLOBAL_DIR, 'runs'), { recursive: true });
+  mkdirSync(join(_fcGlobalDir, 'runs'), { recursive: true });
 }
 
 export function runDir(projectDir: string, runId: string): string {
@@ -557,10 +930,114 @@ export function atomicWrite(filePath: string, data: string): void {
   }
 }
 
-function generateRunId(): string {
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+function generateRunId(at = new Date()): string {
+  const ts = at.toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const suffix = randomBytes(3).toString('hex');
   return `${ts}-${suffix}`;
+}
+
+export const RUN_RESERVATION_FILE = '.run-reservation.json';
+export const RUN_RESERVATION_TTL_MS = 15 * 60_000;
+
+export interface RunReservation {
+  version: 1;
+  runId: string;
+  projectDir: string;
+  reservedAt: string;
+}
+
+/**
+ * Allocate the run identity before a daemon launches the CLI. The directory and
+ * marker are the durable task→run association; run.json is deliberately absent
+ * until the scheduler initializes the reserved run.
+ */
+export function reserveRun(projectDir: string, at = new Date()): { runId: string; runDirPath: string } {
+  ensureGlobalRunsDir();
+  const normalizedProjectDir = resolve(projectDir);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const runId = generateRunId(at);
+    const dir = runDir(normalizedProjectDir, runId);
+    try {
+      mkdirSync(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+    const reservation: RunReservation = {
+      version: 1,
+      runId,
+      projectDir: normalizedProjectDir,
+      reservedAt: at.toISOString(),
+    };
+    try {
+      atomicWrite(join(dir, RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
+      return { runId, runDirPath: dir };
+    } catch (err) {
+      try { rmdirSync(dir); } catch { /* retain evidence if the directory is no longer empty */ }
+      throw err;
+    }
+  }
+  throw new Error('Unable to allocate a unique FlowCrew run id');
+}
+
+export function readRunReservation(
+  projectDir: string,
+  runId: string,
+  nowMs = Date.now(),
+  maxAgeMs = RUN_RESERVATION_TTL_MS,
+): RunReservation | undefined {
+  const dir = runDir(projectDir, runId);
+  try {
+    const reservation = JSON.parse(readFileSync(join(dir, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
+    if (
+      reservation.version !== 1 ||
+      reservation.runId !== runId ||
+      basename(dir) !== runId ||
+      typeof reservation.projectDir !== 'string' ||
+      resolve(reservation.projectDir) !== resolve(projectDir) ||
+      typeof reservation.reservedAt !== 'string'
+    ) return undefined;
+    const reservedAt = Date.parse(reservation.reservedAt);
+    if (!Number.isFinite(reservedAt) || reservedAt > nowMs + 5_000 || nowMs - reservedAt > maxAgeMs) return undefined;
+    return reservation as RunReservation;
+  } catch {
+    return undefined;
+  }
+}
+
+export function initializeReservedRun(
+  projectDir: string,
+  runId: string,
+  workflowName: string,
+  workflowYaml: string,
+  stageIds: string[],
+): { runId: string; runDirPath: string } {
+  const normalizedProjectDir = resolve(projectDir);
+  const reservation = readRunReservation(normalizedProjectDir, runId, Date.now(), Number.POSITIVE_INFINITY);
+  if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
+  const dir = runDir(normalizedProjectDir, runId);
+  if (existsSync(join(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
+  mkdirSync(join(dir, 'stages'), { recursive: true });
+  for (const sid of stageIds) {
+    mkdirSync(stageDir(normalizedProjectDir, runId, sid), { recursive: true });
+  }
+  const stages: Record<string, StageStatus> = {};
+  for (const sid of stageIds) stages[sid] = { status: 'pending', retries: 0 };
+  const state: StoreState = {
+    runId,
+    workflowName,
+    projectDir: normalizedProjectDir,
+    status: 'running',
+    stages,
+    startedAt: new Date().toISOString(),
+  };
+  const baseCommit = captureGitHead(normalizedProjectDir);
+  if (baseCommit) state.baseCommit = baseCommit;
+  atomicWrite(join(dir, 'run.json'), JSON.stringify(state, null, 2));
+  try { upsertRunIndex(normalizedProjectDir, state); } catch { /* index is best-effort */ }
+  atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
+  try { unlinkSync(join(dir, RUN_RESERVATION_FILE)); } catch { /* initialized state is authoritative */ }
+  return { runId, runDirPath: dir };
 }
 
 /** Return the current git HEAD SHA for `projectDir`, or undefined when it is not a git repo / git is unavailable. */
@@ -584,30 +1061,8 @@ export function createRun(
   workflowYaml: string,
   stageIds: string[],
 ): { runId: string; runDirPath: string } {
-  const runId = generateRunId();
-  const dir = runDir(projectDir, runId);
-  mkdirSync(join(dir, 'stages'), { recursive: true });
-  for (const sid of stageIds) {
-    mkdirSync(stageDir(projectDir, runId, sid), { recursive: true });
-  }
-  const stages: Record<string, StageStatus> = {};
-  for (const sid of stageIds) {
-    stages[sid] = { status: 'pending', retries: 0 };
-  }
-  const state: StoreState = {
-    runId,
-    workflowName,
-    projectDir,
-    status: 'running',
-    stages,
-    startedAt: new Date().toISOString(),
-  };
-  const baseCommit = captureGitHead(projectDir);
-  if (baseCommit) state.baseCommit = baseCommit;
-  atomicWrite(join(dir, 'run.json'), JSON.stringify(state, null, 2));
-  try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
-  atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
-  return { runId, runDirPath: dir };
+  const reservation = reserveRun(projectDir);
+  return initializeReservedRun(projectDir, reservation.runId, workflowName, workflowYaml, stageIds);
 }
 
 export function readRunState(projectDir: string, runId: string): StoreState {
@@ -658,6 +1113,187 @@ export function writeStageStatus(
   const dir = stageDir(projectDir, runId, stageId);
   mkdirSync(dir, { recursive: true });
   atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
+  // The per-stage file is the execution ledger, while run.json is the public
+  // aggregate consumed by the dashboard and campaign views. Keep the current
+  // attempt visible there immediately instead of waiting for the parent
+  // scheduler to finish the attempt. updateRunState re-applies this narrow
+  // mutation if a parallel stage updates run.json at the same time.
+  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
+  if (existsSync(runJsonPath)) {
+    updateRunState(projectDir, runId, (state) => {
+      state.stages[stageId] = status;
+    });
+  }
+}
+
+function readStageStatusIfPresent(projectDir: string, runId: string, stageId: string): StageStatus | undefined {
+  try { return readStageStatus(projectDir, runId, stageId); } catch { return undefined; }
+}
+
+function sumAttemptField(attempts: StageAttempt[], key: 'duration_ms' | 'tokens_in' | 'tokens_out'): number | undefined {
+  const values = attempts
+    .map((attempt) => attempt[key])
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function uniqueStrings(...groups: Array<string[] | undefined>): string[] | undefined {
+  const values = [...new Set(groups.flatMap((group) => group ?? []).filter(Boolean))];
+  return values.length > 0 ? values : undefined;
+}
+
+/**
+ * Append a new running attempt without discarding any prior execution. The
+ * returned top-level timestamps keep their compatibility meaning:
+ * `startedAt` is the first attempt start and `completedAt` is the latest
+ * completed attempt (if one exists while the new attempt is running).
+ */
+export function beginStageAttempt(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  retries: number,
+  startedAt = new Date().toISOString(),
+): StageStatus {
+  const previous = readStageStatusIfPresent(projectDir, runId, stageId);
+  const attempts = [...(previous?.attempts ?? [])];
+  const nextIndex = attempts.reduce((max, attempt) => Math.max(max, attempt.index), 0) + 1;
+  attempts.push({ index: nextIndex, startedAt, status: 'running' });
+  const running: StageStatus = {
+    ...previous,
+    status: STAGE_STATUS.RUNNING,
+    retries,
+    attempts,
+    reruns: Math.max(0, attempts.length - 1),
+    startedAt: attempts[0]?.startedAt ?? startedAt,
+  };
+  writeStageStatus(projectDir, runId, stageId, running);
+  return running;
+}
+
+export interface CompleteStageAttemptInput {
+  exitCode: number;
+  duration_ms: number;
+  completedAt?: string;
+  artifacts?: string[];
+  error?: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  kgChanged?: boolean;
+  writes?: string[];
+  writeAttribution?: WriteAttribution;
+  constraintAudit?: StageConstraintAuditSummary;
+  timeout?: StageAttemptTimeoutSummary;
+}
+
+/** Complete only the current attempt, then rebuild compatibility aggregates. */
+export function completeStageAttempt(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  retries: number,
+  completion: CompleteStageAttemptInput,
+): StageStatus {
+  const previous = readStageStatusIfPresent(projectDir, runId, stageId);
+  const completedAt = completion.completedAt ?? new Date().toISOString();
+  const attempts = [...(previous?.attempts ?? [])];
+  let currentIndex = attempts.length - 1;
+  if (currentIndex < 0 || attempts[currentIndex].status !== 'running') {
+    const startedAt = previous?.startedAt ?? completedAt;
+    const nextIndex = attempts.reduce((max, attempt) => Math.max(max, attempt.index), 0) + 1;
+    attempts.push({ index: nextIndex, startedAt, status: 'running' });
+    currentIndex = attempts.length - 1;
+  }
+  const current = attempts[currentIndex];
+  const tokensIn = typeof completion.tokens_in === 'number' && Number.isFinite(completion.tokens_in)
+    ? completion.tokens_in
+    : undefined;
+  const tokensOut = typeof completion.tokens_out === 'number' && Number.isFinite(completion.tokens_out)
+    ? completion.tokens_out
+    : undefined;
+  attempts[currentIndex] = {
+    ...current,
+    completedAt,
+    status: completion.exitCode === 0 ? 'complete' : 'failed',
+    duration_ms: completion.duration_ms,
+    exitCode: completion.exitCode,
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
+    tokenUsage: tokensIn !== undefined && tokensOut !== undefined ? 'known' : 'unknown',
+    error: completion.error,
+    writes: completion.writes,
+    writeAttribution: completion.writeAttribution,
+    constraintAudit: completion.constraintAudit,
+    timeout: completion.timeout,
+  };
+  const writes = uniqueStrings(previous?.writes, completion.writes);
+  const final: StageStatus = {
+    status: completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
+    exitCode: completion.exitCode,
+    duration_ms: sumAttemptField(attempts, 'duration_ms'),
+    artifacts: uniqueStrings(previous?.artifacts, completion.artifacts),
+    retries,
+    startedAt: attempts[0]?.startedAt,
+    completedAt,
+    error: completion.error,
+    tokens_in: sumAttemptField(attempts, 'tokens_in'),
+    tokens_out: sumAttemptField(attempts, 'tokens_out'),
+    kgChanged: previous?.kgChanged === true || completion.kgChanged === true,
+    attempts,
+    reruns: Math.max(0, attempts.length - 1),
+    writes,
+    writeAttribution: completion.writeAttribution ?? previous?.writeAttribution,
+    constraintAudit: completion.constraintAudit ?? previous?.constraintAudit,
+    timeout: completion.timeout ?? previous?.timeout,
+  };
+  writeStageStatus(projectDir, runId, stageId, final);
+  return final;
+}
+
+/** Attach scheduler-owned scope reconciliation after the worker has settled an attempt. */
+export function attachStageConstraintAudit(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  attemptIndex: number,
+  audit: StageConstraintAuditSummary,
+  violationError?: string,
+): StageStatus {
+  const status = readStageStatus(projectDir, runId, stageId);
+  const attempts = [...(status.attempts ?? [])];
+  const index = attempts.findIndex((attempt) => attempt.index === attemptIndex);
+  if (index < 0) throw new Error(`Cannot attach constraint audit: stage ${stageId} attempt ${attemptIndex} does not exist`);
+  attempts[index] = {
+    ...attempts[index],
+    constraintAudit: audit,
+    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError } : {}),
+  };
+  const updated: StageStatus = {
+    ...status,
+    attempts,
+    constraintAudit: audit,
+    ...(violationError ? {
+      status: STAGE_STATUS.FAILED,
+      exitCode: 1,
+      error: violationError,
+    } : {}),
+  };
+  writeStageStatus(projectDir, runId, stageId, updated);
+  return updated;
+}
+
+/** Re-pend a stage while retaining its immutable attempt ledger and aggregates. */
+export function rependStageStatus(
+  previous: StageStatus | undefined,
+  retries = previous?.retries ?? 0,
+  error = previous?.error,
+): StageStatus {
+  return {
+    ...(previous ?? {}),
+    status: STAGE_STATUS.PENDING,
+    retries,
+    error,
+  };
 }
 
 export function writeStageInput(
@@ -669,12 +1305,28 @@ export function writeStageInput(
   atomicWrite(join(stageDir(projectDir, runId, stageId), 'input.md'), input);
 }
 
+/**
+ * `output.md` keeps its meaning — the latest attempt's output — because eighteen readers
+ * depend on it. What it could not do was preserve an earlier attempt: each attempt
+ * overwrote it, so a retry told to "read your previous output" could be handed whatever
+ * the most recent attempt left, and a successful attempt's output could be destroyed by a
+ * later one that failed in two seconds. Observed: a stage whose second attempt passed
+ * ended with a 125-byte `output.md` written by a third attempt that never ran.
+ *
+ * Passing `attemptIndex` also writes `output_attempt_<n>.md`, following the
+ * `constraint_audit_attempt_<n>.json` convention already used in the same directory, so a
+ * retry can be pointed at the attempt it actually needs to read.
+ */
 export function writeStageOutput(
   projectDir: string,
   runId: string,
   stageId: string,
   output: string,
+  attemptIndex?: number,
 ): void {
+  if (attemptIndex !== undefined && Number.isInteger(attemptIndex) && attemptIndex > 0) {
+    atomicWrite(join(stageDir(projectDir, runId, stageId), `output_attempt_${attemptIndex}.md`), output);
+  }
   atomicWrite(join(stageDir(projectDir, runId, stageId), 'output.md'), output);
 }
 

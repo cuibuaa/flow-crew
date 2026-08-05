@@ -2,9 +2,23 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import type { CheckContext, CheckDecl, RealityCheck, RealityGateReport } from './types.js';
+import type {
+  CheckContext,
+  CheckDecl,
+  RealityCheck,
+  RealityGateCheckReport,
+  RealityGateExit,
+  RealityGateReport,
+} from './types.js';
 
-export type { CheckContext, CheckDecl, CheckResult, RealityCheck, RealityGateReport } from './types.js';
+export type {
+  CheckContext,
+  CheckDecl,
+  CheckResult,
+  RealityCheck,
+  RealityGateExit,
+  RealityGateReport,
+} from './types.js';
 
 export function parseChecksFromBrief(briefPath: string): CheckDecl[] {
   return parseChecksFromMarkdown(readFileSync(briefPath, 'utf-8'));
@@ -28,38 +42,197 @@ export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
 }
 
 function normalizeChecks(checks: unknown[]): CheckDecl[] {
-  return checks.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
+  return checks.map((item, index): CheckDecl => {
+    const position = index + 1;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return invalidDeclaration(position, 'must be an object');
+    }
     const rec = item as Record<string, unknown>;
-    if (typeof rec.name !== 'string' || typeof rec.type !== 'string') return [];
+    if (typeof rec.name !== 'string') {
+      return invalidDeclaration(position, 'must have a string name');
+    }
+    if (typeof rec.type !== 'string') {
+      return invalidDeclaration(position, 'must have a string type', rec.name);
+    }
     const params = rec.params && typeof rec.params === 'object' ? rec.params as object : {};
-    return [{ name: rec.name, type: rec.type, params }];
+    return {
+      name: rec.name,
+      type: rec.type,
+      params,
+      ...(rec.advisory === true ? { advisory: true } : {}),
+    };
   });
+}
+
+function invalidDeclaration(position: number, diagnostic: string, suppliedName?: string): CheckDecl {
+  const name = suppliedName?.trim() ? suppliedName : `Reality check item #${position}`;
+  return {
+    kind: 'invalid',
+    name,
+    type: '__invalid-reality-check-declaration__',
+    diagnostic: `Reality check item #${position} ${diagnostic}`,
+  };
 }
 
 export async function runAllChecks(decls: CheckDecl[], context: CheckContext): Promise<RealityGateReport> {
   const handlers = await loadHandlers();
-  const results = [];
+  const results: RealityGateCheckReport[] = [];
   for (const decl of decls) {
+    if (decl.kind === 'invalid') {
+      results.push({
+        name: decl.name,
+        type: decl.type,
+        pass: false,
+        details: decl.diagnostic,
+      });
+      continue;
+    }
     const handler = handlers.get(decl.type);
     if (!handler) {
-      results.push({ name: decl.name, type: decl.type, pass: false, details: `unknown check type: ${decl.type}` });
+      results.push({
+        name: decl.name,
+        type: decl.type,
+        pass: false,
+        details: `unknown check type: ${decl.type}`,
+        ...(decl.advisory === true ? { advisory: true } : {}),
+      });
       continue;
     }
     try {
-      const result = await handler.run(decl.params, context);
-      results.push({ name: decl.name, type: decl.type, ...result });
+      const { advisory: handlerAdvisory, ...result } = await handler.run(decl.params, context);
+      results.push({
+        name: decl.name,
+        type: decl.type,
+        ...result,
+        ...(decl.advisory === true || handlerAdvisory === true ? { advisory: true } : {}),
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      results.push({ name: decl.name, type: decl.type, pass: false, details: message.length <= 500 ? message : `${message.slice(0, 497)}...` });
+      results.push({
+        name: decl.name,
+        type: decl.type,
+        pass: false,
+        details: message.length <= 500 ? message : `${message.slice(0, 497)}...`,
+        ...(decl.advisory === true ? { advisory: true } : {}),
+      });
     }
   }
   return {
-    pass: results.every((item) => item.pass),
+    pass: results.every((item) => item.pass || item.advisory === true),
     checkedAt: new Date().toISOString(),
     checksRun: results.length,
     results,
   };
+}
+
+/**
+ * Read the canonical reality-gate artifact back from disk before adjudication.
+ * This deliberately accepts an artifact path, never a run.json/UI projection.
+ */
+export function readRealityGateReport(artifactPath: string): RealityGateReport {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(artifactPath, 'utf-8')) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot read durable reality-gate evidence at ${artifactPath}: ${detail}`, {
+      cause: error,
+    });
+  }
+  return validateRealityGateReport(value, artifactPath);
+}
+
+function validateRealityGateReport(value: unknown, artifactPath: string): RealityGateReport {
+  const report = requireRecord(value, 'report', artifactPath);
+  if (typeof report.pass !== 'boolean') invalidArtifact(artifactPath, 'report.pass must be boolean');
+  if (typeof report.checkedAt !== 'string' || report.checkedAt.length === 0) {
+    invalidArtifact(artifactPath, 'report.checkedAt must be a nonempty string');
+  }
+  if (!Number.isInteger(report.checksRun) || (report.checksRun as number) < 0) {
+    invalidArtifact(artifactPath, 'report.checksRun must be a nonnegative integer');
+  }
+  if (!Array.isArray(report.results)) invalidArtifact(artifactPath, 'report.results must be an array');
+
+  const results = (report.results as unknown[]).map((entry, index) => {
+    const check = requireRecord(entry, `report.results[${index}]`, artifactPath);
+    if (typeof check.name !== 'string') invalidArtifact(artifactPath, `report.results[${index}].name must be a string`);
+    if (typeof check.type !== 'string') invalidArtifact(artifactPath, `report.results[${index}].type must be a string`);
+    if (typeof check.pass !== 'boolean') invalidArtifact(artifactPath, `report.results[${index}].pass must be boolean`);
+    if (typeof check.details !== 'string') invalidArtifact(artifactPath, `report.results[${index}].details must be a string`);
+    if (check.advisory !== undefined && typeof check.advisory !== 'boolean') {
+      invalidArtifact(artifactPath, `report.results[${index}].advisory must be boolean when present`);
+    }
+    let executionExitCode: number | null | undefined;
+    if (check.evidence !== undefined) {
+      const evidence = requireRecord(check.evidence, `report.results[${index}].evidence`, artifactPath);
+      executionExitCode = validateExecutionEvidence(evidence, index, artifactPath);
+    }
+    if (check.type === 'exec-script-exit-zero') {
+      if (check.pass && executionExitCode === undefined) {
+        invalidArtifact(artifactPath, `report.results[${index}] cannot pass without complete execution evidence`);
+      }
+      if (executionExitCode !== undefined && check.pass !== (executionExitCode === 0)) {
+        invalidArtifact(artifactPath, `report.results[${index}].pass disagrees with evidence.exit.code`);
+      }
+    }
+    return check as unknown as RealityGateCheckReport;
+  });
+
+  if ((report.checksRun as number) !== results.length) {
+    invalidArtifact(artifactPath, 'report.checksRun does not match report.results.length');
+  }
+  const derivedPass = results.every((item) => item.pass || item.advisory === true);
+  if (report.pass !== derivedPass) {
+    invalidArtifact(artifactPath, 'report.pass disagrees with the complete check results');
+  }
+  return { ...report, results } as unknown as RealityGateReport;
+}
+
+function validateExecutionEvidence(
+  evidence: Record<string, unknown>,
+  resultIndex: number,
+  artifactPath: string,
+): number | null | undefined {
+  const hasExecutionTransport = ['command', 'exit', 'code', 'signal', 'timedOut']
+    .some((field) => Object.prototype.hasOwnProperty.call(evidence, field));
+  if (!hasExecutionTransport) return undefined;
+  const prefix = `report.results[${resultIndex}].evidence`;
+  if (typeof evidence.command !== 'string') invalidArtifact(artifactPath, `${prefix}.command must be a string`);
+  if (typeof evidence.stdout !== 'string') invalidArtifact(artifactPath, `${prefix}.stdout must be a string`);
+  if (typeof evidence.stderr !== 'string') invalidArtifact(artifactPath, `${prefix}.stderr must be a string`);
+  const exit = requireRecord(evidence.exit, `${prefix}.exit`, artifactPath);
+  if (!isExitCode(exit.code)) invalidArtifact(artifactPath, `${prefix}.exit.code must be an integer or null`);
+  if (!isExitSignal(exit.signal)) invalidArtifact(artifactPath, `${prefix}.exit.signal must be a string or null`);
+  if (typeof exit.timedOut !== 'boolean') invalidArtifact(artifactPath, `${prefix}.exit.timedOut must be boolean`);
+  if (!isExitCode(evidence.code) || evidence.code !== exit.code) {
+    invalidArtifact(artifactPath, `${prefix}.code must match exit.code`);
+  }
+  if (!isExitSignal(evidence.signal) || evidence.signal !== exit.signal) {
+    invalidArtifact(artifactPath, `${prefix}.signal must match exit.signal`);
+  }
+  if (typeof evidence.timedOut !== 'boolean' || evidence.timedOut !== exit.timedOut) {
+    invalidArtifact(artifactPath, `${prefix}.timedOut must match exit.timedOut`);
+  }
+  return exit.code as number | null;
+}
+
+function isExitCode(value: unknown): value is number | null {
+  return value === null || Number.isInteger(value);
+}
+
+function isExitSignal(value: unknown): value is RealityGateExit['signal'] {
+  return value === null || typeof value === 'string';
+}
+
+function requireRecord(value: unknown, label: string, artifactPath: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    invalidArtifact(artifactPath, `${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function invalidArtifact(artifactPath: string, detail: string): never {
+  throw new Error(`Invalid durable reality-gate evidence at ${artifactPath}: ${detail}`);
 }
 
 async function loadHandlers(): Promise<Map<string, RealityCheck>> {

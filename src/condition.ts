@@ -1,8 +1,8 @@
 // Condition evaluation module
-import pino from 'pino';
 import { readStageStatus } from './store.js';
+import { createLogger } from './logging.js';
 
-const log = pino({ name: 'condition' });
+const log = createLogger({ name: 'condition' });
 
 const OPS = ['>=', '<=', '!=', '==', '>', '<'] as const;
 

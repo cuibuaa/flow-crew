@@ -15,8 +15,11 @@
   <img src="https://img.shields.io/badge/memory-knowledge_graph-2563eb.svg" alt="Knowledge graph memory" />
 </p>
 
-```bash
-flowcrew quick "beat the current model on val accuracy — ship only a result that re-confirms on a fresh split"
+
+```text
+> Beat the current model on val accuracy. Ship only a result that re-confirms
+> on a fresh split.
+> /ship
 ```
 
 **Most AI agents are eager to tell you they succeeded. FlowCrew is built to catch itself when it didn't.**
@@ -26,10 +29,6 @@ Hand it a task brief and it runs as a supervised crew — planner, coder, resear
 And the difference isn't one clever check at the end — it's systemic. Self-checking, exploring, and self-correcting are designed into every step: the planner probes the problem and stages the work, gates catch weak output and fire targeted fixes, the supervisor retries and sends insufficient work back — and only after all that does an *independent* re-check decide whether the result is real enough to call **shipped**. Beat the metric but fail that check? Downgraded, not shipped. It reports honest negatives, refuses to fake progress, and remembers every dead end so the next run never repeats it.
 
 A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable result you can trust — because it didn't trust itself first.
-
-<p align="center">
-  <img src="assets/demo.gif" width="900" alt="FlowCrew dashboard demo" />
-</p>
 
 ## You bring the problem. It brings the rigor.
 
@@ -55,18 +54,144 @@ You give the goal; it does the rest. A sense of what that looks like across the 
 | Synthesize cited research | engineering | a report where every claim's source is re-fetched and quoted verbatim |
 | Refactor without changing behavior | engineering | a shipped refactor, gated on behavior-pinning tests |
 
-## Why FlowCrew is different
+### From brief to verified run
 
-**vs a one-shot agent**
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/how_it_works_dark.png" />
+    <img src="assets/how_it_works.png" width="620" alt="FlowCrew execution flow: a brief from /ship goes to the planner, which dispatches coder stages; their output meets a QA gate that either sends a bounded fix round back or passes the work to the Reality-Gate, which decides between shipped/complete and reality_gate_failed. A supervisor watches progress and can trigger a re-plan on regression, plateau or repeated failure." />
+  </picture>
+</p>
 
-| One-shot agent | FlowCrew |
+The important boundary: the supervisor **steers** but never edits files or runs commands. Work
+happens in worker stages; evidence is checked by gates, Reality-Gate, and — before any
+`shipped` — the confirm-gate.
+
+## What makes it work
+
+Four design choices carry most of the weight. Each is stated with what it actually
+buys you, not what it aspires to.
+
+### Self-describing atoms — the planner prompt is a composition engine, not a dictionary
+
+A role describes itself in its own config (`config/agents/*.yaml`, field `description:`).
+A registry collects those descriptions, injects them into the planner at runtime, and the
+engine validates the planner's output against the same registry. **Adding a role requires
+zero planner-prompt edits.**
+
+That invariant is the point: when a primitive's meaning lives in the prompt *and* in the
+engine, the two copies drift, and every change becomes a hand-edit in two places. Here the
+meaning lives at the primitive's own source and is injected.
+
+The role is the reference case; the same treatment is being generalised to the other
+composable primitives — see [`design/atom-architecture.md`](design/atom-architecture.md).
+
+### A harness you can rehearse for free
+
+`flowcrew rehearse` runs the **real scheduler** against a **scripted fake agent** — no model,
+no tokens, seconds. It exercises the whole lifecycle, not a mock of it:
+
+```bash
+flowcrew rehearse examples/hello-research.brief.md
+```
+
+It reports line by line what the harness actually did: a decoy result triggered `ship` and the
+confirm-gate rejected it, the round floor was met, the terminal artifact landed at its declared
+path, and the confirm command was executed by the engine and recorded — ending in a
+contract-ready verdict.
+
+About a second in a fresh clone. It separates two questions most systems conflate:
+*is the harness wired correctly* and *did the agent do good work*. The first is now free.
+
+The harness also reports on itself:
+
+- `daemon status` / `dashboard status` compare the loaded build against the one on disk,
+  print `FRESH` or `STALE`, and **exit non-zero when stale** — a deploy script can refuse to proceed.
+- A scheduler that dies without settling gets its run rewritten as `failed` with the reason,
+  instead of leaving a record that still claims `running`.
+
+### Two layers of specification — and hard constraints go through deterministic checks
+
+| Layer | What it defines | Where it lives |
+|---|---|---|
+| **HOW** | the atom vocabulary: roles, checks, terminal states | flow-crew — general, public |
+| **WHAT** | this project's acceptance contract and the brief | `<project>/.flowcrew/contract.yaml` — never in the engine |
+
+The rule that keeps this honest:
+
+> A hard constraint must be enforced by a **deterministic check**, not by an agent-judged QA
+> prompt. The planner may *derive* what to check from the goal; enforcement runs as a script
+> whose exit code decides.
+
+An agent asked "did this meet the bar?" can be argued with. A `Reality check` is a script:
+it runs, it exits, and a failing exit code keeps the run out of a terminal state.
+
+The spec layer has its own static check — `rehearse` lints a brief and flags wording that
+binds an *implementation* to "must", the shape a gate faithfully turns into an assertion
+unrelated to what you meant. It also refuses to let a brief declare a finish condition that
+nothing in the engine will ever satisfy, which otherwise surfaces only as a run that will not
+end.
+
+### Observable execution — including what it could not determine
+
+**What you see.** The operating loop is three pages, each answering one question.
+
+| Page | Answers |
 |---|---|
-| Best-effort answer | Auditable run: state, artifacts, verdicts, summary |
-| One context window | Persistent run memory + campaign history |
-| Manual retry after failure | Gate → fix → re-gate loop, self-remediating |
-| "Looks done" | Deterministic evidence + independent confirm before `shipped` |
+| `/inbox` | Is anything waiting on me? |
+| `/campaign/<id>` | Where does this campaign stand? |
+| `/run/<id>` | What is this run doing — or what did it conclude? |
 
-**vs scripted / in-session orchestration** (e.g. a Claude Code *Workflow* — a script that fans work out to subagents, authored and conducted from your session)
+Distinct outcomes stay distinct. `shipped`, `complete`, `ceiling_hit`, `incomplete`,
+`reality_gate_failed` and `stopped` mean different things and are never collapsed into a
+generic pass or fail — the run page names the one that applies and, beside it, what that
+status means.
+
+**What it admits.** The surface states what it does *not* know:
+
+```text
+Canonical status      running
+Run elapsed           56.8s
+                      Wall clock since the run started; not the current attempt duration.
+Known recorded usage  17,567 tokens
+                      Known portion only, including recorded supervisor usage; unsettled
+                      or unavailable fields are not treated as zero.
+```
+
+The labels themselves carry the claim. A finished run reads `Canonical outcome`,
+`Total wall time` and `Total recorded usage` — the word changes only when the number has
+actually become complete. At campaign scale the same rule produces lines like *"11 of 16
+runs have incomplete cost evidence: token or attempt telemetry is incomplete for 11 runs.
+Affected totals are lower bounds."*
+
+<p align="center">
+  <img src="assets/screenshot_run_page.png" width="820" alt="FlowCrew run page for a completed run: canonical outcome, total wall time, total recorded usage, an honest note that recorded progress is not presented as the final conclusion, and an execution-history panel naming zero failed attempts" />
+</p>
+
+Each line is a deliberate refusal to present a number as more complete than it is.
+
+**What is underneath.** A live stage streams its log over SSE with a byte counter, so
+"still producing" is visible rather than guessed. Every attempt records duration, exit code,
+token evidence (measured counters or an explicit unknown marker), and files written. A failed
+Reality-Gate check lands in `run.json` **named**, with ANSI-stripped output tails — no hunting.
+
+**What you can do without stopping it.** `flowcrew guide --run <run-id> "message"` injects context
+mid-flight. Omitting `--run` is accepted only when exactly one run is executing, so concurrent
+runs cannot receive guidance by recency accident. `flowcrew inbox` resolves approval gates that
+parked the run. The daemon owns the run, so closing your session changes nothing.
+
+**What not to do while it runs.** Do not edit the project yourself while a run is working in it.
+Attribution comes from a filesystem snapshot diff, which cannot tell your edit apart from the
+stage's: your change is recorded as that stage's work, and where a stage has been told which
+paths it may write, enforcement can restore anything outside them to its pre-stage contents —
+including your edit. Say what you want changed with `flowcrew guide` instead, or wait for a
+terminal state.
+
+<details>
+<summary><strong>Compared with scripted / in-session orchestration</strong></summary>
+
+(e.g. a Claude Code <em>Workflow</em> — a script that fans work out to subagents, authored and
+conducted from your session)
 
 | Scripted / in-session orchestration | FlowCrew |
 |---|---|
@@ -77,20 +202,76 @@ You give the goal; it does the rest. A sense of what that looks like across the 
 | Results return to you; no cross-run memory | Persistent run memory + campaign knowledge graph |
 | Best for a bounded fan-out you drive now | Best for fire-and-forget autonomous research/engineering |
 
-They are complementary. Scripted orchestration is a tool you *conduct* within a chat; FlowCrew is the system you *hand a brief* and trust to run — and to gate its own honesty — while you are away. Reach for a Workflow to reason inside a conversation; reach for FlowCrew when the work must outlive the chat and something has to decide, honestly, when it is genuinely done.
+They are complementary. Reach for a Workflow to reason inside a conversation; reach for
+FlowCrew when the work must outlive the chat and something has to decide, honestly, when it
+is genuinely done.
+
+</details>
+
+## Before you start
+
+- **Node.js 22.5 or newer** is required. FlowCrew uses the built-in `node:sqlite` module.
+- **Linux with a systemd user session** is the supported setup for the complete background-task and dashboard experience. The engine falls back to a detached Bash process when `systemd-run --user` is unavailable, but process inspection still relies on Linux `/proc`; macOS and Linux environments without a working user session are not fully supported.
+- **A logged-in agent CLI is required for live work.** Install and authenticate either OpenAI Codex CLI or Claude Code. The zero-token rehearsal below does not require either one.
+- **The engine and dashboard are separate build targets.** A repository install runs both builds through the package `prepare` hook, producing `dist/` and `ui/dist/`.
+- **One task per project at a time.** Queue as many as you like — the daemon holds the rest and starts the next when the current one reaches a terminal state. The guard is per project, so tasks in different projects do run concurrently.
+- **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published version closes both at once, and the alternative trades them for two high-severity ones. Production dependencies (`npm audit --omit=dev`) report none.
+
+> [!WARNING]
+> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from `/ship`, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
+>
+> Every launch path first prints the same static brief preflight used by `rehearse`. Consequential findings require the explicit `--acknowledge-brief-warnings` choice; the flag never skips or hides inspection. After admission, `quick` writes the submitted text to `<projectDir>/docs/task_brief.md`, replacing different content only after warning. Start with `flowcrew rehearse`: it launches no agent process or model, spends no tokens, and does not modify your project; an in-process scripted adapter exercises the scheduler in isolated temporary directories.
 
 ## Get started
 
-**1. Install** (once):
+**The way in is `/ship` from your coding agent.** The skill interviews you, turns the
+discussion into a brief, and rehearses that brief before anything runs. That matters more
+than it sounds: a run's outcome is decided mostly by its brief, and the skill carries the
+accumulated rules for writing one — state criteria as properties rather than naming the
+instrument, put the boundaries in the brief instead of sending them later, declare terminal
+artifacts only on what the last stage writes.
+
+The CLI is how you **watch, steer, verify, and operate** a run. `flowcrew quick "one
+sentence"` is still available for scripts and direct operation, but it now says plainly that
+the input has no structured brief contract, prints the shared preflight report, and stops
+until the caller explicitly acknowledges the current exact text. It checks; it does not
+interview you or author the missing contract. Use `/ship` for that primary authoring path.
+
+Dashboard **+ New Run** follows the same boundary: the first action checks the writable
+brief and shows frontmatter, contract, and criterion findings inline; the second action
+starts that exact checked text, with a checkbox when consequential findings remain.
+
+### 1. Clone, install, and expose the local CLI
 
 ```bash
+git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew
 npm install
-npx flowcrew init
-npx flowcrew doctor
-./skills/install.sh          # adds /ship to your coding agent
+npm link
+flowcrew doctor
 ```
 
-**2. Ship from your coding agent.** Shape the task in the conversation — in **Codex or Claude Code** — then `/ship` it:
+`npm install` builds both the TypeScript engine (`dist/`) and React dashboard (`ui/dist/`). `npm link` makes this clone's `flowcrew` command available on your `PATH` — note that if you already have a global `flowcrew` from another checkout, this silently repoints it at this one, and nothing warns you — check with `which flowcrew`. Doctor reports every missing build, CLI, login, or environment item clearly, and when a dashboard already holds the port it names which install that dashboard belongs to; address its attention items before a live run.
+
+### 2. Install the coding-agent skills
+
+```bash
+./skills/install.sh
+```
+
+This adds `/ship` and `/fc-status` to supported coding agents (Codex and Claude Code).
+`/ship` is the primary entry point, not a convenience wrapper.
+
+### 3. Run the safe, zero-token first task
+
+```bash
+flowcrew rehearse examples/hello-research.brief.md
+```
+
+The report ends with a contract-ready verdict. That means the brief's YAML frontmatter, research-loop policy, scheduler lifecycle, terminal artifacts, and confirmation wiring survived a real scheduler rehearsal. It does **not** claim that any research result is correct: rehearsal launches no agent process or model and uses an in-process scripted adapter. See the [rehearsal reference](guide/rehearse.md) and [`examples/README.md`](examples/README.md) for the campaign dry-run and an isolated mock-adapter loop.
+
+### 4. Ship from your coding agent
+
+Shape the task in the conversation — in **Codex or Claude Code** — then `/ship` it:
 
 ```text
 > Split auth into token validation and session management.
@@ -108,65 +289,126 @@ FlowCrew runs end to end on **Codex or Claude** — either works on its own.
 
 Prefer one tool? Run the whole loop on **Codex** (the default) — or entirely in **Claude Code**. The split is a token-budget optimization, not a requirement.
 
-## From brief to verified run
-
-<p align="center">
-  <img src="assets/how_it_works.png" width="900" alt="FlowCrew execution flow: task brief, planner, coder stages, QA gate, fix retry, supervisor steering, Reality-Gate checks, and done or blocked outcome" />
-</p>
-
-The important boundary: the supervisor **steers** but never edits files or runs commands. Work happens in worker stages; evidence is checked by gates, Reality-Gate, and — before any `shipped` — the confirm-gate.
-
-## Architecture: Atoms
-
-FlowCrew is built on **self-describing atomic semantics**. Every composable primitive — roles, skills, deterministic checks, research policies, terminal/verdict vocabularies — describes itself, is collected into a registry, and is injected into the planner at runtime. The planner composes a run from these atoms; each atom maps to the roles that execute it.
-
-The invariant that keeps this maintainable: **semantics live at the atom's own source, injected at runtime — the planner prompt is a stable composition engine, never a semantics dictionary. Domain-specific logic lives in the brief / project contract, never in the engine.** Adding a role, check, or skill needs zero planner-prompt edits, and a project's hard constraints (declared in `<project>/.flowcrew/contract.yaml`) are wired by the planner into deterministic Reality-Gate checks.
-
-See [`design/atom-architecture.md`](design/atom-architecture.md) for the full rationale and roadmap.
-
 ## What you can run
+
+Three shapes of work, all entered the same way: describe it in your coding agent, then
+`/ship`. The skill interviews you, writes the brief, rehearses it, and launches. Each
+example below shows **what you say** — and the contract `/ship` writes from it, because
+that contract is what the engine actually enforces.
 
 ### Research loop (metric) — beat a baseline, honestly
 
-```bash
-flowcrew quick --campaign model-eval "Improve src/model.py on data/validation.jsonl.
-Baseline accuracy 0.72, target >= 0.85. Each round tries one new approach and records the metric.
-research.confirm: re-evaluate any beat on a held-out split before shipping — a candidate that only wins on the tuning split must NOT ship."
+```text
+> Beat our current docs-search relevance baseline. Only ship a result that
+> re-confirms on a fresh split — an honest ceiling is a fine answer.
+> /ship
 ```
+
+Research settings live in the brief's leading YAML frontmatter, and nowhere else. The
+contract `/ship` writes starts with the form the engine parses:
+
+```yaml
+---
+research:
+  baseline: 0
+  policy: greedy_stack
+  result_file: docs/hello-research/round_result.json
+  confirm:
+    command: |
+      test "$(git ls-files '*.ts' | wc -l)" -ge 1
+  stop:
+    beat: 1
+    max_rounds: 3
+---
+```
+
+`examples/hello-research.brief.md` is exactly this shape, complete with a result schema and
+terminal paths. Replay it against the real scheduler for free — no agent, no tokens, about
+a second — with `flowcrew rehearse examples/hello-research.brief.md`.
 
 ### Engineering (acceptance) — satisfy a contract
 
-```bash
-flowcrew quick --campaign cron-lib "Implement cron.py to pass tests/test_acceptance.py (all cases).
-Do not edit the tests. research.confirm: all tests green AND the test file is unmodified (sha256)."
+```text
+> Add a public test proving `flowcrew --help` lists every top-level command.
+> Don't change any command's behavior.
+> /ship
 ```
+
+The same engine-owned decision and confirm gate carry engineering work. The engine parses
+`objective:` and `research:` identically — on engineering work `objective:` says what you
+mean. The contract belongs in the brief's frontmatter, never buried in the task prose:
+
+````markdown
+---
+objective:
+  baseline: 0
+  policy: replace_if_better
+  result_file: artifacts/acceptance/round_result.json
+  report_dir: artifacts/acceptance
+  result_schema:
+    type: object
+    required: [label, result]
+    properties:
+      label: {type: string}
+      result: {type: number}
+  confirm:
+    command: npm run build && npm test
+    requires: The engine build and complete test suite must pass.
+  stop:
+    beat: 1
+    max_rounds: 3
+---
+# Add a CLI help regression test
+
+Add a public test proving that `flowcrew --help` lists every top-level command.
+Do not change command behavior. After measuring the acceptance checks, write
+`{"label":"cli-help-contract","result":1}` to
+`artifacts/acceptance/round_result.json` only when every check passes; otherwise
+write a result below 1.
+````
 
 ### Unknown bug hunt
 
-```bash
-flowcrew quick --campaign checkout-bug "Find the root cause of an intermittent checkout failure.
-Add a reproducer that fails before the fix; fix it; make the reproducer pass 50x consecutively.
-Do not repeat any hypothesis already marked dead_end in the campaign."
+```text
+> Find the root cause of the intermittent checkout failure. Add a reproducer
+> that fails before the fix, then make it pass 50× consecutively. Don't
+> re-try a hypothesis this campaign already marked a dead end.
+> /ship
 ```
+
+That last sentence is not a hint. The campaign's dead ends are handed to the planner as
+facts, so a direction disproved in an earlier run is one it is told not to propose again.
+
+See [Brief and file contract](guide/brief-contract.md) for every frontmatter and runtime
+artifact field, and [`examples/README.md`](examples/README.md) for the runnable tracked
+example and the zero-token flows around it. Launching any of these from the command line
+instead — for a brief you already have, or for scripted and scheduled runs — is in the
+[CLI reference](guide/cli.md).
 
 ## Run memory
 
-FlowCrew records *why* a run made decisions, not just what changed. Every run captures goals, approaches, findings, insights, results, cited sources, and dead ends as a knowledge graph. Across a campaign these roll up into a **knowledge digest** — the best direction and its result, plus ranked, deduped findings, insights, dead ends, and sources, each linking back to the run that produced it.
+FlowCrew records *why* a run made decisions, not just what changed. A run captures goals, approaches, findings, insights, results, cited sources, and dead ends as a knowledge graph, and the engine reads it back: a dead end marked in one round is one the planner is told not to re-propose in the next.
+
+Across a campaign those graphs roll up into a **knowledge digest** — findings and insights in one list, disproved approaches in another, deduped across runs by substance so the same finding reported three times collapses to one entry, each linking back to the run that produced it. Alongside it the campaign page names the best measurement per direction, and says plainly when the evidence is not enough to name one.
 
 <p align="center">
-  <img src="assets/screenshot_knowledge_digest.svg" width="780" alt="Campaign knowledge digest: best direction and result, ranked findings, insights, dead ends, and cited sources" />
+  <img src="assets/screenshot_knowledge_digest.png" width="800" alt="Campaign knowledge digest on the campaign page: nine accepted nDCG measurements ending in ceiling_hit with the best at 0.815, seven key findings and two disproved approaches, each linking back to the run that produced it" />
 </p>
 
-| Type | Meaning |
-|---|---|
-| `goal` | The objective being pursued |
-| `approach` | Strategy selected by the planner |
-| `finding` | Evidence discovered during work |
-| `insight` | Reusable lesson from a stage or iteration |
-| `result` | Measured outcome |
-| `source` | External reference (paper/URL) cited during research |
-| `dead_end` | Failed direction that future runs should avoid |
-| `user_hint` | Human guidance preserved for future stages |
+The digest above is the campaign-level rollup, and it deliberately shows only what a person
+scanning a campaign needs. The full graph is per run, on that run's page. These are its node
+types — and, because a record nothing reads is just clutter, what actually consumes each one:
+
+| Type | Recorded when | What reads it back |
+|---|---|---|
+| `goal` | the objective a run is pursuing | summarised into every later stage's prompt |
+| `approach` | a strategy the planner chose | same, carrying its score; retired to a dead end when the campaign stops improving |
+| `result` | a measured outcome | plateau detection and the improvement ratchet |
+| `dead_end` | a direction that failed | the planner, as a direction not to propose again — plus the campaign digest |
+| `user_hint` | guidance you gave mid-flight | summarised into every later stage's prompt |
+| `finding` | evidence discovered during work | the campaign digest |
+| `insight` | a reusable lesson | the campaign digest |
+| `source` | an external reference cited during research | **nothing yet** — it is captured and stored, but no engine path or view reads it back |
 
 ## Configuration
 
@@ -176,14 +418,25 @@ FlowCrew reads `config/defaults.yaml` (Codex-default):
 default_timeout_ms: 3600000
 default_max_iterations: 5
 default_gate_retry_loops: 3
+default_stage_technical_retries: 1     # adapter/transport retry, separate from gate loops
 default_plan_stage_retries: 2          # transient empty/invalid plan → bounded retry, not fatal
 default_supervisor_max_rejects: 2      # supervisor can send a deliverable back, bounded
 
 adapter: codex
-model: default
+session_reuse: false                   # measured benefit was ~9% wall clock; off by default
+model: default                         # inherit the adapter's own config unless set here
 reasoning_effort: default
 
+campaign_triggers:
+  enabled: true
+  regression_after: 2
+  plateau_after: 3
+  plateau_threshold: 5
+  repeated_failure_after: 3
+
 supervisor:
+  poll_interval_ms: 30000
+  routine_assessment_interval_ms: 180000
   stuck_threshold_ms: 600000           # no-progress stage watchdog
 ```
 
@@ -199,23 +452,39 @@ research:
     command: "bash confirm.sh"                 # verify-before-trust: must pass before `shipped`
 ```
 
-## CLI
+## The CLI is the advanced tool, not the front door
+
+You should not need it to get value out of FlowCrew. `/ship` starts the work and the
+dashboard watches it. Reach for the command line when you want something those two do not
+give you: a scripted or scheduled launch, a brief you already wrote, or an operational
+answer about the install itself.
+
+Three are worth knowing on day one:
 
 ```bash
-flowcrew init          flowcrew quick "task"        flowcrew quick "task" --background
-flowcrew status        flowcrew list                flowcrew guide "message"
-flowcrew start         flowcrew doctor              flowcrew audit-reality
+flowcrew doctor                   # is this install actually ready?
+flowcrew rehearse <brief.md>      # replay a brief for free before spending anything
+flowcrew status                   # what is running right now
 ```
+
+All 19 commands — launching, steering, approvals, brief history, daemon and dashboard
+lifecycle, registry repair, reality audit — are documented with their options and exit
+codes in the **[CLI reference](guide/cli.md)**.
 
 ## Documentation
 
 - [Atom Architecture](design/atom-architecture.md): self-describing atoms and the planner composition model.
-- [Architecture](docs/architecture.md): scheduler, worker, supervisor, loops, storage.
-- [Campaigns and Run Memory](docs/campaigns.md): campaigns, plateaus, pivots, knowledge graph.
-- [Reality-Gate](docs/reality-gate.md): deterministic evidence checks (and the confirm-gate) before terminal success.
-- [Configuration](docs/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
-- [Agent Skills](docs/skills.md): `/ship`, `/fc-status`, and skill installation.
-- [CLI Reference](docs/cli.md): command list and common flags.
+- [Architecture](guide/architecture.md): scheduler, worker, supervisor, loops, storage.
+- [Run Lifecycle](guide/run-lifecycle.md): all 13 statuses and their operator meaning.
+- [Brief and File Contract](guide/brief-contract.md): frontmatter and agent-engine artifacts.
+- [Approval Inbox](guide/approvals.md): park/resume, decisions, CLI, dashboard, and standing rules.
+- [Zero-token Rehearsal](guide/rehearse.md): what the wind tunnel proves and what it cannot prove.
+- [Campaigns and Run Memory](guide/campaigns.md): campaigns, plateaus, pivots, knowledge graph.
+- [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
+- [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
+- [Agent Skills](guide/skills.md): `/ship`, `/fc-status`, and skill installation.
+- [CLI Reference](guide/cli.md): all 19 commands and their subcommands/options.
+- [Contributing](CONTRIBUTING.md): build, test, documentation, commit, and PR expectations.
 
 ## License
 

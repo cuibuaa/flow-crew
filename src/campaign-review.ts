@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
 import { z } from 'zod';
 import type { BriefPatch } from './campaign.js';
+import { readJsonlFile } from './jsonl.js';
+import { campaignsRoot } from './store.js';
 
 const BriefPatchSchema = z.object({
   type: z.literal('brief_patch'),
@@ -37,17 +38,13 @@ export class ReviewConflictError extends Error {
   }
 }
 
-function campaignRoot(): string {
-  return join(homedir(), '.fc', 'campaigns');
-}
-
 function safeId(id: string): boolean {
   return !!id && !id.includes('..') && !id.includes('/') && !id.includes('\\');
 }
 
 export function campaignReviewDir(campaignId: string): string {
   if (!safeId(campaignId)) throw new Error(`Unsafe campaign id: ${campaignId}`);
-  return join(campaignRoot(), campaignId);
+  return join(campaignsRoot(), campaignId);
 }
 
 export function pendingReviewPath(campaignId: string): string {
@@ -56,17 +53,6 @@ export function pendingReviewPath(campaignId: string): string {
 
 export function rejectedReviewPath(campaignId: string): string {
   return join(campaignReviewDir(campaignId), 'rejected_review.jsonl');
-}
-
-function readJsonl(path: string): unknown[] {
-  if (!existsSync(path)) return [];
-  const out: unknown[] = [];
-  for (const line of readFileSync(path, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try { out.push(JSON.parse(trimmed) as unknown); } catch { /* skip malformed review entries */ }
-  }
-  return out;
 }
 
 function normalizeEntry(raw: unknown, campaignId: string): PendingReviewEntry | null {
@@ -93,7 +79,9 @@ function normalizeEntry(raw: unknown, campaignId: string): PendingReviewEntry | 
 }
 
 export function readPendingReviews(campaignId: string): PendingReviewEntry[] {
-  return readJsonl(pendingReviewPath(campaignId))
+  const path = pendingReviewPath(campaignId);
+  if (!existsSync(path)) return [];
+  return readJsonlFile<unknown>(path)
     .map((entry) => normalizeEntry(entry, campaignId))
     .filter((entry): entry is PendingReviewEntry => !!entry);
 }

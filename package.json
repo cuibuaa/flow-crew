@@ -1,6 +1,6 @@
 {
   "name": "flowcrew",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "FlowCrew is a Codex agent workflow dashboard and control plane with QA gates, retries, and run memory for long-running agent workflows.",
   "main": "dist/index.js",
   "bin": {
@@ -8,15 +8,14 @@
   },
   "scripts": {
     "postinstall": "(cd ui && npm install || true)",
+    "prepare": "npm run build && npm run build:ui",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/cli.js',0o755)\"",
     "start": "node dist/index.js",
     "dev": "cd ui && npm run build && cd .. && tsx src/index.ts",
     "build:ui": "cd ui && npm run build",
-    "lint": "eslint .",
-    "test": "vitest run",
-    "config:compile": "node scripts/config-compile.mjs",
-    "config:lint": "node scripts/config-lint.mjs"
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run"
   },
   "keywords": [
     "flowcrew",
@@ -49,7 +48,7 @@
     "node": ">=22.5"
   },
   "dependencies": {
-    "@fastify/static": "^9.1.0",
+    "@fastify/static": "^10.1.2",
     "fastify": "^5.8.4",
     "pino": "^10.3.1",
     "string-width": "7.2.0",

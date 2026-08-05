@@ -30,4 +30,32 @@ prompt: |
     score = number of critical inaccuracies or missing required sections found.
     pass = true only if score == 0 (no critical issues).
     reason must be structured: "Checked: [sections] | Issues: [list] | Missing: [list]"
+  # Design proposals — additional standards. Apply ONLY when the document under review
+  # PROPOSES a design (information architecture, UI/UX, data-fetch strategy, or a product
+  # decision) rather than describing an existing system. Do NOT apply these to READMEs,
+  # API references, or changelogs. For a design proposal, accuracy and clarity are
+  # NECESSARY BUT NOT SUFFICIENT: a document can be accurate, complete and well-structured
+  # and still propose a bad design. Count each violation below in doc_issues.
+  - Purpose traceability: every element the design places in the primary view must be traceable to a stated user question or goal. An element that cannot be named against one, yet still occupies the primary view, is a finding.
+  - Data-driven distinctions: if the design branches behaviour by category, that category must be derivable from data. Dependence on manual classification or a human-set flag is a finding. The design must state its criterion AND a counter-example where the criterion misclassifies.
+  - No normalisation of meaningful states: states that mean different things must stay distinguishable. Collapsing distinct outcomes into one visual treatment for the sake of simplicity is a finding.
+  - No hiding of failure: omitting, de-emphasising or renaming failures, negative results or non-success outcomes to make the view look cleaner is a finding. The goal is a more USEFUL view, not a prettier one.
+  - Localised failure: partial data loss must degrade to "show what was retrieved and name what failed". A design in which one failed source turns the whole view into a single error message is a finding; so is a design that reports "partly retrieved" as "unavailable".
+  - Cost that does not scale with the data: per-view request or render cost must not grow linearly with entity count unless the design explicitly argues why that is acceptable at the real data volume.
+  - Retention is not presentation: removing something from the view must not remove it from persistence. If the design does reduce what is written to disk, it must say so explicitly and justify it.
+  - Information must not be hover-only: information conveyed solely by hover is a finding unless an equivalent keyboard-focusable or always-visible path is specified.
+  - Falsifiable success criteria: the document's own success criteria must be measurable or mechanically decidable. A criterion that cannot judge a concrete proposal as pass or fail is a finding.
+  - Redesign vs. patch list: when the task asked for a redesign, a document whose substance is a per-element list of removals and collapses, rather than a derivation from purpose to structure to data access, is a finding.
+  # The parenthetical examples above are ILLUSTRATIVE, not criteria. A design that satisfies
+  # a property by different means passes. Do not convert an example into a hard assertion.
+  # Read-through review dimensions. Apply these when the task supplies rendered operator-facing
+  # web or CLI text, and keep the wording aligned with docs/ui_selfcheck.md. Read the output as
+  # prose; metric assertions are supporting evidence, never a substitute for this review.
+  - Purpose/question traceability: every section must name the operator question it answers.
+  - Near-duplicate entries: repeated sentence patterns that differ only by an identifier are a finding.
+  - Identifier consistency: the same entity must use one human-readable identifier system within a view.
+  - Self-explaining language: terminology must be understandable from the README, guide, or CLI help without unexplained internal vocabulary.
+  - Scan-length/readability: a single row or line must not become long enough to prevent scanning; complete detail needs a reachable disclosure.
+  - Label-content truthfulness: labels must accurately describe the content and outcome they introduce.
+  - Uninterrupted primary reading flow: empty or secondary sections must not break the main operator decision path.
   - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.

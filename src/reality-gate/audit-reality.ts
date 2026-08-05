@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { TaskRegistry, type TaskEntry } from '../task-registry.js';
+import { runsRoot } from '../store.js';
 import { parseChecksFromBrief, runAllChecks } from './index.js';
 import type { CheckDecl } from './types.js';
 
@@ -36,7 +36,7 @@ async function auditRows(args: string[]): Promise<AuditRow[]> {
 }
 
 async function auditRunMatches(id: number): Promise<AuditRow[]> {
-  const root = join(homedir(), '.fc', 'runs');
+  const root = runsRoot();
   let names: string[];
   try { names = readdirSync(root); } catch { return []; }
   const rows: AuditRow[] = [];
@@ -75,7 +75,7 @@ async function auditRunState(name: string, runPath: string, state: Record<string
 }
 
 async function auditTask(task: TaskEntry): Promise<AuditRow> {
-  const runPath = task.run_id ? join(homedir(), '.fc', 'runs', task.run_id) : undefined;
+  const runPath = task.run_id ? join(runsRoot(), task.run_id) : undefined;
   const runJson = runPath && existsSync(join(runPath, 'run.json')) ? JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as Record<string, unknown> : {};
   const projectDir = typeof runJson.projectDir === 'string' ? runJson.projectDir : task.projectDir;
   const briefPath = resolveBriefPath(task, runPath);

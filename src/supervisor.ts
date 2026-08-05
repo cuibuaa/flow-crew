@@ -1,12 +1,27 @@
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
-import { readRunState, runDir as getRunDirPath, isTerminalRunStatus } from './store.js';
-import type { StoreState } from './store.js';
+import {
+  atomicWrite,
+  isRunningStageStatus,
+  isSettledStageStatus,
+  isTerminalRunStatus,
+  readStageStatus,
+  readRunState,
+  RUN_STATUS,
+  runDir as getRunDirPath,
+  STAGE_STATUS,
+  stageDir,
+  updateRunState,
+} from './store.js';
+import type { StageStatus, StoreState, SupervisorAttempt, SupervisorUsage } from './store.js';
 import type { SupervisorConfig } from './config.js';
-import pino from 'pino';
+import { appendTraceEvent } from './trace.js';
+import { ABORT_SIGNAL_VERSION, type AbortSignalSource, type StageAbortSignal } from './abort-signal.js';
+import { createLogger } from './logging.js';
 
-const log = pino({ name: 'supervisor' });
+const log = createLogger({ name: 'supervisor' });
 
 /**
  * Single source of truth for supervisor verdicts (P4 of the Atom Architecture).
@@ -16,6 +31,7 @@ const log = pino({ name: 'supervisor' });
 export const SUPERVISOR_VERDICTS = [
   { id: 'WAIT', description: 'Agents making progress. No intervention.' },
   { id: 'GUIDE', description: 'Agent going wrong direction. Provide corrective instruction in "guidance".' },
+  { id: 'EXTEND', description: 'Verified progress will exceed the current soft deadline. Propose a positive extension_ms; worker policy may grant it only within the hard cap.' },
   { id: 'ABORT', description: 'Stage stuck/looping/wasting time. Kill it and let retry handle it.' },
   { id: 'REPLAN', description: 'Fundamental approach is wrong. Needs a new plan entirely.' },
   { id: 'REJECT', description: 'A stage emitted a deliverable that does NOT meet its own declared work/acceptance criteria (e.g. a verdict claims pass while its evidence shows otherwise, or a stage marked itself done with the required artifact missing/empty). The result must NOT be accepted — set "target_stage" to the stage and the work is re-done.' },
@@ -28,6 +44,30 @@ export interface SupervisorAssessment {
   targetStage: string | null;
   reason: string;
   guidance: string | null;
+  extensionMs?: number;
+}
+
+export function summarizeSupervisorGuidanceHistory(
+  actions: ReadonlyArray<{ assessment: SupervisorAssessment }>,
+  runningStages: readonly string[],
+): string {
+  const running = new Set(runningStages);
+  const byStage = new Map<string, SupervisorAssessment[]>();
+  for (const action of actions) {
+    const assessment = action.assessment;
+    if (assessment.verdict !== 'GUIDE' || !assessment.targetStage || !running.has(assessment.targetStage)) continue;
+    const prior = byStage.get(assessment.targetStage) ?? [];
+    prior.push(assessment);
+    byStage.set(assessment.targetStage, prior);
+  }
+  return runningStages.flatMap((stageId) => {
+    const guidance = byStage.get(stageId) ?? [];
+    if (guidance.length === 0) return [];
+    const recentReasons = guidance.slice(-3).map((assessment) =>
+      assessment.reason.replace(/\s+/g, ' ').trim().slice(0, 240) || '(reason unavailable)'
+    );
+    return [`- ${stageId}: ${guidance.length} cumulative GUIDE decisions; recent reasons: ${recentReasons.join(' | ')}`];
+  }).join('\n');
 }
 
 interface SupervisorAction {
@@ -35,6 +75,22 @@ interface SupervisorAction {
   tick: number;
   assessment: SupervisorAssessment;
   runningStages: string[];
+  /** Attempt that was running when the action targeted its stage. */
+  targetAttemptIndex?: number;
+  /** Operator additions remain guidance, but do not authorize direction ABORT. */
+  source?: 'supervisor' | 'operator';
+}
+
+function actionAttemptIndex(action: SupervisorAction, status: StageStatus | undefined): number | undefined {
+  if (Number.isInteger(action.targetAttemptIndex)) return action.targetAttemptIndex;
+  if (!status) return undefined;
+  const actionAt = Date.parse(action.timestamp);
+  if (!Number.isFinite(actionAt)) return undefined;
+  return status.attempts?.find((attempt) => {
+    const startedAt = Date.parse(attempt.startedAt);
+    const completedAt = attempt.completedAt ? Date.parse(attempt.completedAt) : Number.POSITIVE_INFINITY;
+    return Number.isFinite(startedAt) && actionAt >= startedAt && actionAt <= completedAt;
+  })?.index;
 }
 
 /**
@@ -52,7 +108,13 @@ export function parseSupervisorVerdict(output: string): SupervisorAssessment | n
     try {
       const parsed = JSON.parse(matches[i][0]);
       if (!valid.includes(parsed.verdict)) continue;
-      return { verdict: parsed.verdict, targetStage: parsed.target_stage ?? null, reason: parsed.reason ?? '', guidance: parsed.guidance ?? null };
+      return {
+        verdict: parsed.verdict,
+        targetStage: parsed.target_stage ?? null,
+        reason: parsed.reason ?? '',
+        guidance: parsed.guidance ?? null,
+        ...(typeof parsed.extension_ms === 'number' ? { extensionMs: parsed.extension_ms } : {}),
+      };
     } catch { /* try the next earlier match */ }
   }
   return null;
@@ -104,6 +166,127 @@ export function detectStalledStages(input: {
   return { nextLastProgressMs: next, stalledStageIds: stalled };
 }
 
+export interface StageExecutionFacts {
+  stageId: string;
+  attemptIndex?: number;
+  attemptStartedAt?: string;
+  verdictObserved: boolean;
+  outputObserved: boolean;
+  handoffObserved: boolean;
+  commitObserved: boolean;
+  artifactProgressThisTick: boolean;
+  finalizing: boolean;
+  protectedFromIdleAbort: boolean;
+}
+
+interface ProjectCommitFact {
+  hash: string;
+  committedAtMs: number;
+}
+
+type AbortBasis =
+  | { kind: 'idle'; stalledMs: number }
+  | { kind: 'repeated_guidance'; guideCount: number };
+
+interface VerifiedAbortResult {
+  written: boolean;
+  reason: string;
+}
+
+function currentRunningAttempt(status: StageStatus | undefined): { index: number; startedAt: string } | undefined {
+  const attempts = status?.attempts ?? [];
+  for (let index = attempts.length - 1; index >= 0; index--) {
+    const attempt = attempts[index];
+    if (attempt.status === STAGE_STATUS.RUNNING) return { index: attempt.index, startedAt: attempt.startedAt };
+  }
+  return undefined;
+}
+
+/**
+ * Inspect only durable, current-attempt evidence. An output/verdict left by an
+ * older attempt cannot make a new execution permanently immune to supervision.
+ */
+export function inspectStageExecutionFacts(input: {
+  runDir: string;
+  stageId: string;
+  status: StageStatus;
+  sinceMs: number;
+  commitObserved?: boolean;
+}): StageExecutionFacts {
+  const attempt = currentRunningAttempt(input.status);
+  const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
+  const belongsToAttempt = (path: string): boolean => {
+    if (!attempt || !Number.isFinite(attemptStartedMs)) return false;
+    try {
+      const stat = statSync(path);
+      return stat.isFile() && stat.size > 0 && stat.mtimeMs >= attemptStartedMs;
+    } catch {
+      return false;
+    }
+  };
+  const changedThisTick = (path: string): boolean => {
+    if (!belongsToAttempt(path)) return false;
+    try { return statSync(path).mtimeMs >= input.sinceMs; } catch { return false; }
+  };
+
+  const stageRoot = join(input.runDir, 'stages', input.stageId);
+  const outputPath = join(stageRoot, 'output.md');
+  const verdictPath = join(input.runDir, `verdict_${input.stageId}.json`);
+  const handoffPath = join(input.runDir, `handoff_${input.stageId}.md`);
+  const verdictObserved = belongsToAttempt(verdictPath);
+  const outputObserved = belongsToAttempt(outputPath);
+  const handoffObserved = belongsToAttempt(handoffPath);
+  const commitObserved = input.commitObserved === true;
+
+  const internalNames = new Set([
+    'live.log', 'status.json', 'input.md', 'guidance.md', 'guidance_consumed.md',
+  ]);
+  let stageArtifactChanged = false;
+  const walk = (dir: string, depth: number): void => {
+    if (stageArtifactChanged || depth > 3) return;
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return; }
+    for (const entry of entries) {
+      if (internalNames.has(entry.name)) continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, depth + 1);
+      else if (entry.isFile() && changedThisTick(path)) stageArtifactChanged = true;
+      if (stageArtifactChanged) return;
+    }
+  };
+  walk(stageRoot, 0);
+  const artifactProgressThisTick = stageArtifactChanged
+    || changedThisTick(verdictPath)
+    || changedThisTick(handoffPath)
+    || commitObserved;
+  const finalizing = outputObserved && !verdictObserved;
+  const protectedFromIdleAbort = verdictObserved || handoffObserved || commitObserved || finalizing;
+  return {
+    stageId: input.stageId,
+    attemptIndex: attempt?.index,
+    attemptStartedAt: attempt?.startedAt,
+    verdictObserved,
+    outputObserved,
+    handoffObserved,
+    commitObserved,
+    artifactProgressThisTick,
+    finalizing,
+    protectedFromIdleAbort,
+  };
+}
+
+export function describeStageExecutionFacts(facts: StageExecutionFacts): string {
+  const attempt = facts.attemptIndex === undefined ? 'no active attempt observed' : `active attempt ${facts.attemptIndex}`;
+  return [
+    attempt,
+    facts.verdictObserved ? 'verdict observed' : 'no verdict observed',
+    facts.outputObserved ? 'final output observed' : 'no final output observed',
+    facts.handoffObserved ? 'handoff observed' : 'no handoff observed',
+    facts.commitObserved ? 'commit observed' : 'no current-attempt commit observed',
+    facts.finalizing ? 'finalization window active' : 'finalization window inactive',
+  ].join('; ');
+}
+
 export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
   const stuckMinutes = Math.max(1, Math.round(stuckThresholdMs / 60_000));
   const verdictUnion = SUPERVISOR_VERDICTS.map((v) => v.id).join('|');
@@ -112,7 +295,7 @@ export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
-Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>"}
+Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>","extension_ms":<positive integer if EXTEND, else null>}
 
 Verdicts:
 ${verdictList}
@@ -120,14 +303,84 @@ ${verdictList}
 Rules:
 - Default to WAIT when agents are making progress toward the goal.
 - GUIDE only when you see a concrete wrong direction (not just slow progress).
+- EXTEND only when verified current-attempt progress or added workload shows that correct work needs more time. Name the running target stage and request a positive extension_ms. EXTEND is a proposal: worker policy enforces the immutable total hard cap, and it never cancels ABORT.
 - REJECT only when an EMITTED deliverable contradicts its OWN declared work or acceptance criteria — e.g. a gate verdict says pass:true while the evidence/metric it cites shows fail, a stage claims it produced an artifact that is missing or empty, or a result codifies a smoke/error as success. Set "target_stage" to that stage; "reason" must name the specific contradiction (what was claimed vs what the evidence shows). REJECT forces the work to be re-done — it is NOT for slow progress (use WAIT) or a wrong overall approach (use REPLAN). CRITICAL GUARD: an HONEST NEGATIVE is a VALID deliverable, not a rejection — do NOT REJECT a result simply because the target metric was not beaten, the hypothesis failed, or the run found no improvement. Only REJECT when the deliverable itself is internally inconsistent or does not actually do the work it declares.
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
-- ABORT only if a stage has been running for ${stuckMinutes}+ minutes with no new output (truly stuck). Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT abort based on stdout silence alone if you can see file/artifact activity in the snapshot.
+- ABORT only in either of these cases: (1) a stage has made no real progress for ${stuckMinutes}+ minutes and is truly stuck, or (2) the same concrete wrong direction continues after repeated GUIDE decisions. Active or high-volume output is not proof that the direction is correct and must not prevent case (2) from escalating to ABORT. Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT infer case (1) from stdout silence alone if you can see file/artifact activity in the snapshot.
+- Treat the verified stage-facts line as authoritative. \`output.md\` is not a verdict: say a verdict exists only when the facts explicitly say "verdict observed". Never ABORT during a stated finalization window; the stage timeout remains the outer bound.
+- Do not ABORT slow but correct work, ordinary progress, or an honestly reported negative result.
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
 }
 
+export type SupervisorAssessmentTrigger = 'anomaly' | 'routine' | 'none';
+
+export function selectSupervisorAssessmentTrigger(input: {
+  anomalySignals: string[];
+  runningStageCount: number;
+  accumulatedOutputBytes: number;
+  minDeltaBytes: number;
+  now: number;
+  lastRoutineAssessmentAt: number;
+  routineAssessmentIntervalMs: number;
+  routineAssessmentsThisIteration: number;
+  maxRoutineAssessmentsPerIteration: number;
+  cooldownUntil: number;
+}): SupervisorAssessmentTrigger {
+  if (input.anomalySignals.length > 0) return 'anomaly';
+  if (input.runningStageCount === 0) return 'none';
+  if (input.accumulatedOutputBytes < input.minDeltaBytes) return 'none';
+  if (input.now - input.lastRoutineAssessmentAt < input.routineAssessmentIntervalMs) return 'none';
+  if (input.routineAssessmentsThisIteration >= input.maxRoutineAssessmentsPerIteration) return 'none';
+  if (input.now < input.cooldownUntil) return 'none';
+  return 'routine';
+}
+
+function artifactShowsFailedGate(artifact: { path: string; content: string }): boolean {
+  if (!/(^|\/)verdict(?:[_.][^/]*)?\.json$/i.test(artifact.path)) return false;
+  try {
+    const parsed = JSON.parse(artifact.content) as { pass?: unknown };
+    return parsed.pass === false;
+  } catch { return false; }
+}
+
+/** Stable signal ids let the heartbeat edge-trigger anomalies instead of spamming every 30s. */
+export function detectSupervisorAnomalySignals(input: {
+  state: StoreState;
+  stageTransitionFingerprint?: string;
+  stalledStageIds?: string[];
+  recentArtifacts?: Array<{ path: string; content: string }>;
+  userInput?: string | null;
+  pendingApprovalFingerprint?: string;
+}): string[] {
+  const signals: string[] = [];
+  if (input.stageTransitionFingerprint) signals.push(`stage_transition:${input.stageTransitionFingerprint}`);
+  for (const stageId of input.stalledStageIds ?? []) signals.push(`stalled:${stageId}`);
+  if (input.userInput) signals.push(`user_input:${input.userInput.slice(0, 120)}`);
+  if (input.pendingApprovalFingerprint) signals.push(`pending_approval:${input.pendingApprovalFingerprint}`);
+  for (const artifact of input.recentArtifacts ?? []) {
+    if (artifactShowsFailedGate(artifact)) signals.push(`gate_failed:${artifact.path}:${artifact.content.slice(0, 160)}`);
+  }
+  for (const [stageId, status] of Object.entries(input.state.stages)) {
+    const failedAttempts = (status.attempts ?? []).filter((attempt) => attempt.status === STAGE_STATUS.FAILED).length;
+    if (failedAttempts >= 2) signals.push(`repeated_failure:${stageId}:${failedAttempts}`);
+  }
+  if (input.state.campaignAlert?.type === 'plateau') {
+    signals.push(`metric_plateau:${input.state.campaignAlert.triggeredAt}`);
+  }
+  const budget = input.state.budget;
+  if (budget) {
+    const tokenRatio = budget.totalTokens && budget.totalTokens > 0 ? (budget.usedTokens ?? 0) / budget.totalTokens : 0;
+    const timeRatio = budget.totalTimeMs && budget.totalTimeMs > 0 ? (budget.usedTimeMs ?? 0) / budget.totalTimeMs : 0;
+    if (Math.max(tokenRatio, timeRatio) >= 0.9) signals.push(`budget_near_exhaustion:${Math.max(tokenRatio, timeRatio).toFixed(3)}`);
+  }
+  if (input.state.status === RUN_STATUS.AWAITING_APPROVAL || input.state.status === RUN_STATUS.PARKED) {
+    signals.push(`pending_approval_state:${input.state.status}`);
+  }
+  return [...new Set(signals)];
+}
+
 export class Supervisor {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private byteOffsets = new Map<string, number>();
   private lastActionTime = 0;
   private assessmentCount = 0;
@@ -147,6 +400,7 @@ export class Supervisor {
   private knownStages = new Set<string>();
   private completedStages = new Map<string, { role: string; duration: number }>();
   private lastState: StoreState | null = null;
+  private usage: SupervisorUsage | null = null;
 
   constructor(
     private projectDir: string,
@@ -156,32 +410,57 @@ export class Supervisor {
     private taskDescription: string,
   ) {}
 
-  // Adaptive polling: the effective interval grows on consecutive WAITs and
-  // resets to base when something interesting happens (non-WAIT verdict, stage
-  // state change, or a new artifact). Cap prevents a quiet run from polling
-  // less often than every 5 minutes.
+  // Heartbeats stay cheap and fixed-rate. Semantic LLM reviews have their own
+  // routine cadence; anomaly signals bypass that cadence and routine budget.
   private effectivePollIntervalMs: number = 0;
-  private static readonly MAX_EFFECTIVE_POLL_MS = 300_000;  // 5 min cap
-  private static readonly BACKOFF_TRIGGER_WAITS = 3;        // start doubling after N WAITs
   private consecutiveWaits = 0;
   private prevStageStatusSnapshot: Record<string, string> = {};
-  // Per-iteration assessment budget refills when state.currentIteration advances.
+  private lastRoutineAssessmentAt = Date.now();
+  private accumulatedOutputBytes = 0;
+  private pendingTails = new Map<string, string>();
+  private pendingArtifacts = new Map<string, { path: string; content: string }>();
+  private seenAnomalySignals = new Set<string>();
+  // Per-iteration ROUTINE budget refills when state.currentIteration advances.
   private lastSeenIteration = 0;
   private iterationAssessmentCount = 0;
   // GAP-2 watchdog: last-progress timestamp per running stage (carried across ticks).
   private stageLastProgressMs: Record<string, number> = {};
-  // Idempotency: stages already aborted by the deterministic watchdog (don't re-fire each tick).
+  // Idempotency is attempt-scoped, so an immediate same-name rerun remains supervisable.
   private watchdogAbortedStages = new Set<string>();
-  // Cursor for the watchdog's own artifact-freshness probe (independent of the LLM artifact scan).
+  private watchdogAttemptKeys: Record<string, string> = {};
+  // Cursor for stage-attributed durable artifact checks (independent of the LLM scan).
   private watchdogLastArtifactCheckMs = 0;
 
   start(): void {
     if (this.timer) return;
     this.stopped = false;
     this.effectivePollIntervalMs = this.config.pollIntervalMs;
+    const startedAt = new Date().toISOString();
+    try {
+      const state = readRunState(this.projectDir, this.runId);
+      const prior = state.supervisor;
+      this.usage = prior ? {
+        ...prior,
+        status: 'running',
+        completedAt: undefined,
+        attempts: [...prior.attempts],
+      } : {
+        status: 'running',
+        calls: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        duration_ms: 0,
+        startedAt,
+        attempts: [],
+      };
+      this.assessmentCount = this.usage.calls;
+      this.startTime = Date.parse(this.usage.startedAt) || Date.now();
+      this.lastRoutineAssessmentAt = Date.now();
+      this.persistUsage();
+    } catch { /* run state may not be initialized yet */ }
     const logPath = this.logPath();
     mkdirSync(join(this.runDir(), 'signals'), { recursive: true });
-    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${new Date().toISOString()}\nConfig: poll=${this.config.pollIntervalMs}ms (adaptive, max ${Supervisor.MAX_EFFECTIVE_POLL_MS}ms), model=${this.config.model}, max/iter=${this.config.maxAssessmentsPerIteration}\n\n`);
+    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${startedAt}\nConfig: heartbeat=${this.config.pollIntervalMs}ms, routine=${this.config.routineAssessmentIntervalMs}ms, model=${this.config.model}, routine-max/iter=${this.config.maxAssessmentsPerIteration}\n\n`);
     log.info({ runId: this.runId }, 'Supervisor started');
     this.scheduleNextTick();
   }
@@ -192,7 +471,7 @@ export class Supervisor {
       this.tick()
         .catch(err => log.error(err, 'Supervisor tick error'))
         .finally(() => this.scheduleNextTick());
-    }, this.effectivePollIntervalMs);
+    }, this.config.pollIntervalMs);
   }
 
   stop(): void {
@@ -207,9 +486,119 @@ export class Supervisor {
       const finalState = readRunState(this.projectDir, this.runId);
       this.trackMilestones(finalState);
     } catch { /* ignore */ }
+    if (this.usage) {
+      this.usage.status = STAGE_STATUS.COMPLETE;
+      this.usage.completedAt = new Date().toISOString();
+      this.persistUsage();
+    }
     appendFileSync(this.logPath(), `\n---\nSupervisor stopped: ${new Date().toISOString()}, ${this.assessmentCount} assessments made.\n`);
     this.writeProgress();
     log.info({ runId: this.runId, assessments: this.assessmentCount }, 'Supervisor stopped');
+  }
+
+  private persistUsage(): void {
+    if (!this.usage) return;
+    const usage: SupervisorUsage = {
+      ...this.usage,
+      attempts: [...this.usage.attempts],
+    };
+    try {
+      const dir = stageDir(this.projectDir, this.runId, '_supervisor');
+      mkdirSync(dir, { recursive: true });
+      atomicWrite(join(dir, 'status.json'), JSON.stringify(usage, null, 2));
+    } catch { /* non-critical */ }
+    try {
+      updateRunState(this.projectDir, this.runId, (state) => { state.supervisor = usage; });
+    } catch { /* non-critical */ }
+    // Summaries are normally generated just before the scheduler's finally
+    // block stops the supervisor. Refresh only the deterministic usage line
+    // here so the final call cannot remain invisible (and do not trigger a
+    // second, costly summary-model invocation).
+    if (usage.status === STAGE_STATUS.COMPLETE) this.refreshSummaryUsage(usage);
+  }
+
+  private refreshSummaryUsage(usage: SupervisorUsage): void {
+    const summaryPath = join(this.runDir(), 'summary.md');
+    if (!existsSync(summaryPath)) return;
+    try {
+      const tokensTotal = usage.tokens_in + usage.tokens_out;
+      const line = `- _supervisor: ${usage.calls} calls, ${Math.round(usage.duration_ms / 1000)}s cumulative, ${tokensTotal} tokens total (${usage.tokens_in} in + ${usage.tokens_out} out)`;
+      let summary = readFileSync(summaryPath, 'utf-8');
+      if (/^- _supervisor:.*$/m.test(summary)) {
+        summary = summary.replace(/^- _supervisor:.*$/m, line);
+      } else if (/^## Stages\s*$/m.test(summary)) {
+        summary = summary.replace(/^## Stages\s*$/m, (heading) => `${heading}\n${line}`);
+      } else {
+        summary = `${summary.trimEnd()}\n\n## Stages\n${line}\n`;
+      }
+      atomicWrite(summaryPath, summary);
+    } catch { /* non-critical observability refresh */ }
+  }
+
+  private recordAssessmentUsage(
+    startedAt: string,
+    result: RunResult | undefined,
+    verdict: SupervisorAssessment | null,
+    error?: string,
+  ): void {
+    if (!this.usage) {
+      this.usage = {
+        status: 'running', calls: 0, tokens_in: 0, tokens_out: 0, duration_ms: 0,
+        startedAt, attempts: [],
+      };
+    }
+    const completedAt = new Date().toISOString();
+    const durationMs = typeof result?.duration_ms === 'number'
+      ? result.duration_ms
+      : Math.max(0, Date.parse(completedAt) - Date.parse(startedAt));
+    const exitCode = result?.exitCode ?? 1;
+    const attempt: SupervisorAttempt = {
+      index: this.usage.attempts.length + 1,
+      startedAt,
+      completedAt,
+      status: exitCode === 0 && verdict ? 'complete' : 'failed',
+      duration_ms: durationMs,
+      exitCode,
+      tokens_in: result?.tokens_in,
+      tokens_out: result?.tokens_out,
+      ...(verdict ? {
+        unverifiedAssessment: {
+          verdict: verdict.verdict,
+          targetStage: verdict.targetStage,
+          reason: verdict.reason,
+        },
+      } : {}),
+      error,
+    };
+    this.usage.attempts.push(attempt);
+    this.usage.calls = this.usage.attempts.length;
+    this.usage.tokens_in += result?.tokens_in ?? 0;
+    this.usage.tokens_out += result?.tokens_out ?? 0;
+    this.usage.duration_ms += durationMs;
+    this.assessmentCount = this.usage.calls;
+    try {
+      appendTraceEvent(this.projectDir, this.runId, '_supervisor', {
+        timestamp: completedAt,
+        stageId: '_supervisor',
+        type: 'llm_call',
+        inputSummary: 'Supervisor semantic assessment',
+        outputSummary: verdict
+          ? `Unverified model assessment — ${verdict.verdict}: ${verdict.reason}`
+          : (error ?? `exit ${exitCode}`),
+        tokensIn: result?.tokens_in,
+        tokensOut: result?.tokens_out,
+        durationMs,
+      });
+    } catch { /* non-critical */ }
+    this.persistUsage();
+  }
+
+  private recordEffectiveAssessment(assessment: SupervisorAssessment): void {
+    const attempt = this.usage?.attempts.at(-1);
+    if (!attempt || attempt.status !== STAGE_STATUS.COMPLETE || !attempt.unverifiedAssessment) return;
+    attempt.verdict = assessment.verdict;
+    attempt.effectiveReason = assessment.reason;
+    this.persistUsage();
   }
 
   private writeProgress(): void {
@@ -231,7 +620,7 @@ export class Supervisor {
     // Outcome first — single most actionable line. Read this and you know
     // whether you need to do anything.
     lines.push('## Outcome');
-    lines.push(`${status === 'complete' ? 'Complete' : status === 'failed' ? 'Failed' : 'In progress'} (${elapsed}s, iteration ${iteration}/${maxIter}, ${retries} interventions)`);
+    lines.push(`${status === RUN_STATUS.COMPLETE ? 'Complete' : status === RUN_STATUS.FAILED ? 'Failed' : 'In progress'} (${elapsed}s, iteration ${iteration}/${maxIter}, ${retries} interventions)`);
     lines.push('');
 
     if (this.decisions.length > 0) {
@@ -277,7 +666,7 @@ export class Supervisor {
     // "VERDICT: reason"; user input pushes "User guidance received: ...".
     if (this.observations.length > 0) {
       const noteworthy = this.observations.filter(o =>
-        /^(GUIDE|ABORT|REPLAN|REJECT|DONE):/.test(o) || o.startsWith('User guidance received:'),
+        /^(GUIDE|EXTEND|ABORT|REPLAN|REJECT|DONE):/.test(o) || o.startsWith('User guidance received:'),
       );
       const recent = noteworthy.slice(-5);
       if (recent.length > 0) {
@@ -310,9 +699,13 @@ export class Supervisor {
       maxAssessmentsPerIteration: this.config.maxAssessmentsPerIteration,
       currentIteration: this.lastSeenIteration,
       basePollIntervalMs: this.config.pollIntervalMs,
+      routineAssessmentIntervalMs: this.config.routineAssessmentIntervalMs,
       effectivePollIntervalMs: this.effectivePollIntervalMs,
       consecutiveWaits: this.consecutiveWaits,
       tickCount: this.tickCount,
+      tokensIn: this.usage?.tokens_in ?? 0,
+      tokensOut: this.usage?.tokens_out ?? 0,
+      assessmentDurationMs: this.usage?.duration_ms ?? 0,
       actions: this.actions.slice(-30).map(a => ({
         tick: a.tick,
         timestamp: a.timestamp,
@@ -321,6 +714,8 @@ export class Supervisor {
         targetStage: a.assessment.targetStage,
         reason: a.assessment.reason,
         guidance: a.assessment.guidance,
+        targetAttemptIndex: a.targetAttemptIndex,
+        source: a.source,
       })),
     };
     try { writeFileSync(path, JSON.stringify(payload, null, 2), 'utf-8'); } catch { /* non-critical */ }
@@ -342,15 +737,15 @@ export class Supervisor {
 
     // Detect new stages starting
     for (const [id, ss] of Object.entries(state.stages)) {
-      if (ss.status === 'running' && !this.knownStages.has(id)) {
+      if (isRunningStageStatus(ss.status) && !this.knownStages.has(id)) {
         this.knownStages.add(id);
       }
       // Detect stage completions
-      if ((ss.status === 'complete' || ss.status === 'failed') && !this.completedStages.has(id)) {
+      if (isSettledStageStatus(ss.status) && !this.completedStages.has(id)) {
         const duration = ss.duration_ms ? Math.round(ss.duration_ms / 1000) : 0;
         this.completedStages.set(id, { role: '', duration });
 
-        if (ss.status === 'complete') {
+        if (ss.status === STAGE_STATUS.COMPLETE) {
           // Check for deliverables (artifacts)
           if (ss.artifacts && ss.artifacts.length > 0) {
             this.deliverables.push(`${id}: ${ss.artifacts.join(', ')}`);
@@ -383,29 +778,68 @@ export class Supervisor {
     return join(this.runDir(), 'signals');
   }
 
-  /**
-   * GAP-2 watchdog probe: true if ANY file under the run dir was modified at/after `sinceMs`.
-   * Used as a generic "something happened" progress signal independent of the LLM artifact scan
-   * (it does not advance that scan's cursor). Skips noisy/internal dirs and is depth-bounded.
-   */
-  private hasFreshArtifactSince(sinceMs: number): boolean {
-    const root = this.runDir();
-    const walk = (dir: string, depth: number): boolean => {
-      if (depth > 4) return false;
-      let entries: import('node:fs').Dirent[];
-      try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return false; }
-      for (const e of entries) {
-        if (e.name === 'codex_home' || e.name === 'node_modules' || e.name === '.tmp' || e.name === 'signals') continue;
-        const p = join(dir, e.name);
-        if (e.isDirectory()) {
-          if (walk(p, depth + 1)) return true;
-        } else if (e.isFile()) {
-          try { if (statSync(p).mtimeMs >= sinceMs) return true; } catch { /* skip */ }
-        }
+  private pendingApprovalFingerprint(): string | undefined {
+    const stagesRoot = join(this.runDir(), 'stages');
+    try {
+      const found: string[] = [];
+      for (const stageId of readdirSync(stagesRoot)) {
+        const path = join(stagesRoot, stageId, 'approval_request.json');
+        if (!existsSync(path)) continue;
+        const stat = statSync(path);
+        found.push(`${stageId}:${stat.mtimeMs}`);
       }
-      return false;
-    };
-    return walk(root, 0);
+      return found.sort().join('|') || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readProjectCommit(): ProjectCommitFact | undefined {
+    try {
+      const output = execFileSync('git', ['show', '-s', '--format=%H%x00%cI', 'HEAD'], {
+        cwd: this.projectDir,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5_000,
+      }).trim();
+      const [hash, committedAt] = output.split('\0');
+      const committedAtMs = Date.parse(committedAt);
+      if (!/^[0-9a-f]{7,40}$/i.test(hash) || !Number.isFinite(committedAtMs)) return undefined;
+      return { hash, committedAtMs };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private inspectFacts(
+    stageId: string,
+    status: StageStatus,
+    sinceMs: number,
+    baseCommit?: string,
+    projectCommit = this.readProjectCommit(),
+  ): StageExecutionFacts {
+    const attempt = currentRunningAttempt(status);
+    const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
+    const commitObserved = Boolean(
+      attempt
+      && projectCommit
+      && projectCommit.hash !== baseCommit
+      && Number.isFinite(attemptStartedMs)
+      // Git commit timestamps have one-second precision; tolerate that
+      // truncation when the commit and attempt start share a second.
+      && projectCommit.committedAtMs + 999 >= attemptStartedMs,
+    );
+    return inspectStageExecutionFacts({
+      runDir: this.runDir(),
+      stageId,
+      status,
+      sinceMs,
+      commitObserved,
+    });
+  }
+
+  private authoritativeStageStatus(stageId: string, fallback: StageStatus): StageStatus {
+    try { return readStageStatus(this.projectDir, this.runId, stageId); } catch { return fallback; }
   }
 
   private async tick(): Promise<void> {
@@ -423,7 +857,7 @@ export class Supervisor {
     // Track milestones and update progress
     this.trackMilestones(state);
 
-    // Refill per-iteration budget when the campaign iteration advances.
+    // Refill the ROUTINE semantic-review budget when the iteration advances.
     const currentIter = state.currentIteration ?? 1;
     if (currentIter !== this.lastSeenIteration) {
       if (this.lastSeenIteration !== 0) {
@@ -431,12 +865,6 @@ export class Supervisor {
       }
       this.lastSeenIteration = currentIter;
       this.iterationAssessmentCount = 0;
-      // Also reset adaptive backoff on iteration transition — fresh iteration
-      // is "something happened" by definition.
-      if (this.effectivePollIntervalMs !== this.config.pollIntervalMs) {
-        this.effectivePollIntervalMs = this.config.pollIntervalMs;
-        this.consecutiveWaits = 0;
-      }
     }
 
     // Stop if run is no longer active (any terminal state, not just complete/failed)
@@ -459,34 +887,35 @@ export class Supervisor {
 
     // Find running stages
     const runningStages = Object.entries(state.stages)
-      .filter(([, s]) => s.status === 'running')
+      .filter(([, s]) => isRunningStageStatus(s.status))
       .map(([id]) => id);
 
-    if (runningStages.length === 0) {
-      this.writeProgress(); // update progress even when idle
-      return;
+    // Read and ACCUMULATE live.log tails across cheap heartbeats. The previous
+    // implementation advanced byte offsets every 30s, so a 180s LLM cadence
+    // would otherwise see only the final 30s and miss the wrong-direction arc.
+    const tails = this.readStageTails(runningStages);
+    const totalDelta = [...tails.values()].reduce((sum, text) => sum + Buffer.byteLength(text), 0);
+    this.accumulatedOutputBytes += totalDelta;
+    for (const [stageId, text] of tails) {
+      const accumulated = (this.pendingTails.get(stageId) ?? '') + text;
+      this.pendingTails.set(stageId, accumulated.slice(-this.config.tailBytes));
     }
 
-    // Read live.log tails
-    const tails = this.readStageTails(runningStages);
-    const totalDelta = [...tails.values()].reduce((sum, t) => sum + t.length, 0);
-
-    // Detect adaptive-reset events: stage state change OR new artifact since last tick.
-    // Either resets backoff so the supervisor "wakes up" when something happens.
+    // Stage transitions are anomaly signals and therefore bypass routine cadence.
     const currentSnapshot: Record<string, string> = {};
     for (const [id, s] of Object.entries(state.stages)) currentSnapshot[id] = s.status;
-    const stageTransition = Object.entries(currentSnapshot).some(
-      ([id, st]) => this.prevStageStatusSnapshot[id] !== undefined && this.prevStageStatusSnapshot[id] !== st,
-    ) || Object.entries(this.prevStageStatusSnapshot).some(
-      ([id]) => currentSnapshot[id] === undefined,
-    );
-    this.prevStageStatusSnapshot = currentSnapshot;
-
-    if (stageTransition && this.effectivePollIntervalMs !== this.config.pollIntervalMs) {
-      log.info({ from: this.effectivePollIntervalMs, to: this.config.pollIntervalMs }, 'Supervisor adaptive reset: stage transition');
-      this.effectivePollIntervalMs = this.config.pollIntervalMs;
-      this.consecutiveWaits = 0;
+    const transitionParts: string[] = [];
+    const transitionedStageIds = new Set<string>();
+    const allStageIds = new Set([...Object.keys(this.prevStageStatusSnapshot), ...Object.keys(currentSnapshot)]);
+    for (const id of allStageIds) {
+      const before = this.prevStageStatusSnapshot[id] ?? 'absent';
+      const after = currentSnapshot[id] ?? 'absent';
+      if (before !== after) {
+        transitionParts.push(`${id}:${before}>${after}`);
+        transitionedStageIds.add(id);
+      }
     }
+    this.prevStageStatusSnapshot = currentSnapshot;
 
     // === GAP-2: deterministic no-progress watchdog ===
     // BEFORE the idle / minDeltaBytes early-returns below (which would otherwise skip the
@@ -495,70 +924,129 @@ export class Supervisor {
     // deterministically, independent of the model: a stage that has shown NO progress
     // signal (new live.log bytes, new artifact, or a stage transition) for
     // config.stuckThresholdMs is killed and left to the retry machinery.
+    let stalledStageIds: string[];
+    const stageFacts = new Map<string, StageExecutionFacts>();
     {
       const now = Date.now();
-      // A new artifact anywhere under the run dir this window counts as progress for all
-      // running stages (artifacts are not reliably stage-attributed). Probe is independent
-      // of readRecentArtifacts() so the LLM scan's cursor is untouched.
-      const freshArtifact = this.hasFreshArtifactSince(this.watchdogLastArtifactCheckMs || (now - this.config.stuckThresholdMs));
+      const artifactCutoff = this.watchdogLastArtifactCheckMs || (now - this.config.stuckThresholdMs);
       this.watchdogLastArtifactCheckMs = now;
+      const projectCommit = this.readProjectCommit();
       const progressedStageIds = new Set<string>();
       for (const stageId of runningStages) {
-        const stageProgressed = (tails.get(stageId)?.length ?? 0) > 0 || stageTransition || freshArtifact;
+        const stageStatus = this.authoritativeStageStatus(stageId, state.stages[stageId]);
+        const facts = this.inspectFacts(
+          stageId,
+          stageStatus,
+          artifactCutoff,
+          state.baseCommit,
+          projectCommit,
+        );
+        stageFacts.set(stageId, facts);
+        const attemptKey = `${stageId}:${facts.attemptIndex ?? 'unknown'}:${facts.attemptStartedAt ?? 'unknown'}`;
+        const attemptChanged = this.watchdogAttemptKeys[stageId] !== attemptKey;
+        this.watchdogAttemptKeys[stageId] = attemptKey;
+        const stageProgressed = (tails.get(stageId)?.length ?? 0) > 0
+          || transitionedStageIds.has(stageId)
+          || attemptChanged
+          || facts.artifactProgressThisTick
+          || facts.protectedFromIdleAbort;
         if (stageProgressed) progressedStageIds.add(stageId);
       }
-      const { nextLastProgressMs, stalledStageIds } = detectStalledStages({
+      const detected = detectStalledStages({
         runningStages,
         progressedStageIds,
         lastProgressMs: this.stageLastProgressMs,
         now,
         thresholdMs: this.config.stuckThresholdMs,
       });
-      this.stageLastProgressMs = nextLastProgressMs;
-      // Forget abort-idempotency for stages no longer running (so a future re-run can be watched).
+      this.stageLastProgressMs = detected.nextLastProgressMs;
+      stalledStageIds = detected.stalledStageIds;
+      const activeAttemptKeys = new Set(runningStages.map((stageId) => {
+        const facts = stageFacts.get(stageId)!;
+        return `${stageId}:${facts.attemptIndex ?? 'unknown'}:${facts.attemptStartedAt ?? 'unknown'}`;
+      }));
       for (const aborted of [...this.watchdogAbortedStages]) {
-        if (!runningStages.includes(aborted)) this.watchdogAbortedStages.delete(aborted);
+        if (!activeAttemptKeys.has(aborted)) this.watchdogAbortedStages.delete(aborted);
       }
       for (const stageId of stalledStageIds) {
-        if (this.watchdogAbortedStages.has(stageId)) continue;  // already fired; don't spam
-        this.watchdogAbortedStages.add(stageId);
+        const facts = stageFacts.get(stageId)!;
+        const attemptKey = `${stageId}:${facts.attemptIndex ?? 'unknown'}:${facts.attemptStartedAt ?? 'unknown'}`;
+        if (this.watchdogAbortedStages.has(attemptKey)) continue;
         const stalledMs = now - (this.stageLastProgressMs[stageId] ?? now);
-        const reason = `Deterministic watchdog: no progress signal (live.log/artifact/transition) for ${Math.round(stalledMs / 1000)}s (>= ${Math.round(this.config.stuckThresholdMs / 1000)}s threshold) — aborting stuck stage.`;
-        try {
-          mkdirSync(this.signalDir(), { recursive: true });
-          writeFileSync(join(this.signalDir(), `abort_${stageId}.json`),
-            JSON.stringify({ reason, timestamp: new Date().toISOString(), source: 'watchdog' }), 'utf-8');
+        const abort = this.writeVerifiedAbort(
+          stageId,
+          'watchdog',
+          { kind: 'idle', stalledMs },
+          undefined,
+          artifactCutoff,
+        );
+        if (abort.written) {
+          this.watchdogAbortedStages.add(attemptKey);
           log.warn({ runId: this.runId, stageId, stalledMs }, 'Watchdog ABORT — stage made no progress past threshold');
           this.observations.push(`Watchdog aborted stuck stage '${stageId}' (${Math.round(stalledMs / 1000)}s no progress)`);
-        } catch (err) { log.warn({ err, stageId }, 'Watchdog failed to write abort signal'); }
+        } else {
+          log.warn({ runId: this.runId, stageId, reason: abort.reason }, 'Watchdog ABORT suppressed by verified stage facts');
+        }
       }
     }
 
-    // Skip if not enough new output (artifact scan still gates via separate path below)
-    if (totalDelta < this.config.minDeltaBytes && !stageTransition) return;
-
-    // Check cooldown
-    if (Date.now() - this.lastActionTime < this.config.cooldownAfterActionMs) return;
-
-    // Per-iteration budget. Refills automatically on iteration transition.
-    if (this.iterationAssessmentCount >= this.config.maxAssessmentsPerIteration) return;
-
-    // Include user input in assessment if just received
-    let extraContext = '';
-    if (userInput) {
-      extraContext = `\n\n# User Guidance (just received)\n${userInput}\nIncorporate this into your assessment.`;
-    }
-
-    // Build prompt and assess
+    // Scan artifacts on every heartbeat, retaining them until the next semantic
+    // call. Failed gates are immediate anomaly signals; ordinary artifacts stay
+    // in the pending prompt for the next routine call.
     const recentArtifacts = this.readRecentArtifacts();
-    const newArtifacts = recentArtifacts.length > 0;
-    if (newArtifacts && this.effectivePollIntervalMs !== this.config.pollIntervalMs) {
-      log.info({ from: this.effectivePollIntervalMs, to: this.config.pollIntervalMs }, 'Supervisor adaptive reset: new artifact');
-      this.effectivePollIntervalMs = this.config.pollIntervalMs;
-      this.consecutiveWaits = 0;
+    for (const artifact of recentArtifacts) this.pendingArtifacts.set(artifact.path, artifact);
+
+    const detectedSignals = detectSupervisorAnomalySignals({
+      state,
+      stageTransitionFingerprint: transitionParts.length > 0 ? transitionParts.sort().join('|') : undefined,
+      stalledStageIds,
+      recentArtifacts,
+      userInput,
+      pendingApprovalFingerprint: this.pendingApprovalFingerprint(),
+    }).map((signal) => (
+      signal.startsWith('user_input:')
+      || signal.startsWith('gate_failed:')
+      || signal.startsWith('stage_transition:')
+    ) ? `${signal}:tick${this.tickCount}` : signal);
+    const anomalySignals = detectedSignals.filter((signal) => !this.seenAnomalySignals.has(signal));
+    for (const signal of anomalySignals) this.seenAnomalySignals.add(signal);
+
+    const now = Date.now();
+    const trigger = selectSupervisorAssessmentTrigger({
+      anomalySignals,
+      runningStageCount: runningStages.length,
+      accumulatedOutputBytes: this.accumulatedOutputBytes,
+      minDeltaBytes: this.config.minDeltaBytes,
+      now,
+      lastRoutineAssessmentAt: this.lastRoutineAssessmentAt,
+      routineAssessmentIntervalMs: this.config.routineAssessmentIntervalMs,
+      routineAssessmentsThisIteration: this.iterationAssessmentCount,
+      maxRoutineAssessmentsPerIteration: this.config.maxAssessmentsPerIteration,
+      cooldownUntil: this.lastActionTime + this.config.cooldownAfterActionMs,
+    });
+    if (trigger === 'none') {
+      this.writeProgress();
+      return;
     }
-    const prompt = this.buildAssessmentPrompt(tails, state, runningStages, recentArtifacts) + extraContext;
+
+    if (trigger === 'routine') {
+      this.lastRoutineAssessmentAt = now;
+      this.iterationAssessmentCount++;
+    }
+    let extraContext = anomalySignals.length > 0
+      ? `\n\n# Immediate anomaly signals\n${anomalySignals.map((signal) => `- ${signal}`).join('\n')}\nAssess now; this call bypassed routine throttling.`
+      : '';
+    if (userInput) {
+      extraContext += `\n\n# User Guidance (just received)\n${userInput}\nIncorporate this into your assessment.`;
+    }
+    const assessmentTails = new Map(this.pendingTails);
+    const assessmentArtifacts = [...this.pendingArtifacts.values()];
+    const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
+    const assessmentStartedAt = Date.now();
     const assessment = await this.assess(prompt);
+    this.accumulatedOutputBytes = 0;
+    this.pendingTails.clear();
+    this.pendingArtifacts.clear();
     if (!assessment) {
       // Track consecutive failures so a silently-broken supervisor (e.g. an
       // adapter that keeps returning unparseable output) becomes observable
@@ -575,6 +1063,7 @@ export class Supervisor {
         } catch { /* non-critical */ }
         log.warn({ runId: this.runId, consecutiveFailures: this.consecutiveAssessFailures }, 'Supervisor DEGRADED — repeated assessment failures, not steering the run');
       }
+      this.writeProgress();
       return;
     }
     // Recovered: a successful assessment clears the degraded state.
@@ -583,58 +1072,52 @@ export class Supervisor {
       try { const p = join(this.signalDir(), 'supervisor_degraded.json'); if (existsSync(p)) unlinkSync(p); } catch { /* non-critical */ }
     }
 
-    this.assessmentCount++;
-    this.iterationAssessmentCount++;
+    // Validate any consequential verdict against fresh on-disk facts before it
+    // becomes an action, log entry, dashboard state, or signal.
+    const effectiveAssessment = await this.act(assessment, assessmentStartedAt, userInput ? 'operator' : 'supervisor');
+    this.recordEffectiveAssessment(effectiveAssessment);
 
-    // Adaptive backoff: count consecutive WAITs; after N, double the effective
-    // poll interval up to a 5-min ceiling. Any non-WAIT verdict resets it.
-    if (assessment.verdict === 'WAIT') {
+    // Keep WAIT streak telemetry, but do not let it slow the 30s anomaly heartbeat.
+    if (effectiveAssessment.verdict === 'WAIT') {
       this.consecutiveWaits++;
-      if (this.consecutiveWaits >= Supervisor.BACKOFF_TRIGGER_WAITS) {
-        const next = Math.min(this.effectivePollIntervalMs * 2, Supervisor.MAX_EFFECTIVE_POLL_MS);
-        if (next !== this.effectivePollIntervalMs) {
-          log.info({ from: this.effectivePollIntervalMs, to: next, consecutiveWaits: this.consecutiveWaits }, 'Supervisor adaptive backoff');
-          this.effectivePollIntervalMs = next;
-        }
-      }
     } else {
       this.consecutiveWaits = 0;
-      if (this.effectivePollIntervalMs !== this.config.pollIntervalMs) {
-        log.info({ from: this.effectivePollIntervalMs, to: this.config.pollIntervalMs }, 'Supervisor adaptive reset: non-WAIT verdict');
-        this.effectivePollIntervalMs = this.config.pollIntervalMs;
-      }
     }
 
     // Record action
     const action: SupervisorAction = {
       timestamp: new Date().toISOString(),
       tick: this.tickCount,
-      assessment,
+      assessment: effectiveAssessment,
       runningStages,
+      targetAttemptIndex: effectiveAssessment.targetStage
+        ? currentRunningAttempt(this.authoritativeStageStatus(
+            effectiveAssessment.targetStage,
+            state.stages[effectiveAssessment.targetStage] ?? { status: STAGE_STATUS.PENDING, retries: 0 },
+          ))?.index
+        : undefined,
+      source: userInput ? 'operator' : 'supervisor',
     };
     this.actions.push(action);
-
-    // Act on verdict
-    await this.act(assessment);
 
     // Log
     this.appendLog(action);
 
     // Record observation
-    if (assessment.verdict === 'WAIT') {
-      this.observations.push(assessment.reason);
+    if (effectiveAssessment.verdict === 'WAIT') {
+      this.observations.push(effectiveAssessment.reason);
     } else {
-      this.observations.push(`${assessment.verdict}: ${assessment.reason}`);
-      if (assessment.verdict === 'GUIDE' && assessment.guidance) {
-        this.decisions.push(`Guided ${assessment.targetStage}: ${assessment.guidance.slice(0, 100)}`);
-      } else if (assessment.verdict === 'REPLAN') {
-        this.decisions.push(`Triggered replan: ${assessment.reason}`);
-      } else if (assessment.verdict === 'REJECT') {
-        this.decisions.push(`Rejected ${assessment.targetStage ?? 'deliverable'}: ${assessment.reason.slice(0, 100)}`);
-      } else if (assessment.verdict === 'DONE') {
-        this.decisions.push(`Goal confirmed met: ${assessment.reason}`);
+      this.observations.push(`${effectiveAssessment.verdict}: ${effectiveAssessment.reason}`);
+      if (effectiveAssessment.verdict === 'GUIDE' && effectiveAssessment.guidance) {
+        this.decisions.push(`Guided ${effectiveAssessment.targetStage}: ${effectiveAssessment.guidance.slice(0, 100)}`);
+      } else if (effectiveAssessment.verdict === 'REPLAN') {
+        this.decisions.push(`Triggered replan: ${effectiveAssessment.reason}`);
+      } else if (effectiveAssessment.verdict === 'REJECT') {
+        this.decisions.push(`Rejected ${effectiveAssessment.targetStage ?? 'deliverable'}: ${effectiveAssessment.reason.slice(0, 100)}`);
+      } else if (effectiveAssessment.verdict === 'DONE') {
+        this.decisions.push(`Goal confirmed met: ${effectiveAssessment.reason}`);
       }
-      log.info({ tick: this.tickCount, verdict: assessment.verdict, target: assessment.targetStage, reason: assessment.reason }, 'Supervisor action');
+      log.info({ tick: this.tickCount, verdict: effectiveAssessment.verdict, target: effectiveAssessment.targetStage, reason: effectiveAssessment.reason }, 'Supervisor action');
     }
 
     // Update progress file
@@ -670,6 +1153,7 @@ export class Supervisor {
     state: StoreState,
     runningStages: string[],
     recentArtifacts: Array<{ path: string; content: string }>,
+    stageFacts: ReadonlyMap<string, StageExecutionFacts>,
   ): string {
     const parts: string[] = [];
 
@@ -684,7 +1168,10 @@ export class Supervisor {
       const ss = state.stages[stageId];
       const elapsed = ss?.startedAt ? Math.round((Date.now() - new Date(ss.startedAt).getTime()) / 1000) : 0;
       const tail = tails.get(stageId) ?? '(no output yet)';
-      parts.push(`\n## ${stageId} — ${elapsed}s elapsed\n\`\`\`\n${tail.slice(-8000)}\n\`\`\``);
+      const facts = stageFacts.get(stageId);
+      parts.push(`\n## ${stageId} — ${elapsed}s elapsed`);
+      if (facts) parts.push(`Verified facts: ${describeStageExecutionFacts(facts)}.`);
+      parts.push(`\`\`\`\n${tail.slice(-8000)}\n\`\`\``);
     }
 
     // Recent JSON artifacts: capability reports, gate verdicts, metric files modified
@@ -700,10 +1187,27 @@ export class Supervisor {
 
     // Completed stages summary
     const completed = Object.entries(state.stages)
-      .filter(([, s]) => s.status === 'complete' || s.status === 'failed')
+      .filter(([, s]) => isSettledStageStatus(s.status))
       .map(([id, s]) => `- ${id}: ${s.status}${s.error ? ` (${s.error})` : ''}`);
     if (completed.length > 0) {
       parts.push(`\n# Completed Stages\n${completed.join('\n')}`);
+    }
+
+    const currentStatuses = new Map(runningStages.map((stageId) => {
+      const fallback = state.stages[stageId];
+      return [stageId, fallback ? this.authoritativeStageStatus(stageId, fallback) : undefined] as const;
+    }));
+    const guidanceHistory = summarizeSupervisorGuidanceHistory(
+      this.actions.filter((action) => (
+        (action.source ?? 'supervisor') === 'supervisor'
+        && action.assessment.targetStage !== null
+        && actionAttemptIndex(action, currentStatuses.get(action.assessment.targetStage))
+          === currentRunningAttempt(currentStatuses.get(action.assessment.targetStage))?.index
+      )),
+      runningStages,
+    );
+    if (guidanceHistory) {
+      parts.push(`\n# Cumulative GUIDE History\n${guidanceHistory}\nRepeatedly unheeded concrete guidance may justify ABORT even when the stage remains highly productive; output volume alone does not establish correctness.`);
     }
 
     // Previous supervisor actions (last 3)
@@ -780,6 +1284,7 @@ export class Supervisor {
       prompt: buildSupervisorSystemPrompt(this.config.stuckThresholdMs),
     };
 
+    const startedAt = new Date().toISOString();
     let result: RunResult;
     try {
       result = await this.adapter.run(prompt, agentConfig, {
@@ -789,11 +1294,13 @@ export class Supervisor {
         stageId: '_supervisor',
       });
     } catch (err) {
+      this.recordAssessmentUsage(startedAt, undefined, null, err instanceof Error ? err.message : String(err));
       log.warn({ err }, 'Supervisor assessment call failed');
       return null;
     }
 
     if (result.exitCode !== 0) {
+      this.recordAssessmentUsage(startedAt, result, null, `adapter exit ${result.exitCode}`);
       log.warn({ exitCode: result.exitCode }, 'Supervisor assessment returned non-zero');
       return null;
     }
@@ -802,18 +1309,112 @@ export class Supervisor {
     // parseSupervisorVerdict scans last-to-first to skip the echoed template).
     const verdict = parseSupervisorVerdict(result.output);
     if (!verdict) {
+      this.recordAssessmentUsage(startedAt, result, null, 'unparseable supervisor verdict');
       log.warn({ outputPreview: result.output.slice(-500) }, 'No parseable supervisor verdict in response');
       return null;
     }
+    this.recordAssessmentUsage(startedAt, result, verdict);
     return verdict;
   }
 
-  private async act(assessment: SupervisorAssessment): Promise<void> {
+  private writeVerifiedAbort(
+    stageId: string,
+    source: AbortSignalSource,
+    basis: AbortBasis,
+    unverifiedAssessmentReason?: string,
+    progressSinceMs = Date.now(),
+  ): VerifiedAbortResult {
+    let state: StoreState;
+    try {
+      state = readRunState(this.projectDir, this.runId);
+    } catch {
+      return { written: false, reason: `ABORT suppressed for ${stageId}: no readable run state observed.` };
+    }
+    const status = state.stages[stageId];
+    if (!status || !isRunningStageStatus(status.status)) {
+      return { written: false, reason: `ABORT suppressed for ${stageId}: no active running stage observed.` };
+    }
+    const authoritativeStatus = this.authoritativeStageStatus(stageId, status);
+    if (!isRunningStageStatus(authoritativeStatus.status)) {
+      return { written: false, reason: `ABORT suppressed for ${stageId}: no active running attempt observed.` };
+    }
+    const facts = this.inspectFacts(stageId, authoritativeStatus, progressSinceMs, state.baseCommit);
+    const factSummary = describeStageExecutionFacts(facts);
+    if (facts.attemptIndex === undefined) {
+      return { written: false, reason: `ABORT suppressed for ${stageId}: ${factSummary}.` };
+    }
+    if (facts.finalizing) {
+      return {
+        written: false,
+        reason: `ABORT suppressed for ${stageId}: ${factSummary}; the current attempt is in its finalization window.`,
+      };
+    }
+    if (basis.kind === 'idle' && facts.protectedFromIdleAbort) {
+      return {
+        written: false,
+        reason: `Idle ABORT suppressed for ${stageId}: durable current-attempt completion evidence exists; ${factSummary}.`,
+      };
+    }
+    if (basis.kind === 'idle' && facts.artifactProgressThisTick) {
+      this.stageLastProgressMs[stageId] = Date.now();
+      return {
+        written: false,
+        reason: `Idle ABORT suppressed for ${stageId}: durable artifact progress was observed during final verification; ${factSummary}.`,
+      };
+    }
+
+    let verifiedBasis: string;
+    if (basis.kind === 'idle') {
+      const lastProgressAt = this.stageLastProgressMs[stageId];
+      const verifiedIdleMs = lastProgressAt === undefined ? -1 : Date.now() - lastProgressAt;
+      if (verifiedIdleMs < this.config.stuckThresholdMs) {
+        return {
+          written: false,
+          reason: `Idle ABORT suppressed for ${stageId}: verified idle duration is unavailable or below the configured threshold; ${factSummary}.`,
+        };
+      }
+      verifiedBasis = `no verified live/artifact/transition progress for ${Math.round(verifiedIdleMs / 1000)}s (threshold ${Math.round(this.config.stuckThresholdMs / 1000)}s)`;
+    } else {
+      if (basis.guideCount < 2) {
+        return {
+          written: false,
+          reason: `Direction ABORT suppressed for ${stageId}: only ${basis.guideCount} prior GUIDE decision(s) observed; ${factSummary}.`,
+        };
+      }
+      verifiedBasis = `${basis.guideCount} prior GUIDE decisions observed for the same running stage`;
+    }
+
+    const reason = `${source === 'watchdog' ? 'Watchdog' : 'Supervisor'} ABORT verified for ${stageId} attempt ${facts.attemptIndex}: ${verifiedBasis}; ${factSummary}.`;
+    const signal: StageAbortSignal = {
+      version: ABORT_SIGNAL_VERSION,
+      stageId,
+      attemptIndex: facts.attemptIndex,
+      reason,
+      timestamp: new Date().toISOString(),
+      source,
+      ...(unverifiedAssessmentReason
+        ? { unverifiedAssessmentReason: unverifiedAssessmentReason.slice(0, 500) }
+        : {}),
+    };
+    try {
+      mkdirSync(this.signalDir(), { recursive: true });
+      atomicWrite(join(this.signalDir(), `abort_${stageId}.json`), JSON.stringify(signal, null, 2));
+      return { written: true, reason };
+    } catch {
+      return { written: false, reason: `ABORT suppressed for ${stageId}: the owned signal could not be persisted; ${factSummary}.` };
+    }
+  }
+
+  private async act(
+    assessment: SupervisorAssessment,
+    progressSinceMs = Date.now(),
+    source: 'supervisor' | 'operator' = 'supervisor',
+  ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
 
     switch (assessment.verdict) {
       case 'WAIT':
-        break;
+        return assessment;
 
       case 'GUIDE':
         if (assessment.targetStage && assessment.guidance) {
@@ -826,21 +1427,98 @@ export class Supervisor {
           writeFileSync(runGuidancePath, existing + `\n\n[${assessment.targetStage}]: ${assessment.guidance}`, 'utf-8');
         }
         this.lastActionTime = Date.now();
-        break;
+        return assessment;
+
+      case 'EXTEND':
+        if (!assessment.targetStage || !Number.isSafeInteger(assessment.extensionMs) || Number(assessment.extensionMs) <= 0 || !assessment.reason.trim()) {
+          return {
+            verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
+            reason: 'EXTEND suppressed: target_stage, a non-empty reason, and a positive safe-integer extension_ms are required.',
+          };
+        }
+        try {
+          const state = readRunState(this.projectDir, this.runId);
+          const status = state.stages[assessment.targetStage];
+          const authoritative = status ? this.authoritativeStageStatus(assessment.targetStage, status) : undefined;
+          const attempt = authoritative ? currentRunningAttempt(authoritative) : undefined;
+          if (!attempt || !authoritative || !isRunningStageStatus(authoritative.status)) {
+            return {
+              verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
+              reason: `EXTEND suppressed: ${assessment.targetStage} has no current running attempt.`,
+            };
+          }
+          mkdirSync(signalDir, { recursive: true });
+          atomicWrite(join(signalDir, `timeout_extension_${assessment.targetStage}.json`), JSON.stringify({
+            version: 1,
+            requestId: `supervisor-${this.tickCount}-${assessment.targetStage}-${attempt.index}`,
+            kind: 'timeout_extension',
+            stageId: assessment.targetStage,
+            attemptIndex: attempt.index,
+            requestedExtensionMs: assessment.extensionMs,
+            reason: assessment.reason,
+            source,
+            requestedAt: new Date().toISOString(),
+          }, null, 2));
+          this.lastActionTime = Date.now();
+          return assessment;
+        } catch {
+          return {
+            verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
+            reason: `EXTEND suppressed: the engine-owned request for ${assessment.targetStage} could not be persisted.`,
+          };
+        }
 
       case 'ABORT':
-        if (assessment.targetStage) {
-          writeFileSync(join(signalDir, `abort_${assessment.targetStage}.json`),
-            JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        if (!assessment.targetStage) {
+          return {
+            verdict: 'WAIT', targetStage: null, guidance: null,
+            reason: 'ABORT suppressed: the assessment named no target stage.',
+          };
         }
-        this.lastActionTime = Date.now();
-        break;
+        {
+          let targetAttemptIndex: number | undefined;
+          let targetStatus: StageStatus | undefined;
+          try {
+            const state = readRunState(this.projectDir, this.runId);
+            const status = state.stages[assessment.targetStage];
+            if (status) {
+              targetStatus = this.authoritativeStageStatus(assessment.targetStage, status);
+              targetAttemptIndex = currentRunningAttempt(targetStatus)?.index;
+            }
+          } catch { /* writeVerifiedAbort performs the authoritative fail-closed check */ }
+          const guideCount = this.actions.filter((action) => (
+            action.assessment.verdict === 'GUIDE'
+            && action.assessment.targetStage === assessment.targetStage
+            && (action.source ?? 'supervisor') === 'supervisor'
+            && actionAttemptIndex(action, targetStatus) === targetAttemptIndex
+          )).length;
+          const lastProgressAt = this.stageLastProgressMs[assessment.targetStage];
+          const idleMs = lastProgressAt === undefined ? -1 : Date.now() - lastProgressAt;
+          const basis: AbortBasis = idleMs >= this.config.stuckThresholdMs
+            ? { kind: 'idle', stalledMs: idleMs }
+            : { kind: 'repeated_guidance', guideCount };
+          const abort = this.writeVerifiedAbort(
+            assessment.targetStage,
+            'supervisor',
+            basis,
+            assessment.reason,
+            progressSinceMs,
+          );
+          if (!abort.written) {
+            return {
+              verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
+              reason: abort.reason,
+            };
+          }
+          this.lastActionTime = Date.now();
+          return { ...assessment, reason: abort.reason };
+        }
 
       case 'REPLAN':
         writeFileSync(join(signalDir, 'replan.json'),
           JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
         this.lastActionTime = Date.now();
-        break;
+        return assessment;
 
       case 'REJECT':
         // Reject an emitted deliverable that does not meet its declared work.
@@ -856,13 +1534,13 @@ export class Supervisor {
             JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
         }
         this.lastActionTime = Date.now();
-        break;
+        return assessment;
 
       case 'DONE':
         writeFileSync(join(signalDir, 'goal_met.json'),
           JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
         this.lastActionTime = Date.now();
-        break;
+        return assessment;
     }
   }
 
@@ -870,6 +1548,7 @@ export class Supervisor {
     const entry = [
       `## Tick ${action.tick} — ${action.timestamp}`,
       `Running: ${action.runningStages.join(', ')}`,
+      `Source: ${action.source ?? 'supervisor (legacy)'}${action.targetAttemptIndex === undefined ? '' : ` · attempt ${action.targetAttemptIndex}`}`,
       `Verdict: **${action.assessment.verdict}**${action.assessment.targetStage ? ` → ${action.assessment.targetStage}` : ''}`,
       `Reason: ${action.assessment.reason}`,
     ];

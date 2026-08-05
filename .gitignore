@@ -24,22 +24,32 @@ Thumbs.db
 *.tsbuildinfo
 ui/*.d.ts.map
 docs/*
-docs/framework_campaign/
 tests/
+!tests/
+tests/*
+!tests/p2-m4-detector-evidence-replay.test.ts
+!tests/p2-m4-identity-probe-fixture.test.ts
+!tests/fixtures/
+tests/fixtures/*
+!tests/fixtures/p2-m4-detector-evidence/
+!tests/fixtures/p2-m4-detector-evidence/**
+!tests/fixtures/p2-m4-typed-probe/
+!tests/fixtures/p2-m4-typed-probe/**
 ui/tests/
 design/*
 !design/atom-architecture.md
 !design/autonomous-loop.md
 op_*.sh
 eval.sh
-scripts/btc_training_*.py
 scripts/__pycache__/
 __pycache__/
 *.pyc
-btc_training_*_artifacts/
-btc_training_*_result.json
-btc_trading_methods_landscape.md
-btc_training_*.md
-# btc_explore/ is a local-only research sub-repo. It has its own .git
-# inside the directory. Flow-crew main tree must never track its contents.
-btc_explore/
+
+# Internal self-development governance tooling — verifies flow-crew's own
+# delivery process against itself. Genuinely useful locally; out of place in
+# a repo whose public surface is meant for using flow-crew, not developing it.
+config/delivery-policy.json
+config/defect-definition-index.json
+scripts/check-delivery-truth-table.mjs
+scripts/check-m3-control-boundaries.mjs
+spec/delivery-truth-table.test.ts
