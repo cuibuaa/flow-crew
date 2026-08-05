@@ -386,9 +386,15 @@ describe('Dashboard admission handshake', () => {
 
   it('guards stage rerun before deleting its output or starting the in-process scheduler', async () => {
     const workflowRuns = vi.fn(async () => readRunState(projectDir, runId));
+    const adapter: Adapter = {
+      async run() {
+        return { output: 'completed', exitCode: 0, duration_ms: 1 };
+      },
+    };
     app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
       runWorkflow: workflowRuns as never,
       isProjectBusy: () => null,
+      adapter,
     });
     const brief = '# Goal\nRerun one stage.\n';
     const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);

@@ -42,7 +42,7 @@ jobs:
         run: npm ci
 
       - name: Pull isolated test image
-        run: docker pull node:22-bookworm-slim
+        run: docker pull node:22-bookworm
 
       - name: Run public spec without network, agent CLIs, or existing state
         run: |
@@ -53,10 +53,11 @@ jobs:
             --env PATH=/usr/local/bin:/usr/bin:/bin \
             --workdir /workspace \
             --volume "$GITHUB_WORKSPACE:/workspace" \
-            node:22-bookworm-slim \
+            node:22-bookworm \
             sh -ceu '
               test ! -e "$HOME/.fc"
               ! command -v codex
               ! command -v claude
+              git config --system --add safe.directory /workspace
               node ./node_modules/vitest/vitest.mjs run spec
             '
