@@ -198,6 +198,18 @@ describe('adapter resolution matrix', () => {
       .toThrow(/Unknown explicit adapter/);
   });
 
+  it('lets an explicit choice win without validating the setting it overrides', () => {
+    // `mock` is a legal adapter for the loader but not a resolvable installed CLI,
+    // so validating the overridden setting used to fail a run that --adapter alone
+    // fully determines.
+    for (const configured of ['mock', 'invented', 'CODEX ']) {
+      const resolution = resolveAdapterChoice({ explicit: 'codex', configured }, ['codex']);
+      expect(resolution, configured).toMatchObject({ ok: true, adapter: 'codex' });
+      expect((resolution as { reason: string }).reason, configured)
+        .toContain('explicit --adapter choice');
+    }
+  });
+
   it('keeps shared installation hints pinned to the real package names', () => {
     expect(ADAPTER_INSTALL_HINT).toEqual({
       codex: 'npm i -g @openai/codex',

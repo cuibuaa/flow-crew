@@ -558,6 +558,23 @@ describe('durable daemon boundary', () => {
     expect(command).not.toContain('--acknowledge-brief-warnings');
     expect(command).not.toContain("'--background'");
   });
+
+  it('round-trips a brief containing shell metacharacters through the relaunch transport', () => {
+    const registry = new TaskRegistry({ baseDir: join(fixtureRoot, 'registry') });
+    // A single quote is what broke the raw `--task` transport: shellJoin escapes it
+    // for bash, then systemd's own ExecStart unescaping mangles that escape, so the
+    // relaunched CLI digested different bytes than the operator admitted and refused
+    // to start. Assert the decoded bytes, not the command's shape.
+    const brief = "# Goal\nKeep `return 'claude'` and \"quotes\" and a literal \\n intact.\n";
+    const admission = explicitAdmission(brief);
+    const task = registry.create({ brief_text: brief, brief_admission: admission, projectDir });
+    const command = buildCommand(task, join(repositoryRoot, 'src', 'cli.ts'));
+
+    expect(command).not.toContain("'--task'");
+    const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(command)?.[1];
+    expect(encoded, command).toBeTruthy();
+    expect(Buffer.from(encoded!, 'base64url').toString('utf8')).toBe(brief);
+  });
 });
 
 describe('deferred continuation snapshots', () => {

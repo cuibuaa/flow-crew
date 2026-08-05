@@ -1038,7 +1038,14 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
   const admitted = task.kind === 'campaign' ? undefined : assertTaskBriefAdmission(task);
   const args = task.kind === 'campaign'
     ? ['campaign', 'run', task.config_path ?? '', ...userArgs]
-    : ['quick', '--task', admitted!.brief, '--project', task.projectDir,
+    : ['quick',
+       // The brief must survive shellJoin AND systemd's own ExecStart unescaping.
+       // Passing it raw corrupted any brief containing a single quote, so the
+       // relaunch recomputed a different digest than the one the operator
+       // admitted and the launch was rejected before run creation. base64url is
+       // the same byte-safe transport --brief-admission-record already uses.
+       '--brief-input-base64', Buffer.from(admitted!.brief, 'utf8').toString('base64url'),
+       '--project', task.projectDir,
        '--supervise', ...userArgs,
        '--brief-admission-record', Buffer.from(JSON.stringify(admitted!.admission), 'utf8').toString('base64url'),
        ...(task.run_id ? ['--existing-run-id', task.run_id] : [])];

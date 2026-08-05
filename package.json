@@ -41,6 +41,9 @@
     "dist",
     "ui/dist",
     "config",
+    "skills",
+    "examples",
+    "guide",
     "README.md",
     "LICENSE"
   ],

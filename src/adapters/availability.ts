@@ -67,7 +67,12 @@ export function resolveAdapterChoice(
   installed: readonly AdapterName[] = installedAdapters(),
 ): AdapterResolution {
   const explicit = normalizeChoice(opts.explicit, 'explicit');
-  const configured = normalizeChoice(opts.configured, 'configured');
+  // An explicit --adapter wins outright, so the lower-priority project setting is
+  // never consulted and must not be validated: rejecting it here would make a
+  // stale or `mock` config value fail a run the flag alone fully determines.
+  const configured = explicit === undefined
+    ? normalizeChoice(opts.configured, 'configured')
+    : undefined;
   const available = new Set<AdapterName>(installed);
   if (available.size === 0) {
     return { ok: false, error: 'none-installed', hint: noAdapterHint() };
