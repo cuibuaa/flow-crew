@@ -172,6 +172,9 @@ export const readyAwareForkPool = {
 };
 
 export default defineConfig({
+  esbuild: {
+    jsx: "automatic",
+  },
   resolve: {
     alias: [
       { find: /^react$/, replacement: new URL("./ui/node_modules/react/index.js", import.meta.url).pathname },

@@ -184,16 +184,19 @@ describe('Vitest experimental API upgrade guard', () => {
         removeComments: true,
       },
     }).outputText;
-    // The pin below is deliberately re-based on 2026-08-04. `65503e8` (M7 delivery truth
-    // table) added react-dom / @testing-library aliases and a jest-dom setup entry so the
-    // root suite can resolve the UI tests it had just moved from `tests/` into `spec/`.
-    // That change is additive with respect to #41: the only removed line was
-    // `setupFiles: ["./vitest.setup.ts"]`, replaced by a list that still contains it.
+    // The pin below is deliberately re-based on 2026-08-05. An `esbuild: { jsx: "automatic" }`
+    // block was added because vite was pinned to 7.3.6 (via a root `overrides` entry) to route
+    // around a rolldown native-binding load failure that reproduced deterministically on
+    // GitHub Actions but not locally under a matching npm version or a cold cache. Vite 7 uses
+    // rollup + esbuild, not rolldown, and its default esbuild JSX handling left `React` out of
+    // scope for every `spec/**/*.test.tsx` file (`ReferenceError: React is not defined`) until
+    // this explicit automatic-runtime setting was added. The change is additive with respect
+    // to #41: nothing in the experimental pool/worker block below was touched.
     // Every #41 mitigation asserted below was verified present before re-basing the pin.
     // Re-base this pin ONLY after checking the four assertions that follow still hold —
     // they, not the digest, are what keeps #41 closed.
     expect(createHash('sha256').update(normalized).digest('hex')).toBe(
-      'e535bd61603e29edcada1824f43a86af09e4270930c0d9d0547fee3ccd81d166',
+      '760004d673246ff5940601d44f2c31d7644bdb08bcedb4f2757e27e8950606db',
     );
     expect(source).toContain('Vitest experimental');
     expect(source).toContain('createPoolWorker contract');
