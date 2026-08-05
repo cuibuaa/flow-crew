@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
+import { loadAdapterByName } from './adapters/loader.js';
 import {
   APPROVAL_REQUEST_FILE,
   APPROVALS_DIR,
@@ -1988,23 +1989,6 @@ const AgentConfigSchema = z.object({
   adapter: z.string().optional(),
   handoff_visibility: z.enum(['full', 'minimal', 'none']).optional(),
 });
-
-const ADAPTER_MODULE_MAP: Record<string, string> = {
-  codex: './adapters/codex.js',
-  claude: './adapters/claude.js',
-};
-
-const _adapterCache = new Map<string, Adapter>();
-export async function loadAdapterByName(name: string): Promise<Adapter> {
-  const cached = _adapterCache.get(name);
-  if (cached) return cached;
-  const modPath = ADAPTER_MODULE_MAP[name];
-  if (!modPath) throw new Error(`Unknown adapter "${name}". Known: ${Object.keys(ADAPTER_MODULE_MAP).join(', ')}`);
-  const mod = await import(modPath);
-  const a = mod.createAdapter() as Adapter;
-  _adapterCache.set(name, a);
-  return a;
-}
 
 function parseAgent(raw: unknown, projectDir?: string): AgentConfig {
   const agent = AgentConfigSchema.parse(raw);

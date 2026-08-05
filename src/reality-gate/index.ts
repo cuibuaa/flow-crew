@@ -24,8 +24,12 @@ export function parseChecksFromBrief(briefPath: string): CheckDecl[] {
   return parseChecksFromMarkdown(readFileSync(briefPath, 'utf-8'));
 }
 
+export function hasRealityChecksHeading(markdown: string): boolean {
+  return /^## Reality checks[^\n]*(?:\n|$)/m.test(markdown);
+}
+
 export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
-  const headings = [...markdown.matchAll(/^## Reality checks[^\n]*\n/gm)];
+  const headings = [...markdown.matchAll(/^## Reality checks[^\n]*(?:\n|$)/gm)];
   for (const heading of headings.reverse()) {
     if (heading.index === undefined) continue;
     const start = heading.index + heading[0].length;
@@ -35,10 +39,26 @@ export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
     const fence = body.match(/^```(?:ya?ml)?\s*\n([\s\S]*?)\n```\s*$/);
     if (fence) body = fence[1];
     let parsed: { checks?: unknown } | null = null;
-    try { parsed = parseYaml(body) as { checks?: unknown } | null; } catch { continue; }
+    try {
+      parsed = parseYaml(body) as { checks?: unknown } | null;
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error))
+        .replace(/\s+/g, ' ')
+        .trim();
+      return [invalidBlockDeclaration(`YAML parsing failed${message ? `: ${message}` : ''}`)];
+    }
     if (parsed && Array.isArray(parsed.checks)) return normalizeChecks(parsed.checks);
   }
   return [];
+}
+
+function invalidBlockDeclaration(diagnostic: string): CheckDecl {
+  return {
+    kind: 'invalid',
+    name: 'Reality checks declaration',
+    type: '__invalid-reality-check-declaration__',
+    diagnostic,
+  };
 }
 
 function normalizeChecks(checks: unknown[]): CheckDecl[] {

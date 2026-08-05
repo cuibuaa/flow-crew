@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,6 +63,8 @@ describe('flowcrew start signal lifecycle', () => {
       for (const directory of [isolatedHome, isolatedFcHome, projectDir]) {
         mkdirSync(directory, { recursive: true });
       }
+      mkdirSync(join(projectDir, 'config'), { recursive: true });
+      writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'adapter: mock\n', 'utf-8');
       const child = spawn(
         process.execPath,
         ['--import', 'tsx', join(process.cwd(), 'src', 'cli.ts'), 'start'],

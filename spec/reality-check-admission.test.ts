@@ -119,6 +119,38 @@ describe('malformed Reality-check admission', () => {
     expect(existsSync(join(created.runDirPath, '.reality-gate.json'))).toBe(false);
   });
 
+  it('turns YAML parsing failure under an existing heading into a hard gate failure', async () => {
+    const markdown = [
+      '## Reality checks',
+      'checks:',
+      '  - name: broken-indentation',
+      '    type: file-exists-nonempty',
+      '     params: { paths: [artifact.txt] }',
+    ].join('\n');
+    const parsed = parseChecksFromMarkdown(markdown);
+    expect(parsed).toEqual([expect.objectContaining({
+      kind: 'invalid',
+      name: 'Reality checks declaration',
+      diagnostic: expect.stringContaining('YAML parsing failed'),
+    })]);
+
+    const created = createRealityRun(markdown);
+    const gate = await enforceRealityGateBeforeTerminal(
+      projectDir,
+      created.runId,
+      created.state,
+      'complete',
+    );
+
+    expect(gate.allowed).toBe(false);
+    expect(gate.report).toMatchObject({
+      pass: false,
+      checksRun: 1,
+      results: [{ name: 'Reality checks declaration', pass: false }],
+    });
+    expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
+  });
+
   it.each([
     { label: 'scalar', item: ['  - 42'] },
     { label: 'null', item: ['  - null'] },

@@ -12,7 +12,7 @@ default_stage_technical_retries: 1     # adapter/transport retry, separate from 
 default_plan_stage_retries: 2          # a plan stage that emits zero valid stages gets this many re-prompts before escalating
 default_supervisor_max_rejects: 2      # bounds how many times the supervisor can send one deliverable back for rework
 
-adapter: codex
+adapter: auto
 session_reuse: false                   # resuming a session measured ~9% lower wall time but 29% more output tokens; opt in with FC_SESSION_REUSE=1
 model: default
 reasoning_effort: default
@@ -36,13 +36,28 @@ supervisor:
 
 ## Adapters
 
-The current project default is:
+Newly initialized projects start undecided:
 
 ```yaml
-adapter: codex
+adapter: auto
 ```
 
-Set `adapter: claude` globally or override a single role when that stage benefits from Claude Code.
+`auto` chooses the only installed CLI, or recommended `codex` when both are installed. It
+does not write that runtime choice back to disk. If neither CLI is installed, live commands
+exit nonzero with the correct Codex and Claude Code installation commands; `flowcrew init`
+still succeeds and keeps `auto` so non-interactive scaffolding never blocks.
+
+Inspect or set the value without hand-editing YAML:
+
+```bash
+flowcrew adapter
+flowcrew adapter codex
+flowcrew adapter claude
+```
+
+Existing explicit `adapter: codex` and `adapter: claude` configurations keep their meaning
+and are never migrated. You can also override a single role when that stage benefits from
+Claude Code.
 
 ```yaml
 # config/agents/qa.yaml

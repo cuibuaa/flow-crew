@@ -1,0 +1,121 @@
+import { execFileSync } from 'node:child_process';
+
+export type AdapterName = 'codex' | 'claude';
+
+export const ADAPTER_CLI: Record<AdapterName, string> = {
+  codex: 'codex',
+  claude: 'claude',
+};
+
+// README: “plan in Claude Code, execute in Codex” and hand heavy execution to
+// Codex, the default backend. `adapter` selects that execution backend.
+export const RECOMMENDED: AdapterName = 'codex';
+
+export const ADAPTER_INSTALL_HINT: Record<AdapterName, string> = {
+  codex: 'npm i -g @openai/codex',
+  claude: 'npm i -g @anthropic-ai/claude-code',
+};
+
+export type AdapterProbe = (command: string) => boolean;
+
+function commandExists(command: string): boolean {
+  try {
+    execFileSync('which', [command], { stdio: 'ignore', timeout: 2000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Physical adapter CLIs currently visible on PATH, in stable recommendation order. */
+export function installedAdapters(probe: AdapterProbe = commandExists): AdapterName[] {
+  return (Object.keys(ADAPTER_CLI) as AdapterName[])
+    .filter((adapter) => probe(ADAPTER_CLI[adapter]));
+}
+
+export type AdapterResolution =
+  | { ok: true; adapter: AdapterName; reason: string }
+  | { ok: false; error: 'none-installed'; hint: string };
+
+export interface AdapterChoiceOptions {
+  explicit?: string;
+  configured?: string;
+}
+
+function normalizeChoice(value: string | undefined, source: string): AdapterName | 'auto' | undefined {
+  if (value === undefined || !value.trim()) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'codex' || normalized === 'claude') return normalized;
+  throw new Error(`Unknown ${source} adapter "${value}". Available adapters: auto, codex, claude`);
+}
+
+function noAdapterHint(): string {
+  return [
+    'No adapter CLI is installed or visible on PATH.',
+    `Install Codex: ${ADAPTER_INSTALL_HINT.codex}`,
+    `Install Claude Code: ${ADAPTER_INSTALL_HINT.claude}`,
+    'Then run `flowcrew doctor` to verify the installation.',
+  ].join('\n');
+}
+
+/**
+ * Resolve one runtime choice without prompting or writing configuration.
+ * The optional installed snapshot is the dependency-injection seam used by tests.
+ */
+export function resolveAdapterChoice(
+  opts: AdapterChoiceOptions,
+  installed: readonly AdapterName[] = installedAdapters(),
+): AdapterResolution {
+  const explicit = normalizeChoice(opts.explicit, 'explicit');
+  const configured = normalizeChoice(opts.configured, 'configured');
+  const available = new Set<AdapterName>(installed);
+  if (available.size === 0) {
+    return { ok: false, error: 'none-installed', hint: noAdapterHint() };
+  }
+
+  const requested = explicit ?? configured ?? 'auto';
+  const source = explicit !== undefined
+    ? 'explicit --adapter choice'
+    : configured !== undefined
+      ? 'project configuration'
+      : 'automatic selection';
+
+  if (requested !== 'auto' && available.has(requested)) {
+    return {
+      ok: true,
+      adapter: requested,
+      reason: `Selected ${requested} from the ${source}; its CLI is installed.`,
+    };
+  }
+
+  if (requested !== 'auto') {
+    const fallback = (Object.keys(ADAPTER_CLI) as AdapterName[])
+      .find((adapter) => available.has(adapter));
+    if (fallback) {
+      return {
+        ok: true,
+        adapter: fallback,
+        reason: `The ${source} requested ${requested}, but its CLI is not installed; using installed ${fallback} as the runtime fallback.`,
+      };
+    }
+  }
+
+  if (available.has(RECOMMENDED)) {
+    const bothInstalled = available.size === Object.keys(ADAPTER_CLI).length;
+    return {
+      ok: true,
+      adapter: RECOMMENDED,
+      reason: bothInstalled
+        ? `Adapter selection is auto and both CLIs are installed; selected recommended execution backend ${RECOMMENDED}.`
+        : `Adapter selection is auto; selected the only installed CLI, ${RECOMMENDED}.`,
+    };
+  }
+
+  const onlyInstalled = (Object.keys(ADAPTER_CLI) as AdapterName[])
+    .find((adapter) => available.has(adapter))!;
+  return {
+    ok: true,
+    adapter: onlyInstalled,
+    reason: `Adapter selection is auto; selected the only installed CLI, ${onlyInstalled}.`,
+  };
+}

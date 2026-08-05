@@ -2,9 +2,9 @@
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
+import { loadAdapterByName } from './adapters/loader.js';
 import { buildStagePrompt } from './handoff.js';
 import { loadProjectDefaults } from './config.js';
-import { loadAdapterByName } from './scheduler.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
   beginStageAttempt,

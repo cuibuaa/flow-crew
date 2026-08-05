@@ -13,7 +13,9 @@ default_plan_stage_retries: 2
 # mis-firing supervisor can't trap a run in an infinite reject loop). Generic
 # bound; the per-task "what counts as a valid deliverable" lives in the brief.
 default_supervisor_max_rejects: 2
-adapter: codex
+# Runtime resolution is read-only: one installed CLI wins; with both installed,
+# Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
+adapter: auto
 # Resume only an explicitly captured per-stage UUID along one proven dependency
 # edge. The replicated same-brief A/B measured only 8.999% lower wall time
 # (below the 10% enable threshold) while output tokens increased 28.938%, so

@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpa
 import { join, resolve } from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml, parseDocument } from 'yaml';
 import {
   campaignDir,
   extractTaskTitle,
@@ -19,6 +19,15 @@ import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
 import { diffVersions, readHead, rollback } from './brief-versioning.js';
 import { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
 import { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } from './adapters/loader.js';
+import {
+  ADAPTER_CLI,
+  ADAPTER_INSTALL_HINT,
+  installedAdapters,
+  RECOMMENDED,
+  resolveAdapterChoice,
+  type AdapterName,
+  type AdapterResolution,
+} from './adapters/availability.js';
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
@@ -47,18 +56,63 @@ function detectProjectDir(): string {
   return process.env.PROJECT_DIR || process.cwd();
 }
 
-function detectAdapter(): string {
-  const checks: [string, string][] = [
-    ['claude', 'claude'],
-    ['codex', 'codex'],
-  ];
-  for (const [cmd, name] of checks) {
-    try {
-      execSync(`which ${cmd}`, { stdio: 'ignore' });
-      return name;
-    } catch { /* not found */ }
+interface AdapterSetting {
+  exists: boolean;
+  value?: string;
+  error?: string;
+}
+
+type RuntimeAdapterResolution = AdapterResolution | {
+  ok: true;
+  adapter: 'mock';
+  reason: string;
+};
+
+function readAdapterSetting(projectDir: string): AdapterSetting {
+  const path = join(projectDir, 'config', 'defaults.yaml');
+  if (!existsSync(path)) return { exists: false };
+  try {
+    const parsed = parseYaml(readFileSync(path, 'utf-8')) as Record<string, unknown> | null;
+    const raw = parsed?.adapter;
+    if (raw === undefined) return { exists: true };
+    if (typeof raw !== 'string' || !raw.trim()) {
+      return { exists: true, error: 'config/defaults.yaml adapter must be a non-empty string' };
+    }
+    return { exists: true, value: raw.trim() };
+  } catch (error) {
+    return {
+      exists: true,
+      error: `config/defaults.yaml YAML parsing failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-  return 'claude';
+}
+
+function resolveRuntimeAdapter(
+  opts: { explicit?: string; configured?: string },
+  installed: readonly AdapterName[] = installedAdapters(),
+): RuntimeAdapterResolution {
+  const explicit = opts.explicit?.trim();
+  const configured = opts.configured?.trim();
+  const effective = explicit || configured;
+  if (effective === 'mock') {
+    return {
+      ok: true,
+      adapter: 'mock',
+      reason: `Selected mock from the ${explicit ? 'explicit --adapter choice' : 'project configuration'}; it is the deterministic in-process test adapter and needs no external CLI.`,
+    };
+  }
+  return resolveAdapterChoice(opts, installed);
+}
+
+function writeAdapterSetting(projectDir: string, adapter: AdapterName | 'auto'): string {
+  const path = ensureProjectDefaultsFile(projectDir);
+  const document = parseDocument(readFileSync(path, 'utf-8'));
+  if (document.errors.length > 0) {
+    throw new Error(`Cannot update ${path}: ${document.errors[0].message}`);
+  }
+  document.set('adapter', adapter);
+  writeFileSync(path, String(document), 'utf-8');
+  return path;
 }
 
 async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
@@ -68,7 +122,38 @@ async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
   console.log(formatDaemonRegistration(response));
 }
 
-function cmdInit() {
+async function chooseInitialAdapter(): Promise<AdapterName | 'auto'> {
+  const installed = installedAdapters();
+  if (installed.length === 0) {
+    console.log('⚠️  No adapter CLI is installed; keeping adapter: auto.');
+    console.log(`   Install Codex: ${ADAPTER_INSTALL_HINT.codex}`);
+    console.log(`   Install Claude Code: ${ADAPTER_INSTALL_HINT.claude}`);
+    console.log('   After installation, set an explicit choice with `flowcrew adapter codex` or `flowcrew adapter claude`.');
+    return 'auto';
+  }
+  if (installed.length === 1) {
+    console.log(`ℹ️  Selected ${installed[0]} because it is the only installed adapter CLI.`);
+    return installed[0];
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log(`ℹ️  Both adapter CLIs are installed; non-interactive init selected recommended execution backend ${RECOMMENDED}.`);
+    return RECOMMENDED;
+  }
+
+  const input = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const answer = (await input.question(`Choose adapter [${RECOMMENDED}/claude] (${RECOMMENDED}): `)).trim().toLowerCase();
+      const selected = answer || RECOMMENDED;
+      if (selected === 'codex' || selected === 'claude') return selected;
+      console.log('Please enter `codex` or `claude`.');
+    }
+  } finally {
+    input.close();
+  }
+}
+
+async function cmdInit() {
   const projectDir = detectProjectDir();
   const configDir = join(projectDir, 'config');
   const agentsDir = join(configDir, 'agents');
@@ -83,8 +168,9 @@ function cmdInit() {
   // Create defaults.yaml if missing
   const defaultsPath = join(configDir, 'defaults.yaml');
   if (!existsSync(defaultsPath)) {
+    const adapter = await chooseInitialAdapter();
     ensureProjectDefaultsFile(projectDir);
-    const adapter = loadProjectDefaults(projectDir).adapter;
+    if (adapter !== 'auto') writeAdapterSetting(projectDir, adapter);
     console.log(`✅ Created ${defaultsPath} (adapter: ${adapter})`);
   } else {
     console.log(`⏭️  ${defaultsPath} already exists`);
@@ -159,12 +245,15 @@ interface DoctorCheck {
   message: string;
 }
 
-function commandExists(commandName: string): boolean {
+function commandPath(commandName: string): string | undefined {
   try {
-    execFileSync('which', [commandName], { stdio: 'ignore', timeout: 2000 });
-    return true;
+    const path = execFileSync('which', [commandName], {
+      encoding: 'utf-8',
+      timeout: 2000,
+    }).trim();
+    return path || undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -177,16 +266,66 @@ function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
   }
 }
 
+function cmdAdapter(): void {
+  const projectDir = detectProjectDir();
+  const requested = args[1]?.trim().toLowerCase();
+  if (!requested) {
+    const setting = readAdapterSetting(projectDir);
+    const current = setting.error
+      ? `invalid (${setting.error})`
+      : setting.exists
+        ? (setting.value ?? 'auto')
+        : '(config/defaults.yaml is missing)';
+    const installed = installedAdapters();
+    console.log(`Current adapter: ${current}`);
+    console.log(`Installed adapters: ${installed.length > 0 ? installed.join(', ') : 'none'}`);
+    console.log(`Recommended adapter: ${RECOMMENDED}`);
+    if (setting.error) process.exitCode = 1;
+    return;
+  }
+  if (args.length > 2 || (requested !== 'auto' && requested !== 'codex' && requested !== 'claude')) {
+    console.error('Usage: flowcrew adapter [auto|codex|claude]');
+    process.exitCode = 1;
+    return;
+  }
+  if (requested !== 'auto' && !installedAdapters().includes(requested)) {
+    console.error(`Cannot select ${requested}: its CLI is not installed or visible on PATH.`);
+    console.error(`Install it first: ${ADAPTER_INSTALL_HINT[requested]}`);
+    process.exitCode = 1;
+    return;
+  }
+  const path = writeAdapterSetting(projectDir, requested);
+  console.log(`Adapter set to ${requested} in ${path}`);
+}
+
 async function cmdDoctor() {
   const projectDir = detectProjectDir();
   const checks: DoctorCheck[] = [];
+  const packageRoot = resolve(import.meta.dirname ?? '.', '..');
 
-  const flowcrewOnPath = commandExists('flowcrew');
-  checks.push({
-    name: 'flowcrew CLI',
-    status: flowcrewOnPath ? 'ok' : 'warn',
-    message: flowcrewOnPath ? 'available on PATH' : 'not found on PATH. Run `npm link` from the repository.',
-  });
+  const flowcrewPath = commandPath('flowcrew');
+  const expectedCliPath = join(packageRoot, 'dist', 'cli.js');
+  let resolvedFlowcrewPath: string | undefined;
+  let resolvedExpectedCliPath: string | undefined;
+  try { if (flowcrewPath) resolvedFlowcrewPath = realpathSync(flowcrewPath); } catch { /* unresolvable PATH entry */ }
+  try { resolvedExpectedCliPath = realpathSync(expectedCliPath); } catch { /* build may be absent */ }
+  if (!flowcrewPath) {
+    checks.push({ name: 'flowcrew CLI', status: 'warn', message: 'not found on PATH. Run `npm link` from this repository.' });
+  } else if (!resolvedFlowcrewPath || !resolvedExpectedCliPath) {
+    checks.push({
+      name: 'flowcrew CLI',
+      status: 'warn',
+      message: `A PATH entry exists at ${flowcrewPath}, but whether it serves this install could not be confirmed.`,
+    });
+  } else if (resolvedFlowcrewPath === resolvedExpectedCliPath) {
+    checks.push({ name: 'flowcrew CLI', status: 'ok', message: `This install is available on PATH (${flowcrewPath}).` });
+  } else {
+    checks.push({
+      name: 'flowcrew CLI',
+      status: 'warn',
+      message: `PATH points to a different install: ${resolvedFlowcrewPath}. This install's CLI is ${resolvedExpectedCliPath}.`,
+    });
+  }
 
   // Node.js version
   const nodeVersion = process.version;
@@ -201,56 +340,74 @@ async function cmdDoctor() {
   });
 
   // Adapter CLIs
-  const adapters: [string, string, string, string[], string][] = [
-    ['claude', 'Claude Code CLI', 'Install: npm i -g @anthropic/claude-code', ['auth', 'status'], 'Run `claude auth login`.'],
-    ['codex', 'OpenAI Codex CLI', 'Install: npm i -g @openai/codex', ['login', 'status'], 'Run `codex login`.'],
-  ];
-  let anyAdapter = false;
-  for (const [cmd, label, installHint, authArgs, loginHint] of adapters) {
-    if (commandExists(cmd)) {
-      anyAdapter = true;
-      const authenticated = commandSucceeds(cmd, authArgs);
+  const installed = installedAdapters();
+  const installedSet = new Set(installed);
+  checks.push({
+    name: 'Installed adapters',
+    status: installed.length > 0 ? 'ok' : 'warn',
+    message: installed.length > 0 ? installed.join(', ') : 'none',
+  });
+  const adapterDiagnostics: Record<AdapterName, { label: string; authArgs: string[]; loginHint: string }> = {
+    codex: { label: 'OpenAI Codex CLI', authArgs: ['login', 'status'], loginHint: 'Run `codex login`.' },
+    claude: { label: 'Claude Code CLI', authArgs: ['auth', 'status'], loginHint: 'Run `claude auth login`.' },
+  };
+  for (const adapter of Object.keys(ADAPTER_CLI) as AdapterName[]) {
+    const cmd = ADAPTER_CLI[adapter];
+    const diagnostic = adapterDiagnostics[adapter];
+    if (installedSet.has(adapter)) {
+      const authenticated = commandSucceeds(cmd, diagnostic.authArgs);
       checks.push({
-        name: label,
+        name: diagnostic.label,
         status: authenticated ? 'ok' : 'warn',
-        message: authenticated ? 'installed and logged in' : `installed, but login was not confirmed. ${loginHint}`,
+        message: authenticated ? 'installed and logged in' : `installed, but login was not confirmed. ${diagnostic.loginHint}`,
       });
     } else {
-      checks.push({ name: label, status: 'warn', message: `not found. ${installHint}` });
+      checks.push({ name: diagnostic.label, status: 'warn', message: `not found. Install: ${ADAPTER_INSTALL_HINT[adapter]}` });
     }
   }
-  if (!anyAdapter) {
+  if (installed.length === 0) {
     checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });
   }
+  checks.push({
+    name: 'Recommended adapter',
+    status: installedSet.has(RECOMMENDED) ? 'ok' : 'warn',
+    message: `${RECOMMENDED}. Select it with: flowcrew adapter ${RECOMMENDED}`,
+  });
 
   // Config files
-  const defaultsPath = join(projectDir, 'config', 'defaults.yaml');
-  if (existsSync(defaultsPath)) {
-    try {
-      const raw = readFileSync(defaultsPath, 'utf-8');
-      const parsed = parseYaml(raw) as Record<string, unknown>;
-      const adapter = parsed.adapter as string;
-      checks.push({ name: 'config/defaults.yaml', status: 'ok', message: `adapter: ${adapter}` });
-
-      // Check if configured adapter is installed
-      const adapterCmd: Record<string, string> = { codex: 'codex', claude: 'claude' };
-      const cmd = adapterCmd[adapter];
-      if (cmd) {
-        if (!commandExists(cmd)) {
-          checks.push({ name: `Configured adapter (${adapter})`, status: 'warn', message: `${cmd} not found. Install it or change adapter in config/defaults.yaml` });
-        }
-      } else if (!AVAILABLE_ADAPTER_NAMES.includes(adapter as typeof AVAILABLE_ADAPTER_NAMES[number])) {
+  const setting = readAdapterSetting(projectDir);
+  if (!setting.exists) {
+    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Missing. Run `flowcrew init` to create it.' });
+  } else if (setting.error) {
+    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: `${setting.error}. Run \`flowcrew init\` to regenerate it.` });
+  } else {
+    const configured = setting.value ?? 'auto';
+    checks.push({ name: 'config/defaults.yaml', status: 'ok', message: `adapter: ${configured}` });
+    if (configured === 'mock') {
+      checks.push({ name: 'Configured adapter (mock)', status: 'ok', message: 'deterministic in-process test adapter; no external CLI is required' });
+    } else if (configured === 'auto' || configured === 'codex' || configured === 'claude') {
+      const resolution = resolveAdapterChoice({ configured }, installed);
+      if (resolution.ok) {
+        const fellBack = configured !== 'auto' && configured !== resolution.adapter;
         checks.push({
-          name: `Configured adapter (${adapter})`,
-          status: 'fail',
-          message: `Unknown adapter. Available adapters: ${AVAILABLE_ADAPTER_NAMES.join(', ')}`,
+          name: `Configured adapter (${configured})`,
+          status: fellBack ? 'warn' : 'ok',
+          message: `${resolution.reason} Set explicitly with: flowcrew adapter ${resolution.adapter}`,
+        });
+      } else {
+        checks.push({
+          name: `Configured adapter (${configured})`,
+          status: 'warn',
+          message: resolution.hint.replace(/\n/g, ' '),
         });
       }
-    } catch { /* expected - optional resource */
-      checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Invalid YAML. Run `flowcrew init` to regenerate.' });
+    } else {
+      checks.push({
+        name: `Configured adapter (${configured})`,
+        status: 'fail',
+        message: `Unknown adapter. Available values: auto, ${AVAILABLE_ADAPTER_NAMES.join(', ')}. Set one with: flowcrew adapter ${RECOMMENDED}`,
+      });
     }
-  } else {
-    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Missing. Run `flowcrew init` to create it.' });
   }
 
   // Agents directory
@@ -335,7 +492,6 @@ async function cmdDoctor() {
   }
 
   // Engine and UI builds
-  const packageRoot = resolve(import.meta.dirname ?? '.', '..');
   const engineDist = join(packageRoot, 'dist', 'cli.js');
   checks.push({
     name: 'Engine build',
@@ -373,6 +529,16 @@ async function cmdDoctor() {
 async function cmdStart() {
   const projectDir = detectProjectDir();
   const port = parseInt(process.env.PORT || '3000', 10);
+  const setting = readAdapterSetting(projectDir);
+  if (setting.error) throw new Error(setting.error);
+  const resolution = resolveRuntimeAdapter({ configured: setting.value ?? 'auto' });
+  if (!resolution.ok) {
+    console.error(`❌ ${resolution.hint}`);
+    process.exitCode = 1;
+    return;
+  }
+  const adapterInstance = await loadAdapterByName(resolution.adapter);
+  console.log(`Adapter: ${resolution.adapter} — ${resolution.reason}`);
 
   const net = await import('node:net');
   const portAvailable = await new Promise<boolean>((resolve) => {
@@ -401,38 +567,8 @@ async function cmdStart() {
     }
   }
 
-  // Auto-detect adapter if defaults.yaml doesn't exist
-  const defaultsPath = join(projectDir, 'config', 'defaults.yaml');
-  if (existsSync(defaultsPath)) {
-    try {
-      const raw = readFileSync(defaultsPath, 'utf-8');
-      const parsed = parseYaml(raw) as Record<string, unknown>;
-      const adapter = parsed.adapter as string;
-      const adapterCmd: Record<string, string> = { codex: 'codex', claude: 'claude' };
-      const cmd = adapterCmd[adapter];
-      if (cmd) {
-        try {
-          execSync(`which ${cmd}`, { stdio: 'ignore' });
-        } catch { /* expected - optional resource */
-          // Configured adapter not found — try to auto-detect
-          const detected = detectAdapter();
-          if (detected !== adapter) {
-            console.log(`⚠️  Configured adapter "${adapter}" (${cmd}) not found. Auto-detected: ${detected}`);
-            parsed.adapter = detected;
-            writeFileSync(defaultsPath, stringifyYaml(parsed), 'utf-8');
-          } else {
-            console.error(`❌ No adapter CLI found. Install Claude Code or Codex`);
-            console.error('   npm i -g @anthropic/claude-code');
-            console.error('   npm i -g @openai/codex');
-            process.exit(1);
-          }
-        }
-      }
-    } catch { /* ignore parse errors, let dashboard handle it */ }
-  }
-
   const { startDashboard } = await import('./dashboard.js');
-  await startDashboard(projectDir, port);
+  await startDashboard(projectDir, port, { adapter: adapterInstance });
 }
 
 async function cmdQuick() {
@@ -537,7 +673,7 @@ async function cmdQuick() {
     console.error('Usage: flowcrew quick "task description" [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --adapter codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
+    console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
     console.error('  --max-iterations <n>    Max plan-execute-review cycles (default: 5)');
     console.error('  --timeout <ms>          Per-stage timeout in ms (default: 300000)');
@@ -632,7 +768,13 @@ async function cmdQuick() {
   }
 
   if (background) {
-    if (adapter) adapter = normalizeAdapterName(adapter);
+    if (adapter) {
+      const candidate = adapter.trim();
+      if (candidate !== 'auto' && !AVAILABLE_ADAPTER_NAMES.includes(candidate as typeof AVAILABLE_ADAPTER_NAMES[number])) {
+        throw new Error(`Unknown adapter "${adapter}". Available adapters: auto, ${AVAILABLE_ADAPTER_NAMES.join(', ')}`);
+      }
+      adapter = candidate;
+    }
     try {
       await registerBackgroundTask({
         kind: 'quick',
@@ -650,10 +792,18 @@ async function cmdQuick() {
     }
   }
 
-  if (!adapter) {
-    const fromDefaults = loadProjectDefaults(projectDir).adapter;
-    adapter = fromDefaults || detectAdapter();
+  const configuredAdapter = loadProjectDefaults(projectDir).adapter;
+  const adapterResolution = resolveRuntimeAdapter({
+    explicit: adapter || undefined,
+    configured: configuredAdapter,
+  });
+  if (!adapterResolution.ok) {
+    console.error(`❌ ${adapterResolution.hint}`);
+    process.exitCode = 1;
+    return;
   }
+  adapter = adapterResolution.adapter;
+  console.log(`Adapter resolution: ${adapter} — ${adapterResolution.reason}`);
   adapter = normalizeAdapterName(adapter);
 
   const configRoot = join(import.meta.dirname ?? '.', '..', 'config', 'workflows');
@@ -765,9 +915,19 @@ async function cmdQuick() {
     console.log(`  ⏸ awaiting approval: ${finalState.parked.action}${finalState.parked.target ? ` → ${finalState.parked.target}` : ''}`);
     console.log(`     resolve with: flowcrew inbox approve ${finalState.parked.requestId}   (or: flowcrew inbox deny ${finalState.parked.requestId})`);
   }
-  for (const [id, st] of Object.entries(finalState.stages) as [string, { status: string; duration_ms?: number }][]) {
+  for (const [id, st] of Object.entries(finalState.stages) as [string, { status: string; duration_ms?: number; error?: string }][]) {
     const si = st.status === STAGE_STATUS.COMPLETE ? '✓' : st.status === STAGE_STATUS.FAILED ? '✗' : st.status === STAGE_STATUS.SKIPPED ? '⊘' : '·';
     console.log(`  ${si} ${id}: ${st.status}${st.duration_ms ? ` (${(st.duration_ms / 1000).toFixed(1)}s)` : ''}`);
+  }
+  if (!succeeded && !parked && finalState.failureReason) {
+    console.log(`  Failure reason: ${finalState.failureReason.replace(/\s+/g, ' ').trim()}`);
+  }
+  if (!succeeded && !parked) {
+    for (const [id, stage] of Object.entries(finalState.stages) as [string, { status: string; error?: string }][]) {
+      if (stage.status === STAGE_STATUS.FAILED && stage.error) {
+        console.log(`  Failed stage ${id}: ${stage.error.replace(/\s+/g, ' ').trim()}`);
+      }
+    }
   }
   // A research ceiling (honest negative) and a shipped beat are successes, not failures —
   // exit 0 so a spawning parent (campaign outer loop's execSync) doesn't read it as a crash.
@@ -1302,6 +1462,7 @@ Usage: flowcrew <command>
 
 Commands:
   init      Initialize FlowCrew in the current project
+  adapter   Show or set the project adapter choice
   quick     Inspect, then run or enqueue an authored brief (no server needed)
   status    Show progress of the latest run
   list      Show all recent runs with status and duration
@@ -1322,6 +1483,8 @@ Commands:
   version   Show version
 
 Examples:
+  flowcrew adapter
+  flowcrew adapter claude
   flowcrew quick "refactor auth module"
   flowcrew quick "task" --supervise --max-iterations 3
   flowcrew status
@@ -1423,7 +1586,14 @@ async function cmdCampaignLoop(): Promise<void> {
   // adapter; the historical hazard was the CLI built-in default drifting to a model the
   // account lacked — gpt-5.3-codex, HTTP 400 — and the failed propose masquerading as a frontier.)
   if ((!proposeRole.model || proposeRole.model === 'default') && projDefaults.model) proposeRole.model = projDefaults.model;
-  const adapterName = normalizeAdapterName(projDefaults.adapter || 'codex');
+  const campaignAdapterResolution = resolveRuntimeAdapter({ configured: projDefaults.adapter });
+  if (!campaignAdapterResolution.ok) {
+    console.error(`❌ ${campaignAdapterResolution.hint}`);
+    process.exitCode = 1;
+    return;
+  }
+  const adapterName = normalizeAdapterName(campaignAdapterResolution.adapter);
+  console.log(`Adapter resolution: ${adapterName} — ${campaignAdapterResolution.reason}`);
   const adapterInstance = await loadAdapterByName(adapterName);
 
   const cliPath = process.argv[1];
@@ -1529,7 +1699,10 @@ async function cmdCampaignLoop(): Promise<void> {
 // Main
 switch (command) {
   case 'init':
-    cmdInit();
+    cmdInit().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
+    break;
+  case 'adapter':
+    try { cmdAdapter(); } catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
     break;
   case 'quick':
     cmdQuick().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });

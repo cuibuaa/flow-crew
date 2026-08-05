@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
 import { RUN_STATUS } from './store.js';
+import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
 
 export interface CriterionLintWarning {
   line: number;
@@ -241,6 +242,19 @@ export function inspectBrief(brief: string): BriefPreflightReport {
       message: frontmatter.status === 'valid' ? 'Frontmatter parsed successfully' : 'No YAML frontmatter declared',
       acknowledgementRequired: false,
     });
+  }
+
+  if (hasRealityChecksHeading(brief)) {
+    const declarations = parseChecksFromMarkdown(brief);
+    if (!declarations.some((declaration) => declaration.kind !== 'invalid')) {
+      const parserDiagnostic = declarations.find((declaration) => declaration.kind === 'invalid')?.diagnostic;
+      add({
+        code: 'reality_checks_empty_or_invalid',
+        level: 'fail',
+        message: `A \`## Reality checks\` section was declared but produced no valid checks${parserDiagnostic ? `: ${parserDiagnostic}` : '. Declare at least one valid check under `checks:`.'}`,
+        acknowledgementRequired: true,
+      });
+    }
   }
 
   const rc = parsed.research;

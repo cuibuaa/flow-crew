@@ -412,7 +412,7 @@ types — and, because a record nothing reads is just clutter, what actually con
 
 ## Configuration
 
-FlowCrew reads `config/defaults.yaml` (Codex-default):
+FlowCrew reads `config/defaults.yaml` (`auto` recommends Codex when both CLIs are installed):
 
 ```yaml
 default_timeout_ms: 3600000
@@ -422,7 +422,7 @@ default_stage_technical_retries: 1     # adapter/transport retry, separate from 
 default_plan_stage_retries: 2          # transient empty/invalid plan → bounded retry, not fatal
 default_supervisor_max_rejects: 2      # supervisor can send a deliverable back, bounded
 
-adapter: codex
+adapter: auto
 session_reuse: false                   # measured benefit was ~9% wall clock; off by default
 model: default                         # inherit the adapter's own config unless set here
 reasoning_effort: default
@@ -463,11 +463,17 @@ Three are worth knowing on day one:
 
 ```bash
 flowcrew doctor                   # is this install actually ready?
+flowcrew adapter                  # current choice, installed CLIs, and recommendation
+flowcrew adapter claude           # set an installed backend explicitly
 flowcrew rehearse <brief.md>      # replay a brief for free before spending anything
 flowcrew status                   # what is running right now
 ```
 
-All 19 commands — launching, steering, approvals, brief history, daemon and dashboard
+New projects store `adapter: auto`: one installed CLI is selected, while two installed CLIs
+select recommended Codex unless interactive `flowcrew init` chooses otherwise. Runtime
+selection never rewrites the project; use `flowcrew adapter <name>` for an explicit change.
+
+All 20 commands — launching, steering, approvals, brief history, daemon and dashboard
 lifecycle, registry repair, reality audit — are documented with their options and exit
 codes in the **[CLI reference](guide/cli.md)**.
 

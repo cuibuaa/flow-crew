@@ -60,6 +60,25 @@ describe('shared brief preflight', () => {
     expect(verifyBriefAdmission('---\nterminal_states: [\n---\n# Goal', admitted).status).toBe('valid');
   });
 
+  it('fails a declared Reality-check section that parses to no valid checks', () => {
+    const malformed = inspectBrief(`${structuredBrief()}\n## Reality checks\nchecks:\n  - name: broken\n    type: file-exists-nonempty\n     params: {}\n`);
+    expect(malformed.contractReady).toBe(false);
+    expect(malformed.findings).toContainEqual(expect.objectContaining({
+      code: 'reality_checks_empty_or_invalid',
+      level: 'fail',
+      message: expect.stringContaining('YAML parsing failed'),
+    }));
+
+    const empty = inspectBrief(`${structuredBrief()}\n## Reality checks\nchecks: []\n`);
+    expect(empty.findings).toContainEqual(expect.objectContaining({
+      code: 'reality_checks_empty_or_invalid',
+      level: 'fail',
+    }));
+
+    const absent = inspectBrief(structuredBrief());
+    expect(absent.findings.some((finding) => finding.code === 'reality_checks_empty_or_invalid')).toBe(false);
+  });
+
   it('digests exact UTF-8 bytes, including BOM, CRLF, and trailing newlines', () => {
     const variants = [
       structuredBrief(),

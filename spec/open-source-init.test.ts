@@ -18,7 +18,7 @@ describe('public project initialization', () => {
     const defaultsPath = ensureProjectDefaultsFile(projectDir);
     const defaults = parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>;
 
-    expect(defaults.adapter).toBe('codex');
+    expect(defaults.adapter).toBe('auto');
     expect(defaults.paths).toMatchObject({ agents: 'config/agents', workflows: 'config/workflows' });
     expect(defaults).not.toHaveProperty('campaign');
   });

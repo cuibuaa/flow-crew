@@ -41,6 +41,8 @@ import type { CampaignHistoryEntry } from "./campaigns.js";
 import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
 import type { StageConfig } from "./scheduler.js";
 import type { AgentConfig, Adapter } from "./adapters/base.js";
+import { loadAdapterByName } from './adapters/loader.js';
+import { resolveAdapterChoice } from './adapters/availability.js';
 import { readAttemptSummaryRefreshState } from "./run-events.js";
 import {
   claimLaunchIntent,
@@ -179,46 +181,20 @@ const INBOX_FILTER_STATES = new Set<string>(Object.values(INBOX_FILTER_STATE));
 const COMPLETE_METRIC_NAME_FRAGMENT = 'complete';
 
 // --- Dynamic adapter loading ---
-let _cachedResolvedAdapter: Adapter | null = null;
-let _cachedAdapterMtime = 0;
 async function resolveAdapter(configDir: string): Promise<Adapter> {
   const defaultsPath = join(configDir, "defaults.yaml");
-  // Invalidate cache when defaults.yaml changes
-  try {
-    const mtime = statSync(defaultsPath).mtimeMs;
-    if (_cachedResolvedAdapter && mtime === _cachedAdapterMtime) return _cachedResolvedAdapter;
-    _cachedAdapterMtime = mtime;
-  } catch { /* non-critical */
-    if (_cachedResolvedAdapter) return _cachedResolvedAdapter;
-  }
   const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, "utf-8")) as Record<string, unknown> : {};
-  let name = (defaults.adapter as string) || "codex";
-  const map: Record<string, string> = { codex: "./adapters/codex.js", claude: "./adapters/claude.js" };
+  const configured = typeof defaults.adapter === 'string' && defaults.adapter.trim()
+    ? defaults.adapter.trim()
+    : 'auto';
+  if (configured === 'mock') return loadAdapterByName('mock');
 
-  // Verify the configured adapter CLI is available; auto-detect if not
-  const cliMap: Record<string, string> = { codex: 'codex', claude: 'claude' };
-  const { execSync } = await import('node:child_process');
-  const cliCmd = cliMap[name];
-  if (cliCmd) {
-    try { execSync(`which ${cliCmd}`, { stdio: 'ignore' }); } catch { /* non-critical */
-      // Configured adapter not found — try to find any available one
-      const configured = name;
-      let found = false;
-      for (const [adapterName, cmd] of Object.entries(cliMap)) {
-        if (adapterName === name) continue;
-        try { execSync(`which ${cmd}`, { stdio: 'ignore' }); name = adapterName; found = true; break; } catch { /* not found */ }
-      }
-      if (!found) {
-        throw new Error(`Configured adapter "${configured}" (${cliCmd}) not found and no fallback available. Install Codex or Claude. See \`flowcrew doctor\` for details.`);
-      }
-      log.warn(`Configured adapter "${configured}" not found — using "${name}" instead`);
-    }
+  const resolution = resolveAdapterChoice({ configured });
+  if (!resolution.ok) throw new Error(resolution.hint);
+  if (configured !== 'auto' && configured !== resolution.adapter) {
+    log.warn({ configured, selected: resolution.adapter }, resolution.reason);
   }
-
-  const mod = await import(map[name] || map.codex);
-  const adapter: Adapter = mod.createAdapter();
-  _cachedResolvedAdapter = adapter;
-  return adapter;
+  return loadAdapterByName(resolution.adapter);
 }
 
 // --- Project defaults for agent config fallback ---
@@ -4307,7 +4283,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const skillsDir = join(configDir, 'skills');
     const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter((f) => f.endsWith('.yaml')) : [];
     const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter((f) => f.endsWith('.md')) : [];
-    return { projectDir, adapter: defaults.adapter ?? 'codex', workflows, skills, port, ...defaults };
+    return { projectDir, adapter: defaults.adapter ?? 'auto', workflows, skills, port, ...defaults };
   });
 
   // 13b. PATCH /api/settings — persist settings changes to defaults.yaml

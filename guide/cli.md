@@ -2,11 +2,12 @@
 
 ## Top-level Commands
 
-The current `src/cli.ts` dispatcher exposes 19 commands:
+The current `src/cli.ts` dispatcher exposes 20 commands:
 
 | Command | Purpose |
 |---|---|
 | `init` | Initialize FlowCrew configuration and storage in a project. |
+| `adapter` | Show or explicitly set the project adapter choice. |
 | `quick` | Run or enqueue one task brief. |
 | `status` | Show the latest run. |
 | `list` | List recent runs. |
@@ -30,6 +31,8 @@ The current `src/cli.ts` dispatcher exposes 19 commands:
 
 ```bash
 flowcrew init
+flowcrew adapter
+flowcrew adapter claude
 flowcrew quick "task"
 flowcrew rehearse <brief.md>
 flowcrew status
@@ -65,6 +68,35 @@ The default command parses the brief and then runs the real scheduler with an in
 An exit-zero report ends with `✅ Contract ready`. The static section also prints the exact brief digest and whether live admission requires an explicit acknowledgement. This verifies the engine-to-brief contract—frontmatter, research result consumption, stop rules, terminal paths, and confirmation wiring—not the truth or quality of a future research result. A `✗` is a contract failure that should be fixed before launch; a `⚠` is a review item that may be intentional.
 
 See [Zero-token rehearsal](rehearse.md) for the complete boundary.
+
+## `flowcrew adapter`
+
+Inspect adapter state without changing the project:
+
+```bash
+flowcrew adapter
+```
+
+The output names the current configuration value, the physically installed adapter CLIs,
+and the recommended execution backend. Set a value with a directly pasteable command:
+
+```bash
+flowcrew adapter auto
+flowcrew adapter codex
+flowcrew adapter claude
+```
+
+An explicit physical adapter must be installed before it can be selected. `auto` remains
+undecided on disk: at runtime it chooses the only installed CLI, or recommended `codex`
+when both are installed. If neither is installed, live execution exits nonzero and prints
+both installation commands. Runtime fallback is in memory only; `quick`, `start`, and the
+dashboard never rewrite `config/defaults.yaml` while resolving an adapter. Existing
+projects with explicit `codex` or `claude` values remain valid and are not migrated.
+
+`flowcrew init` uses the same facts when creating a new project. With both CLIs it prompts
+only on a TTY and preselects `codex`; non-interactive init chooses the recommendation and
+states why. With neither CLI it creates `adapter: auto` and succeeds, so daemon-oriented
+or image-building scaffolds cannot hang on a prompt.
 
 ## `flowcrew guide`
 
@@ -115,7 +147,7 @@ Common flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--project <path>` | cwd | Project directory |
-| `--adapter <name>` | `defaults.yaml` | Registered adapter: `codex`, `claude`, or `mock` |
+| `--adapter <name>` | `defaults.yaml` | Registered adapter: `auto`, `codex`, `claude`, or `mock` |
 | `--workflow <name>` | `default` | Workflow from `config/workflows/` |
 | `--max-iterations <n>` | config | Max plan-execute-review cycles |
 | `--timeout <ms>` | config | Per-stage timeout |
@@ -186,13 +218,17 @@ Checks the agent CLIs (installed and authenticated), `config/defaults.yaml` and 
 configured adapter, every `config/agents/*.yaml` and the shared base prompt, and whether
 the dashboard port is already held.
 
+Doctor is diagnostic-only: it reports the installed adapters, current value, recommendation,
+and a pasteable `flowcrew adapter <name>` correction without creating or changing project
+files. Installation commands come from the same shared constants used by runtime errors.
+
 The port check does more than report "something is listening": when a FlowCrew dashboard
 answers, it resolves the listener's pid through `/proc` and compares the serving process's
 working directory against this checkout's own root. `ok` means this install's dashboard is
 running; a `warn` names the other checkout serving that port (and the alternate-port
-command to start this one alongside it) instead of falsely reporting success. It cannot
-detect a PATH-level `flowcrew` command pointed at a different checkout by `npm link` —
-that check is `which flowcrew`, not `doctor`.
+command to start this one alongside it) instead of falsely reporting success. The PATH
+check likewise resolves the `flowcrew` executable with `realpath` and compares it with this
+checkout's built CLI; another checkout is reported as a different install, never as `ok`.
 
 `flowcrew doctor --repair-registry` and `--compact-registry` are documented under
 [Registry maintenance](#registry-maintenance) below.
