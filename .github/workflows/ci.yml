@@ -68,3 +68,34 @@ jobs:
               ! command -v claude
               node ./node_modules/vitest/vitest.mjs run spec
             '
+
+  # TEMPORARY measurement job (spike/macos-measure). Not for main: it exists to
+  # turn "we think N things break on macOS" into a list of what actually does.
+  # macOS runners have no systemd, no /proc, and no Docker, so the isolation job
+  # is deliberately not replicated here.
+  macos-measure:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Report the platform we are actually measuring
+        run: |
+          uname -a
+          node -e "console.log('platform', process.platform, 'arch', process.arch)"
+          command -v systemctl || echo "systemctl: absent (expected)"
+          test -d /proc && echo "/proc: present (unexpected)" || echo "/proc: absent (expected)"
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:ui
+
+      - name: Run the public spec suite and keep going after failures
+        run: node ./node_modules/vitest/vitest.mjs run spec --reporter=basic 2>&1 | tail -200
