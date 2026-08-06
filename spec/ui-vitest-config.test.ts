@@ -4,6 +4,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
 } from "node:fs";
@@ -63,7 +64,11 @@ function relativeFiles(list: UiTestList, repositoryRoot: string): string[] {
 
 describe("H-M7-ui-cwd-discovery", () => {
   it("discovers the governed UI tests from both working directories and a clean archive", () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "flowcrew-ui-vitest-config-"));
+    // realpath the sandbox: on macOS tmpdir() is /var/folders/... and /var is a
+    // symlink to /private/var. Vitest reports test files by their resolved path,
+    // so an unresolved root makes relative() emit a chain of ../.. instead of the
+    // expected spec/ui/... paths.
+    const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "flowcrew-ui-vitest-config-")));
     try {
       mkdirSync(join(sandbox, "home"), { recursive: true });
       mkdirSync(join(sandbox, "fc-home"), { recursive: true });

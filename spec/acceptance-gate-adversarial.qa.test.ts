@@ -138,10 +138,15 @@ describe('complete repair diff edge cases', () => {
     unlinkSync(file);
     symlinkSync('target', file);
     const row = artifact(before).files.find((entry) => entry.path === 'src/current');
+    // The point of this case is that `type` carries the change when the content
+    // hash cannot. A symlink's own mode is deliberately not asserted: Linux pins
+    // it at 0777 regardless of umask, while BSD/macOS gives symlinks real
+    // permissions, so an exact value here only tests which kernel ran the suite.
     expect(row).toMatchObject({
       status: 'modified',
       before: { type: 'file', mode: '0777' },
-      after: { type: 'symlink', mode: '0777', symlink: true },
+      after: { type: 'symlink', symlink: true },
     });
+    expect((row as { after?: { mode?: string } }).after?.mode).toMatch(/^0[0-7]{3}$/);
   });
 });
