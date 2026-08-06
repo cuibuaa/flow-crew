@@ -251,6 +251,124 @@ interface DoctorCheck {
   message: string;
 }
 
+interface DoctorSkillLocation {
+  label: 'project' | 'global';
+  files: Record<'ship' | 'fc-status', string>;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function skillRevision(content: string): string | undefined {
+  return /<!--\s*flowcrew-skill-revision:\s*([^\s]+)\s*-->/.exec(content)?.[1];
+}
+
+function addDoctorSkillCheck(
+  checks: DoctorCheck[],
+  adapter: AdapterName,
+  projectDir: string,
+  packageRoot: string,
+): void {
+  const agentLabel = adapter === 'codex' ? 'Codex' : 'Claude Code';
+  const sourceFiles: Record<'ship' | 'fc-status', string> = {
+    ship: join(packageRoot, 'skills', 'ship.md'),
+    'fc-status': join(packageRoot, 'skills', 'fc-status.md'),
+  };
+  const home = process.env.HOME;
+  const locations: DoctorSkillLocation[] = adapter === 'codex'
+    ? [
+      {
+        label: 'project',
+        files: {
+          ship: join(projectDir, '.agents', 'skills', 'ship', 'SKILL.md'),
+          'fc-status': join(projectDir, '.agents', 'skills', 'fc-status', 'SKILL.md'),
+        },
+      },
+      ...(home ? [{
+        label: 'global' as const,
+        files: {
+          ship: join(home, '.agents', 'skills', 'ship', 'SKILL.md'),
+          'fc-status': join(home, '.agents', 'skills', 'fc-status', 'SKILL.md'),
+        },
+      }] : []),
+    ]
+    : [
+      {
+        label: 'project',
+        files: {
+          ship: join(projectDir, '.claude', 'commands', 'ship.md'),
+          'fc-status': join(projectDir, '.claude', 'commands', 'fc-status.md'),
+        },
+      },
+      ...(home ? [{
+        label: 'global' as const,
+        files: {
+          ship: join(home, '.claude', 'commands', 'ship.md'),
+          'fc-status': join(home, '.claude', 'commands', 'fc-status.md'),
+        },
+      }] : []),
+    ];
+  const installer = join(packageRoot, 'skills', 'install.sh');
+  const repairCommand = (scope: DoctorSkillLocation['label']) => (
+    `bash ${shellQuote(installer)} --${adapter} --${scope}`
+  );
+  const names = Object.keys(sourceFiles) as Array<keyof typeof sourceFiles>;
+  const sourceContent = new Map<string, string>();
+  for (const name of names) {
+    if (!existsSync(sourceFiles[name])) {
+      checks.push({
+        name: `${agentLabel} skills`,
+        status: 'warn',
+        message: `repository skill source ${sourceFiles[name]} is missing. Reinstall FlowCrew: npm i -g flowcrew`,
+      });
+      return;
+    }
+    sourceContent.set(name, readFileSync(sourceFiles[name], 'utf-8'));
+  }
+
+  const issues: string[] = [];
+  const current: string[] = [];
+  const seen = new Set<string>();
+  for (const location of locations) {
+    const existing = names.filter((name) => existsSync(location.files[name]));
+    if (existing.length === 0) continue;
+    const missing = names.filter((name) => !existsSync(location.files[name]));
+    if (missing.length > 0) {
+      issues.push(`${location.label} install is incomplete (missing ${missing.join(', ')}). Run: ${repairCommand(location.label)}`);
+    }
+    for (const name of existing) {
+      seen.add(name);
+      const installedContent = readFileSync(location.files[name], 'utf-8');
+      const expectedContent = sourceContent.get(name)!;
+      if (installedContent === expectedContent) {
+        current.push(`${name} (${location.label})`);
+        continue;
+      }
+      const installedRevision = skillRevision(installedContent);
+      const expectedRevision = skillRevision(expectedContent) ?? 'unknown';
+      const versionDetail = installedRevision
+        ? `revision ${installedRevision}; repository revision ${expectedRevision}`
+        : `unversioned; repository revision ${expectedRevision}`;
+      issues.push(`${name} (${location.label}) is outdated or locally changed (${versionDetail}). Run: ${repairCommand(location.label)}`);
+    }
+  }
+
+  const entirelyMissing = names.filter((name) => !seen.has(name));
+  if (entirelyMissing.length > 0) {
+    const scope: DoctorSkillLocation['label'] = home ? 'global' : 'project';
+    issues.push(`missing ${entirelyMissing.join(', ')}. Run: ${repairCommand(scope)}`);
+  }
+
+  checks.push(issues.length > 0
+    ? { name: `${agentLabel} skills`, status: 'warn', message: issues.join('\n') }
+    : {
+      name: `${agentLabel} skills`,
+      status: 'ok',
+      message: `current repository copies found: ${current.join(', ')}`,
+    });
+}
+
 function commandPath(commandName: string): string | undefined {
   try {
     const path = execFileSync('which', [commandName], {
@@ -379,6 +497,9 @@ async function cmdDoctor() {
     } else {
       checks.push({ name: diagnostic.label, status: 'warn', message: `not found. Install: ${ADAPTER_INSTALL_HINT[adapter]}` });
     }
+  }
+  for (const adapter of installed) {
+    addDoctorSkillCheck(checks, adapter, projectDir, packageRoot);
   }
   if (installed.length === 0) {
     checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });

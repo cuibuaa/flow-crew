@@ -63,7 +63,7 @@ flowcrew rehearse examples/hello-research.brief.md
 flowcrew rehearse path/to/brief.md --static-only
 ```
 
-The default command parses the brief and then runs the real scheduler with an in-process scripted adapter in an isolated temporary project and `FC_HOME`. It launches no agent process or model, consumes no tokens, and does not write to the selected project. `--static-only` skips the scheduler simulation; `--keep` preserves the otherwise temporary rehearsal artifacts for inspection.
+The default command parses the brief and then runs the real scheduler with an in-process scripted adapter in an isolated temporary project and `FC_HOME`. It launches no agent process or model, consumes no tokens, and does not write to the selected project. Its temporary Git repository ignores inherited `GIT_*`, global/system config, signing, hooks, and templates. If Git or the simulation still cannot run, the report gives a concise explanation and a pasteable `--static-only` command; raw child-process buffers and Node stacks are not the user-facing diagnosis. `--static-only` skips the scheduler simulation; `--keep` preserves the otherwise temporary rehearsal artifacts for inspection.
 
 An exit-zero report ends with `✅ Contract ready`. The static section also prints the exact brief digest and whether live admission requires an explicit acknowledgement. This verifies the engine-to-brief contract—frontmatter, research result consumption, stop rules, terminal paths, and confirmation wiring—not the truth or quality of a future research result. A `✗` is a contract failure that should be fixed before launch; a `⚠` is a review item that may be intentional.
 
@@ -116,8 +116,9 @@ and task titles. Explicit targets must exist and still be running.
 `flowcrew quick` runs an already-authored task brief without needing the dashboard server.
 It always prints the shared static preflight before loading an adapter, writing the project
 brief, registering a daemon task, or creating a run. A single-line request is reported as
-plain text because no structured brief contract was available to validate; use `/ship` to
-author one or `flowcrew rehearse <brief.md>` to inspect a file first.
+plain text because no structured brief contract was available to validate; use the `ship`
+skill (`/ship` in Claude Code, `$ship` in Codex) to author one or
+`flowcrew rehearse <brief.md>` to inspect a file first.
 
 ```bash
 flowcrew quick "fix failing tests"
@@ -214,9 +215,13 @@ a long-running live command, not a rehearsal.
 
 ## `flowcrew doctor`
 
-Checks the agent CLIs (installed and authenticated), `config/defaults.yaml` and the
-configured adapter, every `config/agents/*.yaml` and the shared base prompt, and whether
-the dashboard port is already held.
+Checks the agent CLIs (installed and authenticated), each installed agent's FlowCrew skill
+copies, `config/defaults.yaml` and the configured adapter, every `config/agents/*.yaml` and
+the shared base prompt, and whether the dashboard port is already held. Agents absent from
+`PATH` receive no missing-skill warning. For an installed agent, doctor checks the supported
+project and global paths against the packaged source bytes, reports incomplete, changed, or
+older copies, and gives the matching `skills/install.sh --<agent> --global|--project`
+command.
 
 Doctor is diagnostic-only: it reports the installed adapters, current value, recommendation,
 and a pasteable `flowcrew adapter <name>` correction without creating or changing project

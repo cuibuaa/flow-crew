@@ -11,11 +11,22 @@ FlowCrew ships agent skills so you can hand off work from an active Claude Code 
 ./skills/install.sh --project
 ```
 
-`--project` installs into the current project's `.claude/commands/` and `.codex/commands/` folders.
+With no agent selector, the installer considers both CLIs. It uses `command -v` and installs
+only agents that are present; each absent CLI is explicitly skipped with its real install
+command (`npm i -g @openai/codex` or `npm i -g @anthropic-ai/claude-code`). A successful
+Claude copy is byte-verified. A successful Codex copy is additionally enumerated through
+Codex's no-token `skills/list` API.
 
-## `/ship`
+Global targets are `~/.claude/commands/{ship,fc-status}.md` for Claude Code and
+`~/.agents/skills/{ship,fc-status}/SKILL.md` for Codex. `--project` uses the corresponding
+`.claude/commands/` and `.agents/skills/` folders in the current project. Run
+`flowcrew doctor` to detect a missing, locally changed, or older installed copy and get a
+pasteable repair command.
 
-`/ship` turns the current conversation into a FlowCrew task:
+## `ship`: `/ship` in Claude Code, `$ship` in Codex
+
+Invoke `/ship` in Claude Code. In Codex, invoke `$ship` or select `ship` from `/skills`.
+The same skill then turns the current conversation into a FlowCrew task:
 
 1. Summarizes the discussion into a structured brief and proposes settings such as
    workflow, campaign, iteration limit, and timeout.
@@ -44,8 +55,11 @@ Confirm constraints and acceptance criteria.
 /ship
 ```
 
+In Codex, replace the last line with `$ship`.
+
 With the default config, FlowCrew executes through Codex unless the brief, flags, or role config override the adapter.
 
-## `/fc-status`
+## `fc-status`: `/fc-status` in Claude Code, `$fc-status` in Codex
 
-`/fc-status` checks the latest FlowCrew run and summarizes progress, stage status, and next actions.
+The status skill runs `flowcrew status`. Invoke `/fc-status` in Claude Code or `$fc-status`
+in Codex (it is also selectable from Codex's `/skills` list).

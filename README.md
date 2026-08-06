@@ -218,13 +218,14 @@ is genuinely done.
 - **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published version closes both at once, and the alternative trades them for two high-severity ones. Production dependencies (`npm audit --omit=dev`) report none.
 
 > [!WARNING]
-> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from `/ship`, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
+> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from the `ship` skill, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
 >
 > Every launch path first prints the same static brief preflight used by `rehearse`. Consequential findings require the explicit `--acknowledge-brief-warnings` choice; the flag never skips or hides inspection. After admission, `quick` writes the submitted text to `<projectDir>/docs/task_brief.md`, replacing different content only after warning. Start with `flowcrew rehearse`: it launches no agent process or model, spends no tokens, and does not modify your project; an in-process scripted adapter exercises the scheduler in isolated temporary directories.
 
 ## Get started
 
-**The way in is `/ship` from your coding agent.** The skill interviews you, turns the
+**The way in is the `ship` skill from your coding agent.** Invoke it as `/ship` in Claude
+Code or as `$ship` in Codex (you can also choose `ship` from Codex's `/skills` list). It interviews you, turns the
 discussion into a brief, and rehearses that brief before anything runs. That matters more
 than it sounds: a run's outcome is decided mostly by its brief, and the skill carries the
 accumulated rules for writing one — state criteria as properties rather than naming the
@@ -235,7 +236,7 @@ The CLI is how you **watch, steer, verify, and operate** a run. `flowcrew quick 
 sentence"` is still available for scripts and direct operation, but it now says plainly that
 the input has no structured brief contract, prints the shared preflight report, and stops
 until the caller explicitly acknowledges the current exact text. It checks; it does not
-interview you or author the missing contract. Use `/ship` for that primary authoring path.
+interview you or author the missing contract. Use the `ship` skill for that primary authoring path.
 
 Dashboard **+ New Run** follows the same boundary: the first action checks the writable
 brief and shows frontmatter, contract, and criterion findings inline; the second action
@@ -258,8 +259,14 @@ flowcrew doctor
 ./skills/install.sh
 ```
 
-This adds `/ship` and `/fc-status` to supported coding agents (Codex and Claude Code).
-`/ship` is the primary entry point, not a convenience wrapper.
+The installer checks which requested CLIs are actually on `PATH`; an absent agent is
+explicitly skipped and never reported as installed. Install one with
+`npm i -g @openai/codex` or `npm i -g @anthropic-ai/claude-code`, then rerun the command.
+Claude Code receives `/ship` and `/fc-status` under `~/.claude/commands/`. Codex receives
+enumerable skills under `~/.agents/skills/`; use `$ship`/`$fc-status` or select them from
+`/skills`. Codex installation succeeds only after its own no-token `skills/list` API sees
+both skills. `flowcrew doctor` reports missing or outdated copies and prints the exact
+installer command to repair them.
 
 ### 3. Run the safe, zero-token first task
 
@@ -267,16 +274,17 @@ This adds `/ship` and `/fc-status` to supported coding agents (Codex and Claude 
 flowcrew rehearse examples/hello-research.brief.md
 ```
 
-The report ends with a contract-ready verdict. That means the brief's YAML frontmatter, research-loop policy, scheduler lifecycle, terminal artifacts, and confirmation wiring survived a real scheduler rehearsal. It does **not** claim that any research result is correct: rehearsal launches no agent process or model and uses an in-process scripted adapter. See the [rehearsal reference](guide/rehearse.md) and [`examples/README.md`](examples/README.md) for the campaign dry-run and an isolated mock-adapter loop.
+The report ends with a contract-ready verdict. That means the brief's YAML frontmatter, research-loop policy, scheduler lifecycle, terminal artifacts, and confirmation wiring survived a real scheduler rehearsal. It does **not** claim that any research result is correct: rehearsal launches no agent process or model, uses an in-process scripted adapter, and creates its Git repository with isolated temporary HOME, config, hooks, and templates. If setup still fails, the report gives a plain explanation plus a pasteable static-only command instead of a Node stack trace. See the [rehearsal reference](guide/rehearse.md) and [`examples/README.md`](examples/README.md) for the campaign dry-run and an isolated mock-adapter loop.
 
 ### 4. Ship from your coding agent
 
-Shape the task in the conversation — in **Codex or Claude Code** — then `/ship` it:
+Shape the task in the conversation, then invoke `/ship` in **Claude Code** or `$ship` in
+**Codex**:
 
 ```text
 > Split auth into token validation and session management.
 > Keep the public API compatible and add focused regression tests.
-> /ship
+> /ship        # Claude Code; use $ship in Codex
 ```
 
 FlowCrew turns the confirmed discussion into a brief, runs the crew, and reports back — while you watch the dashboard or walk away.
@@ -292,8 +300,9 @@ Prefer one tool? Run the whole loop on **Codex** (the default) — or entirely i
 ## What you can run
 
 Three shapes of work, all entered the same way: describe it in your coding agent, then
-`/ship`. The skill interviews you, writes the brief, rehearses it, and launches. Each
-example below shows **what you say** — and the contract `/ship` writes from it, because
+invoke its `ship` skill (`/ship` in Claude Code, `$ship` in Codex). The skill interviews
+you, writes the brief, rehearses it, and launches. Each example below uses Claude Code's
+`/ship` spelling and shows **what you say** — and the contract the skill writes from it, because
 that contract is what the engine actually enforces.
 
 ### Research loop (metric) — beat a baseline, honestly
@@ -305,7 +314,7 @@ that contract is what the engine actually enforces.
 ```
 
 Research settings live in the brief's leading YAML frontmatter, and nowhere else. The
-contract `/ship` writes starts with the form the engine parses:
+contract the skill writes starts with the form the engine parses:
 
 ```yaml
 ---
@@ -454,7 +463,7 @@ research:
 
 ## The CLI is the advanced tool, not the front door
 
-You should not need it to get value out of FlowCrew. `/ship` starts the work and the
+You should not need it to get value out of FlowCrew. The `ship` skill starts the work and the
 dashboard watches it. Reach for the command line when you want something those two do not
 give you: a scripted or scheduled launch, a brief you already wrote, or an operational
 answer about the install itself.
@@ -490,7 +499,7 @@ codes in the **[CLI reference](guide/cli.md)**.
 - [Campaigns and Run Memory](guide/campaigns.md): campaigns, plateaus, pivots, knowledge graph.
 - [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
 - [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
-- [Agent Skills](guide/skills.md): `/ship`, `/fc-status`, and skill installation.
+- [Agent Skills](guide/skills.md): Claude Code slash commands, Codex skills, and installation.
 - [CLI Reference](guide/cli.md): all 20 commands and their subcommands/options.
 - [Contributing](CONTRIBUTING.md): build, test, documentation, commit, and PR expectations.
 

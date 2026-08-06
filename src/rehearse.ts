@@ -16,8 +16,8 @@
  * stop rules propose a ceiling — deferred by the floor if declared, then
  * committed honestly.
  */
-import { execSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { inspectBrief } from './brief-preflight.js';
@@ -37,7 +37,86 @@ export function rehearsalExitCode(findings: ReadonlyArray<Finding>): 0 | 1 {
   return findings.some((finding) => finding.level === 'fail') ? 1 : 0;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function conciseError(error: unknown): string {
+  if (!(error instanceof Error)) return 'an unexpected internal error occurred';
+  const firstLine = error.message.split(/\r?\n/).find((line) => line.trim())?.trim();
+  return (firstLine || error.name || 'an unexpected internal error occurred')
+    .replace(/Buffer\s*</g, 'binary output <')
+    .slice(0, 300);
+}
+
+function gitSetupFailure(error: unknown): string {
+  const detail = error && typeof error === 'object'
+    ? error as { code?: unknown; status?: unknown }
+    : undefined;
+  if (detail?.code === 'ENOENT') {
+    return 'Git is not installed or is not available on PATH, so the isolated temporary repository could not be created.';
+  }
+  const status = typeof detail?.status === 'number' ? ` (git exit ${detail.status})` : '';
+  return `Git could not create the isolated temporary repository${status}.`;
+}
+
+function isolatedGitEnvironment(home: string, configPath: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('GIT_') && value !== undefined) env[key] = value;
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, 'xdg'),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: configPath,
+    GIT_CONFIG_SYSTEM: configPath,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
+function initializeTemporaryGitRepository(projectDir: string, stateDir: string): void {
+  const gitHome = join(stateDir, 'git-home');
+  const gitConfig = join(stateDir, 'empty.gitconfig');
+  const templateDir = join(stateDir, 'empty-git-template');
+  const hooksDir = join(stateDir, 'empty-git-hooks');
+  for (const directory of [gitHome, join(gitHome, 'xdg'), templateDir, hooksDir]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  writeFileSync(gitConfig, '', 'utf-8');
+  const env = isolatedGitEnvironment(gitHome, gitConfig);
+  execFileSync('git', ['init', '-q', `--template=${templateDir}`], {
+    cwd: projectDir,
+    env,
+    stdio: 'pipe',
+  });
+  execFileSync('git', [
+    '-c', 'user.email=r@r.r',
+    '-c', 'user.name=rehearse',
+    '-c', 'commit.gpgSign=false',
+    '-c', `core.hooksPath=${hooksDir}`,
+    'commit', '-q', '--allow-empty', '-m', 'init',
+  ], {
+    cwd: projectDir,
+    env,
+    stdio: 'pipe',
+  });
+}
+
 export async function cmdRehearse(argv: string[]): Promise<void> {
+  try {
+    await runRehearsal(argv);
+  } catch (error) {
+    const briefPath = argv.find((arg) => !arg.startsWith('--')) ?? '<brief.md>';
+    console.error(`Rehearsal could not complete safely: ${conciseError(error)}`);
+    console.error(`Next: flowcrew rehearse ${shellQuote(briefPath)} --static-only`);
+    process.exitCode = 1;
+  }
+}
+
+async function runRehearsal(argv: string[]): Promise<void> {
   const briefPath = argv.find((a) => !a.startsWith('--'));
   if (!briefPath || !existsSync(briefPath)) {
     console.error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only]');
@@ -82,9 +161,10 @@ export async function cmdRehearse(argv: string[]): Promise<void> {
     tempProject = mkdtempSync(join(tmpdir(), 'fc-rehearse-proj-'));
     const realFcHome = store.fcGlobalDir();
     store.setFcGlobalDir(tempFcHome);
+    let simulationPhase: 'git' | 'scheduler' = 'git';
     try {
-      execSync('git init -q && git -c user.email=r@r.r -c user.name=rehearse commit -q --allow-empty -m init',
-        { cwd: tempProject, shell: '/bin/bash' });
+      initializeTemporaryGitRepository(tempProject, tempFcHome);
+      simulationPhase = 'scheduler';
 
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
       mkdirSync(join(tempProject, dirname(resultRel)), { recursive: true });
@@ -202,8 +282,14 @@ export async function cmdRehearse(argv: string[]): Promise<void> {
 
       const pendingStages = Object.entries(state.stages ?? {}).filter(([, s]) => store.isPendingStageStatus(s.status));
       if (pendingStages.length > 0) add('fail', `run.json still contains pending stages: ${pendingStages.map(([k]) => k).join(', ')}`);
-
       if (keep) add('ok', `Artifacts retained: project=${tempProject} run=${runDirPath}`);
+    } catch (error) {
+      const retry = `flowcrew rehearse ${shellQuote(briefPath)} --static-only`;
+      if (simulationPhase === 'git') {
+        add('fail', `${gitSetupFailure(error)}\n  Next: git --version\n  Static fallback: ${retry}`);
+      } else {
+        add('fail', `The isolated scheduler rehearsal could not complete: ${conciseError(error)}\n  Next: ${retry}`);
+      }
     } finally {
       store.setFcGlobalDir(realFcHome);
       if (!keep) {

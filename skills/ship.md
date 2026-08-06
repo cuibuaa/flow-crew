@@ -1,6 +1,12 @@
+---
+name: ship
+description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
+---
+<!-- flowcrew-skill-revision: 1 -->
+
 # /ship — Hand off your plan to FlowCrew for multi-agent execution
 
-When the user invokes `/ship`, follow these steps:
+When the user invokes `/ship` in Claude Code or `$ship` in Codex, follow these steps:
 
 ## 0. Prior-Run Handoff Check (BEFORE drafting)
 
