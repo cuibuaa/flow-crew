@@ -4,6 +4,23 @@ This is the canonical public contract between a FlowCrew brief, its agents, and
 the scheduler. Brief-writing tools such as `/ship` should link here instead of
 maintaining their own copy.
 
+## Three rules that decide most outcomes
+
+A run's result is determined more by its brief than by anything the engine does afterwards.
+These three are the ones that most often go wrong:
+
+- **State a criterion as the observable property, not the instrument.** "The probe must import
+  `jsdom`" pins an implementation; "prove a real browser environment was exercised" states what
+  you actually want, and a gate can satisfy it by other means without failing you on a
+  technicality.
+- **Put the boundaries in the brief, not in a follow-up message.** Anything a stage may write,
+  and anything it must not, has to be declared up front — a constraint sent later cannot
+  retroactively govern work already done, and an undeclared write scope means the stage is
+  neither allowed to write nor told it may ask.
+- **Declare terminal artifacts only on what the last stage writes.** Naming a path that some
+  mid-pipeline stage produces lets the run reach a terminal state before the gates that were
+  supposed to guard it have run.
+
 ## Contract flow
 
 ```text
@@ -192,6 +209,8 @@ artifacts remain in the selected project.
 | Round result | Measurement stage | Research advance gate | Path from `research.result_file`; one fresh JSON object per round. After ingestion it is moved to `<runDir>/research_round_<N>_consumed.json` and journaled. |
 | `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
 | `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
+| `handoff_<stageId>.md` | Each stage on completion | The next stage that depends on it | `<runDir>/handoff_<stageId>.md`; what a stage passes forward, rather than the next stage re-reading its predecessor's full output. |
+| `scope_revision_request.json` | A stage needing a path outside its declared scope | Scheduler policy, which writes `scope_revision_decision_*.json` beside it | `<runDir>/stages/<stageId>/`; answered by a deterministic predicate chain — matching run and live attempt, digest-verified paths, no collision with a running peer, and the requested file not already modified — never by the supervisor. |
 | Guidance | Supervisor, scheduler, or operator path | Later workers/planner | Run-level `supervisor_guidance.md` plus optional `stages/<stageId>/guidance.md`; snapshotted for each consuming stage and archived by iteration. |
 | Terminal artifact | Agent, or the research engine when it owns the decision | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; snapshotted as `<runDir>/terminal_<basename>` when detected. |
 | Stage output | Every stage attempt | Retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest attempt. A retry that needs to read what an *earlier* attempt actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered attempt — `output.md` alone was overwritten by each new attempt, so a passing attempt's output could be destroyed by a later one that failed in seconds. |

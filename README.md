@@ -11,11 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg" alt="Node >= 22.5" />
   <img src="https://img.shields.io/badge/default_backend-Codex-111827.svg" alt="Codex default backend" />
-  <img src="https://img.shields.io/badge/verify--before--trust-confirm--gate-16a34a.svg" alt="Confirm-gate: verify before trust" />
-  <img src="https://img.shields.io/badge/memory-knowledge_graph-2563eb.svg" alt="Knowledge graph memory" />
 </p>
-
-Claude Code:
 
 ```text
 > Beat the current model on val accuracy. Ship only a result that re-confirms
@@ -23,21 +19,14 @@ Claude Code:
 > /ship
 ```
 
-Codex:
-
-```text
-> Beat the current model on val accuracy. Ship only a result that re-confirms
-> on a fresh split.
-> $ship
-```
+`/ship` in Claude Code; `$ship` in Codex.
 
 **Most AI agents are eager to tell you they succeeded. FlowCrew is built to catch itself when it didn't.**
 
 Hand it a task brief and it runs as a supervised crew — planner, coder, researcher, reviewer, QA, supervisor — that plans, executes, retries, and checks its own work for hours, unattended.
 
-And the difference isn't one clever check at the end — it's systemic. Self-checking, exploring, and self-correcting are designed into every step: the planner probes the problem and stages the work, gates catch weak output and fire targeted fixes, the supervisor retries and sends insufficient work back — and only after all that does an *independent* re-check decide whether the result is real enough to call **shipped**. Beat the metric but fail that check? Downgraded, not shipped. It reports honest negatives, refuses to fake progress, and remembers every dead end so the next run never repeats it.
-
-A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable result you can trust — because it didn't trust itself first.
+Self-checking is designed into every step, not bolted on at the end — and an *independent*
+re-check, not the crew, decides whether a result may be called **shipped**.
 
 ## Will this run on your machine?
 
@@ -50,19 +39,14 @@ A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable
   | **Linux without a systemd session** | detached process fallback | full — same as above, `/proc` is what provides it |
   | **macOS** | detached process fallback | reduced — see below |
 
-  On macOS there is no `/proc`, so FlowCrew identifies a process by its pid and command
-  line rather than by an exact start-time token. In the rare case where the operating
-  system recycles a pid before FlowCrew notices the original exited, it can mistake the
-  new process for the old one. Everything else — liveness, ownership, cancellation —
-  works; this one guarantee is weaker than on Linux, deliberately, because the
-  alternative costs a native addon.
+  macOS identifies processes slightly more loosely than Linux — see
+  [Known issues](#known-issues). Everything else works the same.
 - **Node.js 22.5+** — FlowCrew uses the built-in `node:sqlite`.
 - **An authenticated Codex CLI or Claude Code** — for live runs only. The zero-token
   rehearsal in [Get started](#get-started) needs neither, and is the recommended way to
   try FlowCrew before installing anything else.
-- **A live run gets unattended shell access to the target project**, for hours. Use a
-  dedicated workspace or an isolated container. Full detail in
-  [Before you start](#before-you-start).
+- **A live run gets unattended shell access to the target project**, for hours — see the
+  warning under [Before you start](#before-you-start).
 
 **You probably don't need FlowCrew** if you want one agent to do one bounded task — use
 Codex or Claude Code directly. The gates, supervisor and retry loops only pay for
@@ -70,9 +54,7 @@ themselves once the work runs longer than you are willing to sit and watch it.
 
 ### Before you start
 
-- **The engine and dashboard are separate build targets.** A repository install runs both builds through the package `prepare` hook, producing `dist/` and `ui/dist/`.
 - **One task per project at a time.** Queue as many as you like — the daemon holds the rest and starts the next when the current one reaches a terminal state. The guard is per project, so tasks in different projects do run concurrently.
-- **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published version closes both at once, and the alternative trades them for two high-severity ones. Production dependencies (`npm audit --omit=dev`) report none.
 
 > [!WARNING]
 > **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from the `ship` skill, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
@@ -81,23 +63,11 @@ themselves once the work runs longer than you are willing to sit and watch it.
 
 ## Get started
 
-**The way in is the `ship` skill from your coding agent.** Invoke it as `/ship` in Claude
-Code or as `$ship` in Codex (you can also choose `ship` from Codex's `/skills` list). It interviews you, turns the
-discussion into a brief, and rehearses that brief before anything runs. That matters more
-than it sounds: a run's outcome is decided mostly by its brief, and the skill carries the
-accumulated rules for writing one — state criteria as properties rather than naming the
-instrument, put the boundaries in the brief instead of sending them later, declare terminal
-artifacts only on what the last stage writes.
-
-The CLI is how you **watch, steer, verify, and operate** a run. `flowcrew quick "one
-sentence"` is still available for scripts and direct operation, but it now says plainly that
-the input has no structured brief contract, prints the shared preflight report, and stops
-until the caller explicitly acknowledges the current exact text. It checks; it does not
-interview you or author the missing contract. Use the `ship` skill for that primary authoring path.
-
-Dashboard **+ New Run** follows the same boundary: the first action checks the writable
-brief and shows frontmatter, contract, and criterion findings inline; the second action
-starts that exact checked text, with a checkbox when consequential findings remain.
+**The way in is the `ship` skill from your coding agent** — `/ship` in Claude Code, `$ship` in
+Codex. It interviews you, turns the discussion into a brief, and rehearses that brief before
+anything runs. That matters more than it sounds: a run's outcome is decided mostly by its
+brief, and the skill carries the accumulated rules for writing one (see the
+[brief contract](guide/brief-contract.md)). The CLI is how you then watch, steer and verify.
 
 ### 1. Clone, install, and expose the local CLI
 
@@ -290,121 +260,49 @@ instead — for a brief you already have, or for scripted and scheduled runs —
 
 ## What makes it work
 
-### A crew of roles, not one agent with many tools
+### A crew of roles, and one authority withheld
 
-A run is carried out by specialists. A planner decomposes the goal. A coder implements. A
-researcher gathers evidence. A reviewer and a QA gate judge the result against the brief. Each
-one sees only the context its own job needs, and each can be replaced without touching the
-others.
+A run is carried out by specialists — a planner, a coder, a researcher, a reviewer, a QA gate —
+each seeing only the context its own job needs. That much is ordinary.
 
-That much is ordinary. What follows is what we added on top of it — and the one authority we
-deliberately withheld.
+What is not: **the planner emits a stage graph the scheduler executes literally**, written in a
+fixed vocabulary the engine validates, so a role it invents is rejected rather than guessed at.
+A **supervisor** watches the run rather than the task — it samples progress, sends insufficient
+work back, ends a stage that has gone quiet, and can force a re-plan — but it never decides
+that the work is done.
 
-### The planner writes a program, not a plan
+That last authority is withheld on purpose. **The same population of models writes the work,
+measures the work, and judges the measurement**, so a natural-language opinion that the bar was
+met is not independent evidence. What ends a run successfully is the **Reality Gate**: the
+checks the work declared for itself, executed as scripts. Only success is gated — a failure
+needs no proving. The crew can raise this bar on itself, because the planner may add checks for
+constraints it derives from the goal. Nothing in the crew can lower it.
 
-Most systems ask a model to "make a plan" and get back prose that a human, or another model,
-then has to interpret. Ours emits something the scheduler executes literally.
-
-What it writes in is a small **grammar of atoms** — enough vocabulary to express not just *who
-does what*, but the shape of the work:
-
-- **dependency** — which stages must finish first, and, for every edge, *why* it exists. An
-  unexplained edge is not accepted, so the graph cannot quietly serialise itself into a chain.
-- **iteration** — a stage can be marked a gate, and a gate names where failing work goes back
-  to. That pair is the loop construct: rework is a declared edge in the graph, not an agent
-  deciding to try again.
-- **runtime expansion** — a stage can be allowed to emit further stages once it knows more, so
-  the planner commits to a subgraph now and the rest when the problem is understood.
-- **capability** — each stage declares which paths it may write. Declaring nothing means
-  writing nothing; the closed case is the default, not an oversight.
-- **budget** — a soft time budget per attempt and an immutable ceiling for the stage as a
-  whole, so a stage can ask for more time without any path to unbounded time.
-
-Because it is a grammar rather than a fixed template, the planner composes these freely for
-the problem in front of it — a wide parallel fan-out for independent work, a narrow chain with
-a gate looping back for work that must converge, an expansion point where the shape is not yet
-knowable.
-
-And because it is a grammar rather than prose, it can be *checked before it runs*. Each role
-describes itself at its own source; a registry hands the planner the vocabulary it may compose
-from and rejects anything it invents that is not in it. The menu and the validator are the same
-list, so adding a role needs no prompt edit and the two cannot drift apart. A stage that does
-not parse is dropped and named — never guessed at.
-
-### A supervisor whose job is the run, not the task
-
-A crew handing work down a chain has a blind spot: **everyone is doing a job, nobody is
-watching the job get done.** A stage that quietly stalls burns its whole budget before anyone
-notices. Weak output flows downstream because the next agent takes its input on faith. A plan
-that turns out to be wrong keeps being executed, because the thing that could re-plan it is
-not looking.
-
-So one role's work *is* the run. It samples progress cheaply, escalates to a real assessment
-when something looks anomalous, sends insufficient work back, ends a stage that has gone
-quiet, and can force a re-plan when the approach is not converging.
-
-### The crew never grades its own work
-
-In the systems this most resembles, that supervisor would also decide when the task is
-complete. Ours does not.
-
-The reason is not distrust of one model. It is that **the same population of models writes the
-work, measures the work, and judges the measurement** — so a natural-language opinion that the
-bar was met is not evidence, it is a fourth sample from the same distribution.
-
-What ends a run successfully is the **Reality Gate**: the checks the work declared for itself,
-executed as scripts. They pass or they do not, and a run that fails them is recorded as having
-failed its gate rather than as complete. Only success is gated — a failure needs no proving.
-The crew may raise this bar on itself, because the planner can add checks for constraints it
-derives from the goal. Nothing in the crew can lower it.
+The [architecture guide](guide/architecture.md) has the grammar, the anti-tampering rules and
+the scope machinery in full.
 
 ### Every hand-off is a checkable artifact, not a message
 
-Denying a model the last word only helps if there is something better to check. **Agents in
-FlowCrew never pass each other free-form prose.** Every hand-off is a typed artifact at a known
-place in the run directory, with one producer and one consumer, and a malformed one is refused
-rather than interpreted.
+Agents in FlowCrew never pass each other free-form prose. Every hand-off — the plan, the work,
+a verdict, a scope request, an approval — is a typed artifact at a known path in the run
+directory, with one producer and one consumer, and a malformed one is refused rather than
+interpreted. The [brief contract](guide/brief-contract.md) lists them.
 
-| Hand-off | Artifact | Producer → consumer |
-|---|---|---|
-| the plan | `dispatch.yaml` | planner → scheduler, parsed per stage; invalid entries are dropped, not guessed at |
-| the work | `stages/<id>/input.md` → `output.md` | scheduler → agent → scheduler |
-| the judgement | `verdict_<gate>.json` | gate → scheduler, read as pass/fail rather than as an opinion |
-| "I need to write outside my scope" | `scope_revision_request.json` → `scope_revision_decision_*.json` | stage → **scheduler policy** → stage, answered by a predicate chain rather than by a model |
-| "a human must decide this" | `approval_request.json` → `approvals.jsonl` | stage → operator → stage, idempotent on the request id, first resolution wins |
-| the deterministic checks | the brief's own checks, **and** checks the planner writes for its own goal | brief and planner → engine, executed rather than believed |
-| what the next stage inherits | `handoff_<stage>.md` | stage → stage |
-
-Two of those edges are where the design is least conventional:
-
-- **A gate cannot move its own goalposts.** A gate writes its own verdict, but it is checked
-  against the acceptance contract and against the measurement the run recorded separately.
-  Renaming the metric, quietly lowering the threshold, claiming a pass on a number that misses,
-  or returning a verdict with no number at all — each is rejected outright.
-- **A boundary that cannot be enforced is not a boundary.** Anything a stage writes outside its
-  declared paths is restored to its pre-stage contents, and the restore is re-read to confirm it
-  took. A stage that genuinely needs another file can ask — and the answer comes from a rule,
-  not from persuading anyone. One rule is that the file must not have been touched already:
-  **you cannot ask forgiveness dressed as permission.** A refusal is handed to the next planning
-  round rather than leaving the stage to be retried into the same wall. (This is also why you
-  should not edit the project by hand while a run is working in it: attribution is a snapshot
-  diff, and it cannot tell your edit from the stage's.)
-
-Because every hand-off is a file with a shape rather than a conversation, the whole lifecycle
-can be driven by a scripted stand-in instead of a model. That is what makes
-`flowcrew rehearse` possible: the *real* scheduler, a fake agent, no tokens, about a second —
-so you can find out whether a brief's contract is wired correctly before spending anything on
-finding out whether the work is good.
+Two consequences are worth knowing before you run anything. A stage that writes outside its
+declared paths has those files **restored to their pre-stage contents** — so do not hand-edit
+the project while a run is working in it, because attribution is a snapshot diff and cannot
+tell your edit from the stage's. And because every hand-off is a file rather than a
+conversation, the whole lifecycle can be driven by a scripted stand-in instead of a model:
+that is what makes `flowcrew rehearse` possible — the *real* scheduler, a fake agent, no
+tokens, about a second.
 
 ### Knowing when to stop is a rule, not a judgement call
 
-The same refusal applies to the hardest judgement in open-ended work: when to give up. In
-research mode the crew proposes and measures, but whether a result is kept, and whether to
+In research mode the crew proposes and measures, but whether a result is kept, and whether to
 continue, ship, or declare a ceiling, is computed from the history of results by a fixed
-policy — and that policy, not the supervisor, owns the ending.
-
-It also refuses to mistake luck for progress: a round counts as an improvement only if it beats
-the running best by more than the measurement's own uncertainty.
+policy — and that policy, not the supervisor, owns the ending. A round counts as an improvement
+only if it beats the running best by more than the measurement's own uncertainty, so noise
+cannot be banked as progress.
 
 ### When this is the wrong tool
 
@@ -503,7 +401,7 @@ dashboard watches it. Reach for the command line when you want something those t
 give you: a scripted or scheduled launch, a brief you already wrote, or an operational
 answer about the install itself.
 
-Four are worth knowing on day one:
+Five are worth knowing on day one:
 
 ```bash
 flowcrew doctor                   # is this install actually ready?
@@ -527,6 +425,9 @@ codes in the **[CLI reference](guide/cli.md)**.
 
 Reproduced on the current release. Listed here rather than discovered by you.
 
+- **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published
+  version closes both at once, and the alternative trades them for two high-severity ones.
+  Production dependencies (`npm audit --omit=dev`) report none.
 - **`flowcrew status` and `/fc-status` are not project-scoped.** Run from any directory,
   they report the most recent run across every project on the machine — including one
   that belongs to a different project entirely. A run that has already reached a terminal
@@ -543,8 +444,11 @@ Reproduced on the current release. Listed here rather than discovered by you.
   background task can finish without the daemon noticing.** The run's own record reaches a
   terminal state correctly, but `flowcrew task list` may keep reporting it as running. Read
   the outcome with `flowcrew task show <id>` until this is fixed.
-- **macOS identifies processes slightly more loosely than Linux** — see
-  [Will this run on your machine?](#will-this-run-on-your-machine).
+- **macOS identifies processes slightly more loosely than Linux.** Without `/proc` a process is
+  matched by pid and command line rather than by an exact start-time token, so if the operating
+  system recycles a pid before FlowCrew notices the original exited, it can mistake the new
+  process for the old one. Liveness, ownership and cancellation are unaffected. This is a
+  deliberate trade — the faithful alternative needs a native addon.
 
 ## Documentation
 
