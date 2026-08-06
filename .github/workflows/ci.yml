@@ -97,5 +97,7 @@ jobs:
       - run: npm run build
       - run: npm run build:ui
 
-      - name: Run the public spec suite and keep going after failures
-        run: node ./node_modules/vitest/vitest.mjs run spec --reporter=basic 2>&1 | tail -200
+      # No pipe and no `|| true`: the step's own exit code must reach the log.
+      # continue-on-error at the job level is what keeps the run from going red.
+      - name: Run the public spec suite
+        run: node ./node_modules/vitest/vitest.mjs run spec
