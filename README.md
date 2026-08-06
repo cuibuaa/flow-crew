@@ -15,7 +15,6 @@
   <img src="https://img.shields.io/badge/memory-knowledge_graph-2563eb.svg" alt="Knowledge graph memory" />
 </p>
 
-
 Claude Code:
 
 ```text
@@ -58,6 +57,92 @@ A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable
 Codex or Claude Code directly. The gates, supervisor and retry loops only pay for
 themselves once the work runs longer than you are willing to sit and watch it.
 
+### Before you start
+
+- **The engine and dashboard are separate build targets.** A repository install runs both builds through the package `prepare` hook, producing `dist/` and `ui/dist/`.
+- **One task per project at a time.** Queue as many as you like — the daemon holds the rest and starts the next when the current one reaches a terminal state. The guard is per project, so tasks in different projects do run concurrently.
+- **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published version closes both at once, and the alternative trades them for two high-severity ones. Production dependencies (`npm audit --omit=dev`) report none.
+
+> [!WARNING]
+> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from the `ship` skill, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
+>
+> Every launch path first prints the same static brief preflight used by `rehearse`. Consequential findings require the explicit `--acknowledge-brief-warnings` choice; the flag never skips or hides inspection. After admission, `quick` writes the submitted text to `<projectDir>/docs/task_brief.md`, replacing different content only after warning. Start with `flowcrew rehearse`: it launches no agent process or model, spends no tokens, and does not modify your project; an in-process scripted adapter exercises the scheduler in isolated temporary directories.
+
+## Get started
+
+**The way in is the `ship` skill from your coding agent.** Invoke it as `/ship` in Claude
+Code or as `$ship` in Codex (you can also choose `ship` from Codex's `/skills` list). It interviews you, turns the
+discussion into a brief, and rehearses that brief before anything runs. That matters more
+than it sounds: a run's outcome is decided mostly by its brief, and the skill carries the
+accumulated rules for writing one — state criteria as properties rather than naming the
+instrument, put the boundaries in the brief instead of sending them later, declare terminal
+artifacts only on what the last stage writes.
+
+The CLI is how you **watch, steer, verify, and operate** a run. `flowcrew quick "one
+sentence"` is still available for scripts and direct operation, but it now says plainly that
+the input has no structured brief contract, prints the shared preflight report, and stops
+until the caller explicitly acknowledges the current exact text. It checks; it does not
+interview you or author the missing contract. Use the `ship` skill for that primary authoring path.
+
+Dashboard **+ New Run** follows the same boundary: the first action checks the writable
+brief and shows frontmatter, contract, and criterion findings inline; the second action
+starts that exact checked text, with a checkbox when consequential findings remain.
+
+### 1. Clone, install, and expose the local CLI
+
+```bash
+git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew
+npm install
+npm link
+flowcrew doctor
+```
+
+`npm install` builds both the TypeScript engine (`dist/`) and React dashboard (`ui/dist/`). `npm link` makes this clone's `flowcrew` command available on your `PATH` — note that if you already have a global `flowcrew` from another checkout, this silently repoints it at this one, and nothing warns you — check with `which flowcrew`. Doctor reports every missing build, CLI, login, or environment item clearly, and when a dashboard already holds the port it names which install that dashboard belongs to; address its attention items before a live run.
+
+### 2. Install the coding-agent skills
+
+```bash
+./skills/install.sh
+```
+
+The installer checks which requested CLIs are actually on `PATH`; an absent agent is
+explicitly skipped and never reported as installed. Install one with
+`npm i -g @openai/codex` or `npm i -g @anthropic-ai/claude-code`, then rerun the command.
+Claude Code receives `/ship` and `/fc-status` under `~/.claude/commands/`. Codex receives
+enumerable skills under `~/.agents/skills/`; use `$ship`/`$fc-status` or select them from
+`/skills`. Codex installation succeeds only after its own no-token `skills/list` API sees
+both skills. `flowcrew doctor` reports missing or outdated copies and prints the exact
+installer command to repair them.
+
+### 3. Run the safe, zero-token first task
+
+```bash
+flowcrew rehearse examples/hello-research.brief.md
+```
+
+The report ends with a contract-ready verdict. That means the brief's YAML frontmatter, research-loop policy, scheduler lifecycle, terminal artifacts, and confirmation wiring survived a real scheduler rehearsal. It does **not** claim that any research result is correct: rehearsal launches no agent process or model, uses an in-process scripted adapter, and creates its Git repository with isolated temporary HOME, config, hooks, and templates. If setup still fails, the report gives a plain explanation plus a pasteable static-only command instead of a Node stack trace. See the [rehearsal reference](guide/rehearse.md) and [`examples/README.md`](examples/README.md) for the campaign dry-run and an isolated mock-adapter loop.
+
+### 4. Ship from your coding agent
+
+Shape the task in the conversation, then invoke `/ship` in **Claude Code** or `$ship` in
+**Codex**:
+
+```text
+> Split auth into token validation and session management.
+> Keep the public API compatible and add focused regression tests.
+> /ship        # Claude Code; use $ship in Codex
+```
+
+FlowCrew turns the confirmed discussion into a brief, runs the crew, and reports back — while you watch the dashboard or walk away.
+
+### Run it your way — Codex, Claude, or both
+
+FlowCrew runs end to end on **Codex or Claude** — either works on its own.
+
+**We recommend: plan in Claude Code, execute in Codex.** Long multi-agent sub-runs are token-hungry, and Claude subscription budgets deplete faster than Codex's — so shape the plan where the conversation flows best (Claude Code), then hand the heavy execution to Codex (the default backend).
+
+Prefer one tool? Run the whole loop on **Codex** (the default) — or entirely in **Claude Code**. The split is a token-budget optimization, not a requirement.
+
 ## You bring the problem. It brings the rigor.
 
 Point FlowCrew at an open-ended goal — *"find an edge in this data," "make this 10× faster," "implement this to spec"* — and its planner decomposes the work, chooses the checks, and drives it to a trustworthy conclusion, unattended for hours. **You don't wire the gates — the engine does.**
@@ -95,6 +180,103 @@ The important boundary: the supervisor **steers** but never edits files or runs 
 happens in worker stages; evidence is checked by gates, Reality-Gate, and — before any
 `shipped` — the confirm-gate.
 
+## What you can run
+
+Three shapes of work, all entered the same way: describe it in your coding agent, then
+invoke its `ship` skill (`/ship` in Claude Code, `$ship` in Codex). The skill interviews
+you, writes the brief, rehearses it, and launches. Each example below uses Claude Code's
+`/ship` spelling and shows **what you say** — and the contract the skill writes from it, because
+that contract is what the engine actually enforces.
+
+### Research loop (metric) — beat a baseline, honestly
+
+```text
+> Beat our current docs-search relevance baseline. Only ship a result that
+> re-confirms on a fresh split — an honest ceiling is a fine answer.
+> /ship
+```
+
+Research settings live in the brief's leading YAML frontmatter, and nowhere else. The
+contract the skill writes starts with the form the engine parses:
+
+```yaml
+---
+research:
+  baseline: 0
+  policy: greedy_stack
+  result_file: docs/hello-research/round_result.json
+  confirm:
+    command: |
+      test "$(git ls-files '*.ts' | wc -l)" -ge 1
+  stop:
+    beat: 1
+    max_rounds: 3
+---
+```
+
+`examples/hello-research.brief.md` is exactly this shape, complete with a result schema and
+terminal paths. Replay it against the real scheduler for free — no agent, no tokens, about
+a second — with `flowcrew rehearse examples/hello-research.brief.md`.
+
+### Engineering (acceptance) — satisfy a contract
+
+```text
+> Add a public test proving `flowcrew --help` lists every top-level command.
+> Don't change any command's behavior.
+> /ship
+```
+
+The same engine-owned decision and confirm gate carry engineering work. The engine parses
+`objective:` and `research:` identically — on engineering work `objective:` says what you
+mean. The contract belongs in the brief's frontmatter, never buried in the task prose:
+
+````markdown
+---
+objective:
+  baseline: 0
+  policy: replace_if_better
+  result_file: artifacts/acceptance/round_result.json
+  report_dir: artifacts/acceptance
+  result_schema:
+    type: object
+    required: [label, result]
+    properties:
+      label: {type: string}
+      result: {type: number}
+  confirm:
+    command: npm run build && npm test
+    requires: The engine build and complete test suite must pass.
+  stop:
+    beat: 1
+    max_rounds: 3
+---
+# Add a CLI help regression test
+
+Add a public test proving that `flowcrew --help` lists every top-level command.
+Do not change command behavior. After measuring the acceptance checks, write
+`{"label":"cli-help-contract","result":1}` to
+`artifacts/acceptance/round_result.json` only when every check passes; otherwise
+write a result below 1.
+````
+
+### Unknown bug hunt
+
+```text
+> Find the root cause of the intermittent checkout failure. Add a reproducer
+> that fails before the fix, then make it pass 50× consecutively. Don't
+> re-try a hypothesis this campaign already marked a dead end.
+> /ship
+```
+
+That last sentence is not a hint. The campaign's dead ends are handed to the planner as
+facts, so a direction disproved in an earlier run is one it is told not to propose again.
+
+See [Brief and file contract](guide/brief-contract.md) for every frontmatter and runtime
+artifact field, and [`examples/README.md`](examples/README.md) for the runnable tracked
+example and the zero-token flows around it. Launching any of these from the command line
+instead — for a brief you already have, or for scripted and scheduled runs — is in the
+[CLI reference](guide/cli.md).
+
 ## What makes it work
 
 Four design choices carry most of the weight. Each is stated with what it actually
@@ -114,10 +296,31 @@ meaning lives at the primitive's own source and is injected.
 The role is the reference case; the same treatment is being generalised to the other
 composable primitives — see [`design/atom-architecture.md`](design/atom-architecture.md).
 
-### A harness you can rehearse for free
+### A harness contract — agents hand each other typed artifacts, never prose
 
-`flowcrew rehearse` runs the **real scheduler** against a **scripted fake agent** — no model,
-no tokens, seconds. It exercises the whole lifecycle, not a mock of it:
+This is the part that makes a crew work rather than a chain of chat turns. Agents in
+FlowCrew never pass each other free-form text. Every hand-off is a **typed, versioned
+artifact with one defined producer and one defined consumer**, written to a known path in
+the run directory — and a malformed one is *refused*, not interpreted:
+
+| Hand-off | Artifact | Producer → consumer |
+|---|---|---|
+| the plan | `dispatch.yaml` | planner → scheduler, parsed per stage against a schema; invalid entries are dropped, not guessed at |
+| the work | `stages/<id>/input.md` → `output.md` | scheduler → agent → scheduler |
+| the judgement | `verdict_<gate>.json` | gate → scheduler, read as pass/fail rather than as an opinion |
+| "I need to write outside my scope" | `scope_revision_request.json` → `scope_revision_decision_*.json` | stage → supervisor → stage, as a versioned `ScopeRevisionRequestV1` that either parses or is rejected with a reason |
+| "a human must decide this" | `approval_request.json` → `approvals.jsonl` | stage → operator → stage, idempotent on the request id, first resolution wins |
+| the deterministic checks | `reality_checks.md` → `.reality-gate.json` | brief → engine, executed rather than believed |
+| what the next stage inherits | `handoff_<stage>.md` | stage → stage |
+
+Because each edge is a contract rather than a conversation, a stage that oversteps is
+caught by the constraint audit instead of quietly succeeding, and a rejected gate produces
+a machine-readable reason the scheduler can act on. That is why the crew composes at all:
+the engine is reading structure, not parsing intent.
+
+**`flowcrew rehearse` is how you check that contract for free — it is not what makes it
+work.** It runs the *real* scheduler against a scripted fake agent: no model, no tokens,
+about a second in a fresh clone.
 
 ```bash
 flowcrew rehearse examples/hello-research.brief.md
@@ -126,10 +329,8 @@ flowcrew rehearse examples/hello-research.brief.md
 It reports line by line what the harness actually did: a decoy result triggered `ship` and the
 confirm-gate rejected it, the round floor was met, the terminal artifact landed at its declared
 path, and the confirm command was executed by the engine and recorded — ending in a
-contract-ready verdict.
-
-About a second in a fresh clone. It separates two questions most systems conflate:
-*is the harness wired correctly* and *did the agent do good work*. The first is now free.
+contract-ready verdict. It separates two questions most systems conflate:
+*is the contract wired correctly* and *did the agent do good work*. The first is now free.
 
 The harness also reports on itself:
 
@@ -235,192 +436,6 @@ FlowCrew when the work must outlive the chat and something has to decide, honest
 is genuinely done.
 
 </details>
-
-## Before you start
-
-- **Node.js 22.5 or newer** is required. FlowCrew uses the built-in `node:sqlite` module.
-- **Linux with a systemd user session** is the supported setup for the complete background-task and dashboard experience. The engine falls back to a detached Bash process when `systemd-run --user` is unavailable, but process inspection still relies on Linux `/proc`; macOS and Linux environments without a working user session are not fully supported.
-- **A logged-in agent CLI is required for live work.** Install and authenticate either OpenAI Codex CLI or Claude Code. The zero-token rehearsal below does not require either one.
-- **The engine and dashboard are separate build targets.** A repository install runs both builds through the package `prepare` hook, producing `dist/` and `ui/dist/`.
-- **One task per project at a time.** Queue as many as you like — the daemon holds the rest and starts the next when the current one reaches a terminal state. The guard is per project, so tasks in different projects do run concurrently.
-- **`npm audit` reports two moderate advisories in `ui/`** (React Router). No published version closes both at once, and the alternative trades them for two high-severity ones. Production dependencies (`npm audit --omit=dev`) report none.
-
-> [!WARNING]
-> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from the `ship` skill, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.
->
-> Every launch path first prints the same static brief preflight used by `rehearse`. Consequential findings require the explicit `--acknowledge-brief-warnings` choice; the flag never skips or hides inspection. After admission, `quick` writes the submitted text to `<projectDir>/docs/task_brief.md`, replacing different content only after warning. Start with `flowcrew rehearse`: it launches no agent process or model, spends no tokens, and does not modify your project; an in-process scripted adapter exercises the scheduler in isolated temporary directories.
-
-## Get started
-
-**The way in is the `ship` skill from your coding agent.** Invoke it as `/ship` in Claude
-Code or as `$ship` in Codex (you can also choose `ship` from Codex's `/skills` list). It interviews you, turns the
-discussion into a brief, and rehearses that brief before anything runs. That matters more
-than it sounds: a run's outcome is decided mostly by its brief, and the skill carries the
-accumulated rules for writing one — state criteria as properties rather than naming the
-instrument, put the boundaries in the brief instead of sending them later, declare terminal
-artifacts only on what the last stage writes.
-
-The CLI is how you **watch, steer, verify, and operate** a run. `flowcrew quick "one
-sentence"` is still available for scripts and direct operation, but it now says plainly that
-the input has no structured brief contract, prints the shared preflight report, and stops
-until the caller explicitly acknowledges the current exact text. It checks; it does not
-interview you or author the missing contract. Use the `ship` skill for that primary authoring path.
-
-Dashboard **+ New Run** follows the same boundary: the first action checks the writable
-brief and shows frontmatter, contract, and criterion findings inline; the second action
-starts that exact checked text, with a checkbox when consequential findings remain.
-
-### 1. Clone, install, and expose the local CLI
-
-```bash
-git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew
-npm install
-npm link
-flowcrew doctor
-```
-
-`npm install` builds both the TypeScript engine (`dist/`) and React dashboard (`ui/dist/`). `npm link` makes this clone's `flowcrew` command available on your `PATH` — note that if you already have a global `flowcrew` from another checkout, this silently repoints it at this one, and nothing warns you — check with `which flowcrew`. Doctor reports every missing build, CLI, login, or environment item clearly, and when a dashboard already holds the port it names which install that dashboard belongs to; address its attention items before a live run.
-
-### 2. Install the coding-agent skills
-
-```bash
-./skills/install.sh
-```
-
-The installer checks which requested CLIs are actually on `PATH`; an absent agent is
-explicitly skipped and never reported as installed. Install one with
-`npm i -g @openai/codex` or `npm i -g @anthropic-ai/claude-code`, then rerun the command.
-Claude Code receives `/ship` and `/fc-status` under `~/.claude/commands/`. Codex receives
-enumerable skills under `~/.agents/skills/`; use `$ship`/`$fc-status` or select them from
-`/skills`. Codex installation succeeds only after its own no-token `skills/list` API sees
-both skills. `flowcrew doctor` reports missing or outdated copies and prints the exact
-installer command to repair them.
-
-### 3. Run the safe, zero-token first task
-
-```bash
-flowcrew rehearse examples/hello-research.brief.md
-```
-
-The report ends with a contract-ready verdict. That means the brief's YAML frontmatter, research-loop policy, scheduler lifecycle, terminal artifacts, and confirmation wiring survived a real scheduler rehearsal. It does **not** claim that any research result is correct: rehearsal launches no agent process or model, uses an in-process scripted adapter, and creates its Git repository with isolated temporary HOME, config, hooks, and templates. If setup still fails, the report gives a plain explanation plus a pasteable static-only command instead of a Node stack trace. See the [rehearsal reference](guide/rehearse.md) and [`examples/README.md`](examples/README.md) for the campaign dry-run and an isolated mock-adapter loop.
-
-### 4. Ship from your coding agent
-
-Shape the task in the conversation, then invoke `/ship` in **Claude Code** or `$ship` in
-**Codex**:
-
-```text
-> Split auth into token validation and session management.
-> Keep the public API compatible and add focused regression tests.
-> /ship        # Claude Code; use $ship in Codex
-```
-
-FlowCrew turns the confirmed discussion into a brief, runs the crew, and reports back — while you watch the dashboard or walk away.
-
-### Run it your way — Codex, Claude, or both
-
-FlowCrew runs end to end on **Codex or Claude** — either works on its own.
-
-**We recommend: plan in Claude Code, execute in Codex.** Long multi-agent sub-runs are token-hungry, and Claude subscription budgets deplete faster than Codex's — so shape the plan where the conversation flows best (Claude Code), then hand the heavy execution to Codex (the default backend).
-
-Prefer one tool? Run the whole loop on **Codex** (the default) — or entirely in **Claude Code**. The split is a token-budget optimization, not a requirement.
-
-## What you can run
-
-Three shapes of work, all entered the same way: describe it in your coding agent, then
-invoke its `ship` skill (`/ship` in Claude Code, `$ship` in Codex). The skill interviews
-you, writes the brief, rehearses it, and launches. Each example below uses Claude Code's
-`/ship` spelling and shows **what you say** — and the contract the skill writes from it, because
-that contract is what the engine actually enforces.
-
-### Research loop (metric) — beat a baseline, honestly
-
-```text
-> Beat our current docs-search relevance baseline. Only ship a result that
-> re-confirms on a fresh split — an honest ceiling is a fine answer.
-> /ship
-```
-
-Research settings live in the brief's leading YAML frontmatter, and nowhere else. The
-contract the skill writes starts with the form the engine parses:
-
-```yaml
----
-research:
-  baseline: 0
-  policy: greedy_stack
-  result_file: docs/hello-research/round_result.json
-  confirm:
-    command: |
-      test "$(git ls-files '*.ts' | wc -l)" -ge 1
-  stop:
-    beat: 1
-    max_rounds: 3
----
-```
-
-`examples/hello-research.brief.md` is exactly this shape, complete with a result schema and
-terminal paths. Replay it against the real scheduler for free — no agent, no tokens, about
-a second — with `flowcrew rehearse examples/hello-research.brief.md`.
-
-### Engineering (acceptance) — satisfy a contract
-
-```text
-> Add a public test proving `flowcrew --help` lists every top-level command.
-> Don't change any command's behavior.
-> /ship
-```
-
-The same engine-owned decision and confirm gate carry engineering work. The engine parses
-`objective:` and `research:` identically — on engineering work `objective:` says what you
-mean. The contract belongs in the brief's frontmatter, never buried in the task prose:
-
-````markdown
----
-objective:
-  baseline: 0
-  policy: replace_if_better
-  result_file: artifacts/acceptance/round_result.json
-  report_dir: artifacts/acceptance
-  result_schema:
-    type: object
-    required: [label, result]
-    properties:
-      label: {type: string}
-      result: {type: number}
-  confirm:
-    command: npm run build && npm test
-    requires: The engine build and complete test suite must pass.
-  stop:
-    beat: 1
-    max_rounds: 3
----
-# Add a CLI help regression test
-
-Add a public test proving that `flowcrew --help` lists every top-level command.
-Do not change command behavior. After measuring the acceptance checks, write
-`{"label":"cli-help-contract","result":1}` to
-`artifacts/acceptance/round_result.json` only when every check passes; otherwise
-write a result below 1.
-````
-
-### Unknown bug hunt
-
-```text
-> Find the root cause of the intermittent checkout failure. Add a reproducer
-> that fails before the fix, then make it pass 50× consecutively. Don't
-> re-try a hypothesis this campaign already marked a dead end.
-> /ship
-```
-
-That last sentence is not a hint. The campaign's dead ends are handed to the planner as
-facts, so a direction disproved in an earlier run is one it is told not to propose again.
-
-See [Brief and file contract](guide/brief-contract.md) for every frontmatter and runtime
-artifact field, and [`examples/README.md`](examples/README.md) for the runnable tracked
-example and the zero-token flows around it. Launching any of these from the command line
-instead — for a brief you already have, or for scripted and scheduled runs — is in the
-[CLI reference](guide/cli.md).
 
 ## Run memory
 

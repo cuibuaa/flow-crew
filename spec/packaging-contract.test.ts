@@ -84,3 +84,27 @@ describe('documented command count', () => {
     for (const n of quoted) expect(n, `README says ${n} commands; the dispatch table has ${total}`).toBe(total);
   });
 });
+
+/**
+ * Section moves break `](#anchor)` links silently — GitHub renders a dead link exactly
+ * like a live one. This caught nothing on the day it was written; it exists so the next
+ * reorder cannot quietly strand a cross-reference.
+ */
+describe('README internal anchors', () => {
+  it('resolves every in-page link to a heading that exists', () => {
+    const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
+    const slug = (heading: string) => heading
+      .toLowerCase()
+      .replace(/[^a-z0-9 -]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
+    const headings = new Set(
+      [...readme.matchAll(/^#{1,6} (.+)$/gm)].map(([, text]) => slug(text)),
+    );
+    const targets = [...readme.matchAll(/\]\(#([a-z0-9-]+)\)/g)].map(([, anchor]) => anchor);
+    expect(targets.length, 'README should contain at least one in-page link').toBeGreaterThan(0);
+    for (const anchor of targets) {
+      expect(headings, `README links to #${anchor}, which no heading produces`).toContain(anchor);
+    }
+  });
+});
