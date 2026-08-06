@@ -30,6 +30,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { getItem, isPendingInboxItemState } from './inbox.js';
@@ -220,7 +221,23 @@ function processArguments(pid: number): string[] | null {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
     return cmdline.split('\0').filter(Boolean);
   } catch {
-    return null;
+    // No procfs. `ps` is POSIX and reports the same argument vector, just
+    // space-joined — good enough for the "is this a flowcrew scheduler" question,
+    // which only inspects argv positions and never a path containing spaces.
+    // Without this the caller used to answer "yes, any live pid is ours", which
+    // was measured returning true for an unrelated shell.
+    try {
+      const out = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (!out) return null;
+      const argv = out.split(/\s+/).filter(Boolean);
+      return argv.length > 0 ? argv : null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -252,7 +269,11 @@ function schedulerCommandIndex(pid: number, args: string[]): number {
 
 function commandLooksLikeFlowcrewScheduler(pid: number, expectedRunId?: string): boolean {
   const args = processArguments(pid);
-  if (args === null) return expectedRunId === undefined && process.platform !== 'linux';
+  // Unreadable argv used to mean "assume it is ours on any non-Linux platform",
+  // which answered true for an unrelated live shell. processArguments now falls
+  // back to `ps`, so reaching here means we genuinely cannot tell — and claiming
+  // ownership of a process we cannot identify is what gates SIGTERM downstream.
+  if (args === null) return false;
   const cliIndex = schedulerCommandIndex(pid, args);
   if (cliIndex < 0 || args[cliIndex + 1] !== 'quick') return false;
   if (expectedRunId === undefined) return true;

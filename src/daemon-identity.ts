@@ -109,11 +109,48 @@ export function readDaemonIdentity(socketPath: string): DaemonIdentity | undefin
   return parsed;
 }
 
-/** Locate the process that owns the listening Unix socket by inode only. */
+/**
+ * The off-Linux substitute for the inode scan: the pid the daemon recorded for
+ * itself, reported only if that process still exists. Returns undefined when
+ * there is no metadata, the metadata is unreadable, or the pid has exited — so a
+ * caller can still tell "no listener" from "a listener I cannot attest to".
+ */
+function recordedDaemonPidIfAlive(socketPath: string, opts: SocketOwnerLookupOptions = {}): number | undefined {
+  if (opts.procRoot !== undefined || opts.netUnixPath !== undefined) return undefined;
+  let identity: DaemonIdentity | undefined;
+  try {
+    identity = readDaemonIdentity(socketPath);
+  } catch {
+    return undefined;
+  }
+  const pid = identity?.pid;
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch (error) {
+    // EPERM: the process exists but is owned by another user.
+    return (error as NodeJS.ErrnoException)?.code === 'EPERM' ? pid : undefined;
+  }
+}
+
+/**
+ * Locate the process that owns the listening Unix socket.
+ *
+ * On Linux this is answered by the kernel: the socket's inode is matched against
+ * every process's open descriptors, so a stale metadata file cannot fake it.
+ *
+ * Without procfs there is no equivalent from Node, so we fall back to the pid the
+ * daemon recorded for itself and confirm only that it is still alive. That is
+ * strictly weaker — it trusts a file the daemon wrote rather than asking the
+ * kernel — but it is honest about *which* pid it is reporting, and it refuses to
+ * report one that has exited. Throwing here instead, as this used to, made
+ * `daemon start`, `status` and `restart` all unusable off Linux.
+ */
 export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLookupOptions = {}): number | undefined {
   const platform = opts.platform ?? process.platform;
   if (platform !== 'linux') {
-    throw new Error('Unix socket ownership lookup requires Linux /proc');
+    return recordedDaemonPidIfAlive(socketPath, opts);
   }
   const procRoot = opts.procRoot ?? '/proc';
   const netUnixPath = opts.netUnixPath ?? join(procRoot, 'net', 'unix');
