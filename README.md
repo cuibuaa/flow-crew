@@ -279,142 +279,123 @@ instead — for a brief you already have, or for scripted and scheduled runs —
 
 ## What makes it work
 
-Four design choices carry most of the weight. Each is stated with what it actually
-buys you, not what it aspires to.
+### A crew of roles, not one agent with many tools
 
-### Self-describing atoms — the planner prompt is a composition engine, not a dictionary
+A run is carried out by specialists. A planner decomposes the goal. A coder implements. A
+researcher gathers evidence. A reviewer and a QA gate judge the result against the brief. Each
+one sees only the context its own job needs, and each can be replaced without touching the
+others.
 
-A role describes itself in its own config (`config/agents/*.yaml`, field `description:`).
-A registry collects those descriptions, injects them into the planner at runtime, and the
-engine validates the planner's output against the same registry. **Adding a role requires
-zero planner-prompt edits.**
+That much is ordinary. What follows is what we added on top of it — and the one authority we
+deliberately withheld.
 
-That invariant is the point: when a primitive's meaning lives in the prompt *and* in the
-engine, the two copies drift, and every change becomes a hand-edit in two places. Here the
-meaning lives at the primitive's own source and is injected.
+### The planner writes a program, not a plan
 
-The role is the reference case; the same treatment is being generalised to the other
-composable primitives — see [`design/atom-architecture.md`](design/atom-architecture.md).
+Most systems ask a model to "make a plan" and get back prose that a human, or another model,
+then has to interpret. Ours emits something the scheduler executes literally.
 
-### A harness contract — agents hand each other typed artifacts, never prose
+What it writes in is a small **grammar of atoms** — enough vocabulary to express not just *who
+does what*, but the shape of the work:
 
-This is the part that makes a crew work rather than a chain of chat turns. Agents in
-FlowCrew never pass each other free-form text. Every hand-off is a **typed, versioned
-artifact with one defined producer and one defined consumer**, written to a known path in
-the run directory — and a malformed one is *refused*, not interpreted:
+- **dependency** — which stages must finish first, and, for every edge, *why* it exists. An
+  unexplained edge is not accepted, so the graph cannot quietly serialise itself into a chain.
+- **iteration** — a stage can be marked a gate, and a gate names where failing work goes back
+  to. That pair is the loop construct: rework is a declared edge in the graph, not an agent
+  deciding to try again.
+- **runtime expansion** — a stage can be allowed to emit further stages once it knows more, so
+  the planner commits to a subgraph now and the rest when the problem is understood.
+- **capability** — each stage declares which paths it may write. Declaring nothing means
+  writing nothing; the closed case is the default, not an oversight.
+- **budget** — a soft time budget per attempt and an immutable ceiling for the stage as a
+  whole, so a stage can ask for more time without any path to unbounded time.
+
+Because it is a grammar rather than a fixed template, the planner composes these freely for
+the problem in front of it — a wide parallel fan-out for independent work, a narrow chain with
+a gate looping back for work that must converge, an expansion point where the shape is not yet
+knowable.
+
+And because it is a grammar rather than prose, it can be *checked before it runs*. Each role
+describes itself at its own source; a registry hands the planner the vocabulary it may compose
+from and rejects anything it invents that is not in it. The menu and the validator are the same
+list, so adding a role needs no prompt edit and the two cannot drift apart. A stage that does
+not parse is dropped and named — never guessed at.
+
+### A supervisor whose job is the run, not the task
+
+A crew handing work down a chain has a blind spot: **everyone is doing a job, nobody is
+watching the job get done.** A stage that quietly stalls burns its whole budget before anyone
+notices. Weak output flows downstream because the next agent takes its input on faith. A plan
+that turns out to be wrong keeps being executed, because the thing that could re-plan it is
+not looking.
+
+So one role's work *is* the run. It samples progress cheaply, escalates to a real assessment
+when something looks anomalous, sends insufficient work back, ends a stage that has gone
+quiet, and can force a re-plan when the approach is not converging.
+
+### The crew never grades its own work
+
+In the systems this most resembles, that supervisor would also decide when the task is
+complete. Ours does not.
+
+The reason is not distrust of one model. It is that **the same population of models writes the
+work, measures the work, and judges the measurement** — so a natural-language opinion that the
+bar was met is not evidence, it is a fourth sample from the same distribution.
+
+What ends a run successfully is the **Reality Gate**: the checks the work declared for itself,
+executed as scripts. They pass or they do not, and a run that fails them is recorded as having
+failed its gate rather than as complete. Only success is gated — a failure needs no proving.
+The crew may raise this bar on itself, because the planner can add checks for constraints it
+derives from the goal. Nothing in the crew can lower it.
+
+### Every hand-off is a checkable artifact, not a message
+
+Denying a model the last word only helps if there is something better to check. **Agents in
+FlowCrew never pass each other free-form prose.** Every hand-off is a typed artifact at a known
+place in the run directory, with one producer and one consumer, and a malformed one is refused
+rather than interpreted.
 
 | Hand-off | Artifact | Producer → consumer |
 |---|---|---|
-| the plan | `dispatch.yaml` | planner → scheduler, parsed per stage against a schema; invalid entries are dropped, not guessed at |
+| the plan | `dispatch.yaml` | planner → scheduler, parsed per stage; invalid entries are dropped, not guessed at |
 | the work | `stages/<id>/input.md` → `output.md` | scheduler → agent → scheduler |
 | the judgement | `verdict_<gate>.json` | gate → scheduler, read as pass/fail rather than as an opinion |
-| "I need to write outside my scope" | `scope_revision_request.json` → `scope_revision_decision_*.json` | stage → supervisor → stage, as a versioned `ScopeRevisionRequestV1` that either parses or is rejected with a reason |
+| "I need to write outside my scope" | `scope_revision_request.json` → `scope_revision_decision_*.json` | stage → **scheduler policy** → stage, answered by a predicate chain rather than by a model |
 | "a human must decide this" | `approval_request.json` → `approvals.jsonl` | stage → operator → stage, idempotent on the request id, first resolution wins |
-| the deterministic checks | `reality_checks.md` → `.reality-gate.json` | brief → engine, executed rather than believed |
+| the deterministic checks | the brief's own checks, **and** checks the planner writes for its own goal | brief and planner → engine, executed rather than believed |
 | what the next stage inherits | `handoff_<stage>.md` | stage → stage |
 
-Because each edge is a contract rather than a conversation, a stage that oversteps is
-caught by the constraint audit instead of quietly succeeding, and a rejected gate produces
-a machine-readable reason the scheduler can act on. That is why the crew composes at all:
-the engine is reading structure, not parsing intent.
+Two of those edges are where the design is least conventional:
 
-**`flowcrew rehearse` is how you check that contract for free — it is not what makes it
-work.** It runs the *real* scheduler against a scripted fake agent: no model, no tokens,
-about a second in a fresh clone.
+- **A gate cannot move its own goalposts.** A gate writes its own verdict, but it is checked
+  against the acceptance contract and against the measurement the run recorded separately.
+  Renaming the metric, quietly lowering the threshold, claiming a pass on a number that misses,
+  or returning a verdict with no number at all — each is rejected outright.
+- **A boundary that cannot be enforced is not a boundary.** Anything a stage writes outside its
+  declared paths is restored to its pre-stage contents, and the restore is re-read to confirm it
+  took. A stage that genuinely needs another file can ask — and the answer comes from a rule,
+  not from persuading anyone. One rule is that the file must not have been touched already:
+  **you cannot ask forgiveness dressed as permission.** A refusal is handed to the next planning
+  round rather than leaving the stage to be retried into the same wall. (This is also why you
+  should not edit the project by hand while a run is working in it: attribution is a snapshot
+  diff, and it cannot tell your edit from the stage's.)
 
-```bash
-flowcrew rehearse examples/hello-research.brief.md
-```
+Because every hand-off is a file with a shape rather than a conversation, the whole lifecycle
+can be driven by a scripted stand-in instead of a model. That is what makes
+`flowcrew rehearse` possible: the *real* scheduler, a fake agent, no tokens, about a second —
+so you can find out whether a brief's contract is wired correctly before spending anything on
+finding out whether the work is good.
 
-It reports line by line what the harness actually did: a decoy result triggered `ship` and the
-confirm-gate rejected it, the round floor was met, the terminal artifact landed at its declared
-path, and the confirm command was executed by the engine and recorded — ending in a
-contract-ready verdict. It separates two questions most systems conflate:
-*is the contract wired correctly* and *did the agent do good work*. The first is now free.
+### Knowing when to stop is a rule, not a judgement call
 
-The harness also reports on itself:
+The same refusal applies to the hardest judgement in open-ended work: when to give up. In
+research mode the crew proposes and measures, but whether a result is kept, and whether to
+continue, ship, or declare a ceiling, is computed from the history of results by a fixed
+policy — and that policy, not the supervisor, owns the ending.
 
-- `daemon status` / `dashboard status` compare the loaded build against the one on disk,
-  print `FRESH` or `STALE`, and **exit non-zero when stale** — a deploy script can refuse to proceed.
-- A scheduler that dies without settling gets its run rewritten as `failed` with the reason,
-  instead of leaving a record that still claims `running`.
+It also refuses to mistake luck for progress: a round counts as an improvement only if it beats
+the running best by more than the measurement's own uncertainty.
 
-### Two layers of specification — and hard constraints go through deterministic checks
-
-| Layer | What it defines | Where it lives |
-|---|---|---|
-| **HOW** | the atom vocabulary: roles, checks, terminal states | flow-crew — general, public |
-| **WHAT** | this project's acceptance contract and the brief | `<project>/.flowcrew/contract.yaml` — never in the engine |
-
-The rule that keeps this honest:
-
-> A hard constraint must be enforced by a **deterministic check**, not by an agent-judged QA
-> prompt. The planner may *derive* what to check from the goal; enforcement runs as a script
-> whose exit code decides.
-
-An agent asked "did this meet the bar?" can be argued with. A `Reality check` is a script:
-it runs, it exits, and a failing exit code keeps the run out of a terminal state.
-
-The spec layer has its own static check — `rehearse` lints a brief and flags wording that
-binds an *implementation* to "must", the shape a gate faithfully turns into an assertion
-unrelated to what you meant. It also refuses to let a brief declare a finish condition that
-nothing in the engine will ever satisfy, which otherwise surfaces only as a run that will not
-end.
-
-### Observable execution — including what it could not determine
-
-**What you see.** The operating loop is three pages, each answering one question.
-
-| Page | Answers |
-|---|---|
-| `/inbox` | Is anything waiting on me? |
-| `/campaign/<id>` | Where does this campaign stand? |
-| `/run/<id>` | What is this run doing — or what did it conclude? |
-
-Distinct outcomes stay distinct. `shipped`, `complete`, `ceiling_hit`, `incomplete`,
-`reality_gate_failed` and `stopped` mean different things and are never collapsed into a
-generic pass or fail — the run page names the one that applies and, beside it, what that
-status means.
-
-**What it admits.** The surface states what it does *not* know:
-
-```text
-Canonical status      running
-Run elapsed           56.8s
-                      Wall clock since the run started; not the current attempt duration.
-Known recorded usage  17,567 tokens
-                      Known portion only, including recorded supervisor usage; unsettled
-                      or unavailable fields are not treated as zero.
-```
-
-The labels themselves carry the claim. A finished run reads `Canonical outcome`,
-`Total wall time` and `Total recorded usage` — the word changes only when the number has
-actually become complete. At campaign scale the same rule produces lines like *"11 of 16
-runs have incomplete cost evidence: token or attempt telemetry is incomplete for 11 runs.
-Affected totals are lower bounds."*
-
-<p align="center">
-  <img src="assets/screenshot_run_page.png" width="820" alt="FlowCrew run page for a completed run: canonical outcome, total wall time, total recorded usage, an honest note that recorded progress is not presented as the final conclusion, and an execution-history panel naming zero failed attempts" />
-</p>
-
-Each line is a deliberate refusal to present a number as more complete than it is.
-
-**What is underneath.** A live stage streams its log over SSE with a byte counter, so
-"still producing" is visible rather than guessed. Every attempt records duration, exit code,
-token evidence (measured counters or an explicit unknown marker), and files written. A failed
-Reality-Gate check lands in `run.json` **named**, with ANSI-stripped output tails — no hunting.
-
-**What you can do without stopping it.** `flowcrew guide --run <run-id> "message"` injects context
-mid-flight. Omitting `--run` is accepted only when exactly one run is executing, so concurrent
-runs cannot receive guidance by recency accident. `flowcrew inbox` resolves approval gates that
-parked the run. The daemon owns the run, so closing your session changes nothing.
-
-**What not to do while it runs.** Do not edit the project yourself while a run is working in it.
-Attribution comes from a filesystem snapshot diff, which cannot tell your edit apart from the
-stage's: your change is recorded as that stage's work, and where a stage has been told which
-paths it may write, enforcement can restore anything outside them to its pre-stage contents —
-including your edit. Say what you want changed with `flowcrew guide` instead, or wait for a
-terminal state.
+### When this is the wrong tool
 
 <details>
 <summary><strong>Compared with scripted / in-session orchestration</strong></summary>
