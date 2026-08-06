@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, parseDocument } from 'yaml';
@@ -260,6 +260,37 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function repositoryCloneUrl(packageRoot: string): string {
+  let repositoryUrl = 'git+https://github.com/cuibuaa/flow-crew.git';
+  try {
+    const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf-8')) as {
+      repository?: string | { url?: string };
+    };
+    const configured = typeof manifest.repository === 'string'
+      ? manifest.repository
+      : manifest.repository?.url;
+    if (configured?.trim()) repositoryUrl = configured.trim();
+  } catch { /* retain the canonical repository URL */ }
+  return repositoryUrl.replace(/^git\+/, '');
+}
+
+function skillSourceRepairCommand(
+  packageRoot: string,
+  installer: string,
+  adapter: AdapterName,
+  scope: DoctorSkillLocation['label'],
+  missingSources: string[],
+): string {
+  if (existsSync(join(packageRoot, '.git'))) {
+    const restorePaths = missingSources
+      .map((path) => shellQuote(relative(packageRoot, path)))
+      .join(' ');
+    return `git -C ${shellQuote(packageRoot)} restore --source=HEAD -- ${restorePaths} && bash ${shellQuote(installer)} --${adapter} --${scope}`;
+  }
+  const cloneUrl = repositoryCloneUrl(packageRoot);
+  return `FLOWCREW_SKILL_REPAIR_DIR=$(mktemp -d) && git clone --depth 1 ${shellQuote(cloneUrl)} "$FLOWCREW_SKILL_REPAIR_DIR/flow-crew" && bash "$FLOWCREW_SKILL_REPAIR_DIR/flow-crew/skills/install.sh" --${adapter} --${scope}`;
+}
+
 function skillRevision(content: string): string | undefined {
   return /<!--\s*flowcrew-skill-revision:\s*([^\s]+)\s*-->/.exec(content)?.[1];
 }
@@ -314,16 +345,24 @@ function addDoctorSkillCheck(
     `bash ${shellQuote(installer)} --${adapter} --${scope}`
   );
   const names = Object.keys(sourceFiles) as Array<keyof typeof sourceFiles>;
+  const preferredScope: DoctorSkillLocation['label'] = locations.some((location) => (
+    location.label === 'project' && names.some((name) => existsSync(location.files[name]))
+  ))
+    ? 'project'
+    : home ? 'global' : 'project';
+  const missingSources = names
+    .map((name) => sourceFiles[name])
+    .filter((path) => !existsSync(path));
+  if (missingSources.length > 0) {
+    checks.push({
+      name: `${agentLabel} skills`,
+      status: 'warn',
+      message: `repository skill source ${missingSources.join(', ')} is missing. Restore and install: ${skillSourceRepairCommand(packageRoot, installer, adapter, preferredScope, missingSources)}`,
+    });
+    return;
+  }
   const sourceContent = new Map<string, string>();
   for (const name of names) {
-    if (!existsSync(sourceFiles[name])) {
-      checks.push({
-        name: `${agentLabel} skills`,
-        status: 'warn',
-        message: `repository skill source ${sourceFiles[name]} is missing. Reinstall FlowCrew: npm i -g flowcrew`,
-      });
-      return;
-    }
     sourceContent.set(name, readFileSync(sourceFiles[name], 'utf-8'));
   }
 
@@ -356,8 +395,7 @@ function addDoctorSkillCheck(
 
   const entirelyMissing = names.filter((name) => !seen.has(name));
   if (entirelyMissing.length > 0) {
-    const scope: DoctorSkillLocation['label'] = home ? 'global' : 'project';
-    issues.push(`missing ${entirelyMissing.join(', ')}. Run: ${repairCommand(scope)}`);
+    issues.push(`missing ${entirelyMissing.join(', ')}. Run: ${repairCommand(preferredScope)}`);
   }
 
   checks.push(issues.length > 0
@@ -435,6 +473,7 @@ async function cmdDoctor() {
   const projectDir = detectProjectDir();
   const checks: DoctorCheck[] = [];
   const packageRoot = resolve(import.meta.dirname ?? '.', '..');
+  const skillPackageRoot = resolve(process.env.FLOWCREW_DOCTOR_SKILL_ROOT || packageRoot);
 
   const flowcrewPath = commandPath('flowcrew');
   const expectedCliPath = join(packageRoot, 'dist', 'cli.js');
@@ -499,7 +538,7 @@ async function cmdDoctor() {
     }
   }
   for (const adapter of installed) {
-    addDoctorSkillCheck(checks, adapter, projectDir, packageRoot);
+    addDoctorSkillCheck(checks, adapter, projectDir, skillPackageRoot);
   }
   if (installed.length === 0) {
     checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });

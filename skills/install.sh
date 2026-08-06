@@ -73,18 +73,27 @@ verify_codex_enumeration() {
   local ship_path="$2"
   local status_path="$3"
   local node_bin="${FLOWCREW_NODE:-}"
+  local timeout_ms="${FLOWCREW_CODEX_VERIFY_TIMEOUT_MS:-20000}"
   if [ -z "$node_bin" ]; then
     if ! node_bin="$(command -v node 2>/dev/null)"; then
       printf '%s\n' 'Codex verification requires Node.js, but node was not found on PATH.' >&2
       return 1
     fi
   fi
+  case "$timeout_ms" in
+    ''|*[!0-9]*|0)
+      printf '%s\n' 'FLOWCREW_CODEX_VERIFY_TIMEOUT_MS must be a positive integer.' >&2
+      return 1
+      ;;
+  esac
 
-  "$node_bin" --input-type=module - "$codex_bin" "$PWD" "$ship_path" "$status_path" <<'NODE'
+  "$node_bin" --input-type=module - "$codex_bin" "$PWD" "$ship_path" "$status_path" "$timeout_ms" <<'NODE'
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 
-const [codexBin, cwd, shipPath, statusPath] = process.argv.slice(2);
+const [codexBin, cwd, shipPath, statusPath, timeoutArg] = process.argv.slice(2);
+const timeoutMs = Number.parseInt(timeoutArg, 10);
+const timeoutLabel = timeoutMs % 1_000 === 0 ? `${timeoutMs / 1_000} seconds` : `${timeoutMs} ms`;
 try {
   const child = spawn(codexBin, ['app-server'], {
     cwd,
@@ -97,19 +106,44 @@ try {
     let answer;
     let settled = false;
     let shutdownTimer;
+    let forceKillTimer;
+    let detachTimer;
+    let stopping = false;
+    let stopError;
     const finish = (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(shutdownTimer);
+      clearTimeout(forceKillTimer);
+      clearTimeout(detachTimer);
       if (error) reject(error);
       else resolveList(answer);
     };
-    const timeoutTimer = setTimeout(() => {
+    const stopChild = (error) => {
+      if (settled || stopping) return;
+      stopping = true;
+      stopError = error;
+      child.stdin.end();
       child.kill('SIGTERM');
-      finish(new Error('Codex skills/list timed out after 20 seconds'));
-    }, 20_000);
+      forceKillTimer = setTimeout(() => {
+        if (settled) return;
+        child.kill('SIGKILL');
+        detachTimer = setTimeout(() => {
+          if (settled) return;
+          child.stdin.destroy();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          child.unref();
+          finish(stopError || new Error('Codex app-server did not exit after forced shutdown'));
+        }, 1_000);
+      }, 500);
+    };
+    const timeoutTimer = setTimeout(() => {
+      stopChild(new Error(`Codex skills/list timed out after ${timeoutLabel}`));
+    }, timeoutMs);
 
+    child.stdin.on('error', () => {});
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.stdout.setEncoding('utf8');
@@ -125,19 +159,18 @@ try {
         try { message = JSON.parse(line); } catch { continue; }
         if (message.id !== 25) continue;
         if (message.error) {
-          child.stdin.end();
-          child.kill('SIGTERM');
-          finish(new Error(`Codex skills/list returned an error: ${JSON.stringify(message.error)}`));
+          stopChild(new Error(`Codex skills/list returned an error: ${JSON.stringify(message.error)}`));
           return;
         }
         answer = message.result?.data?.flatMap((row) => row.skills || []) || [];
         child.stdin.end();
-        shutdownTimer = setTimeout(() => child.kill('SIGTERM'), 1_000);
+        shutdownTimer = setTimeout(() => stopChild(), 1_000);
       }
     });
     child.on('error', (error) => finish(new Error(`Codex skills/list could not run: ${error.message}`)));
     child.on('exit', (code) => {
-      if (answer) finish();
+      if (stopError) finish(stopError);
+      else if (answer) finish();
       else finish(new Error(stderr.trim() || `Codex app-server exited without skills/list (status ${String(code)})`));
     });
     const send = (message) => child.stdin.write(JSON.stringify(message) + '\n');

@@ -2,9 +2,9 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 1 -->
+<!-- flowcrew-skill-revision: 2 -->
 
-# /ship — Hand off your plan to FlowCrew for multi-agent execution
+# ship — Hand off your plan to FlowCrew for multi-agent execution
 
 When the user invokes `/ship` in Claude Code or `$ship` in Codex, follow these steps:
 
@@ -274,7 +274,8 @@ they were asked and nothing more. §1.6 says the same thing about a survey that 
 asked for user-visible consequence. When something feels too obvious to write down, that is
 exactly the thing that will not appear in the output.
 
-If the user said `/ship <specific instruction>`, use that as the task directly.
+If the user invoked `/ship <specific instruction>` in Claude Code or
+`$ship <specific instruction>` in Codex, use that as the task directly.
 If the conversation has no clear plan yet, ask the user to clarify before proceeding.
 
 ## 2. Campaign Hygiene Check (BEFORE confirming)
@@ -368,7 +369,7 @@ defines what this proves and what it does not prove.
 Rules:
 - **Exit 0 (`✅ Contract ready`)** → proceed to launch.
 - **Any `✗`** → FIX THE BRIEF AND RE-REHEARSE. Do not launch a brief with a failing contract; the run will burn real tokens and end in a mislabeled or unusable terminal.
-- **Criterion-wording `⚠` lines** → FIX THE BRIEF AND RE-REHEARSE. `/ship` applies a stricter authoring policy than the transport layer: turn the requested instrument into the observable property, or explicitly say the exact means itself is the criterion.
+- **Criterion-wording `⚠` lines** → FIX THE BRIEF AND RE-REHEARSE. The ship skill applies a stricter authoring policy than the transport layer: turn the requested instrument into the observable property, or explicitly say the exact means itself is the criterion.
 - **Other `⚠` lines** → judgement call. Read each one; some are intentional (an engineering brief has no `research:` block; a pure-exploration brief may intentionally omit `stop.beat`). Say in the launch message which warnings you accepted and why.
 - Engineering briefs are supported: static contract checks run, the research-loop simulation is skipped.
 - Show the complete rehearsal report and its exact digest to the user. The approval in Step 3 happened before these findings existed and is not consent to ignore them.
@@ -421,7 +422,7 @@ Capture the task id from the output line `Task #<id> registered. Unit: flowcrew-
 
 **Background semantics**: chat returns immediately. Daemon polls run lifecycle, restarts on crash (up to max_retries), updates task registry, writes tick log. No external monitor needed.
 
-**Foreground fallback**: if user explicitly passes `--foreground` to `/ship`, or daemon fails to bootstrap, drop `--background` and run the blocking `flowcrew quick` variant.
+**Foreground fallback**: if the user explicitly passes `--foreground` to the ship skill, or daemon fails to bootstrap, drop `--background` and run the blocking `flowcrew quick` variant.
 
 ### Apply the canonical contract
 
@@ -441,20 +442,21 @@ may park and can be resolved with `flowcrew inbox`,
 
 The adapter (claude/codex) is auto-detected. Override with `--adapter claude` or `--adapter codex` if needed.
 
-If `flowcrew` is not found, try: `npx flowcrew quick ...`
+If `flowcrew` is not found, stop and give the user this install command before retrying:
+`git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew && npm install && npm link`.
 
 ## 5. Report Back
 
 Tell the user (substitute real task id captured from step 4):
 ```
 Task shipped to FlowCrew daemon as Task #<id>.
-- Check progress:    /fc-status            (or `flowcrew task list`)
+- Check progress:    flowcrew task list
 - Inspect this task: flowcrew task show <id>
 - Cancel if needed:  flowcrew task cancel <id>
 - Dashboard:         http://localhost:3000
 ```
 
-Workflow + adapter + supervise settings used in step 4 should be mentioned. Chat session is now FREE — daemon owns the run, no further blocking. User can close session and check later via `/fc-status`.
+Workflow + adapter + supervise settings used in step 4 should be mentioned. Chat session is now FREE — daemon owns the run, no further blocking. User can close the session and check later with `flowcrew task list`, `/fc-status` in Claude Code, or `$fc-status` in Codex.
 
 ## 6. When it lands — accepting the run
 
@@ -565,10 +567,12 @@ produced three green rounds for a hypothesis about jsdom initialisation it never
 
 ## Variants
 
-- `/ship --foreground` — bypass daemon, run blocking (legacy behavior; use only if daemon unavailable)
-- `/ship --workflow engineering` — use the engineering workflow (includes QA gate + retry)
-- `/ship --adapter claude` — force Claude adapter
-- `/ship --adapter codex` — force Codex adapter
-- `/ship --no-supervise` — disable supervisor brain (default is enabled)
-- `/ship --no-inherit-campaign` — skip injecting prior-phase campaign context into planner prompts (use when task pivots from prior campaign direction)
-- `/ship --keep-campaign-context` — force-keep prior context even if hygiene heuristic would suggest dropping it
+Invoke each as `/ship <flag>` in Claude Code or `$ship <flag>` in Codex:
+
+- `--foreground` — bypass daemon, run blocking (legacy behavior; use only if daemon unavailable)
+- `--workflow engineering` — use the engineering workflow (includes QA gate + retry)
+- `--adapter claude` — force Claude adapter
+- `--adapter codex` — force Codex adapter
+- `--no-supervise` — disable supervisor brain (default is enabled)
+- `--no-inherit-campaign` — skip injecting prior-phase campaign context into planner prompts (use when task pivots from prior campaign direction)
+- `--keep-campaign-context` — force-keep prior context even if hygiene heuristic would suggest dropping it

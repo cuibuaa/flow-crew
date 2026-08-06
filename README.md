@@ -16,10 +16,20 @@
 </p>
 
 
+Claude Code:
+
 ```text
 > Beat the current model on val accuracy. Ship only a result that re-confirms
 > on a fresh split.
 > /ship
+```
+
+Codex:
+
+```text
+> Beat the current model on val accuracy. Ship only a result that re-confirms
+> on a fresh split.
+> $ship
 ```
 
 **Most AI agents are eager to tell you they succeeded. FlowCrew is built to catch itself when it didn't.**
@@ -59,7 +69,7 @@ You give the goal; it does the rest. A sense of what that looks like across the 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/how_it_works_dark.png" />
-    <img src="assets/how_it_works.png" width="620" alt="FlowCrew execution flow: a brief from /ship goes to the planner, which dispatches coder stages; their output meets a QA gate that either sends a bounded fix round back or passes the work to the Reality-Gate, which decides between shipped/complete and reality_gate_failed. A supervisor watches progress and can trigger a re-plan on regression, plateau or repeated failure." />
+    <img src="assets/how_it_works.png" width="620" alt="FlowCrew execution flow: a brief from the ship skill goes to the planner, which dispatches coder stages; their output meets a QA gate that either sends a bounded fix round back or passes the work to the Reality-Gate, which decides between shipped/complete and reality_gate_failed. A supervisor watches progress and can trigger a re-plan on regression, plateau or repeated failure." />
   </picture>
 </p>
 

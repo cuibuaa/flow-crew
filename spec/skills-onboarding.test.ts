@@ -154,10 +154,25 @@ function installFakeCodex(fixture: OnboardingFixture, omit: string | undefined =
   ].join('\n'));
 }
 
+function installStubbornFakeCodex(fixture: OnboardingFixture): string {
+  const pidFile = join(fixture.root, 'stubborn-codex.pid');
+  executable(join(fixture.bin, 'codex'), [
+    `#!${process.execPath}`,
+    "import { writeFileSync } from 'node:fs';",
+    "import process from 'node:process';",
+    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n", 'utf8');`,
+    "process.on('SIGTERM', () => {});",
+    'setInterval(() => {}, 1_000);',
+    '',
+  ].join('\n'));
+  return pidFile;
+}
+
 function runInstaller(
   fixture: OnboardingFixture,
   args: string[] = [],
   cwd = repositoryRoot,
+  extraEnv: Record<string, string> = {},
 ) {
   return spawnSync(process.execPath, [fixture.runner, installerPath, ...args], {
     cwd: repositoryRoot,
@@ -171,6 +186,7 @@ function runInstaller(
       FLOWCREW_NODE: process.execPath,
       PROBE_CWD: cwd,
       NO_COLOR: '1',
+      ...extraEnv,
     },
     encoding: 'utf-8',
     timeout: 40_000,
@@ -187,7 +203,7 @@ function prepareDoctorProject(fixture: OnboardingFixture): void {
   writeFileSync(join(agents, '_base.md'), 'fixture base prompt\n', 'utf-8');
 }
 
-function runDoctor(fixture: OnboardingFixture) {
+function runDoctor(fixture: OnboardingFixture, packageRoot = repositoryRoot) {
   prepareDoctorProject(fixture);
   return spawnSync(
     process.execPath,
@@ -204,6 +220,7 @@ function runDoctor(fixture: OnboardingFixture) {
         PATH: fixture.bin,
         PORT: '65534',
         NO_COLOR: '1',
+        FLOWCREW_DOCTOR_SKILL_ROOT: packageRoot,
       },
       encoding: 'utf-8',
       timeout: 30_000,
@@ -300,6 +317,28 @@ describe('FlowCrew skill installer', () => {
     expect(output).not.toContain('✓ Codex skills installed');
   });
 
+  it('force-terminates a Codex verifier that ignores SIGTERM', () => {
+    const fixture = onboardingFixture();
+    const pidFile = installStubbornFakeCodex(fixture);
+    const startedAt = Date.now();
+    const result = runInstaller(
+      fixture,
+      ['--codex'],
+      repositoryRoot,
+      { FLOWCREW_CODEX_VERIFY_TIMEOUT_MS: '100' },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.status, output).toBe(1);
+    expect(elapsedMs).toBeLessThan(3_000);
+    expect(output).toContain('Codex skills/list timed out');
+    expect(output).not.toContain('✓ Codex skills installed');
+    const childPid = Number.parseInt(readFileSync(pidFile, 'utf8'), 10);
+    expect(Number.isSafeInteger(childPid)).toBe(true);
+    expect(() => process.kill(childPid, 0)).toThrow();
+  });
+
   it('uses supported project layouts without writing the disposable HOME', () => {
     const fixture = onboardingFixture();
     installFakeCodex(fixture);
@@ -329,8 +368,24 @@ describe('skill manifests and doctor freshness', () => {
       expect(metadata.name).toBe(expectedName);
       expect(typeof metadata.description).toBe('string');
       expect((metadata.description as string).trim().length).toBeGreaterThan(0);
-      expect(source).toContain('<!-- flowcrew-skill-revision: 1 -->');
+      const revision = /<!-- flowcrew-skill-revision: (\d+) -->/.exec(source)?.[1];
+      expect(Number(revision)).toBeGreaterThan(0);
     }
+  });
+
+  it('uses the real invocation syntax for both agents wherever onboarding first asks users to ship', () => {
+    const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf8');
+    const firstExample = readme.slice(0, readme.indexOf('**Most AI agents'));
+    expect(firstExample).toContain('/ship');
+    expect(firstExample).toContain('$ship');
+
+    const ship = readFileSync(join(repositoryRoot, 'skills', 'ship.md'), 'utf8');
+    expect(ship).toContain('`/ship <flag>` in Claude Code or `$ship <flag>` in Codex');
+    expect(ship).not.toContain('If the user said `/ship');
+    expect(ship).not.toMatch(/^- `\/ship --/m);
+    expect(ship).not.toContain('npx flowcrew');
+    expect(ship).not.toContain("npm install --global 'git+https://github.com/cuibuaa/flow-crew.git'");
+    expect(ship).toContain('git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew && npm install && npm link');
   });
 
   it('warns for missing skills only when that agent is installed and gives a pasteable repair command', () => {
@@ -375,16 +430,19 @@ describe('skill manifests and doctor freshness', () => {
     const install = runInstaller(fixture, ['--codex']);
     expect(install.status, `${install.stdout}${install.stderr}`).toBe(0);
     const installed = join(fixture.home, '.agents', 'skills', 'ship', 'SKILL.md');
+    const source = readFileSync(installed, 'utf-8');
+    const repositoryRevision = /flowcrew-skill-revision: (\d+)/.exec(source)?.[1];
+    expect(repositoryRevision).toBeDefined();
     writeFileSync(
       installed,
-      readFileSync(installed, 'utf-8').replace('flowcrew-skill-revision: 1', 'flowcrew-skill-revision: 0'),
+      source.replace(`flowcrew-skill-revision: ${repositoryRevision}`, 'flowcrew-skill-revision: 0'),
       'utf-8',
     );
 
     const doctor = runDoctor(fixture);
     const output = `${doctor.stdout}${doctor.stderr}`;
     expect(output).toContain('ship (global) is outdated or locally changed');
-    expect(output).toContain('revision 0; repository revision 1');
+    expect(output).toContain(`revision 0; repository revision ${repositoryRevision}`);
     expect(output).toContain(`bash '${installerPath}' --codex --global`);
     expect(output).not.toMatch(/✅\s+Codex skills:/);
   });
@@ -402,5 +460,25 @@ describe('skill manifests and doctor freshness', () => {
     expect(output).toContain('project install is incomplete (missing fc-status)');
     expect(output).toContain('ship (project) is outdated or locally changed');
     expect(output).toContain(`bash '${installerPath}' --codex --project`);
+  });
+
+  it('restores missing checkout sources without naming an unpublished registry package', () => {
+    const fixture = onboardingFixture();
+    installFakeCodex(fixture);
+    const brokenPackageRoot = join(fixture.root, 'broken-package');
+    mkdirSync(join(brokenPackageRoot, '.git'), { recursive: true });
+    mkdirSync(join(brokenPackageRoot, 'skills'), { recursive: true });
+    writeFileSync(join(brokenPackageRoot, 'package.json'), JSON.stringify({
+      repository: { url: 'git+https://github.com/cuibuaa/flow-crew.git' },
+    }), 'utf8');
+    writeFileSync(join(brokenPackageRoot, 'skills', 'fc-status.md'), 'fixture\n', 'utf8');
+    writeFileSync(join(brokenPackageRoot, 'skills', 'install.sh'), '#!/bin/bash\n', 'utf8');
+
+    const doctor = runDoctor(fixture, brokenPackageRoot);
+    const output = `${doctor.stdout}${doctor.stderr}`;
+    expect(doctor.status, output).toBe(0);
+    expect(output).toContain(`git -C '${brokenPackageRoot}' restore --source=HEAD -- 'skills/ship.md'`);
+    expect(output).toContain(`bash '${join(brokenPackageRoot, 'skills', 'install.sh')}' --codex --global`);
+    expect(output).not.toContain('npm i -g flowcrew');
   });
 });
