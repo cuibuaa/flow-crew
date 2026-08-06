@@ -69,13 +69,13 @@ jobs:
               node ./node_modules/vitest/vitest.mjs run spec
             '
 
-  # TEMPORARY measurement job (spike/macos-measure). Not for main: it exists to
-  # turn "we think N things break on macOS" into a list of what actually does.
-  # macOS runners have no systemd, no /proc, and no Docker, so the isolation job
-  # is deliberately not replicated here.
-  macos-measure:
+  # macOS is a supported platform, so it gets a blocking job. Without this the
+  # port would rot the first time someone reaches for /proc or a GNU-only flag.
+  # macOS runners have no Docker, so the network-isolated job is not replicated
+  # here; that job doubles as the systemd-less Linux guard, since its container
+  # has procfs but no systemctl, systemd-run or /run/systemd/system.
+  macos:
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -86,7 +86,7 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - name: Report the platform we are actually measuring
+      - name: Report the platform under test
         run: |
           uname -a
           node -e "console.log('platform', process.platform, 'arch', process.arch)"
@@ -97,7 +97,7 @@ jobs:
       - run: npm run build
       - run: npm run build:ui
 
-      # No pipe and no `|| true`: the step's own exit code must reach the log.
-      # continue-on-error at the job level is what keeps the run from going red.
+      # No pipe and no `|| true`: a masked exit code here would make the job
+      # green while macOS is broken, which is the failure this job exists to catch.
       - name: Run the public spec suite
         run: node ./node_modules/vitest/vitest.mjs run spec
