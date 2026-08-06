@@ -40,6 +40,24 @@ And the difference isn't one clever check at the end — it's systemic. Self-che
 
 A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable result you can trust — because it didn't trust itself first.
 
+## Will this run on your machine?
+
+- **Linux with a systemd user session.** WSL2 with systemd enabled counts and gets the
+  full experience. macOS and sessionless Linux do not: process inspection relies on
+  `/proc`, and without `systemd-run --user` a background task launches but is never
+  observed as complete.
+- **Node.js 22.5+** — FlowCrew uses the built-in `node:sqlite`.
+- **An authenticated Codex CLI or Claude Code** — for live runs only. The zero-token
+  rehearsal in [Get started](#get-started) needs neither, and is the recommended way to
+  try FlowCrew before installing anything else.
+- **A live run gets unattended shell access to the target project**, for hours. Use a
+  dedicated workspace or an isolated container. Full detail in
+  [Before you start](#before-you-start).
+
+**You probably don't need FlowCrew** if you want one agent to do one bounded task — use
+Codex or Claude Code directly. The gates, supervisor and retry loops only pay for
+themselves once the work runs longer than you are willing to sit and watch it.
+
 ## You bring the problem. It brings the rigor.
 
 Point FlowCrew at an open-ended goal — *"find an edge in this data," "make this 10× faster," "implement this to spec"* — and its planner decomposes the work, chooses the checks, and drives it to a trustworthy conclusion, unattended for hours. **You don't wire the gates — the engine does.**
@@ -497,6 +515,25 @@ project; use `flowcrew adapter <name>` for an explicit change.
 All 20 commands — launching, steering, approvals, brief history, daemon and dashboard
 lifecycle, registry repair, reality audit — are documented with their options and exit
 codes in the **[CLI reference](guide/cli.md)**.
+
+## Known issues
+
+Reproduced on the current release. Listed here rather than discovered by you.
+
+- **`flowcrew status` and `/fc-status` are not project-scoped.** Run from any directory,
+  they report the most recent run across every project on the machine — including one
+  that belongs to a different project entirely. A run that has already reached a terminal
+  state can also still render as `In progress`. Use `flowcrew task show <id>` for a
+  specific run until this is fixed.
+- **A `config/defaults.yaml` that fails to parse is not self-repairing.** `flowcrew
+  doctor` names the exact parse error with line and column, but the `flowcrew init` it
+  suggests will not overwrite an existing file, so the fix is currently manual.
+- **Two spec files are timing-sensitive under load.** `spec/negotiation.test.ts` and
+  `spec/deterministic-retry-clock.test.ts` assert sub-200ms scheduling budgets and can
+  fail on a saturated machine while passing in isolation. If `npm test` fails only
+  inside those two, re-run them alone before treating it as a regression.
+- **macOS and sessionless Linux are not supported**, and the gap is not cosmetic — see
+  [Will this run on your machine?](#will-this-run-on-your-machine).
 
 ## Documentation
 
