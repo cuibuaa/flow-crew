@@ -236,7 +236,13 @@ async function cmdInit() {
     }
   } catch { /* best effort */ }
 
-  console.log('\n🎉 FlowCrew initialized! Run `flowcrew start` or `flowcrew doctor` next.');
+  // `start` refuses without an adapter CLI, so pointing an agentless newcomer at it
+  // would dead-end them one command later. Send them to what actually works instead:
+  // doctor names what is missing, and rehearse runs for free with no CLI at all.
+  console.log(installedAdapters().length > 0
+    ? '\n🎉 FlowCrew initialized! Run `flowcrew start` or `flowcrew doctor` next.'
+    : '\n🎉 FlowCrew initialized! No adapter CLI is installed yet, so a live run cannot start.'
+      + '\n   Run `flowcrew doctor` to see what is missing, or `flowcrew rehearse <brief.md>` to try the engine for free.');
 }
 
 interface DoctorCheck {
@@ -268,7 +274,11 @@ function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
 
 function cmdAdapter(): void {
   const projectDir = detectProjectDir();
-  const requested = args[1]?.trim().toLowerCase();
+  // Take the first positional argument, not args[1]: a leading flag such as the
+  // documented --project would otherwise be read as the adapter name and rejected
+  // with a usage error that says nothing about the real problem.
+  const positional = args.slice(1).filter((a) => !a.startsWith('-'));
+  const requested = positional[0]?.trim().toLowerCase();
   if (!requested) {
     const setting = readAdapterSetting(projectDir);
     const current = setting.error
@@ -280,10 +290,15 @@ function cmdAdapter(): void {
     console.log(`Current adapter: ${current}`);
     console.log(`Installed adapters: ${installed.length > 0 ? installed.join(', ') : 'none'}`);
     console.log(`Recommended adapter: ${RECOMMENDED}`);
+    // Every other message in this surface ends in a command the reader can run;
+    // these two states used to end in a statement of the problem alone.
+    if (!setting.exists) console.log('Next: run `flowcrew init` to create it.');
+    else if (setting.error) console.log('Next: fix the file by hand, or run `flowcrew adapter <auto|codex|claude>` to rewrite the adapter line.');
+    else if (installed.length === 0) console.log(`Next: install an adapter CLI — ${ADAPTER_INSTALL_HINT[RECOMMENDED]}`);
     if (setting.error) process.exitCode = 1;
     return;
   }
-  if (args.length > 2 || (requested !== 'auto' && requested !== 'codex' && requested !== 'claude')) {
+  if (positional.length > 1 || (requested !== 'auto' && requested !== 'codex' && requested !== 'claude')) {
     console.error('Usage: flowcrew adapter [auto|codex|claude]');
     process.exitCode = 1;
     return;
@@ -368,11 +383,22 @@ async function cmdDoctor() {
   if (installed.length === 0) {
     checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });
   }
-  checks.push({
-    name: 'Recommended adapter',
-    status: installedSet.has(RECOMMENDED) ? 'ok' : 'warn',
-    message: `${RECOMMENDED}. Select it with: flowcrew adapter ${RECOMMENDED}`,
-  });
+  // Only hand out `flowcrew adapter <name>` when that CLI is actually installed:
+  // the command refuses an absent CLI, so suggesting it on a box without one would
+  // be advice that cannot be followed.
+  checks.push(installedSet.has(RECOMMENDED)
+    ? {
+      name: 'Recommended adapter',
+      status: 'ok',
+      message: `${RECOMMENDED}. Select it with: flowcrew adapter ${RECOMMENDED}`,
+    }
+    : {
+      name: 'Recommended adapter',
+      status: 'warn',
+      message: installed.length > 0
+        ? `${RECOMMENDED} is recommended but not installed; ${installed.join(' and ')} will be used. Install it with: ${ADAPTER_INSTALL_HINT[RECOMMENDED]}`
+        : `${RECOMMENDED}, once an adapter CLI exists. Install it with: ${ADAPTER_INSTALL_HINT[RECOMMENDED]}`,
+    });
 
   // Config files
   const setting = readAdapterSetting(projectDir);
@@ -398,7 +424,7 @@ async function cmdDoctor() {
         checks.push({
           name: `Configured adapter (${configured})`,
           status: 'warn',
-          message: resolution.hint.replace(/\n/g, ' '),
+          message: resolution.hint,
         });
       }
     } else {
@@ -511,7 +537,12 @@ async function cmdDoctor() {
   let hasWarning = false;
   for (const c of checks) {
     const icon = c.status === 'ok' ? '✅' : c.status === 'warn' ? '⚠️ ' : '❌';
-    console.log(`  ${icon} ${c.name}: ${c.message}`);
+    // Multi-line messages carry the install guidance for a machine with no adapter
+    // CLI — the one audience doctor exists for. Indent continuation lines instead of
+    // collapsing them into an unusable run-on line.
+    const [head, ...rest] = c.message.split('\n');
+    console.log(`  ${icon} ${c.name}: ${head}`);
+    for (const line of rest) console.log(`       ${line}`);
     if (c.status === 'fail') hasFailure = true;
     if (c.status === 'warn') hasWarning = true;
   }

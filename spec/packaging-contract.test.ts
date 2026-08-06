@@ -60,3 +60,27 @@ describe('published package contents', () => {
     }
   });
 });
+
+/**
+ * The README quotes a command total in two places. They silently drifted apart the
+ * moment `flowcrew adapter` was added (one said 20, the other still said 19), because
+ * nothing tied either number to the CLI. Derive the count instead of trusting prose.
+ */
+describe('documented command count', () => {
+  function helpCommands(): string[] {
+    const source = readFileSync(join(repositoryRoot, 'src', 'cli.ts'), 'utf-8');
+    const dispatch = source.slice(source.indexOf('switch (command)'));
+    const names = new Set<string>();
+    for (const [, name] of dispatch.matchAll(/^\s*case '([a-z][a-z-]*)':/gm)) names.add(name);
+    return [...names].sort();
+  }
+
+  it('keeps every README command total equal to the real dispatch table', () => {
+    const total = helpCommands().length;
+    expect(total).toBeGreaterThan(0);
+    const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
+    const quoted = [...readme.matchAll(/\b(?:all|All)\s+(\d+)\s+commands\b/g)].map((m) => Number(m[1]));
+    expect(quoted.length, 'README should quote the command total at least once').toBeGreaterThan(0);
+    for (const n of quoted) expect(n, `README says ${n} commands; the dispatch table has ${total}`).toBe(total);
+  });
+});

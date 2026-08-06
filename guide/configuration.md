@@ -36,7 +36,9 @@ supervisor:
 
 ## Adapters
 
-Newly initialized projects start undecided:
+`flowcrew init` resolves the adapter once and writes the concrete value it chose, so a new
+project normally starts decided. Only when no adapter CLI is installed does it leave the
+undecided sentinel in place:
 
 ```yaml
 adapter: auto

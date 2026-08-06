@@ -459,7 +459,7 @@ dashboard watches it. Reach for the command line when you want something those t
 give you: a scripted or scheduled launch, a brief you already wrote, or an operational
 answer about the install itself.
 
-Three are worth knowing on day one:
+Four are worth knowing on day one:
 
 ```bash
 flowcrew doctor                   # is this install actually ready?
@@ -469,9 +469,11 @@ flowcrew rehearse <brief.md>      # replay a brief for free before spending anyt
 flowcrew status                   # what is running right now
 ```
 
-New projects store `adapter: auto`: one installed CLI is selected, while two installed CLIs
-select recommended Codex unless interactive `flowcrew init` chooses otherwise. Runtime
-selection never rewrites the project; use `flowcrew adapter <name>` for an explicit change.
+`flowcrew init` decides once and writes what it decided: the only installed CLI when there
+is one, recommended Codex when both are installed (an interactive init preselects it and
+lets you choose), and `adapter: auto` only when neither is installed, so scaffolding never
+hangs on a prompt. Every later run resolves without prompting and never rewrites the
+project; use `flowcrew adapter <name>` for an explicit change.
 
 All 20 commands — launching, steering, approvals, brief history, daemon and dashboard
 lifecycle, registry repair, reality audit — are documented with their options and exit
@@ -489,7 +491,7 @@ codes in the **[CLI reference](guide/cli.md)**.
 - [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
 - [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
 - [Agent Skills](guide/skills.md): `/ship`, `/fc-status`, and skill installation.
-- [CLI Reference](guide/cli.md): all 19 commands and their subcommands/options.
+- [CLI Reference](guide/cli.md): all 20 commands and their subcommands/options.
 - [Contributing](CONTRIBUTING.md): build, test, documentation, commit, and PR expectations.
 
 ## License
