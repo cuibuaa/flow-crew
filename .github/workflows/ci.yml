@@ -68,3 +68,36 @@ jobs:
               ! command -v claude
               node ./node_modules/vitest/vitest.mjs run spec
             '
+
+  # macOS is a supported platform, so it gets a blocking job. Without this the
+  # port would rot the first time someone reaches for /proc or a GNU-only flag.
+  # macOS runners have no Docker, so the network-isolated job is not replicated
+  # here; that job doubles as the systemd-less Linux guard, since its container
+  # has procfs but no systemctl, systemd-run or /run/systemd/system.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Report the platform under test
+        run: |
+          uname -a
+          node -e "console.log('platform', process.platform, 'arch', process.arch)"
+          command -v systemctl || echo "systemctl: absent (expected)"
+          test -d /proc && echo "/proc: present (unexpected)" || echo "/proc: absent (expected)"
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:ui
+
+      # No pipe and no `|| true`: a masked exit code here would make the job
+      # green while macOS is broken, which is the failure this job exists to catch.
+      - name: Run the public spec suite
+        run: node ./node_modules/vitest/vitest.mjs run spec

@@ -371,8 +371,17 @@ export function hasLiveScheduler(_projectDir: string, runId: string): boolean {
     if (!existsSync(pidPath)) return false;
     const pid = readFileSync(pidPath, 'utf-8').trim();
     if (!/^\d+$/.test(pid)) return false;
-    // /proc/<pid> is the canonical Linux liveness probe; FlowCrew is WSL/Linux only.
-    return existsSync(`/proc/${pid}`);
+    // Signal 0 is the portable liveness probe and is what run-lock.ts:189 and
+    // task-registry.ts already use. Reading /proc/<pid> here meant that on any
+    // platform without procfs this returned false for a provably live scheduler,
+    // and performStartupRecovery then rewrote the healthy run to `failed`.
+    try {
+      process.kill(Number(pid), 0);
+      return true;
+    } catch (error) {
+      // EPERM means the process exists but belongs to another user — still alive.
+      return (error as NodeJS.ErrnoException)?.code === 'EPERM';
+    }
   } catch { /* non-critical */
     return false;
   }

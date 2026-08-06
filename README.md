@@ -41,10 +41,21 @@ A one-shot agent hands you a best-effort answer. FlowCrew hands you an auditable
 
 ## Will this run on your machine?
 
-- **Linux with a systemd user session.** WSL2 with systemd enabled counts and gets the
-  full experience. macOS and sessionless Linux do not: process inspection relies on
-  `/proc`, and without `systemd-run --user` a background task launches but is never
-  observed as complete.
+- **Linux or macOS.** Both are covered by CI on every commit. WSL2 with systemd enabled
+  behaves as Linux and gets the full experience.
+
+  | | Background tasks | Process identity |
+  |---|---|---|
+  | **Linux + systemd user session** | supervised units, restart on crash | full — a recorded pid is bound to that process's start time, so a recycled pid can never be mistaken for it |
+  | **Linux without a systemd session** | detached process fallback | full — same as above, `/proc` is what provides it |
+  | **macOS** | detached process fallback | reduced — see below |
+
+  On macOS there is no `/proc`, so FlowCrew identifies a process by its pid and command
+  line rather than by an exact start-time token. In the rare case where the operating
+  system recycles a pid before FlowCrew notices the original exited, it can mistake the
+  new process for the old one. Everything else — liveness, ownership, cancellation —
+  works; this one guarantee is weaker than on Linux, deliberately, because the
+  alternative costs a native addon.
 - **Node.js 22.5+** — FlowCrew uses the built-in `node:sqlite`.
 - **An authenticated Codex CLI or Claude Code** — for live runs only. The zero-token
   rehearsal in [Get started](#get-started) needs neither, and is the recommended way to
@@ -528,7 +539,11 @@ Reproduced on the current release. Listed here rather than discovered by you.
   `spec/deterministic-retry-clock.test.ts` assert sub-200ms scheduling budgets and can
   fail on a saturated machine while passing in isolation. If `npm test` fails only
   inside those two, re-run them alone before treating it as a regression.
-- **macOS and sessionless Linux are not supported**, and the gap is not cosmetic — see
+- **Without a systemd user session — on macOS, or on Linux outside a login session — a
+  background task can finish without the daemon noticing.** The run's own record reaches a
+  terminal state correctly, but `flowcrew task list` may keep reporting it as running. Read
+  the outcome with `flowcrew task show <id>` until this is fixed.
+- **macOS identifies processes slightly more loosely than Linux** — see
   [Will this run on your machine?](#will-this-run-on-your-machine).
 
 ## Documentation
