@@ -46,7 +46,15 @@ jobs:
 
       - name: Run public spec without network, agent CLIs, or existing state
         run: |
+          # Run as the runner's own uid. As root this container wrote root-owned build
+          # caches into the bind-mounted workspace, which the runner (and anyone
+          # reproducing the job locally) then cannot delete. Matching uids also removes
+          # git's "dubious ownership" refusal, so the `git config --system` workaround
+          # that used to sit in this script is no longer needed — and would now fail,
+          # since a non-root user cannot write /etc/gitconfig. The two changes must
+          # stay together.
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             --network none \
             --tmpfs /home/flowcrew:rw,nosuid,nodev \
             --env HOME=/home/flowcrew \
@@ -58,6 +66,5 @@ jobs:
               test ! -e "$HOME/.fc"
               ! command -v codex
               ! command -v claude
-              git config --system --add safe.directory /workspace
               node ./node_modules/vitest/vitest.mjs run spec
             '
