@@ -107,9 +107,9 @@ class ManualTechnicalChainClock implements TechnicalChainClock {
     this.timers.delete(timer as unknown as number);
   }
 
-  advanceSemanticEvent(): void {
-    this.monotonicMs += 1;
-    this.wallMs += 1;
+  advance(elapsedMs: number): void {
+    this.monotonicMs += elapsedMs;
+    this.wallMs += elapsedMs;
     const due = [...this.timers.entries()]
       .filter(([, timer]) => timer.deadlineMs <= this.monotonicMs)
       .sort((left, right) => left[1].deadlineMs - right[1].deadlineMs);
@@ -117,6 +117,10 @@ class ManualTechnicalChainClock implements TechnicalChainClock {
       this.timers.delete(timerId);
       timer.callback();
     }
+  }
+
+  advanceSemanticEvent(): void {
+    this.advance(1);
   }
 }
 
@@ -268,6 +272,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'ordinary') {
+        expect(prompt).toContain('"requestedAt":"<ISO-8601 timestamp sampled immediately before writing>"');
         const directory = join(opts.runDir, 'stages', opts.stageId);
         writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
           version: 1, kind: 'scope_revision', requestId: 'ordinary-shared', stageId: opts.stageId,
@@ -412,9 +417,11 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two without request\n');
       return { output: 'done', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' };
     } };
+    const clock = new ManualTechnicalChainClock();
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
       writeRoles('planner', 'qa', 'repair'), created.runId, 'repair scope attempts', true,
+      undefined, undefined, true, undefined, () => clock,
     );
     expect(repairCalls).toBe(2);
     expect(final.status).not.toBe('complete');
@@ -665,7 +672,8 @@ describe('bounded timeout negotiation', () => {
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json'), JSON.stringify({
         version: 1, kind: 'timeout_extension', requestId: 'finite-more', stageId: opts.stageId,
-        attemptIndex: 1, requestedExtensionMs: 700, reason: 'verified final checks remain',
+        attemptIndex: 1, requestedAt: new Date().toISOString(),
+        requestedExtensionMs: 700, reason: 'verified final checks remain',
       }));
       await waitForDecision(join(opts.runDir, 'stages', opts.stageId), 'timeout_extension_decision_');
       await new Promise((resolve) => setTimeout(resolve, 900));
@@ -680,7 +688,14 @@ describe('bounded timeout negotiation', () => {
     const status = readStageStatus(projectDir, runId, stageId);
     expect(status.timeout).toMatchObject({ effectiveBudgetMs: 1_300, extensionCount: 1, cumulativeGrantedMs: 700, terminationCause: 'complete' });
     const decision = readJson(join(runDirPath, status.timeout!.decisionPaths[0]));
-    expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'worker-policy', grantedExtensionMs: 700 });
+    expect(decision).toMatchObject({
+      accepted: true,
+      requestedBy: 'stage',
+      decidedBy: 'worker-policy',
+      grantedExtensionMs: 700,
+      timingBasis: 'requested_at',
+      requestedAt: expect.any(String),
+    });
   });
 
   it('never replays a stale timeout request or decision into a later attempt', { timeout: 5_000 }, async () => {
@@ -784,13 +799,21 @@ describe('bounded timeout negotiation', () => {
       'model: default',
       'reasoning_effort: default',
     ].join('\n'));
-    const chain = new TechnicalChainController({ initialBudgetMs: 90, hardTotalMs: 90, ledgerDir: join(runDirPath, 'stages', stageId) });
+    const clock = new ManualTechnicalChainClock();
+    const chain = new TechnicalChainController({
+      initialBudgetMs: 90,
+      hardTotalMs: 90,
+      ledgerDir: join(runDirPath, 'stages', stageId),
+      clock,
+    });
     const hardBudgets: number[] = [];
     let primaryCalls = 0;
     let fallbackCalls = 0;
     const primary: Adapter = { async run(_prompt, _agent, opts) {
       primaryCalls++;
       hardBudgets.push(opts.hard_timeout_ms ?? 0);
+      if (primaryCalls === 1) setImmediate(() => clock.advance(5));
+      if (primaryCalls === 2) setImmediate(() => clock.advance(7));
       return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
     } };
     const fallback: Adapter = { async run(_prompt, _agent, opts) {
@@ -802,9 +825,9 @@ describe('bounded timeout negotiation', () => {
         opts.abortSignal?.addEventListener('abort', () => resolve({
           output: 'cancelled', exitCode: 137, duration_ms: Date.now() - started,
         }), { once: true });
+        setImmediate(() => clock.advance(90));
       });
     } };
-    const started = Date.now();
     const result = await runStage(primary, {
       stageId,
       role: { ...role, adapter: 'primary' },
@@ -836,7 +859,7 @@ describe('bounded timeout negotiation', () => {
     const status = readStageStatus(projectDir, runId, stageId);
     expect(status.timeout?.terminationCause).toBe('hard_cap_timeout');
     expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
-    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(clock.monotonicNow()).toBe(102);
     const ledgerName = readdirSync(join(runDirPath, 'stages', stageId))
       .find((name) => name.startsWith('technical_chain_') && name.endsWith('.jsonl'));
     expect(ledgerName).toBeTruthy();
@@ -857,14 +880,28 @@ describe('bounded timeout negotiation', () => {
     const primary: Adapter = { async run() {
       return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
     } };
-    const started = Date.now();
+    const clock = new ManualTechnicalChainClock();
+    const chain = new TechnicalChainController({
+      initialBudgetMs: 60,
+      hardTotalMs: 120,
+      ledgerDir: join(runDirPath, 'stages', stageId),
+      clock,
+    });
     const result = await runStage(primary, {
       stageId, role: { ...role, adapter: 'primary' }, dependsOn: [], promptTemplate: 'loader',
       timeout_ms: 60, timeout_total_ms: 120,
-      technicalRetry: { delaysMs: [], loadFallbackAdapter: async () => new Promise<Adapter>(() => {}) },
+      technicalChain: chain,
+      technicalRetry: {
+        delaysMs: [],
+        loadFallbackAdapter: async () => {
+          setImmediate(() => clock.advance(60));
+          return new Promise<Adapter>(() => {});
+        },
+      },
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
-    expect(Date.now() - started).toBeLessThan(350);
+    chain.dispose();
+    expect(clock.monotonicNow()).toBe(60);
     expect(result.exitCode).toBe(124);
     expect(['soft_timeout', 'hard_cap_timeout']).toContain(
       readStageStatus(projectDir, runId, stageId).timeout?.terminationCause,
@@ -913,7 +950,8 @@ describe('bounded timeout negotiation', () => {
         requestNumber++;
         writeFileSync(requestPath, JSON.stringify({
           version: 1, kind: 'timeout_extension', requestId: `loop-${requestNumber}`, stageId: opts.stageId,
-          attemptIndex: 1, requestedExtensionMs: 50, reason: `progress sample ${requestNumber}`,
+          attemptIndex: 1, requestedAt: new Date().toISOString(),
+          requestedExtensionMs: 50, reason: `progress sample ${requestNumber}`,
         }));
       };
       emit();
@@ -937,8 +975,9 @@ describe('bounded timeout negotiation', () => {
     chain.dispose();
     const elapsed = Date.now() - started;
     const status = readStageStatus(projectDir, runId, stageId);
+    const decisions = status.timeout?.decisionPaths.map((path) => readJson(join(runDirPath, path))) ?? [];
     expect(result.exitCode).not.toBe(0);
-    expect(status.timeout?.terminationCause).toBe('hard_cap_timeout');
+    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('hard_cap_timeout');
     expect(status.timeout?.cumulativeGrantedMs).toBeLessThanOrEqual(120);
     expect(status.timeout?.effectiveBudgetMs).toBeLessThanOrEqual(170);
     expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);

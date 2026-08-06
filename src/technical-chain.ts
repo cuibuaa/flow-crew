@@ -120,6 +120,19 @@ export class TechnicalChainController {
     return Math.max(0, Math.min(this.hardTotalMs, this.baseChargedMs + this.clock.monotonicNow() - this.startedMono));
   }
 
+  /** Correlated attempt-start samples from the controller's injected clock. */
+  sampleTime(): { elapsedMs: number; wallNowMs: number } {
+    return { elapsedMs: this.elapsedMs(), wallNowMs: this.clock.wallNow() };
+  }
+
+  scheduleTimer(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
+    return this.clock.setTimer(callback, delayMs);
+  }
+
+  clearScheduledTimer(timer: ReturnType<typeof setTimeout>): void {
+    this.clock.clearTimer(timer);
+  }
+
   remainingMs(): number {
     return Math.max(0, this.deadlineMono - this.clock.monotonicNow());
   }

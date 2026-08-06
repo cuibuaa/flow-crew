@@ -28,6 +28,8 @@ interface RuntimeConstraintRequestBaseV1 {
   attemptIndex: number;
   requestedBy: NegotiationRequester;
   reason: string;
+  /** Producer wall-clock time sampled immediately before persisting the request. */
+  requestedAt?: string;
 }
 
 export interface ScopeRevisionRequestV1 extends RuntimeConstraintRequestBaseV1 {
@@ -211,6 +213,16 @@ function parseCommonRequest(
   if (typeof candidate.stageId !== 'string' || !candidate.stageId.trim()) return { ok: false, error: 'stageId must be non-empty' };
   if (!Number.isSafeInteger(candidate.attemptIndex) || Number(candidate.attemptIndex) < 1) return { ok: false, error: 'attemptIndex must be a positive safe integer' };
   if (typeof candidate.reason !== 'string') return { ok: false, error: 'reason must be a string' };
+  if (
+    candidate.requestedAt !== undefined
+    && (
+      typeof candidate.requestedAt !== 'string'
+      || !candidate.requestedAt.trim()
+      || !Number.isFinite(Date.parse(candidate.requestedAt.trim()))
+    )
+  ) {
+    return { ok: false, error: 'requestedAt must be a valid timestamp when provided' };
+  }
   return {
     ok: true,
     raw: candidate,
@@ -222,6 +234,7 @@ function parseCommonRequest(
       attemptIndex: Number(candidate.attemptIndex),
       requestedBy,
       reason: candidate.reason.trim(),
+      ...(typeof candidate.requestedAt === 'string' ? { requestedAt: candidate.requestedAt.trim() } : {}),
     },
   };
 }

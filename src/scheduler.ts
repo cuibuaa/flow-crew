@@ -67,6 +67,7 @@ import {
   TechnicalChainController,
   createTechnicalRetryBudgetState,
   transitionTechnicalRetryBudget,
+  type TechnicalChainClock,
   type TechnicalRetryBudgetState,
 } from './technical-chain.js';
 import {
@@ -892,7 +893,8 @@ function appendTimeoutExtensionContract(
     + `more than the current soft budget, request it before the deadline by writing exactly one JSON object to `
     + `${join(runDirPath, 'stages', stageId, 'timeout_extension_request.json')} with `
     + `{"version":1,"kind":"timeout_extension","requestId":"<unique id>","stageId":"${stageId}",`
-    + `"attemptIndex":<current attempt>,"requestedExtensionMs":<positive integer>,"reason":"<verified progress or added workload>"}. `
+    + `"attemptIndex":<current attempt>,"requestedAt":"<ISO-8601 timestamp sampled immediately before writing>",`
+    + `"requestedExtensionMs":<positive integer>,"reason":"<verified progress or added workload>"}. `
     + `Worker policy records its decision before moving the soft deadline; no request can raise the hard cap or cancel ABORT.`;
 }
 
@@ -4202,6 +4204,7 @@ export async function runWorkflow(
   campaignId?: string,
   inheritCampaignContext: boolean = true,
   briefAdmission?: BriefAdmissionRecord,
+  technicalChainClockFactory?: () => TechnicalChainClock,
 ): Promise<StoreState> {
   if (briefAdmission) {
     if (taskDescription === undefined) {
@@ -4890,7 +4893,8 @@ export async function runWorkflow(
     // Inner execution loop for this iteration
     const iterationResult = await executeIteration(
       sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
-      resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription, availableSkillsList,
+      resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
+      availableSkillsList, technicalChainClockFactory,
     );
 
     state = readRunState(projectDir, runId);
@@ -5063,7 +5067,7 @@ export async function runWorkflow(
               projectDir,
               runId,
               state.currentIteration ?? 1,
-              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList),
+              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, technicalChainClockFactory),
               repairSnapshot,
             );
             innerRetriesUsed = inner + 1;
@@ -5125,7 +5129,7 @@ export async function runWorkflow(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList),
+                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList, technicalChainClockFactory),
               );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
@@ -5160,7 +5164,7 @@ export async function runWorkflow(
       await executeIteration(
         sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
         resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
-        skills, taskDescription, availableSkillsList,
+        skills, taskDescription, availableSkillsList, technicalChainClockFactory,
       );
       state = readRunState(projectDir, runId);
       const afterContinuation = JSON.stringify(Object.fromEntries(
@@ -5227,7 +5231,8 @@ export async function runWorkflow(
       if (!reworked) break;
       await executeIteration(
         sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
-        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription, availableSkillsList,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
+        availableSkillsList, technicalChainClockFactory,
       );
       state = readRunState(projectDir, runId);
       if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
@@ -6233,6 +6238,7 @@ function createSchedulerTechnicalChain(
   stage: StageConfig,
   initialBudgetMs: number,
   runDirPath: string,
+  clockFactory?: () => TechnicalChainClock,
   priorStatus?: StageStatus,
   recover = false,
 ): TechnicalRetryBudgetState {
@@ -6264,6 +6270,7 @@ function createSchedulerTechnicalChain(
     initialBudgetMs,
     hardTotalMs: canRecover ? priorTimeout.hardTotalMs : configuredHardTotal,
     ledgerDir: join(runDirPath, 'stages', stage.id),
+    ...(clockFactory ? { clock: clockFactory() } : {}),
     ...(canRecover ? {
       chainId: priorTimeout.chainId,
       recovery: {
@@ -6381,6 +6388,7 @@ async function executeSingleStage(
   fixStageIds?: string[],
   roundDiffPath?: string,
   availableSkills?: string,
+  technicalChainClockFactory?: () => TechnicalChainClock,
 ): Promise<void> {
   if (!agents.has(stage.role)) {
     const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -6451,7 +6459,12 @@ async function executeSingleStage(
   const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
   const resumeSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined)
     ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
-  const technicalChain = createSchedulerTechnicalChain(stage, initialTimeout, runDirPath);
+  const technicalChain = createSchedulerTechnicalChain(
+    stage,
+    initialTimeout,
+    runDirPath,
+    technicalChainClockFactory,
+  );
 
   try {
   while (true) {
@@ -6571,6 +6584,7 @@ async function executeIteration(
   skills?: string,
   taskDescription?: string,
   availableSkills?: string,
+  technicalChainClockFactory?: () => TechnicalChainClock,
 ): Promise<StoreState> {
   const technicalChains = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
@@ -6879,7 +6893,14 @@ async function executeIteration(
       const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
       const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled);
       if (!technicalChain) {
-        technicalChain = createSchedulerTechnicalChain(stage, initialTimeout, runDirPath, state.stages[stage.id], true);
+        technicalChain = createSchedulerTechnicalChain(
+          stage,
+          initialTimeout,
+          runDirPath,
+          technicalChainClockFactory,
+          state.stages[stage.id],
+          true,
+        );
         technicalChains.set(stage.id, technicalChain);
       }
       const prepared = prepareSchedulerTechnicalAttempt(technicalChain);
