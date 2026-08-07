@@ -1,6 +1,6 @@
 {
   "name": "flowcrew",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "FlowCrew is a Codex agent workflow dashboard and control plane with QA gates, retries, and run memory for long-running agent workflows.",
   "main": "dist/index.js",
   "bin": {

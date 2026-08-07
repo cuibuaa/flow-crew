@@ -108,3 +108,30 @@ describe('README internal anchors', () => {
     }
   });
 });
+
+describe('release metadata cannot drift', () => {
+  // The README badge and package.json are two statements of the same fact, and
+  // nothing previously reconciled them: v0.5.0 shipped with the badge already
+  // one release stale. A version bump that forgets the badge now fails here
+  // rather than being noticed by a reader months later.
+  it('states the same version in package.json, the README badge, and its alt text', () => {
+    const version = JSON.parse(
+      readFileSync(join(repositoryRoot, 'package.json'), 'utf-8'),
+    ).version as string;
+    const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
+
+    expect(readme).toContain(`badge/release-v${version}-`);
+    expect(readme).toContain(`alt="FlowCrew v${version}"`);
+  });
+
+  it('has a dated changelog section for the version being shipped', () => {
+    const version = JSON.parse(
+      readFileSync(join(repositoryRoot, 'package.json'), 'utf-8'),
+    ).version as string;
+    const changelog = readFileSync(join(repositoryRoot, 'CHANGELOG.md'), 'utf-8');
+
+    expect(changelog).toMatch(
+      new RegExp(`^## \\[${version.replace(/\./g, '\\.')}\\] - \\d{4}-\\d{2}-\\d{2}$`, 'm'),
+    );
+  });
+});
