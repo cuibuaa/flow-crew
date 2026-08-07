@@ -1,5 +1,5 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   STALE_DAEMON_MESSAGE,
@@ -10,7 +10,7 @@ import {
   writeDaemonIdentity,
   type DaemonIdentity,
 } from './daemon-identity.js';
-import { TaskRegistry, TASK_STATUS } from './task-registry.js';
+import { TaskRegistry, TASK_STATUS, type TaskEntry } from './task-registry.js';
 import { Orchestrator } from './orchestrator.js';
 import {
   DaemonUnavailableError,
@@ -22,8 +22,10 @@ import {
   type RpcHandlerError,
   type RpcRequest,
   type RpcResponse,
+  type TaskShowEntry,
 } from './orchestrator-rpc.js';
 import type { CancellationResult } from './run-control.js';
+import { runsRoot } from './store.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
 
@@ -154,11 +156,66 @@ export async function handleDaemonCancellationRequest(
   if (request.cmd === 'cancel') {
     const result = await orchestrator.cancel(request.id);
     if (!result.ok) {
+      if (result.status === 'outcome-unknown') {
+        throw new Error(`Cancellation outcome unknown; processes may still be running: ${result.message}`);
+      }
       throw new Error(`Cancellation still in progress: ${result.message}. Check progress with: flowcrew task show ${request.id}`);
     }
     return result;
   }
   if (request.cmd === 'cancel-run') return orchestrator.cancelRun(request.runId, request.unit);
+  return undefined;
+}
+
+/**
+ * Build a read-only task view. A bound run is the authority for lifecycle
+ * outcome fields, while the registry continues to own launch metadata.
+ */
+export function mergeTaskWithRunState(
+  task: TaskEntry,
+  runRoot = runsRoot(),
+): TaskShowEntry {
+  if (!task.run_id) return { ...task };
+  const runPath = isAbsolute(task.run_id) ? task.run_id : join(runRoot, task.run_id);
+  try {
+    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as {
+      status?: unknown;
+      completedAt?: unknown;
+      failureReason?: unknown;
+      verdict?: unknown;
+      realityGate?: unknown;
+    };
+    if (typeof state.status !== 'string' || !state.status) return { ...task };
+    const verdict = runVerdict(state.verdict, state.realityGate);
+    return {
+      ...task,
+      status: state.status,
+      // A terminal registry timestamp may record a later control-plane action
+      // (for example an already-terminal cancellation). Preserve it when
+      // present; otherwise project the run's authoritative completion time.
+      completed_at: task.completed_at
+        ?? (typeof state.completedAt === 'string' ? state.completedAt : undefined),
+      ...(verdict ? { run_verdict: verdict } : {}),
+      ...(typeof state.failureReason === 'string' && state.failureReason
+        ? { failure_reason: state.failureReason }
+        : {}),
+    };
+  } catch {
+    return { ...task };
+  }
+}
+
+function runVerdict(verdict: unknown, realityGate: unknown): string | undefined {
+  if (typeof verdict === 'string' && verdict.trim()) return verdict.trim();
+  if (typeof verdict === 'object' && verdict !== null) {
+    const nested = (verdict as { verdict?: unknown }).verdict;
+    if (typeof nested === 'string' && nested.trim()) return nested.trim();
+  }
+  if (typeof realityGate === 'object' && realityGate !== null) {
+    const pass = (realityGate as { pass?: unknown }).pass;
+    if (pass === true) return 'PASS';
+    if (pass === false) return 'FAIL';
+  }
   return undefined;
 }
 
@@ -187,7 +244,13 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     if (req.cmd === 'show') {
       const task = registry.get(req.id);
       if (!task) throw new Error(`Task not found: ${req.id}`);
-      return { task, recent_ticks: registry.readRecentTicks(req.id) };
+      const unitStatus = await orchestrator.unitStatus(req.id);
+      return {
+        task: mergeTaskWithRunState(task),
+        recent_ticks: registry.readRecentTicks(req.id),
+        unit_status: unitStatus,
+        ...(unitStatus.kind === 'terminal' ? { exit_code: unitStatus.exitCode } : {}),
+      };
     }
     const cancellation = await handleDaemonCancellationRequest(orchestrator, req);
     if (cancellation) return cancellation;
@@ -195,7 +258,10 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
       const task = await orchestrator.retry(req.id);
       return { new_attempt: task.attempt, unit: task.systemd_unit };
     }
-    if (req.cmd === 'tail') return { output: await orchestrator.tail(req.id, req.lines, req.follow) };
+    if (req.cmd === 'tail') {
+      if (req.follow) return orchestrator.tailSnapshot(req.id, req.lines);
+      return { output: await orchestrator.tail(req.id, req.lines) };
+    }
     if (req.cmd === 'status') return { ...orchestrator.status(), ...rpcIdentity(identity) };
     if (req.cmd === 'stop') {
       orchestrator.stop();

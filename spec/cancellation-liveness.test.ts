@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { Adapter } from '../src/adapters/base.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { handleDaemonCancellationRequest } from '../src/cli-daemon.js';
-import { NodeSystemd, Orchestrator, type GitAdapter, type SystemdAdapter } from '../src/orchestrator.js';
+import { NodeSystemd, Orchestrator, type GitAdapter, type SupervisorBackend, type UnitStatus } from '../src/orchestrator.js';
 import {
   activeRunsByProject,
   claimLaunchIntent,
@@ -105,8 +105,8 @@ class FakeGit implements GitAdapter {
   async findCommitSince(): Promise<undefined> { return undefined; }
 }
 
-class FakeSystemd implements SystemdAdapter {
-  state = 'inactive';
+class FakeSystemd implements SupervisorBackend {
+  state: UnitStatus = { kind: 'terminal', exitCode: 0 };
   isActiveCalls = 0;
   runCalls = 0;
   stopCalls = 0;
@@ -115,22 +115,22 @@ class FakeSystemd implements SystemdAdapter {
   stopError?: Error;
   afterStop?: () => void;
 
-  async isActive(): Promise<string> {
+  async isActive(): Promise<UnitStatus> {
     this.isActiveCalls += 1;
     await this.isActiveHook?.(this.isActiveCalls);
     return this.state;
   }
   async runUnit(): Promise<void> {
     this.runCalls += 1;
-    this.state = 'active';
+    this.state = { kind: 'active' };
   }
   async stopUnit(): Promise<void> {
     this.stopCalls += 1;
     if (this.stopError) throw this.stopError;
-    this.state = 'deactivating';
+    this.state = { kind: 'deactivating' };
     if (this.stopGate) await this.stopGate;
     this.afterStop?.();
-    this.state = 'inactive';
+    this.state = { kind: 'terminal', exitCode: 0 };
   }
   async journalTail(): Promise<string> { return ''; }
 }
@@ -142,7 +142,7 @@ function completedCancellation(overrides: Partial<CancellationResult> = {}): Can
     runId: 'run-one',
     observation: {
       unit: 'flowcrew-task-1.service',
-      unitState: 'inactive',
+      unitState: { kind: 'terminal', exitCode: 0 },
       runReadable: true,
       schedulerPid: null,
       schedulerAlive: false,
@@ -312,7 +312,7 @@ describe('process-authoritative project occupancy', () => {
         systemd_unit: 'flowcrew-e13-unrelated-cli.service',
       });
       const systemd = new FakeSystemd();
-      systemd.state = 'failed';
+      systemd.state = { kind: 'terminal', exitCode: 1 };
       systemd.stopError = new Error('systemctl stop failed');
       const sentSignals: string[] = [];
       const coordinator = new RunCancellationCoordinator({
@@ -394,7 +394,10 @@ describe('systemd confirmation truth', () => {
     process.env.PATH = `${fakeBin}:${priorPath ?? ''}`;
     try {
       const systemd = new NodeSystemd(registry.baseDir);
-      await expect(systemd.isActive(unit)).resolves.toBe('unverified:systemctl-error');
+      await expect(systemd.isActive(unit)).resolves.toEqual({
+        kind: 'unobservable',
+        reason: 'systemctl probe failed',
+      });
       const coordinator = new RunCancellationCoordinator({
         registry,
         units: systemd,
@@ -407,7 +410,7 @@ describe('systemd confirmation truth', () => {
       expect(result).toMatchObject({
         ok: false,
         status: 'cancelling',
-        observation: { unitState: 'unverified:systemctl-error' },
+        observation: { unitState: { kind: 'unobservable', reason: 'systemctl probe failed' } },
       });
       expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING);
       expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.RUNNING);
@@ -442,7 +445,10 @@ describe('systemd confirmation truth', () => {
         JSON.stringify({ state: 'inactive' }),
         'utf-8',
       );
-      await expect(systemd.isActive(unit)).resolves.toBe('unverified:systemctl-error');
+      await expect(systemd.isActive(unit)).resolves.toEqual({
+        kind: 'unobservable',
+        reason: 'systemctl probe failed',
+      });
       const coordinator = new RunCancellationCoordinator({
         registry,
         units: systemd,
@@ -455,7 +461,7 @@ describe('systemd confirmation truth', () => {
       expect(result).toMatchObject({
         ok: false,
         status: 'cancelling',
-        observation: { unitState: 'unverified:systemctl-error' },
+        observation: { unitState: { kind: 'unobservable', reason: 'systemctl probe failed' } },
       });
       expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING);
       expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.RUNNING);
@@ -481,7 +487,7 @@ describe('cancel-and-confirm coordinator', () => {
       systemd_unit: 'flowcrew-e13-gated.service',
     });
     const systemd = new FakeSystemd();
-    systemd.state = 'active';
+    systemd.state = { kind: 'active' };
     let releaseStop!: () => void;
     systemd.stopGate = new Promise<void>((resolveStop) => { releaseStop = resolveStop; });
     let schedulerAlive = true;
@@ -503,7 +509,7 @@ describe('cancel-and-confirm coordinator', () => {
       unit: systemd.state,
       registry: registry.get(task.id)?.status,
       run: readRunState(projectDir, runId).status,
-    }).toEqual({ process: true, unit: 'active', registry: 'running', run: 'running' });
+    }).toEqual({ process: true, unit: { kind: 'active' }, registry: 'running', run: 'running' });
 
     const byTask = coordinator.cancelTask(task.id);
     const byRun = coordinator.cancelRun(runId);
@@ -514,7 +520,7 @@ describe('cancel-and-confirm coordinator', () => {
       unit: systemd.state,
       registry: registry.get(task.id)?.status,
       run: readRunState(projectDir, runId).status,
-    }).toEqual({ process: true, unit: 'deactivating', registry: 'cancelling', run: 'running' });
+    }).toEqual({ process: true, unit: { kind: 'deactivating' }, registry: 'cancelling', run: 'running' });
 
     releaseStop();
     const result = await byTask;
@@ -530,7 +536,7 @@ describe('cancel-and-confirm coordinator', () => {
       reason: state.failureReason,
     }).toEqual({
       process: false,
-      unit: 'inactive',
+      unit: { kind: 'terminal', exitCode: 0 },
       registry: 'cancelled',
       run: 'stopped',
       reason: 'Cancelled by user',
@@ -550,7 +556,7 @@ describe('cancel-and-confirm coordinator', () => {
       systemd_unit: 'flowcrew-e13-timeout.service',
     });
     const systemd = new FakeSystemd();
-    systemd.state = 'active';
+    systemd.state = { kind: 'active' };
     systemd.stopGate = new Promise<void>(() => {});
     const coordinator = new RunCancellationCoordinator({
       registry,
@@ -577,7 +583,7 @@ describe('cancel-and-confirm coordinator', () => {
     const runId = 'campaign-unregistered-run';
     writeRun(runId, RUN_STATUS.RUNNING, LIVE_FIXTURE_PID);
     const systemd = new FakeSystemd();
-    systemd.state = 'active';
+    systemd.state = { kind: 'active' };
     systemd.stopError = new Error('systemctl stop failed');
     let schedulerAlive = true;
     const sentSignals: string[] = [];
@@ -590,7 +596,7 @@ describe('cancel-and-confirm coordinator', () => {
       signalScheduler: (pid, signal) => {
         sentSignals.push(`${pid}:${signal}`);
         schedulerAlive = false;
-        systemd.state = 'failed';
+        systemd.state = { kind: 'terminal', exitCode: 1 };
       },
     });
 
@@ -628,7 +634,7 @@ describe('cancel-and-confirm coordinator', () => {
       setTimeout(() => {
         writeRun(runId, RUN_STATUS.RUNNING, LIVE_FIXTURE_PID);
         launchInFlight = false;
-        systemd.state = 'active';
+        systemd.state = { kind: 'active' };
         resolveLaunch();
       }, 10);
     });
@@ -647,7 +653,7 @@ describe('cancel-and-confirm coordinator', () => {
 
     expect(result).toMatchObject({ ok: true, status: 'cancelled' });
     expect(systemd.stopCalls).toBe(2);
-    expect(systemd.state).toBe('inactive');
+    expect(systemd.state).toEqual({ kind: 'terminal', exitCode: 0 });
     expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
   });
 
@@ -662,7 +668,7 @@ describe('cancel-and-confirm coordinator', () => {
       systemd_unit: 'flowcrew-e13-catch-up.service',
     });
     const systemd = new FakeSystemd();
-    systemd.state = 'active';
+    systemd.state = { kind: 'active' };
     const orchestrator = new Orchestrator({
       registry,
       systemd,

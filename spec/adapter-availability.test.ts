@@ -9,6 +9,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ADAPTER_INSTALL_HINT,
+  findExecutableOnPath,
   resolveAdapterChoice,
   type AdapterName,
 } from '../src/adapters/availability.js';
@@ -41,19 +43,8 @@ function cliFixture(): CliFixture {
   const project = join(root, 'project');
   const bin = join(root, 'bin');
   for (const path of [home, fcHome, project, bin]) mkdirSync(path, { recursive: true });
-  const which = join(bin, 'which');
-  writeFileSync(which, [
-    '#!/bin/sh',
-    'base=${0%/*}',
-    'candidate=$base/$1',
-    'if [ -x "$candidate" ]; then',
-    '  printf "%s\\n" "$candidate"',
-    '  exit 0',
-    'fi',
-    'exit 1',
-    '',
-  ].join('\n'), 'utf-8');
-  chmodSync(which, 0o755);
+  // Deliberately do not install `which`: production command discovery must
+  // scan PATH directly on minimal images and macOS fixtures alike.
   return { root, home, fcHome, project, bin };
 }
 
@@ -144,6 +135,15 @@ afterEach(() => {
 });
 
 describe('adapter resolution matrix', () => {
+  it('finds executable PATH entries without an external which command', () => {
+    const fixture = cliFixture();
+    const codex = installCommand(fixture, 'codex');
+
+    expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
+    expect(findExecutableOnPath('codex', fixture.bin)).toBe(codex);
+    expect(findExecutableOnPath('claude', fixture.bin)).toBeUndefined();
+  });
+
   const installations: Array<{ label: string; installed: AdapterName[] }> = [
     { label: 'none', installed: [] },
     { label: 'codex only', installed: ['codex'] },
@@ -287,9 +287,27 @@ describe('CLI adapter behavior', () => {
     const result = runCli(fixture, ['doctor']);
     const output = `${result.stdout}${result.stderr}`;
 
+    expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
     expect(projectSnapshot(fixture.project)).toEqual(before);
     expect(output).toContain('flowcrew CLI: PATH points to a different install');
+    expect(output).not.toContain('flowcrew CLI: not found on PATH');
+    expect(output).toContain('Process supervision: portable Node shim');
     expect(output).not.toMatch(/✅\s+flowcrew CLI:/);
+  });
+
+  it('recognizes this linked CLI without an external which command', () => {
+    const fixture = cliFixture();
+    writeAdapterConfig(fixture, 'auto');
+    mkdirSync(join(fixture.project, 'config', 'agents'), { recursive: true });
+    symlinkSync(join(repositoryRoot, 'dist', 'cli.js'), join(fixture.bin, 'flowcrew'));
+
+    const result = runCli(fixture, ['doctor']);
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
+    expect(output).toContain('flowcrew CLI: This install is available on PATH');
+    expect(output).not.toContain('flowcrew CLI: not found on PATH');
+    expect(output).toContain('Process supervision: portable Node shim');
   });
 
   it('reports adapter state read-only, then writes only on an explicit valid set command', () => {

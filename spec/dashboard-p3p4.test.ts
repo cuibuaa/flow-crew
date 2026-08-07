@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { startDashboard } from '../src/dashboard.js';
+import { hasLiveDirectRunner, startDashboard } from '../src/dashboard.js';
 import { recordRequest } from '../src/inbox.js';
 import { RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
@@ -319,6 +319,54 @@ describe('dashboard terminal-state truth', () => {
   });
 });
 
+describe('dashboard direct-runner liveness', () => {
+  it('keeps signal-0 live runners alive when procfs is absent and treats EPERM as alive', () => {
+    const runId = 'portable-direct-runner';
+    const markerDir = join(projectDir, '.fc');
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, `direct-resume-${runId}.pid`), String(process.pid), 'utf-8');
+    const missingProc = join(fixtureRoot, 'no-procfs');
+
+    expect(hasLiveDirectRunner(projectDir, runId, { procRoot: missingProc })).toBe(true);
+    expect(hasLiveDirectRunner(projectDir, runId, {
+      procRoot: missingProc,
+      killProcess: () => { throw Object.assign(new Error('not permitted'), { code: 'EPERM' }); },
+    })).toBe(true);
+    expect(hasLiveDirectRunner(projectDir, runId, {
+      procRoot: missingProc,
+      killProcess: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+    })).toBe(false);
+  });
+
+  it('rejects pid zero without probing the caller process group', () => {
+    const runId = 'invalid-zero-direct-runner';
+    const markerDir = join(projectDir, '.fc');
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, `direct-resume-${runId}.pid`), '0', 'utf-8');
+    const killProcess = vi.fn();
+
+    expect(hasLiveDirectRunner(projectDir, runId, { killProcess })).toBe(false);
+    expect(killProcess).not.toHaveBeenCalled();
+  });
+
+  it('uses readable Linux procfs metadata only as an additional recycled-pid check', () => {
+    const runId = 'direct-runner-proc-strengthening';
+    const markerDir = join(projectDir, '.fc');
+    const procRoot = join(fixtureRoot, 'proc');
+    const procPid = join(procRoot, String(process.pid));
+    mkdirSync(markerDir, { recursive: true });
+    mkdirSync(procPid, { recursive: true });
+    writeFileSync(join(markerDir, `direct-rerun-${runId}.pid`), String(process.pid), 'utf-8');
+    writeFileSync(join(procPid, 'cmdline'), 'unrelated-process\0', 'utf-8');
+    writeFileSync(join(procPid, 'environ'), `RUN_ID=${runId}\0`, 'utf-8');
+
+    expect(hasLiveDirectRunner(projectDir, runId, { procRoot })).toBe(process.platform !== 'linux');
+
+    writeFileSync(join(procPid, 'cmdline'), '/tmp/project/.fc/direct-rerun\0', 'utf-8');
+    expect(hasLiveDirectRunner(projectDir, runId, { procRoot })).toBe(true);
+  });
+});
+
 describe('dashboard E13 cancellation delegation', () => {
   it('launches stage reruns out of process so run-id cancellation can stop their scheduler', async () => {
     await app!.close();
@@ -447,6 +495,33 @@ describe('dashboard daemon-backed task creation', () => {
     });
     expect(readFileSync(task!.brief_path!, 'utf-8')).toBe('# Registered task\n\nDo the work.');
     expect(existsSync(runsRoot())).toBe(false);
+  });
+
+  it('derives task titles through the shared extractor for complete, absent, and incomplete frontmatter', async () => {
+    const cases = [
+      {
+        expected: 'Complete frontmatter title',
+        brief: '---\nterminal_states:\n  shipped:\n    paths: [docs/report.md]\n---\nIntro before heading.\n# Complete frontmatter title\n',
+      },
+      {
+        expected: 'No frontmatter title',
+        brief: 'Intro before heading.\n## No frontmatter title\n',
+      },
+      {
+        expected: 'Incomplete frontmatter title',
+        brief: '---\nterminal_states:\n  shipped:\n    paths: [docs/report.md]\nIntro before heading.\n# Incomplete frontmatter title\n',
+      },
+    ];
+
+    for (const [index, fixture] of cases.entries()) {
+      const response = await app!.inject({
+        method: 'POST',
+        url: '/api/tasks',
+        payload: await admittedTaskPayload(fixture.brief, { projectDir }),
+      });
+      expect(response.statusCode).toBe(201);
+      expect(registry.get(index + 1)?.name).toBe(fixture.expected);
+    }
   });
 
   it('returns a truthful non-2xx response when daemon registration fails', async () => {

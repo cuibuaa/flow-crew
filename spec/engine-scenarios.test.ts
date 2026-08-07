@@ -610,7 +610,7 @@ describe('Scenario F: daemon reconciles the same bound run after approval (C2)',
     registry.update(task.id, { started_at: startedAt });
     const systemd = {
       runs: [] as { unit: string; command: string }[],
-      async isActive() { return 'inactive'; },
+      async isActive() { return { kind: 'absent' as const }; },
       async runUnit(opts: { unit: string; command: string }) { this.runs.push(opts); },
       async stopUnit() {},
       async journalTail() { return ''; },

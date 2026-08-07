@@ -3,7 +3,14 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdir
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { buildCommand, NodeSystemd, Orchestrator, type GitAdapter, type SystemdAdapter } from '../src/orchestrator.js';
+import {
+  buildCommand,
+  NodeSystemd,
+  Orchestrator,
+  type GitAdapter,
+  type SupervisorBackend,
+  type UnitStatus,
+} from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import {
@@ -16,6 +23,7 @@ import {
   processStartTimeTicks,
 } from '../src/run-lock.js';
 import { recordRequest, resolveRequest } from '../src/inbox.js';
+import { supervisionPaths } from '../src/supervision.js';
 import {
   fcGlobalDir,
   initializeReservedRun,
@@ -28,6 +36,9 @@ import {
 
 let tempDir: string;
 let registry: TaskRegistry;
+const ACTIVE_UNIT: UnitStatus = { kind: 'active' };
+const CLEAN_UNIT_EXIT: UnitStatus = { kind: 'terminal', exitCode: 0 };
+const FAILED_UNIT_EXIT: UnitStatus = { kind: 'terminal', exitCode: 1 };
 let systemd: FakeSystemd;
 let git: FakeGit;
 let orchestrator: Orchestrator;
@@ -166,11 +177,19 @@ describe('Orchestrator', () => {
       expect(command).not.toContain("'--campaign-context=skip'");
       expect(command).not.toContain("'--no-inherit-campaign'");
     });
+
+    it('uses the daemon absolute Node interpreter instead of a PATH-dependent node word', () => {
+      const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
+      const command = buildCommand(task, '/tmp/flowcrew-cli.js');
+
+      expect(command.startsWith(`'${process.execPath}' '/tmp/flowcrew-cli.js'`)).toBe(true);
+      expect(command.startsWith("'node' ")).toBe(false);
+    });
   });
 
   it('records active ticks and marks pending tasks running', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
-    systemd.states.set(task.systemd_unit, 'active');
+    systemd.states.set(task.systemd_unit, ACTIVE_UNIT);
 
     await orchestrator.tickOnce();
 
@@ -183,7 +202,7 @@ describe('Orchestrator', () => {
     mkdirSync(join(tempDir, 'docs'), { recursive: true });
     writeFileSync(join(tempDir, 'docs', 'task_summary.md'), validSummary(), 'utf-8');
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
 
     await orchestrator.tickOnce();
@@ -200,7 +219,7 @@ describe('Orchestrator', () => {
   it('marks inactive tasks needs_summary when summary is missing', async () => {
     writeFileSync(join(tempDir, 'result.txt'), 'ok', 'utf-8');
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
 
     await orchestrator.tickOnce();
@@ -215,7 +234,7 @@ describe('Orchestrator', () => {
     mkdirSync(join(tempDir, 'docs'), { recursive: true });
     writeFileSync(join(tempDir, 'docs', 'task_summary.md'), '# Task Summary\n\n**Verdict**: SUCCESS\n', 'utf-8');
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
 
     await orchestrator.tickOnce();
@@ -237,7 +256,7 @@ describe('Orchestrator', () => {
       expected_artifacts: ['result.txt'],
       expected_summary_path: 'summaries',
     });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
 
     await orchestrator.tickOnce();
@@ -247,7 +266,7 @@ describe('Orchestrator', () => {
 
   it('marks inactive tasks stuck when commit exists but artifacts are missing', async () => {
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['missing.txt'] });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
 
     await orchestrator.tickOnce();
@@ -258,7 +277,7 @@ describe('Orchestrator', () => {
 
   it('retries inactive tasks with no commit until retry budget is exhausted', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir, status: 'running', max_retries: 2 });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -275,7 +294,7 @@ describe('Orchestrator', () => {
     expect(retried.systemd_unit).toBe('flowcrew-task-1-attempt-2.service');
     expect(systemd.runs.at(-1)?.unit).toBe('flowcrew-task-1-attempt-2.service');
 
-    systemd.states.set(retried.systemd_unit, 'inactive');
+    systemd.states.set(retried.systemd_unit, CLEAN_UNIT_EXIT);
     await orchestrator.tickOnce();
     advance(120_000);
     await orchestrator.tickOnce();
@@ -285,7 +304,7 @@ describe('Orchestrator', () => {
 
   it('relaunches failed tasks and then marks stuck after budget', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir, status: 'running', max_retries: 2 });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
     expect(registry.get(task.id)?.status).toBe('deferred');
@@ -297,7 +316,7 @@ describe('Orchestrator', () => {
     expect(retried.attempt).toBe(2);
     expect(retried.systemd_unit).toContain('attempt-2');
 
-    systemd.states.set(retried.systemd_unit, 'failed');
+    systemd.states.set(retried.systemd_unit, FAILED_UNIT_EXIT);
     await orchestrator.tickOnce();
     advance(120_000);
     await orchestrator.tickOnce();
@@ -320,7 +339,7 @@ describe('Orchestrator', () => {
       status: 'running',
       run_id: runId,
     });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -340,7 +359,7 @@ describe('Orchestrator', () => {
       status: 'running',
       run_id: runId,
     });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -355,7 +374,7 @@ describe('Orchestrator', () => {
       status: 'running',
       run_id: 'missing-bound-run',
     });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -373,7 +392,7 @@ describe('Orchestrator', () => {
       status: 'running',
       run_id: runId,
     });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -436,7 +455,7 @@ describe('Orchestrator', () => {
     const terminal = readRunState(tempDir, task.run_id!);
     terminal.status = 'reality_gate_failed';
     writeRunState(tempDir, task.run_id!, terminal);
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -452,7 +471,7 @@ describe('Orchestrator', () => {
   it('retries a genuine early crash while the bound run is still an uninitialized reservation', async () => {
     const task = await orchestrator.register({ ...admittedBrief('task'), projectDir: tempDir });
     const reservedRunId = task.run_id!;
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -526,25 +545,25 @@ Review the summary in task show.
 `;
 }
 
-class FakeSystemd implements SystemdAdapter {
-  states = new Map<string, string>();
+class FakeSystemd implements SupervisorBackend {
+  states = new Map<string, UnitStatus>();
   runs: { unit: string; command: string }[] = [];
   stopped: string[] = [];
   runGate?: Promise<void>;
 
-  async isActive(unit: string): Promise<string> {
-    return this.states.get(unit) ?? 'inactive';
+  async isActive(unit: string): Promise<UnitStatus> {
+    return this.states.get(unit) ?? { kind: 'absent' };
   }
 
   async runUnit(opts: { unit: string; command: string }): Promise<void> {
     this.runs.push({ unit: opts.unit, command: opts.command });
     if (this.runGate) await this.runGate;
-    this.states.set(opts.unit, 'active');
+    this.states.set(opts.unit, ACTIVE_UNIT);
   }
 
   async stopUnit(unit: string): Promise<void> {
     this.stopped.push(unit);
-    this.states.set(unit, 'inactive');
+    this.states.set(unit, CLEAN_UNIT_EXIT);
   }
 
   async journalTail(): Promise<string> {
@@ -636,7 +655,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
 
   it('a unit that died on a project conflict is re-queued, not counted as a crash', async () => {
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', max_retries: 2 });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
     busyProject = tempDir;                                     // the sibling that killed it is still live
 
     await orchestrator.tickOnce();
@@ -658,7 +677,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
       max_retries: 2,
     });
     registry.update(task.id, { started_at: new Date(clock).toISOString() });
-    systemd.states.set(task.systemd_unit, 'failed');
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -681,7 +700,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
   it('adopts an already-live unit instead of double-launching it', async () => {
     // Daemon died between launch and the status write: task looks never-launched.
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
-    systemd.states.set(task.systemd_unit, 'active');
+    systemd.states.set(task.systemd_unit, ACTIVE_UNIT);
 
     await orchestrator.tickOnce();
 
@@ -692,7 +711,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
 
   it('is reentrancy-guarded: an overlapping sweep cannot double-launch', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
 
     await Promise.all([orchestrator.tickOnce(), orchestrator.tickOnce()]);
 
@@ -721,8 +740,8 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
   it('two queued tasks for the same project do not both launch in one sweep', async () => {
     const a = registry.create({ ...admittedBrief('a'), projectDir: tempDir });
     const b = registry.create({ ...admittedBrief('b'), projectDir: tempDir });
-    systemd.states.set(a.systemd_unit, 'inactive');
-    systemd.states.set(b.systemd_unit, 'inactive');
+    systemd.states.set(a.systemd_unit, CLEAN_UNIT_EXIT);
+    systemd.states.set(b.systemd_unit, CLEAN_UNIT_EXIT);
 
     await orchestrator.tickOnce();
 
@@ -738,7 +757,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
       pausedAt: '2026-07-29T23:59:59.000Z',
     });
     addPendingApproval('old-park', 'old-request');
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
 
     expect(findParkedRunForProject(tempDir)).toBeNull();
     await orchestrator.tickOnce();
@@ -769,7 +788,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
       pausedAt: '2026-07-30T00:00:01.000Z',
     });
     addPendingApproval('approval-park', 'approval-request');
-    systemd.states.set(task.systemd_unit, 'inactive');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
 
     await orchestrator.tickOnce();
     const first = registry.get(task.id)!;
@@ -852,6 +871,29 @@ class FakeGit implements GitAdapter {
   }
 }
 
+describe('portable log tail snapshots', () => {
+  it('derives the tail output and byte cursor from one UTF-8 file snapshot', async () => {
+    const baseDir = join(tempDir, 'snapshot-backend');
+    const unit = 'flowcrew-task-42.service';
+    const paths = supervisionPaths(baseDir, unit);
+    const log = 'older line\n雪と🙂 latest\n';
+    mkdirSync(paths.unitDir, { recursive: true });
+    writeFileSync(paths.log, log, 'utf-8');
+
+    const snapshot = await new NodeSystemd(baseDir).tailSnapshot(unit, 1);
+
+    expect(snapshot).toEqual({
+      output: '雪と🙂 latest\n',
+      source: {
+        kind: 'file',
+        path: paths.log,
+        offset: Buffer.byteLength(log),
+      },
+    });
+    expect(Buffer.byteLength(log)).toBeGreaterThan(log.length);
+  });
+});
+
 describe('fallback stop binds the pid to a process identity', () => {
   // The fallback path exists because `systemd-run` can be unavailable. Before this binding it
   // signalled whatever pid the record held with no evidence the pid was still that child, and
@@ -904,5 +946,56 @@ describe('fallback stop binds the pid to a process identity', () => {
     const source = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf-8');
     const deactivating = source.slice(source.indexOf("state: 'deactivating'") - 400, source.indexOf("state: 'deactivating'") + 200);
     expect(deactivating).toContain('startTimeTicks');
+  });
+
+  it('persists an inactive terminal record when a read observes that the child is gone', async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = base;
+    try {
+      writeFileSync(recordPath, JSON.stringify({
+        pid: NONEXISTENT_PID,
+        state: 'active',
+        command: 'x',
+        startTimeTicks: '1',
+      }));
+
+      await expect(systemd.isActive(unit)).resolves.toEqual({
+        kind: 'terminal-unknown',
+        reason: 'fallback process ended without an exit status',
+      });
+      expect(JSON.parse(readFileSync(recordPath, 'utf-8'))).toMatchObject({
+        pid: NONEXISTENT_PID,
+        state: 'inactive',
+        command: 'x',
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it('consumes an asynchronous fallback spawn error and persists the named launch failure', async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = base;
+    const failedUnit = 'flowcrew-task-spawn-error.service';
+    const failedRecordPath = join(base, 'systemd-fallback', `${failedUnit}.json`);
+    try {
+      const missingShell = join(base, 'missing-shell');
+      const backend = new NodeSystemd(base, { shellPath: missingShell });
+      await backend.runUnit({ unit: failedUnit, workingDirectory: base, command: "'ignored'" });
+
+      let record: Record<string, unknown> = {};
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        try { record = JSON.parse(readFileSync(failedRecordPath, 'utf-8')) as Record<string, unknown>; } catch {}
+        if (record.state === 'failed') break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      }
+      expect(record.state).toBe('failed');
+      expect(String(record.reason)).toMatch(/fallback spawn failed:.*ENOENT/);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 });

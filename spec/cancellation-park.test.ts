@@ -12,7 +12,7 @@ import {
 } from '../src/cancellation-client.js';
 import { cmdTask } from '../src/cli-task.js';
 import { cancelRunWithControlPlane } from '../src/dashboard.js';
-import { Orchestrator, type SystemdAdapter } from '../src/orchestrator.js';
+import { Orchestrator, type SupervisorBackend, type UnitStatus } from '../src/orchestrator.js';
 import {
   RpcOutcomeUnknownError,
   startRpcServer,
@@ -66,13 +66,13 @@ afterAll(() => {
   setFcGlobalDir(originalFcHome);
 });
 
-class FakeSystemd implements SystemdAdapter {
-  state = 'inactive';
+class FakeSystemd implements SupervisorBackend {
+  state: UnitStatus = { kind: 'terminal', exitCode: 0 };
   stopCalls = 0;
 
-  async isActive(): Promise<string> { return this.state; }
-  async runUnit(): Promise<void> { this.state = 'active'; }
-  async stopUnit(): Promise<void> { this.stopCalls += 1; this.state = 'inactive'; }
+  async isActive(): Promise<UnitStatus> { return this.state; }
+  async runUnit(): Promise<void> { this.state = { kind: 'active' }; }
+  async stopUnit(): Promise<void> { this.stopCalls += 1; this.state = { kind: 'terminal', exitCode: 0 }; }
   async journalTail(): Promise<string> { return ''; }
 }
 
@@ -83,7 +83,7 @@ function completeCancellation(overrides: Partial<CancellationResult> = {}): Canc
     runId: 'run-bound',
     observation: {
       unit: 'flowcrew-e13b.service',
-      unitState: 'inactive',
+      unitState: { kind: 'terminal', exitCode: 0 },
       runReadable: true,
       schedulerPid: null,
       schedulerAlive: false,
@@ -200,7 +200,7 @@ describe('cancellation entry convergence', () => {
       status: 'cancelling',
       observation: {
         unit: 'flowcrew-e13b.service',
-        unitState: 'deactivating',
+        unitState: { kind: 'deactivating' },
         runReadable: true,
         schedulerPid: process.pid,
         schedulerAlive: true,
@@ -242,7 +242,7 @@ describe('cancellation entry convergence', () => {
           runId,
           observation: {
             unit: null,
-            unitState: 'inactive',
+            unitState: { kind: 'terminal', exitCode: 0 },
             runReadable: true,
             schedulerPid: null,
             schedulerAlive: false,
@@ -255,6 +255,19 @@ describe('cancellation entry convergence', () => {
     expect(result).toMatchObject({ ok: true, runId });
     expect(requests).toEqual([{ cmd: 'cancel-run', runId }]);
     expect(local.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it('returns a complete daemon result without constructing or invoking local cancellation', async () => {
+    const remote = completeCancellation({ runId: 'daemon-owned-result' });
+    const local: LocalCancellationControl = {
+      cancel: async () => { throw new Error('daemon result fell back to local task cancellation'); },
+      cancelRun: async () => { throw new Error('daemon result fell back to local run cancellation'); },
+    };
+
+    await expect(cancelRunThroughControlPlane('daemon-owned-result', undefined, {
+      sendRequest: async () => remote,
+      localControl: local,
+    })).resolves.toBe(remote);
   });
 
   it('maps an outcome-unknown CLI mutation to exit 2 without starting local cancellation', async () => {

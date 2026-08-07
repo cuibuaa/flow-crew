@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -17,9 +23,13 @@ import {
   findParkedRunForProject,
   invalidateRunLockCache,
   isProjectBusy,
-  processStartTimeTicks,
+  processCommandMatches,
+  processIsAlive,
+  processStartToken,
+  processStartTokensMatch,
   readLaunchIntent,
   releaseLaunchIntent,
+  type ProcessStartToken,
 } from './run-lock.js';
 import {
   isPausedRunStatus,
@@ -36,30 +46,38 @@ import {
   type CancellationResult,
   type RunCancellationOptions,
 } from './run-control.js';
+import {
+  SUPERVISION_PROTOCOL_VERSION,
+  atomicWriteJson,
+  gcSupervisionDirectories,
+  hasSupervisionEvidence,
+  observePortableUnit,
+  readSupervisionRunning,
+  runningRecordBindingStatus,
+  supervisionPaths,
+  type SupervisorBackend,
+  type SupervisorLogSource,
+  type SupervisorTailSnapshot,
+  type SupervisionExitRecord,
+  type SupervisionLaunchRecord,
+  type SupervisionRunningRecord,
+  type UnitStatus,
+} from './supervision.js';
+
+export type { SupervisorBackend, UnitStatus } from './supervision.js';
 
 const execFileAsync = promisify(execFile);
+const PORTABLE_BIND_ATTEMPTS = 10;
+const PORTABLE_BIND_INTERVAL_MS = 25;
 
 /** Deferred-queue backoff: 30s doubling per attempt, capped at 10 min. */
 const DEFER_BASE_MS = 30_000;
 const DEFER_MAX_MS = 600_000;
-const SYSTEMD_STATE = {
-  ACTIVE: 'active',
-  INACTIVE: 'inactive',
-  FAILED: 'failed',
-} as const;
-type SystemdState = typeof SYSTEMD_STATE[keyof typeof SYSTEMD_STATE];
 interface BoundRun {
   runId: string;
   path: string;
   status: string;
   failureReason?: string;
-}
-
-export interface SystemdAdapter {
-  isActive(unit: string): Promise<SystemdState | string>;
-  runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void>;
-  stopUnit(unit: string): Promise<void>;
-  journalTail(unit: string, lines: number, follow?: boolean): Promise<string>;
 }
 
 export interface GitAdapter {
@@ -71,7 +89,7 @@ export interface GitAdapter {
 
 export interface OrchestratorOptions {
   registry?: TaskRegistry;
-  systemd?: SystemdAdapter;
+  systemd?: SupervisorBackend;
   git?: GitAdapter;
   intervalMs?: number;
   cliPath?: string;
@@ -89,7 +107,7 @@ export interface OrchestratorOptions {
 
 export class Orchestrator {
   readonly registry: TaskRegistry;
-  private readonly systemd: SystemdAdapter;
+  private readonly systemd: SupervisorBackend;
   private readonly git: GitAdapter;
   private readonly intervalMs: number;
   private readonly cliPath: string;
@@ -265,9 +283,37 @@ export class Orchestrator {
     return this.relaunch(task, 'manual retry');
   }
 
-  async tail(id: number, lines = 100, follow = false): Promise<string> {
+  async tail(id: number, lines = 100, _follow = false): Promise<string> {
     const task = this.mustGet(id);
-    return this.systemd.journalTail(task.systemd_unit, lines, follow);
+    return this.systemd.journalTail(task.systemd_unit, lines, false);
+  }
+
+  async tailSnapshot(id: number, lines = 100): Promise<SupervisorTailSnapshot> {
+    const task = this.mustGet(id);
+    if (this.systemd.tailSnapshot) {
+      return this.systemd.tailSnapshot(task.systemd_unit, lines);
+    }
+    // Older/injected backends cannot bind output to a file cursor. Preserve the
+    // source without inventing one so older daemon responses remain lossless:
+    // the CLI will conservatively follow a cursorless file from byte zero.
+    const output = await this.tail(id, lines, false);
+    const source = this.systemd.logSource
+      ? await this.systemd.logSource(task.systemd_unit)
+      : { kind: 'journal' as const, unit: task.systemd_unit };
+    return { output, source };
+  }
+
+  async tailSource(id: number): Promise<SupervisorLogSource> {
+    const task = this.mustGet(id);
+    if (this.systemd.logSource) return this.systemd.logSource(task.systemd_unit);
+    return { kind: 'journal', unit: task.systemd_unit };
+  }
+
+  /** Minimal Phase 3 projection: durable supervisor outcome, without run.json merging. */
+  async unitStatus(id: number): Promise<UnitStatus> {
+    const task = this.mustGet(id);
+    const backend = this.systemd;
+    return backend.isActive(task.systemd_unit);
   }
 
   status(): { uptime: number; watched_tasks: number; registry_unreadable_records: number } {
@@ -372,13 +418,36 @@ export class Orchestrator {
       || (afterUnitProbe.status !== TASK_STATUS.DEFERRED && afterUnitProbe.status !== TASK_STATUS.PENDING)
     ) return;
     task = afterUnitProbe;
-    if (observedUnitState === SYSTEMD_STATE.ACTIVE) {
-      this.registry.update(task.id, {
-        status: 'running', started_at: task.started_at ?? this.now().toISOString(),
-        not_before: undefined, defer_reason: undefined, defer_kind: undefined,
-      });
-      this.registry.appendTick(task.id, { status: 'running', message: `adopted live unit ${task.systemd_unit}` });
-      return;
+    switch (observedUnitState.kind) {
+      case 'active':
+        this.registry.update(task.id, {
+          status: 'running', started_at: task.started_at ?? this.now().toISOString(),
+          not_before: undefined, defer_reason: undefined, defer_kind: undefined,
+        });
+        this.registry.appendTick(task.id, { status: 'running', message: `adopted live unit ${task.systemd_unit}` });
+        return;
+      case 'deactivating':
+        this.registry.appendTick(task.id, {
+          status: task.status,
+          message: `unit ${task.systemd_unit} is still deactivating; launch remains deferred`,
+        });
+        return;
+      case 'unobservable':
+        this.registry.appendTick(task.id, {
+          status: task.status,
+          message: `unit ${task.systemd_unit} is unobservable (${observedUnitState.reason}); launch remains deferred`,
+        });
+        return;
+      case 'terminal-unknown':
+        await this.handleTerminalUnknown(task, observedUnitState.reason);
+        return;
+      case 'terminal':
+      case 'absent':
+        break;
+      default: {
+        const _exhaustive: never = observedUnitState;
+        return _exhaustive;
+      }
     }
     invalidateRunLockCache();
     const busy = this.busyFor(task.projectDir, task.run_id);
@@ -448,26 +517,59 @@ export class Orchestrator {
     }
     if (current.status !== TASK_STATUS.RUNNING) return;
     task = current;
-    if (state === SYSTEMD_STATE.ACTIVE) {
-      const patch: Partial<TaskEntry> = { status: TASK_STATUS.RUNNING };
-      if (!task.started_at) patch.started_at = this.now().toISOString();
-      this.registry.update(task.id, patch);
-      this.registry.appendTick(task.id, { status: SYSTEMD_STATE.ACTIVE, stages: this.readStages(task) });
+    switch (state.kind) {
+      case 'active': {
+        const patch: Partial<TaskEntry> = { status: TASK_STATUS.RUNNING };
+        if (!task.started_at) patch.started_at = this.now().toISOString();
+        this.registry.update(task.id, patch);
+        this.registry.appendTick(task.id, { status: 'active', stages: this.readStages(task) });
+        return;
+      }
+      case 'deactivating':
+        this.registry.appendTick(task.id, {
+          status: 'deactivating',
+          message: `supervisor reported ${task.systemd_unit} is deactivating`,
+        });
+        return;
+      case 'unobservable':
+        this.registry.appendTick(task.id, {
+          status: 'unobservable',
+          message: `supervisor could not observe ${task.systemd_unit}: ${state.reason}`,
+        });
+        return;
+      case 'absent':
+        await this.handleInactive(task);
+        return;
+      case 'terminal': {
+        if (state.exitCode === 0) {
+          await this.handleInactive(task);
+          return;
+        }
+        const reason = state.signal
+          ? `unit terminated by ${state.signal} (normalized exit ${state.exitCode})`
+          : `unit exited with code ${state.exitCode}`;
+        if (await this.reconcileBoundRunAfterExit(task, reason)) return;
+        await this.retryOrStuck(task, reason);
+        return;
+      }
+      case 'terminal-unknown':
+        await this.handleTerminalUnknown(task, state.reason);
+        return;
+      default: {
+        const _exhaustive: never = state;
+        return _exhaustive;
+      }
+    }
+  }
+
+  private async handleTerminalUnknown(task: TaskEntry, detail: string): Promise<void> {
+    const bound = this.readBoundRun(task);
+    if (bound && isTerminalRunStatus(bound.status)) {
+      await this.reconcileTerminalBoundRun(task, bound);
       return;
     }
-
-    if (state === SYSTEMD_STATE.INACTIVE) {
-      await this.handleInactive(task);
-      return;
-    }
-
-    if (state === SYSTEMD_STATE.FAILED) {
-      if (await this.reconcileBoundRunAfterExit(task, 'unit failed')) return;
-      await this.retryOrStuck(task, 'unit failed');
-      return;
-    }
-
-    this.registry.appendTick(task.id, { status: state, message: `systemd reported ${state}` });
+    const suffix = bound ? `; bound run ${bound.runId} remains ${bound.status}` : '';
+    this.failClosed(task, `supervisor outcome unknown: ${detail}${suffix}; refusing to retry automatically`);
   }
 
   /**
@@ -805,61 +907,149 @@ export class NodeGit implements GitAdapter {
   }
 }
 
-export class NodeSystemd implements SystemdAdapter {
-  private fallbackDir: string;
+interface FallbackUnitRecord {
+  pid?: number;
+  state?: string;
+  command?: string;
+  /** Kept for disk compatibility; contains the ProcessStartToken value. */
+  startTimeTicks?: string;
+  startTokenKind?: ProcessStartToken['kind'];
+  unverifiedPid?: number;
+  reason?: string;
+  completedAt?: string;
+}
 
-  constructor(baseDir: string) {
+const FALLBACK_TERMINAL_STATE = {
+  INACTIVE: 'inactive',
+  FAILED: 'failed',
+} as const;
+
+export interface NodeSystemdOptions {
+  /** Test seam and explicit override for minimal POSIX images. */
+  shellPath?: string;
+  /** Explicit shim entrypoint seam; normal resolution probes .js then .ts. */
+  shimPath?: string;
+  /** Test seam; production always uses the daemon's absolute interpreter. */
+  nodePath?: string;
+  startupGraceMs?: number;
+  shutdownGraceMs?: number;
+  retentionMs?: number;
+  now?: () => Date;
+}
+
+export class NodeSystemd implements SupervisorBackend {
+  private readonly baseDir: string;
+  private readonly fallbackDir: string;
+  private readonly configuredShellPath?: string;
+  private readonly configuredShimPath?: string;
+  private readonly nodePath: string;
+  private readonly startupGraceMs: number;
+  private readonly shutdownGraceMs: number;
+  private readonly retentionMs: number;
+  private readonly now: () => Date;
+
+  constructor(baseDir: string, options: NodeSystemdOptions = {}) {
+    this.baseDir = baseDir;
     this.fallbackDir = join(baseDir, 'systemd-fallback');
+    this.configuredShellPath = options.shellPath;
+    this.configuredShimPath = options.shimPath;
+    this.nodePath = options.nodePath ?? process.execPath;
+    this.startupGraceMs = Math.max(0, options.startupGraceMs ?? 5_000);
+    this.shutdownGraceMs = Math.max(0, options.shutdownGraceMs ?? 1_500);
+    this.retentionMs = Math.max(0, options.retentionMs ?? 30 * 24 * 60 * 60_000);
+    this.now = options.now ?? (() => new Date());
     mkdirSync(this.fallbackDir, { recursive: true });
+    mkdirSync(supervisionPaths(this.baseDir, '_').root, { recursive: true });
+    gcSupervisionDirectories(this.baseDir, {
+      nowMs: this.now().getTime(),
+      retentionMs: this.retentionMs,
+    });
   }
 
-  async isActive(unit: string): Promise<SystemdState | string> {
+  async isActive(unit: string): Promise<UnitStatus> {
+    const portable = this.portableState(unit);
+    // An atomically-written exit status is the only backend-independent result
+    // and therefore outranks even a systemd unit that has not been reaped yet.
+    if (portable.kind === 'terminal') return portable;
     try {
       const { stdout } = await execFileAsync(
         'systemctl',
         ['--user', 'is-active', unit],
         { encoding: 'utf-8', timeout: 1_000 },
       );
-      return normalizeSystemdState(stdout);
+      return mergeSupervisorStatuses(portable, normalizeSystemdStatus(stdout));
     } catch (err) {
       const stdout = (err as { stdout?: string | Buffer }).stdout;
-      if (stdout !== undefined && String(stdout).trim()) return normalizeSystemdState(String(stdout));
+      if (stdout !== undefined && String(stdout).trim()) {
+        return mergeSupervisorStatuses(portable, normalizeSystemdStatus(String(stdout)));
+      }
       const failure = err as { killed?: boolean; signal?: string; code?: string | number };
       if (failure.killed || failure.signal === 'SIGTERM' || failure.code === 'ETIMEDOUT') {
-        return 'unverified:systemctl-timeout';
+        return { kind: 'unobservable', reason: 'systemctl probe timed out' };
       }
-      if (existsSync(this.fallbackPath(unit))) {
-        const fallback = this.fallbackState(unit);
-        // A live process-fallback is useful conservative evidence that the unit
-        // is not stopped. A terminal/stale record cannot prove that a real
-        // systemd unit is absent while systemctl itself is unobservable.
-        if (fallback === SYSTEMD_STATE.ACTIVE || fallback === 'deactivating') return fallback;
-      }
-      return 'unverified:systemctl-error';
+      if (failure.code === 'ENOENT') return this.fallbackState(unit);
+      // A bound live shim is conservative positive evidence. Terminal-unknown
+      // and absent cannot prove that a real unit stopped while systemctl itself
+      // is unobservable, so those cases preserve the Phase 1 fail-closed rule.
+      if (portable.kind === 'active' || portable.kind === 'deactivating') return portable;
+      const legacy = this.legacyFallbackState(unit);
+      if (legacy.kind === 'active' || legacy.kind === 'deactivating') return legacy;
+      return { kind: 'unobservable', reason: 'systemctl probe failed' };
     }
   }
 
   async runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void> {
+    gcSupervisionDirectories(this.baseDir, {
+      nowMs: this.now().getTime(),
+      retentionMs: this.retentionMs,
+    });
+    const paths = supervisionPaths(this.baseDir, opts.unit);
+    if (hasSupervisionEvidence(this.baseDir, opts.unit)) {
+      throw new Error(`supervision evidence already exists for ${opts.unit}; refusing to overwrite it`);
+    }
+    mkdirSync(paths.unitDir, { recursive: true });
+    const shellPath = this.fallbackShellPath();
+    const launch: SupervisionLaunchRecord = {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      unit: opts.unit,
+      workingDirectory: opts.workingDirectory,
+      command: opts.command,
+      nodePath: this.nodePath,
+      shellPath,
+      createdAt: this.now().toISOString(),
+      shutdownGraceMs: this.shutdownGraceMs,
+      legacyRecordPath: this.fallbackPath(opts.unit),
+    };
+    atomicWriteJson(paths.launch, launch);
+    const shimArgs = this.shimArguments(paths.unitDir);
     try {
-      await execFileAsync('systemd-run', ['--user', `--unit=${opts.unit}`, `--working-directory=${opts.workingDirectory}`, 'bash', '-lc', opts.command]);
+      await execFileAsync('systemd-run', [
+        '--user',
+        `--unit=${opts.unit}`,
+        '--property=KillMode=mixed',
+        `--working-directory=${opts.workingDirectory}`,
+        this.nodePath,
+        ...shimArgs,
+      ], { timeout: 5_000 });
     } catch {
-      mkdirSync(this.fallbackDir, { recursive: true });
-      const child = spawn('bash', ['-lc', opts.command], {
-        cwd: opts.workingDirectory,
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-      // Record the start time alongside the pid. Without it a later stop has no way to
-      // prove the pid still belongs to this child, and a recycled pid would be signalled
-      // instead — possibly a process belonging to the operator.
-      const startTimeTicks = child.pid === undefined ? undefined : processStartTimeTicks(child.pid);
-      writeFileSync(this.fallbackPath(opts.unit), JSON.stringify({
-        pid: child.pid,
-        state: SYSTEMD_STATE.ACTIVE,
-        command: opts.command,
-        ...(startTimeTicks ? { startTimeTicks } : {}),
-      }), 'utf-8');
+      try {
+        const child = spawn(this.nodePath, shimArgs, {
+          cwd: opts.workingDirectory,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.once('error', (error) => {
+          this.recordShimLaunchFailure(opts.unit, opts.command, error);
+        });
+        // Once spawn succeeds, the shim's exit alone cannot prove that no agent
+        // was launched: it may have detached the agent and then died before it
+        // could publish running.json. Keep launch.json as the durable evidence;
+        // after the startup window readers conservatively report outcome unknown.
+        // Only spawn's error event is authoritative proof that the shim never ran.
+        child.unref();
+      } catch (error) {
+        this.recordShimLaunchFailure(opts.unit, opts.command, error);
+      }
     }
   }
 
@@ -870,90 +1060,349 @@ export class NodeSystemd implements SystemdAdapter {
     } catch (error) {
       systemctlError = error;
     }
+    if (hasSupervisionEvidence(this.baseDir, unit)) {
+      const paths = supervisionPaths(this.baseDir, unit);
+      const observation = observePortableUnit(this.baseDir, unit, {
+        nowMs: this.now().getTime(),
+        startupGraceMs: this.startupGraceMs,
+      });
+      if (observation.status.kind === 'terminal') return;
+      const running = readSupervisionRunning(paths.running);
+      if (!running || !await this.waitForPortableBinding(running)) return;
+
+      // The legacy mirror remains only for upgrade compatibility and Phase 1
+      // safety evidence. If somebody altered its command, fail closed instead
+      // of letting that weaker record silently disagree with the durable one.
+      try {
+        const mirror = JSON.parse(readFileSync(this.fallbackPath(unit), 'utf-8')) as FallbackUnitRecord;
+        if (typeof mirror.command === 'string' && mirror.command !== running.command) {
+          if (systemctlError) throw systemctlError;
+          return;
+        }
+      } catch (error) {
+        if (error === systemctlError) throw error;
+      }
+
+      // The shim is deliberately outside the agent's process group. Signal the
+      // strictly-bound shim as a bare PID; it owns TERM -> bounded KILL of the
+      // agent group and writes exit.json only after reaping the agent.
+      try {
+        process.kill(running.shimPid, 'SIGTERM');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+      await this.waitForPortableExit(unit, running.shimPid);
+      return;
+    }
+    await this.stopLegacyUnit(unit, systemctlError);
+  }
+
+  private async stopLegacyUnit(unit: string, systemctlError: unknown): Promise<void> {
     const path = this.fallbackPath(unit);
     if (!existsSync(path)) {
       if (systemctlError) throw systemctlError;
       return;
     }
     let fallbackPid: number | undefined;
-    let recordedTicks: string | undefined;
+    let record: FallbackUnitRecord = {};
     try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: number; startTimeTicks?: string };
-      if (Number.isInteger(parsed.pid) && (parsed.pid ?? 0) > 0) fallbackPid = parsed.pid;
-      if (typeof parsed.startTimeTicks === 'string' && parsed.startTimeTicks) recordedTicks = parsed.startTimeTicks;
+      record = JSON.parse(readFileSync(path, 'utf-8')) as FallbackUnitRecord;
+      if (Number.isInteger(record.pid) && (record.pid ?? 0) > 0) fallbackPid = record.pid;
     } catch { /* malformed fallback record */ }
+    const recordedTicks = typeof record.startTimeTicks === 'string' && record.startTimeTicks
+      ? record.startTimeTicks
+      : undefined;
+    const recordedKind = record.startTokenKind === 'posix-lstart' || record.startTokenKind === 'linux'
+      ? record.startTokenKind
+      : 'linux';
+    const recordedToken: ProcessStartToken | undefined = recordedTicks
+      ? { kind: recordedKind, value: recordedTicks }
+      : undefined;
+    const fallbackAlive = fallbackPid !== undefined && processIsAlive(fallbackPid);
     // A pid on its own is not evidence: the kernel reuses pids, so the number recorded when
-    // this unit started may now belong to anything, including a process of the operator's.
-    // Signal only when the recorded start time still matches the live one. A record with no
-    // start time cannot be verified, so it is not signalled — killing the wrong process is
-    // worse than leaving one running, and `systemctl --user stop` above already had its turn.
+    // this unit started may now belong to anything. BSD's second-resolution token is
+    // additionally bound to the recorded command. A token that cannot be interpreted
+    // removes signal authority, but is never treated as evidence that a live pid died.
     const identityBinds = fallbackPid !== undefined
-      && recordedTicks !== undefined
-      && processStartTimeTicks(fallbackPid) === recordedTicks;
+      && fallbackAlive
+      && processStartTokensMatch(recordedToken, processStartToken(fallbackPid))
+      && typeof record.command === 'string'
+      && processCommandMatches(fallbackPid, record.command);
     if (fallbackPid !== undefined && !identityBinds) {
-      writeFileSync(path, JSON.stringify({
-        state: SYSTEMD_STATE.INACTIVE,
+      const reason = recordedTicks === undefined
+        ? 'fallback record predates start-time binding; refusing to signal an unverifiable pid'
+        : !fallbackAlive
+          ? 'recorded start time no longer matches this pid; refusing to signal a recycled pid'
+          : typeof record.command !== 'string' || !processCommandMatches(fallbackPid, record.command)
+            ? 'recorded command no longer matches this pid; refusing to signal an unbound process'
+            : 'recorded start time no longer matches this pid; refusing to signal a recycled pid';
+      this.writeFallbackRecord(unit, {
+        ...record,
+        state: fallbackAlive ? 'active' : 'inactive',
         unverifiedPid: fallbackPid,
-        reason: recordedTicks === undefined
-          ? 'fallback record predates start-time binding; refusing to signal an unverifiable pid'
-          : 'recorded start time no longer matches this pid; refusing to signal a recycled pid',
-      }), 'utf-8');
+        reason,
+        ...(!fallbackAlive ? { completedAt: record.completedAt ?? new Date().toISOString() } : {}),
+      });
       if (systemctlError) throw systemctlError;
       return;
     }
     if (fallbackPid !== undefined) {
-      try { process.kill(fallbackPid, 'SIGTERM'); } catch { /* confirmation below remains authoritative */ }
-      try {
-        process.kill(fallbackPid, 0);
-        writeFileSync(path, JSON.stringify({
+      const signalTarget = process.platform !== 'win32' ? -fallbackPid : fallbackPid;
+      try { process.kill(signalTarget, 'SIGTERM'); } catch { /* confirmation below remains authoritative */ }
+      if (processIsAlive(fallbackPid)) {
+        const startToken = recordedToken;
+        this.writeFallbackRecord(unit, {
+          ...record,
           pid: fallbackPid,
           state: 'deactivating',
-          ...(recordedTicks ? { startTimeTicks: recordedTicks } : {}),
-        }), 'utf-8');
+          ...(startToken ? {
+            startTimeTicks: startToken.value,
+            startTokenKind: startToken.kind,
+          } : {}),
+        });
         return;
-      } catch { /* process already stopped */ }
+      }
     }
-    writeFileSync(path, JSON.stringify({ state: SYSTEMD_STATE.INACTIVE }), 'utf-8');
+    this.writeFallbackRecord(unit, {
+      ...record,
+      state: 'inactive',
+      completedAt: record.completedAt ?? new Date().toISOString(),
+    });
   }
 
-  async journalTail(unit: string, lines: number, follow = false): Promise<string> {
-    if (follow) return `Follow mode is available via journalctl --user -u ${unit} -f`;
+  async journalTail(unit: string, lines: number, _follow = false): Promise<string> {
+    const portableLogPath = supervisionPaths(this.baseDir, unit).log;
+    const logPath = existsSync(portableLogPath) ? portableLogPath : this.fallbackLogPath(unit);
+    // A systemd-less Linux host can still have a journalctl executable. The
+    // fallback record/log, when present, is therefore stronger routing evidence
+    // than command availability and must be read before consulting the journal.
+    if (existsSync(logPath)) {
+      return this.readFileLogSnapshot(logPath, lines).output;
+    }
     try {
       const { stdout } = await execFileAsync('journalctl', ['--user', '-u', unit, '-n', String(lines), '--no-pager']);
       return stdout;
     } catch {
-      return '';
+      return this.readFileLogSnapshot(logPath, lines).output;
     }
   }
 
-  private fallbackState(unit: string): SystemdState | string {
-    const path = this.fallbackPath(unit);
-    if (!existsSync(path)) return SYSTEMD_STATE.INACTIVE;
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: number; state?: string };
-      if (parsed.state === SYSTEMD_STATE.INACTIVE || parsed.state === SYSTEMD_STATE.FAILED) return parsed.state;
-      if (!parsed.pid) return SYSTEMD_STATE.INACTIVE;
-      try {
-        process.kill(parsed.pid, 0);
-        return parsed.state === 'deactivating' ? 'deactivating' : SYSTEMD_STATE.ACTIVE;
-      } catch {
-        rmSync(path, { force: true });
-        return SYSTEMD_STATE.INACTIVE;
+  async tailSnapshot(unit: string, lines: number): Promise<SupervisorTailSnapshot> {
+    const source = await this.logSource(unit);
+    switch (source.kind) {
+      case 'file': {
+        // Derive both values from this one Buffer. A later stat would reopen the
+        // blind interval between the daemon's output snapshot and the follower.
+        const snapshot = this.readFileLogSnapshot(source.path, lines);
+        return {
+          output: snapshot.output,
+          source: { ...source, offset: snapshot.offset },
+        };
       }
-    } catch {
-      return SYSTEMD_STATE.FAILED;
+      case 'journal':
+        return { output: await this.journalTail(unit, lines, false), source };
+      case 'unavailable':
+        return { output: '', source };
+      default: {
+        const _exhaustive: never = source;
+        return _exhaustive;
+      }
     }
+  }
+
+  async logSource(unit: string): Promise<SupervisorLogSource> {
+    const portableLogPath = supervisionPaths(this.baseDir, unit).log;
+    if (hasSupervisionEvidence(this.baseDir, unit) || existsSync(portableLogPath)) {
+      return { kind: 'file', path: portableLogPath };
+    }
+    const fallbackLogPath = this.fallbackLogPath(unit);
+    if (existsSync(this.fallbackPath(unit)) || existsSync(fallbackLogPath)) {
+      return { kind: 'file', path: fallbackLogPath };
+    }
+    return { kind: 'journal', unit };
+  }
+
+  private fallbackState(unit: string): UnitStatus {
+    if (hasSupervisionEvidence(this.baseDir, unit)) return this.portableState(unit);
+    return this.legacyFallbackState(unit);
+  }
+
+  private portableState(unit: string): UnitStatus {
+    return observePortableUnit(this.baseDir, unit, {
+      nowMs: this.now().getTime(),
+      startupGraceMs: this.startupGraceMs,
+    }).status;
+  }
+
+  private legacyFallbackState(unit: string): UnitStatus {
+    const path = this.fallbackPath(unit);
+    if (!existsSync(path)) return { kind: 'absent' };
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as FallbackUnitRecord;
+      if (parsed.state === FALLBACK_TERMINAL_STATE.INACTIVE
+        || parsed.state === FALLBACK_TERMINAL_STATE.FAILED) {
+        return {
+          kind: 'terminal-unknown',
+          reason: parsed.reason ?? `fallback process ended without an exit status (${parsed.state})`,
+        };
+      }
+      if (parsed.pid && processIsAlive(parsed.pid)) {
+        return parsed.state === 'deactivating' ? { kind: 'deactivating' } : { kind: 'active' };
+      }
+      this.writeFallbackRecord(unit, {
+        ...parsed,
+        state: 'inactive',
+        completedAt: parsed.completedAt ?? new Date().toISOString(),
+      });
+      return { kind: 'terminal-unknown', reason: 'fallback process ended without an exit status' };
+    } catch {
+      this.writeFallbackRecord(unit, {
+        state: 'failed',
+        reason: 'fallback state record is malformed',
+        completedAt: new Date().toISOString(),
+      });
+      return { kind: 'terminal-unknown', reason: 'fallback state record is malformed' };
+    }
+  }
+
+  private fallbackShellPath(): string {
+    if (this.configuredShellPath) return this.configuredShellPath;
+    if (existsSync('/bin/bash')) return '/bin/bash';
+    if (existsSync('/bin/sh')) return '/bin/sh';
+    return 'sh';
+  }
+
+  private shimArguments(controlDir: string): string[] {
+    const moduleDir = import.meta.dirname ?? '.';
+    const jsPath = resolve(moduleDir, 'supervise-shim.js');
+    const tsPath = resolve(moduleDir, 'supervise-shim.ts');
+    const shimPath = this.configuredShimPath
+      ?? (existsSync(jsPath) ? jsPath : tsPath);
+    if (!shimPath.endsWith('.ts')) return [shimPath, controlDir];
+    let tsxLoader: string;
+    try {
+      tsxLoader = import.meta.resolve('tsx');
+    } catch {
+      return [shimPath, controlDir];
+    }
+    return ['--import', tsxLoader, shimPath, controlDir];
+  }
+
+  private recordShimLaunchFailure(unit: string, command: string, error: unknown): void {
+    const reason = `shim launcher spawn failed: ${error instanceof Error ? error.message : String(error)}`;
+    const endedAt = this.now().toISOString();
+    const exit: SupervisionExitRecord = {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      exitCode: null,
+      normalized: 127,
+      endedAt,
+      reason,
+    };
+    atomicWriteJson(supervisionPaths(this.baseDir, unit).exit, exit);
+    this.writeFallbackRecord(unit, {
+      state: 'failed',
+      command,
+      reason,
+      completedAt: endedAt,
+    });
+  }
+
+  private async waitForPortableExit(unit: string, shimPid: number): Promise<void> {
+    const deadline = Date.now() + this.shutdownGraceMs + 2_500;
+    const exitPath = supervisionPaths(this.baseDir, unit).exit;
+    while (Date.now() < deadline) {
+      if (existsSync(exitPath) || !processIsAlive(shimPid)) return;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+  }
+
+  private async waitForPortableBinding(running: SupervisionRunningRecord): Promise<boolean> {
+    for (let attempt = 0; attempt < PORTABLE_BIND_ATTEMPTS; attempt += 1) {
+      const binding = runningRecordBindingStatus(running);
+      if (binding === 'bound') return true;
+      // A recorded token or command mismatch is definitive and keeps its veto.
+      // Only an unreadable process-table sample may be retried; it never grants
+      // signal authority and is never treated as evidence that the shim died.
+      if (binding === 'unbound') return false;
+      if (attempt + 1 < PORTABLE_BIND_ATTEMPTS) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, PORTABLE_BIND_INTERVAL_MS));
+      }
+    }
+    return false;
+  }
+
+  private writeFallbackRecord(unit: string, record: FallbackUnitRecord): void {
+    writeFileSync(this.fallbackPath(unit), JSON.stringify(record), 'utf-8');
   }
 
   private fallbackPath(unit: string): string {
     return join(this.fallbackDir, `${unit.replace(/[^a-zA-Z0-9_.-]/g, '_')}.json`);
   }
+
+  private fallbackLogPath(unit: string): string {
+    return join(this.fallbackDir, `${unit.replace(/[^a-zA-Z0-9_.-]/g, '_')}.log`);
+  }
+
+  private readFileLogSnapshot(path: string, lines: number): { output: string; offset: number } {
+    try {
+      const buffer = readFileSync(path);
+      const log = buffer.toString('utf-8');
+      const rows = log.split(/\r?\n/);
+      if (rows.at(-1) === '') rows.pop();
+      return {
+        output: rows.slice(-Math.max(0, lines)).join('\n') + (rows.length > 0 ? '\n' : ''),
+        offset: buffer.length,
+      };
+    } catch {
+      return { output: '', offset: 0 };
+    }
+  }
 }
 
-function normalizeSystemdState(output: string): string {
+function mergeSupervisorStatuses(portable: UnitStatus, systemd: UnitStatus): UnitStatus {
+  if (portable.kind === 'terminal') return portable;
+  switch (systemd.kind) {
+    case 'active':
+      // Without an exit sentinel, a live unit vetoes stale/missing portable
+      // metadata. Misclassifying it as terminal lets catch-up launch a second
+      // agent under a transient unit name that systemd will reject.
+      return { kind: 'active' };
+    case 'deactivating':
+      return { kind: 'deactivating' };
+    case 'unobservable':
+      return portable.kind === 'active' || portable.kind === 'deactivating'
+        ? portable
+        : systemd;
+    case 'terminal':
+    case 'terminal-unknown':
+    case 'absent':
+      return portable.kind === 'absent' ? systemd : portable;
+    default: {
+      const _exhaustive: never = systemd;
+      return _exhaustive;
+    }
+  }
+}
+
+function normalizeSystemdStatus(output: string): UnitStatus {
   const state = output.trim();
-  if (!state || state === 'unknown' || state === 'not-found') return SYSTEMD_STATE.INACTIVE;
-  return state;
+  switch (state) {
+    case 'active':
+    case 'activating':
+    case 'reloading':
+      return { kind: 'active' };
+    case 'deactivating':
+      return { kind: 'deactivating' };
+    case FALLBACK_TERMINAL_STATE.INACTIVE:
+    case FALLBACK_TERMINAL_STATE.FAILED:
+      return { kind: 'terminal-unknown', reason: `systemd reported ${state} without an exit status` };
+    case '':
+    case 'unknown':
+    case 'not-found':
+      return { kind: 'absent' };
+    default:
+      return { kind: 'unobservable', reason: `systemd reported unsupported state ${state}` };
+  }
 }
 
 function readBrief(task: TaskEntry): string {
@@ -1049,7 +1498,7 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
        '--supervise', ...userArgs,
        '--brief-admission-record', Buffer.from(JSON.stringify(admitted!.admission), 'utf8').toString('base64url'),
        ...(task.run_id ? ['--existing-run-id', task.run_id] : [])];
-  return shellJoin(['node', cliPath, ...args.filter(Boolean)]);
+  return shellJoin([process.execPath, cliPath, ...args.filter(Boolean)]);
 }
 
 function shellJoin(parts: string[]): string {

@@ -423,6 +423,8 @@ describe('rejected digest handoff across planner iterations', () => {
             observedDigest = String(readJson(join(opts.runDir, inputName)).digest);
             expect(prompt).toContain('# Pending scope-negotiation planning input');
             expect(prompt).toContain(observedDigest);
+            expect(prompt).toContain('# Engine-owned unresolved stage obligations');
+            expect(prompt).toContain('review_gate_1');
             const scopeLine = disposition === 'resolve' ? `    scope: [${requestedPath}]` : '    scope: []';
             writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
               'scope_negotiation:',
@@ -469,6 +471,7 @@ describe('rejected digest handoff across planner iterations', () => {
         writeRoles('planner', 'coder', 'qa'), created.runId, 'two iteration M3 fixture', true,
       );
       expect(final.status).toBe('complete');
+      expect(final.unresolvedStageObligations).toBeUndefined();
       expect(planCalls).toBe(2);
       expect(observedDigest).not.toBe('');
       const inputFiles = readdirSync(created.runDirPath).filter((file) => file.startsWith('scope_negotiation_input_'));

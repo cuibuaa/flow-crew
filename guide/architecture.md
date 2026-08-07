@@ -17,6 +17,26 @@ brief
 
 The supervisor is backend-driven. It uses the configured adapter and model, reads run state, stage output, and knowledge graph updates, then emits steering signals. It never edits code or runs shell commands directly.
 
+## Process supervision and platform behaviour
+
+Supervision does not depend on a service manager. A background run is owned by a small
+Node shim that records the run's exit status to disk atomically, so the outcome survives
+even the death of FlowCrew's own daemon. Where a systemd user session exists it is still
+used, for cgroup cleanup and tree-kill — but the recorded exit status, not systemd, is
+what the engine treats as the truth.
+
+| | Background tasks | Process identity |
+|---|---|---|
+| **Linux + systemd user session** | supervised units, restart on crash | exact — a recorded pid is bound to that process's `/proc` start-time token, so a recycled pid can never be mistaken for it |
+| **Linux without a systemd session** | portable shim, exit status recorded | exact — the same `/proc` binding |
+| **macOS** | portable shim, exit status recorded | strong, not exact — see below |
+
+Without `/proc`, macOS binds a pid by its start time to the second (`ps -o lstart=`) *and*
+by the command that was recorded when the run launched. That is weaker than Linux's exact
+token, so it is stated rather than hidden: confusing two processes requires a pid to be
+recycled within the same second *and* relaunched with a matching command line. When the
+binding cannot be read, the engine treats the process as unbound — never as dead.
+
 ## Inner Loop
 
 The inner loop handles stage-level convergence:

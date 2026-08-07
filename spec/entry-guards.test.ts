@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -12,7 +12,7 @@ import {
   verifyBriefAdmission,
   type BriefAdmissionRecord,
 } from '../src/brief-preflight.js';
-import { buildCommand, Orchestrator, type GitAdapter, type SystemdAdapter } from '../src/orchestrator.js';
+import { buildCommand, Orchestrator, type GitAdapter, type SupervisorBackend, type UnitStatus } from '../src/orchestrator.js';
 import { startRpcServer, type RpcRequest } from '../src/orchestrator-rpc.js';
 import { recordRequest } from '../src/inbox.js';
 import { cmdInbox } from '../src/cli-inbox.js';
@@ -828,9 +828,9 @@ describe('quick and operator entry behavior', () => {
   });
 });
 
-class CapturingSystemd implements SystemdAdapter {
+class CapturingSystemd implements SupervisorBackend {
   commands: string[] = [];
-  async isActive(): Promise<string> { return 'inactive'; }
+  async isActive(): Promise<UnitStatus> { return { kind: 'absent' }; }
   async runUnit(options: { command: string }): Promise<void> { this.commands.push(options.command); }
   async stopUnit(): Promise<void> {}
   async journalTail(): Promise<string> { return ''; }
@@ -847,6 +847,7 @@ interface CliFixture {
   home: string;
   fcHome: string;
   project: string;
+  bin: string;
 }
 
 function cliFixture(): CliFixture {
@@ -854,8 +855,17 @@ function cliFixture(): CliFixture {
   const home = join(root, 'home');
   const fcHome = join(root, 'fc');
   const project = join(root, 'project');
-  for (const directory of [home, fcHome, project]) mkdirSync(directory, { recursive: true });
-  return { root, home, fcHome, project };
+  const bin = join(root, 'bin');
+  for (const directory of [home, fcHome, project, bin]) mkdirSync(directory, { recursive: true });
+  // A stub agent CLI. These tests are about brief admission and registration,
+  // not adapter discovery, but the submit path now refuses to register a run
+  // that nothing could execute. Without this the whole file would pass or fail
+  // according to whether the developer happens to have codex installed — which
+  // is exactly the machine dependency the spec purity gate exists to prevent.
+  const stub = join(bin, 'codex');
+  writeFileSync(stub, '#!/bin/sh\nexit 0\n', 'utf-8');
+  chmodSync(stub, 0o755);
+  return { root, home, fcHome, project, bin };
 }
 
 function runQuickSync(isolated: CliFixture, quickArgs: string[]) {
@@ -873,6 +883,7 @@ function runCliSync(isolated: CliFixture, cliArgs: string[], input?: string) {
         HOME: isolated.home,
         FC_HOME: isolated.fcHome,
         PROJECT_DIR: isolated.project,
+        PATH: [isolated.bin, '/usr/local/bin', '/usr/bin', '/bin'].join(':'),
         NO_COLOR: '1',
       },
       encoding: 'utf-8',
@@ -900,6 +911,7 @@ async function runQuick(
         FC_HOME: isolated.fcHome,
         PROJECT_DIR: isolated.project,
         FLOWCREW_DAEMON_SOCKET: socketPath,
+        PATH: [isolated.bin, '/usr/local/bin', '/usr/bin', '/bin'].join(':'),
         NO_COLOR: '1',
       },
       stdio: ['pipe', 'pipe', 'pipe'],

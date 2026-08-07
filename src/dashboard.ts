@@ -40,6 +40,7 @@ import {
 import type { CampaignHistoryEntry } from "./campaigns.js";
 import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
 import type { StageConfig } from "./scheduler.js";
+import { loadProjectDefaults as loadCanonicalProjectDefaults } from './config.js';
 import type { AgentConfig, Adapter } from "./adapters/base.js";
 import { loadAdapterByName } from './adapters/loader.js';
 import { resolveAdapterChoice } from './adapters/availability.js';
@@ -198,7 +199,7 @@ async function resolveAdapter(configDir: string): Promise<Adapter> {
 }
 
 // --- Project defaults for agent config fallback ---
-function loadProjectDefaults(configDir: string): { model: string; reasoning_effort: string } {
+function loadAgentDefaults(configDir: string): { model: string; reasoning_effort: string } {
   try {
     const raw = readFileSync(join(configDir, 'defaults.yaml'), 'utf-8');
     const parsed = parseYaml(raw) as Record<string, unknown>;
@@ -212,7 +213,7 @@ function loadProjectDefaults(configDir: string): { model: string; reasoning_effo
 const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string(), adapter: z.string().optional(), handoff_visibility: z.enum(['full', 'minimal', 'none']).optional() });
 
 function parseAgentConfig(raw: unknown, configDir?: string): AgentConfig {
-  const defaults = loadProjectDefaults(configDir ?? join(process.cwd(), 'config'));
+  const defaults = loadAgentDefaults(configDir ?? join(process.cwd(), 'config'));
   const agent = DashboardAgentSchema.parse(raw);
   if (agent.model === 'default') agent.model = defaults.model;
   if (agent.reasoning_effort === 'default') agent.reasoning_effort = defaults.reasoning_effort;
@@ -338,23 +339,54 @@ function sendStageOutput(
   return reply.type("text/markdown").send(result.content);
 }
 
-function hasLiveDirectRunner(projectDir: string, runId: string): boolean {
+export interface DirectRunnerLivenessOptions {
+  procRoot?: string;
+  killProcess?: (pid: number, signal: 0) => void;
+}
+
+export function hasLiveDirectRunner(
+  projectDir: string,
+  runId: string,
+  options: DirectRunnerLivenessOptions = {},
+): boolean {
+  const procRoot = options.procRoot ?? '/proc';
+  const killProcess = options.killProcess ?? ((pid, signal) => process.kill(pid, signal));
   for (const prefix of ['direct-resume', 'direct-rerun']) {
     try {
       const pidPath = join(projectDir, '.fc', `${prefix}-${runId}.pid`);
       if (!existsSync(pidPath)) continue;
-      const pid = readFileSync(pidPath, 'utf-8').trim();
-      if (!/^\d+$/.test(pid)) continue;
-      const cmdlinePath = `/proc/${pid}/cmdline`;
-      const environPath = `/proc/${pid}/environ`;
-      if (!existsSync(cmdlinePath) || !existsSync(environPath)) continue;
-      const cmdline = readFileSync(cmdlinePath, 'utf-8');
-      const environ = readFileSync(environPath, 'utf-8');
-      if (cmdline.includes('.fc/direct-') && environ.split('\0').includes(`RUN_ID=${runId}`)) {
+      const rawPid = readFileSync(pidPath, 'utf-8').trim();
+      if (!/^\d+$/.test(rawPid)) continue;
+      const pid = Number(rawPid);
+      // PID 0 targets the caller's process group on POSIX and is never a
+      // process identity. Reject it before the signal-0 liveness probe.
+      if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+      try {
+        killProcess(pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EPERM') continue;
+      }
+
+      // Signal 0 is the portable liveness proof. On Linux, readable procfs
+      // metadata additionally rejects a recycled pid; missing or inaccessible
+      // procfs must not turn a proven-live process into a dead one on macOS or
+      // in a Linux container without procfs.
+      if (process.platform !== 'linux') return true;
+      const cmdlinePath = join(procRoot, rawPid, 'cmdline');
+      const environPath = join(procRoot, rawPid, 'environ');
+      if (!existsSync(cmdlinePath) || !existsSync(environPath)) return true;
+      try {
+        const cmdline = readFileSync(cmdlinePath, 'utf-8');
+        const environ = readFileSync(environPath, 'utf-8');
+        if (cmdline.includes('.fc/direct-') && environ.split('\0').includes(`RUN_ID=${runId}`)) {
+          return true;
+        }
+      } catch {
         return true;
       }
     } catch { /* non-critical */
-      // Stale PID files or inaccessible /proc entries are treated as not alive.
+      // A malformed marker is not liveness evidence; inaccessible procfs is
+      // handled above only after signal 0 has established that the pid exists.
     }
   }
   return false;
@@ -756,26 +788,15 @@ function normalizeCampaignTriggers(value: unknown): StoreState['campaignTriggers
   return triggers;
 }
 
-let _cachedExecutionDefaults: { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } | null = null;
-let _executionDefaultsMtime = 0;
-
-function readExecutionDefaults(configDir?: string): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
-  const defaultsPath = join(configDir ?? join(process.cwd(), 'config'), 'defaults.yaml');
-  try {
-    const mtime = statSync(defaultsPath).mtimeMs;
-    if (_cachedExecutionDefaults && mtime === _executionDefaultsMtime) return _cachedExecutionDefaults;
-    const defaults = parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>;
-    _executionDefaultsMtime = mtime;
-    _cachedExecutionDefaults = {
-      timeoutMs: typeof defaults.default_timeout_ms === 'number' ? defaults.default_timeout_ms : 300000,
-      maxIterations: typeof defaults.default_max_iterations === 'number' ? defaults.default_max_iterations : 3,
-      gateRetryLoops: typeof defaults.default_gate_retry_loops === 'number' ? defaults.default_gate_retry_loops : 1,
-      stageTechnicalRetries: typeof defaults.default_stage_technical_retries === 'number' ? defaults.default_stage_technical_retries : 1,
-    };
-    return _cachedExecutionDefaults;
-  } catch { /* non-critical */
-    return _cachedExecutionDefaults ?? { timeoutMs: 300000, maxIterations: 3, gateRetryLoops: 1, stageTechnicalRetries: 1 };
-  }
+export function readExecutionDefaults(configDir?: string): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
+  const projectDir = dirname(configDir ?? join(process.cwd(), 'config'));
+  const defaults = loadCanonicalProjectDefaults(projectDir);
+  return {
+    timeoutMs: defaults.timeout_ms,
+    maxIterations: defaults.max_iterations,
+    gateRetryLoops: defaults.gate_retry_loops,
+    stageTechnicalRetries: defaults.stage_technical_retries,
+  };
 }
 
 
@@ -2661,7 +2682,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
     const task: TaskCreateInput = {
       kind: 'quick',
-      name: (body.name ?? brief.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80)) || 'Quick task',
+      name: (body.name ?? extractTaskTitle(brief)) || 'Quick task',
       brief_text: brief,
       brief_admission: admission.admission,
       projectDir: targetProjectDir,

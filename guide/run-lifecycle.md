@@ -69,4 +69,16 @@ then applies Reality-Gate before committing successful statuses. A hard
 Reality-Gate failure replaces the requested success with
 `reality_gate_failed`.
 
+## When the supervisor is hard-killed
+
+A background run is owned by a supervising shim that records the run's exit status to disk
+atomically. `SIGKILL` gives it no chance to write that record, and the agent it was
+supervising may survive, reparented, still holding shell access to the project.
+
+The engine does not guess what happened. The run ends in a terminal state marked
+`outcome unknown` rather than `failed`, `flowcrew task cancel` refuses to report success for
+it, and the operator may need to find and kill the stray process. This is the one gap the
+exit-status protocol cannot close, and it is deliberately loud rather than silently rounded
+to a result the engine cannot support.
+
 See [Brief contract](brief-contract.md) for the frontmatter and file contracts.

@@ -10,6 +10,7 @@ import {
   isPausedRunStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
+  isTerminalRunStatus,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
@@ -22,12 +23,14 @@ import { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } from
 import {
   ADAPTER_CLI,
   ADAPTER_INSTALL_HINT,
+  findExecutableOnPath,
   installedAdapters,
   RECOMMENDED,
   resolveAdapterChoice,
   type AdapterName,
   type AdapterResolution,
 } from './adapters/availability.js';
+import { detectSupervisorBackend } from './cli-doctor.js';
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
@@ -407,18 +410,6 @@ function addDoctorSkillCheck(
     });
 }
 
-function commandPath(commandName: string): string | undefined {
-  try {
-    const path = execFileSync('which', [commandName], {
-      encoding: 'utf-8',
-      timeout: 2000,
-    }).trim();
-    return path || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
   try {
     execFileSync(commandName, commandArgs, { stdio: 'ignore', timeout: 5000 });
@@ -475,7 +466,7 @@ async function cmdDoctor() {
   const packageRoot = resolve(import.meta.dirname ?? '.', '..');
   const skillPackageRoot = resolve(process.env.FLOWCREW_DOCTOR_SKILL_ROOT || packageRoot);
 
-  const flowcrewPath = commandPath('flowcrew');
+  const flowcrewPath = findExecutableOnPath('flowcrew');
   const expectedCliPath = join(packageRoot, 'dist', 'cli.js');
   let resolvedFlowcrewPath: string | undefined;
   let resolvedExpectedCliPath: string | undefined;
@@ -509,6 +500,13 @@ async function cmdDoctor() {
     name: 'Node.js',
     status: nodeOk ? 'ok' : 'fail',
     message: nodeOk ? `${nodeVersion}` : `${nodeVersion} - Node.js 22.5+ required. Install from https://nodejs.org/`,
+  });
+
+  const supervision = detectSupervisorBackend();
+  checks.push({
+    name: 'Process supervision',
+    status: 'ok',
+    message: supervision.message,
   });
 
   // Adapter CLIs
@@ -866,8 +864,8 @@ async function cmdQuick() {
     console.error('Options:');
     console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
-    console.error('  --max-iterations <n>    Max plan-execute-review cycles (default: 5)');
-    console.error('  --timeout <ms>          Per-stage timeout in ms (default: 300000)');
+    console.error('  --max-iterations <n>    Override config/defaults.yaml for this run');
+    console.error('  --timeout <ms>          Override config/defaults.yaml for this run');
     console.error('  --supervise             Enable supervisor brain (default: ON)');
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
     console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug(basename(projectDir)))');
@@ -966,10 +964,25 @@ async function cmdQuick() {
       }
       adapter = candidate;
     }
+    // A background submit hands the run to the daemon, which resolves the
+    // adapter in a child process minutes or hours later. Validate availability
+    // HERE as well: registering a task whose adapter CLI is not installed
+    // prints a Task id and then fails out of sight, which is the worst place
+    // for someone to discover they never finished setting up. The child still
+    // performs the authoritative resolution; this only fails fast.
+    const backgroundResolution = resolveRuntimeAdapter({
+      explicit: adapter || undefined,
+      configured: loadProjectDefaults(projectDir).adapter,
+    });
+    if (!backgroundResolution.ok) {
+      console.error(`❌ ${backgroundResolution.hint}`);
+      process.exitCode = 1;
+      return;
+    }
     try {
       await registerBackgroundTask({
         kind: 'quick',
-        name: task.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || 'Quick task',
+        name: extractTaskTitle(task) || 'Quick task',
         brief_text: task,
         brief_admission: briefAdmission,
         projectDir,
@@ -1038,12 +1051,13 @@ async function cmdQuick() {
   console.log(`Task: ${task.slice(0, 100)}${task.length > 100 ? '...' : ''}`);
   console.log(`Project: ${projectDir}`);
   console.log(`Adapter: ${adapter}`);
-  console.log(`Max iterations: ${config.defaults.max_iterations ?? 5}`);
-  console.log(`Stage timeout: ${config.defaults.timeout_ms ?? 300000}ms`);
+  const projectDefaults = loadProjectDefaults(projectDir);
+  console.log(`Max iterations: ${config.defaults.max_iterations ?? projectDefaults.max_iterations}`);
+  console.log(`Stage timeout: ${config.defaults.timeout_ms ?? projectDefaults.timeout_ms}ms`);
   console.log(`Supervisor: ${supervise ? 'enabled' : 'disabled'}`);
   // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(projectDir)).
   // --no-campaign forces undefined (run stays untagged).
-  const campaignFromDefaults = loadProjectDefaults(projectDir).campaign;
+  const campaignFromDefaults = projectDefaults.campaign;
   const campaignBaseSlug = (projectDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -1169,13 +1183,116 @@ function printResearchProgress(runDir: string): void {
   }
 }
 
-function cmdStatus() {
+interface StatusSelection {
+  all: boolean;
+  projectDir?: string;
+}
 
+interface StatusRun {
+  id: string;
+  directory: string;
+  state: {
+    projectDir?: string;
+    taskDescription?: string;
+    status?: string;
+    currentIteration?: number;
+    maxIterations?: number;
+    stages?: Record<string, { status?: string; duration_ms?: number }>;
+  };
+}
+
+function printStatusUsage(): void {
+  console.log('Usage: flowcrew status [--all | --project <path>]');
+  console.log('');
+  console.log('Shows the latest run for the current project by default.');
+  console.log('  --all              Show the latest run across all projects');
+  console.log('  --project <path>   Show the latest run for another project');
+}
+
+function parseStatusSelection(): StatusSelection | undefined {
+  let all = false;
+  let project: string | undefined;
+  for (let index = 1; index < args.length; index++) {
+    const value = args[index];
+    if (value === '--help' || value === '-h') {
+      printStatusUsage();
+      return undefined;
+    }
+    if (value === '--all') {
+      all = true;
+      continue;
+    }
+    if (value === '--project') {
+      const selected = args[index + 1];
+      if (!selected || selected.startsWith('--')) {
+        console.error('--project requires a path.');
+        printStatusUsage();
+        process.exitCode = 1;
+        return undefined;
+      }
+      project = selected;
+      index++;
+      continue;
+    }
+    if (value.startsWith('--project=')) {
+      project = value.slice('--project='.length);
+      if (!project) {
+        console.error('--project requires a path.');
+        printStatusUsage();
+        process.exitCode = 1;
+        return undefined;
+      }
+      continue;
+    }
+    console.error(`Unknown status option: ${value}`);
+    printStatusUsage();
+    process.exitCode = 1;
+    return undefined;
+  }
+  if (all && project !== undefined) {
+    console.error('--all and --project cannot be used together.');
+    printStatusUsage();
+    process.exitCode = 1;
+    return undefined;
+  }
+  return all
+    ? { all: true }
+    : { all: false, projectDir: canonicalProjectPath(project ?? detectProjectDir()) };
+}
+
+function canonicalProjectPath(path: string): string {
+  const absolute = resolve(path);
+  try { return realpathSync.native(absolute); } catch { return absolute; }
+}
+
+function latestStatusRun(root: string, runIds: string[], selection: StatusSelection): StatusRun | undefined {
+  for (const id of runIds) {
+    const directory = join(root, id);
+    try {
+      const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StatusRun['state'];
+      const matchesProject = typeof state.projectDir === 'string'
+        && canonicalProjectPath(state.projectDir) === selection.projectDir;
+      if (selection.all || matchesProject) return { id, directory, state };
+    } catch { /* malformed or concurrently removed run: try the next one */ }
+  }
+  return undefined;
+}
+
+function cmdStatus() {
+  const selection = parseStatusSelection();
+  if (!selection) return;
   const root = runsRoot();
-  if (!existsSync(root)) { console.log('No runs found. Run `flowcrew quick "task"` first.'); return; }
+  if (!existsSync(root)) {
+    console.log(selection.all ? 'No runs found.' : `No runs found for project: ${selection.projectDir}`);
+    return;
+  }
   const runs = runIdsByRecency(root);
-  if (runs.length === 0) { console.log('No runs found.'); return; }
-  const runDir = join(root, runs[0]);
+  const selected = latestStatusRun(root, runs, selection);
+  if (!selected) {
+    console.log(selection.all ? 'No runs found.' : `No runs found for project: ${selection.projectDir}`);
+    return;
+  }
+  const { id, directory: runDir, state } = selected;
 
   // Show summary.md if generated (best overview of what was done)
   const summaryPath = join(runDir, 'summary.md');
@@ -1183,16 +1300,19 @@ function cmdStatus() {
 
   // Show progress.md if supervisor generated one
   const progressPath = join(runDir, 'progress.md');
-  if (existsSync(progressPath)) { console.log(readFileSync(progressPath, 'utf-8')); printResearchProgress(runDir); return; }
+  if (!isTerminalRunStatus(state.status ?? '') && existsSync(progressPath)) {
+    console.log(readFileSync(progressPath, 'utf-8'));
+    printResearchProgress(runDir);
+    return;
+  }
 
   // Fallback: show run.json summary
-  const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8'));
-  console.log(`# Run: ${runs[0]}\n`);
+  console.log(`# Run: ${id}\n`);
   console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
   console.log(`Status: ${state.status}`);
   console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}\n`);
   console.log('## Stages');
-  for (const [id, ss] of Object.entries(state.stages) as [string, any][]) {
+  for (const [id, ss] of Object.entries(state.stages ?? {})) {
     const dur = ss.duration_ms ? ` (${(ss.duration_ms / 1000).toFixed(0)}s)` : '';
     const icon = ss.status === STAGE_STATUS.COMPLETE ? '✓' : ss.status === STAGE_STATUS.RUNNING ? '⟳' : ss.status === STAGE_STATUS.FAILED ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
@@ -1655,7 +1775,7 @@ Commands:
   init      Initialize FlowCrew in the current project
   adapter   Show or set the project adapter choice
   quick     Inspect, then run or enqueue an authored brief (no server needed)
-  status    Show progress of the latest run
+  status    Show the latest run for this project (--all/--project for others)
   list      Show all recent runs with status and duration
   guide     Send guidance to the running supervisor
   clean     Delete old runs (keeps 5 most recent by default)
@@ -1679,6 +1799,8 @@ Examples:
   flowcrew quick "refactor auth module"
   flowcrew quick "task" --supervise --max-iterations 3
   flowcrew status
+  flowcrew status --all
+  flowcrew status --project ../another-project
   flowcrew list --limit 20
   flowcrew daemon status
   flowcrew daemon restart

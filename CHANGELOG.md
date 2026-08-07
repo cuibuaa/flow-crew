@@ -2,6 +2,84 @@
 
 ## [Unreleased]
 
+### Changed — supervision no longer requires a service manager
+
+- **A background run is owned by a portable shim, not by systemd.** Off a systemd user
+  session — macOS, a container, a WSL2 install without systemd enabled — `flowcrew task
+  cancel` could never confirm: `NodeSystemd.isActive` threw `ENOENT`, the catch discarded a
+  *terminal* process-fallback record and returned the string `unverified:systemctl-error`,
+  which was in neither `STOPPED_UNIT_STATES` nor the active set. The task pinned in
+  `cancelling`, the daemon retried the same failing cancellation every 30s with no timeout
+  and no route out, and cancelling an already-finished task wiped its terminal record. A
+  small Node shim now owns each run and writes its exit status to disk atomically, so the
+  outcome survives even the death of FlowCrew's own daemon — the one capability nothing in
+  the Node supervisor ecosystem provides, because every one of them learns of an exit from
+  an in-memory `child.on('exit')` in a live parent. Where a systemd user session exists it
+  is still used for cgroup cleanup and tree-kill, but the recorded exit status, not systemd,
+  is what the engine treats as truth.
+- **Unit state is a closed six-member union.** The same string was previously read with
+  opposite fail directions in two files, and a third, unimported copy of
+  `STOPPED_UNIT_STATES` lived in `cancellation-client.ts` behind a `typeof x === 'string'`
+  guard: once the state became an object that guard would have rejected every valid daemon
+  response and silently re-run the coordinator inside the CLI — while still printing
+  `Task #N cancelled` and exiting 0. `unitIsStopped` is now an exhaustive switch with a
+  `never` check, so a seventh variant is a compile error rather than a silently pinned task.
+- **`terminal-unknown` is a first-class outcome.** A `SIGKILL`ed shim records no exit status
+  and may leave its agent alive, reparented. The engine does not round that to `failed`:
+  the run ends marked unrecoverable and `flowcrew task cancel` refuses to report success.
+- **Process identity is portable.** Linux keeps its exact `/proc` start-time token; Darwin
+  binds by `ps -o lstart=` plus the recorded argv. `ps` is resolved absolutely rather than
+  through `PATH` — a caller that strips service-manager tools from `PATH` must not thereby
+  lose the ability to identify its own processes. On Linux this was invisible because procfs
+  answers first; on macOS, where there is no procfs fallback, it broke everything downstream.
+
+### Added — CI that can actually catch this class of defect
+
+- **Three supervision axes, not one.** `quality` (systemd present), a new
+  `no-service-manager` job that symlink-farms a `PATH` without `systemctl`/`systemd-run`/
+  `journalctl`, and the existing blocking `macos` job (no procfs at all). Varying one axis
+  silently pins the other at its Linux value, which is why every earlier "macOS is covered"
+  claim was untestable. `macos-latest` is pinned to `macos-15`: GitHub's docs page and the
+  runner-images README currently disagree about which release it points at.
+- **Distribution jobs.** `npm pack` + global install exercising the documented first steps
+  (the only way to catch a missing `files` entry, which no in-repo test can see), a cold
+  `git clone` over HTTPS with a cold npm cache, and the four adapter-installation states.
+  They run on `main` and `tests` pushes.
+- **Verified on real hardware.** Darwin 24.6.0 arm64, GitHub run 31162993188, all ten jobs
+  green. Every prior macOS claim in this repository was inferred from Linux.
+
+### Fixed
+
+- **A passing gate still dispatched a fix stage.** `gate_phase0` passing correctly skipped
+  its fix stage; `gate_phase2` passing dispatched one anyway, which then re-ran the gate —
+  about 24 minutes per occurrence.
+- **`flowcrew status` and `/fc-status` are project-scoped.** They reported the most recent
+  run on the whole machine, possibly belonging to an unrelated project.
+- **The stage timeout had two sources of truth.** `config/defaults.yaml` said 60 minutes and
+  the ship skill's confirmation message said 5, so a run driven by the skill timed out on
+  the first attempt of every substantial stage. The skill no longer carries a number.
+- **Replanning could drop an undone stage while the run still reported `complete`.**
+- **A task title took the YAML frontmatter delimiter as its name**, so any brief with
+  frontmatter was listed as `---`.
+- **Two timing-sensitive specs made "CI is green" unreliable** as a judgement.
+- **`flowcrew quick --background` registered a task without checking that an adapter CLI
+  existed** to execute it: the submit path returned before the availability check.
+
+### Changed — documentation states only what has been verified
+
+- Three false platform claims removed; two known issues that this release fixes removed.
+  Known issues is now defects only — a deliberate limitation is stated where the feature is
+  described, so fixing a bug cannot silently rewrite a design decision.
+- The README leads with what the tool does rather than with prerequisites; the value
+  proposition moved from 31% depth to the first screen, and about 670 words of restatement
+  and design rationale moved to `guide/` or were cut. A `spec/readme-contract.test.ts`
+  pins the properties that cut relied on, including the passages that carry the project's
+  voice, so a future trim cannot quietly remove them.
+- Worked examples are labelled as illustrative shapes rather than transcripts: the one
+  brief in the repository that runs as written is `examples/hello-research.brief.md`.
+
+## [0.5.0] - 2026-08-06
+
 ### Added — absorbed from openworker (code-level comparison)
 
 - **Approval inbox / park-and-resume.** A run that reaches a consequential action no longer has to choose between doing it autonomously and escalating (killing the run). A stage writes `<run_dir>/approval_request.json`; the engine records it in an append-only `<run_dir>/approvals.jsonl` and either auto-approves it via a standing rule or PARKS the run — new non-terminal `parked` status, process exits, project lock and daemon queue slot freed. `flowcrew inbox list|show|approve|deny|rules|revoke` resolves it and resumes the SAME runId, DAG and iteration. Idempotent on `(runId, requestId)`; **first resolution wins**, so two operators on two surfaces can never produce two decisions (append order is the arbiter — no lock, no read-modify-write). Standing rules ("always allow") are mintable ONLY for an `external`-risk action bound to an exact target; shell/write/untargeted actions ask every time.

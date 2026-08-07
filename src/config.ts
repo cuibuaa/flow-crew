@@ -177,14 +177,12 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
   const p = ensureProjectDefaultsFile(projectDir);
   const mtime = statSync(p).mtimeMs;
   if (_cache && mtime === _cacheMtime && p === _cachePath) return _cache;
-  _cacheMtime = mtime;
-  _cachePath = p;
 
   const raw = readRaw(projectDir);
   const template = sourceDefaultsRaw();
   const rawPaths = raw.paths as Partial<FlowCrewPaths> | undefined;
   const templatePaths = template.paths as Partial<FlowCrewPaths> | undefined;
-  _cache = {
+  const parsed: ProjectDefaults = {
     timeout_ms: numberValue(raw, template, 'default_timeout_ms'),
     max_iterations: numberValue(raw, template, 'default_max_iterations'),
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
@@ -198,7 +196,13 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
     paths: { ...DEFAULT_PATHS, ...templatePaths, ...rawPaths },
     campaign: typeof raw.campaign === 'string' && raw.campaign ? raw.campaign : undefined,
   };
-  return _cache;
+  // Commit the cache key only after the file has parsed and validated. If an
+  // edit is malformed, every read must keep reporting that error rather than
+  // treating a previous value as the cache entry for the broken mtime.
+  _cache = parsed;
+  _cacheMtime = mtime;
+  _cachePath = p;
+  return parsed;
 }
 
 /** Per-process measurement override; only literal 0/1 are accepted. */

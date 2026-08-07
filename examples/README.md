@@ -20,8 +20,11 @@ flowcrew rehearse examples/hello-research.brief.md
 
 Rehearsal uses the real scheduler with an in-process scripted adapter in
 temporary directories. It launches no agent process or model, consumes no
-tokens, and removes its temporary state when finished. The command should exit
-0 and its rehearsal report should include:
+tokens, and writes nothing into your project. It does leave one directory
+behind on purpose — the engine diagnostics log named at the end of the report,
+kept so a failed rehearsal can still be inspected afterwards. Those accumulate
+under the system temp directory; delete them when you no longer need them. The
+command should exit 0 and its rehearsal report should include:
 
 ```text
 ✅ Contract ready

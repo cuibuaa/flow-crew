@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # Lets the distribution jobs below be run on demand against any ref, without
+  # having to push to `tests` first.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -69,13 +72,71 @@ jobs:
               node ./node_modules/vitest/vitest.mjs run spec
             '
 
+  # Supervision is a two-axis matrix: whether a service manager is present, and
+  # whether procfs is. Varying only one axis silently pins the other at its
+  # Linux value, so each axis needs its own job.
+  #
+  #   systemctl / procfs | job
+  #   ------------------ | ---------------------------------------------
+  #   present  / present | quality (control)
+  #   absent   / present | no-service-manager (below) + public-spec-isolation
+  #   absent   / absent  | macos (below) — the only axis that can prove a
+  #                        signal actually reached the agent off Linux
+  no-service-manager:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # Symlink-farm a PATH without the systemd tools rather than deleting
+      # /usr/bin/systemctl: reproducible, reversible, and it cannot leave the
+      # runner in a state that confuses a later step.
+      - name: Run the public spec suite with no systemd tooling on PATH
+        run: |
+          FARM="$RUNNER_TEMP/nosystemd-bin"
+          mkdir -p "$FARM"
+          # Resolve the toolchain BEFORE overriding PATH. setup-node installs
+          # into the hosted tool cache, not /usr/bin, so farming the system
+          # directories alone would leave the job without a node at all.
+          NODE_BIN=$(command -v node); NPM_BIN=$(command -v npm)
+          for d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*; do
+              b=$(basename "$f")
+              case "$b" in systemctl|systemd-run|journalctl) continue ;; esac
+              [ -e "$FARM/$b" ] || ln -s "$f" "$FARM/$b" 2>/dev/null || true
+            done
+          done
+          ln -sf "$NODE_BIN" "$FARM/node"
+          ln -sf "$NPM_BIN" "$FARM/npm"
+          export PATH="$FARM"
+          command -v node >/dev/null || { echo "node missing from the farmed PATH"; exit 1; }
+          command -v systemctl   && { echo "systemctl leaked into PATH"; exit 1; } || echo "systemctl: absent (expected)"
+          command -v systemd-run && { echo "systemd-run leaked into PATH"; exit 1; } || echo "systemd-run: absent (expected)"
+          command -v journalctl  && { echo "journalctl leaked into PATH"; exit 1; } || echo "journalctl: absent (expected)"
+          test -d /proc && echo "/proc: present (expected on this axis)"
+          node ./node_modules/vitest/vitest.mjs run spec
+
   # macOS is a supported platform, so it gets a blocking job. Without this the
   # port would rot the first time someone reaches for /proc or a GNU-only flag.
   # macOS runners have no Docker, so the network-isolated job is not replicated
   # here; that job doubles as the systemd-less Linux guard, since its container
   # has procfs but no systemctl, systemd-run or /run/systemd/system.
+  #
+  # Pinned rather than `macos-latest`: GitHub's docs page and the runner-images
+  # README currently disagree about which release `macos-latest` points at, and
+  # the rotation is live, so the OS could change between merges.
   macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -97,7 +158,468 @@ jobs:
       - run: npm run build
       - run: npm run build:ui
 
+      # Off Linux there is no /proc, so process identity comes from `ps`. BSD
+      # and GNU `ps` disagree about flags and output, and that disagreement is
+      # invisible from a Linux developer machine. Print what this platform
+      # actually returns so a failure downstream is diagnosable from the log
+      # instead of requiring a Mac to reproduce. Never fails the job.
+      - name: Probe the POSIX start-time source this platform provides
+        continue-on-error: true
+        run: |
+          echo "--- ps -ww -o lstart= ---"
+          ps -ww -o lstart= -p $$ ; echo "exit=$?"
+          echo "--- ps -o lstart= (no -ww) ---"
+          ps -o lstart= -p $$ ; echo "exit=$?"
+          echo "--- TZ/LC_ALL forced, as production does ---"
+          TZ=UTC LC_ALL=C ps -ww -o lstart= -p $$ ; echo "exit=$?"
+          echo "--- exactly what production calls ---"
+          node -e "
+            const { execFileSync } = require('node:child_process');
+            for (const args of [['-ww','-o','lstart=','-p'],['-o','lstart=','-p'],['-ww','-o','lstart','-p']]) {
+              try {
+                const out = execFileSync('ps', [...args, String(process.pid)], {
+                  encoding: 'utf-8', timeout: 2000,
+                  stdio: ['ignore','pipe','pipe'],
+                  env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+                });
+                console.log(JSON.stringify(args), '->', JSON.stringify(out));
+              } catch (e) {
+                console.log(JSON.stringify(args), '-> THREW', e.message, '| stderr:', String(e.stderr ?? ''));
+              }
+            }
+          "
+
+      - name: Probe detached-process identity and signalling
+        continue-on-error: true
+        run: |
+          node --input-type=module -e '
+            import { execFileSync, spawn } from "node:child_process";
+            import { once } from "node:events";
+            import { setTimeout as delay } from "node:timers/promises";
+            import {
+              processArgumentsFromPs,
+              processCommandMatches,
+              processStartToken,
+            } from "./dist/run-lock.js";
+
+            const apostrophe = String.fromCharCode(39);
+            const escapedApostrophe = apostrophe + "\\" + apostrophe + apostrophe;
+            const shellJoin = (parts) => parts
+              .map((part) => apostrophe + part.split(apostrophe).join(escapedApostrophe) + apostrophe)
+              .join(" ");
+            const errorDetails = (error) => ({
+              name: error?.name,
+              message: error?.message,
+              code: error?.code,
+              errno: error?.errno,
+              syscall: error?.syscall,
+            });
+            const capture = (operation) => {
+              try { return { ok: true, value: operation() }; }
+              catch (error) { return { ok: false, error: errorDetails(error) }; }
+            };
+            const rawPs = (pid, format) => capture(() => execFileSync(
+              "ps",
+              ["-ww", "-o", format, "-p", String(pid)],
+              {
+                encoding: "utf-8",
+                timeout: 2000,
+                stdio: ["ignore", "pipe", "pipe"],
+                env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
+              },
+            ));
+            const signalProbe = (target) => capture(() => {
+              process.kill(target, 0);
+              return "signal-0 accepted";
+            });
+
+            const marker = "flowcrew-darwin-probe-" + process.pid
+              + "-apostrophe-" + apostrophe + "-value";
+            const childArgs = ["-e", "setInterval(() => {}, 1000)", marker];
+            const recordedCommand = shellJoin([process.execPath, ...childArgs]);
+            const child = spawn(process.execPath, childArgs, {
+              detached: true,
+              stdio: "ignore",
+            });
+            const started = process.hrtime.bigint();
+            const pid = child.pid;
+            child.unref();
+            child.once("error", (error) => {
+              console.log("DETACHED_PROBE_CHILD_ERROR " + JSON.stringify(errorDetails(error)));
+            });
+            console.log("DETACHED_PROBE_BEGIN");
+            console.log("DETACHED_PROBE_SETUP " + JSON.stringify({
+              pid,
+              expectedPgid: pid,
+              childArgs,
+              recordedCommand,
+            }));
+
+            const elapsedMs = () => Number(process.hrtime.bigint() - started) / 1e6;
+            try {
+              if (!Number.isInteger(pid) || pid <= 0) throw new Error("spawn returned no positive pid");
+              for (const targetMs of [0, 10, 25, 50, 100]) {
+                const remainingMs = targetMs - elapsedMs();
+                if (remainingMs > 0) await delay(remainingMs);
+                const sample = {
+                  targetMs,
+                  elapsedMs: elapsedMs(),
+                  startToken: processStartToken(pid),
+                };
+                console.log("DETACHED_PROBE_SAMPLE " + JSON.stringify(sample));
+              }
+              console.log("DETACHED_PROBE_IDENTITY " + JSON.stringify({
+                elapsedMs: elapsedMs(),
+                recordedCommand,
+                rawArgsPs: rawPs(pid, "args="),
+                parsedArgs: processArgumentsFromPs(pid),
+                commandMatches: processCommandMatches(pid, recordedCommand),
+              }));
+              console.log("DETACHED_PROBE_SIGNALS " + JSON.stringify({
+                elapsedMs: elapsedMs(),
+                pid,
+                expectedPgid: pid,
+                rawPgidPs: rawPs(pid, "pgid="),
+                groupSignalZero: signalProbe(-pid),
+                pidSignalZero: signalProbe(pid),
+              }));
+            } catch (error) {
+              console.log("DETACHED_PROBE_FATAL " + JSON.stringify(errorDetails(error)));
+            } finally {
+              if (Number.isInteger(pid) && pid > 0) {
+                const cleanup = { termGroup: capture(() => process.kill(-pid, "SIGTERM")) };
+                await Promise.race([once(child, "close").catch(() => undefined), delay(250)]);
+                if (signalProbe(-pid).ok) cleanup.killGroup = capture(() => process.kill(-pid, "SIGKILL"));
+                if (signalProbe(pid).ok) cleanup.killPid = capture(() => process.kill(pid, "SIGKILL"));
+                console.log("DETACHED_PROBE_CLEANUP " + JSON.stringify(cleanup));
+              }
+              console.log("DETACHED_PROBE_END");
+            }
+          '
+
+      - name: Probe the real portable supervision lifecycle
+        continue-on-error: true
+        run: |
+          node --input-type=module -e '
+            import { execFileSync } from "node:child_process";
+            import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+            import { tmpdir } from "node:os";
+            import { join } from "node:path";
+            import { setTimeout as delay } from "node:timers/promises";
+            import { NodeSystemd } from "./dist/orchestrator.js";
+            import {
+              processArgumentsFromPs,
+              processCommandMatches,
+              processIsAlive,
+              processStartToken,
+              processStartTokensMatch,
+            } from "./dist/run-lock.js";
+            import {
+              readSupervisionExit,
+              readSupervisionRunning,
+              runningRecordBindsShim,
+              supervisionPaths,
+            } from "./dist/supervision.js";
+
+            const capture = (operation) => {
+              try { return { ok: true, value: operation() }; }
+              catch (error) {
+                return { ok: false, error: {
+                  name: error?.name,
+                  message: error?.message,
+                  code: error?.code,
+                  errno: error?.errno,
+                  syscall: error?.syscall,
+                } };
+              }
+            };
+            const rawArgs = (pid) => capture(() => execFileSync(
+              "ps",
+              ["-ww", "-o", "args=", "-p", String(pid)],
+              {
+                encoding: "utf-8",
+                timeout: 2000,
+                stdio: ["ignore", "pipe", "pipe"],
+                env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
+              },
+            ));
+            const apostrophe = String.fromCharCode(39);
+            const escapedApostrophe = apostrophe + "\\" + apostrophe + apostrophe;
+            const shellJoin = (parts) => parts
+              .map((part) => apostrophe + part.split(apostrophe).join(escapedApostrophe) + apostrophe)
+              .join(" ");
+            const waitUntil = async (predicate, timeoutMs = 5000) => {
+              const deadline = Date.now() + timeoutMs;
+              while (Date.now() < deadline) {
+                if (predicate()) return true;
+                await delay(25);
+              }
+              return predicate();
+            };
+
+            const root = mkdtempSync(join(tmpdir(), "flowcrew-real-shim-probe-"));
+            const unit = "flowcrew-real-shim-probe.service";
+            const backend = new NodeSystemd(root, {
+              shellPath: "/bin/sh",
+              shimPath: join(process.cwd(), "src", "supervise-shim.ts"),
+              shutdownGraceMs: 100,
+            });
+            const paths = supervisionPaths(root, unit);
+            let running;
+            console.log("REAL_SHIM_PROBE_BEGIN");
+            try {
+              await backend.runUnit({
+                unit,
+                workingDirectory: root,
+                command: shellJoin([
+                  process.execPath,
+                  "-e",
+                  "setInterval(() => {}, 1000)",
+                  "flowcrew-real-shim-probe",
+                ]),
+              });
+              const initialized = await waitUntil(() => existsSync(paths.running));
+              running = readSupervisionRunning(paths.running);
+              console.log("REAL_SHIM_PROBE_RECORD " + JSON.stringify({
+                initialized,
+                rawRunning: capture(() => readFileSync(paths.running, "utf-8")),
+                running,
+              }));
+              if (running) {
+                const currentShimToken = processStartToken(running.shimPid);
+                console.log("REAL_SHIM_PROBE_IDENTITY " + JSON.stringify({
+                  shimPid: running.shimPid,
+                  recordedShimToken: running.shimToken,
+                  currentShimToken,
+                  tokenMatches: processStartTokensMatch(running.shimToken, currentShimToken),
+                  recordedShimCommand: running.shimCommand,
+                  rawShimArgsPs: rawArgs(running.shimPid),
+                  parsedShimArgs: processArgumentsFromPs(running.shimPid),
+                  shimCommandMatches: processCommandMatches(running.shimPid, running.shimCommand),
+                  runningRecordBindsShim: runningRecordBindsShim(running),
+                  shimAlive: processIsAlive(running.shimPid),
+                  agentAlive: processIsAlive(running.agentPid),
+                }));
+              }
+              let stopResult;
+              try {
+                await backend.stopUnit(unit);
+                stopResult = { ok: true };
+              } catch (error) {
+                stopResult = { ok: false, error: {
+                  name: error?.name,
+                  message: error?.message,
+                  code: error?.code,
+                  errno: error?.errno,
+                  syscall: error?.syscall,
+                } };
+              }
+              await delay(250);
+              console.log("REAL_SHIM_PROBE_STOP " + JSON.stringify({
+                stopResult,
+                exit: readSupervisionExit(paths.exit),
+                status: await backend.isActive(unit),
+                shimAlive: running ? processIsAlive(running.shimPid) : undefined,
+                agentAlive: running ? processIsAlive(running.agentPid) : undefined,
+              }));
+            } finally {
+              if (running) {
+                capture(() => process.kill(running.shimPid, "SIGKILL"));
+                capture(() => process.kill(-running.agentPid, "SIGKILL"));
+              }
+              await delay(100);
+              rmSync(root, { recursive: true, force: true });
+              console.log("REAL_SHIM_PROBE_END");
+            }
+          '
+
       # No pipe and no `|| true`: a masked exit code here would make the job
       # green while macOS is broken, which is the failure this job exists to catch.
       - name: Run the public spec suite
         run: node ./node_modules/vitest/vitest.mjs run spec
+
+  # ---------------------------------------------------------------------------
+  # Distribution jobs. These answer a question the rest of CI structurally
+  # cannot: does a NEWCOMER, starting from nothing, end up with a working
+  # install? Every other job runs inside a repo that npm ci has already
+  # prepared, so it can never notice a missing entry in the `files` allowlist
+  # or a documented step that does not work off a fresh machine.
+  #
+  # They are slow, so they run on the `tests` branch (a throwaway mirror you
+  # force-push to) and on manual dispatch, not on every commit to main.
+  # ---------------------------------------------------------------------------
+
+  cold-install-tarball:
+    # Push-only, and only to a branch that exists in this repository:
+    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
+    # branch is not. Running on main as well as tests is deliberate — a missing
+    # entry in the `files` allowlist is release-blocking and invisible to every
+    # in-repo test, since those all run inside a tree npm ci already prepared.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # `npm pack` runs `prepare`, so the tarball is built from this commit and
+      # is byte-equivalent to what `npm publish` would upload. Installing THAT
+      # is the only way to exercise the `files` allowlist: a directory missing
+      # from it is invisible to every in-repo test.
+      - name: Pack and install globally, as a published release would be
+        run: |
+          set -euo pipefail
+          # Build explicitly and then pack with --ignore-scripts. `prepare`
+          # would otherwise run the vite build inside the command substitution,
+          # and its stdout interleaves with the tarball name npm prints, so
+          # $TGZ ends up holding a build log instead of a filename.
+          npm run build
+          npm run build:ui
+          TGZ=$(npm pack --silent --ignore-scripts | tail -n 1)
+          echo "packed: $TGZ"
+          test -f "$TGZ" || { echo "npm pack did not produce a readable tarball"; exit 1; }
+          npm i -g "./$TGZ"
+          which flowcrew
+          flowcrew --version || true
+
+      - name: The documented first steps must work off the global install
+        run: |
+          set -euo pipefail
+          ROOT=$(npm root -g)/flowcrew
+          echo "installed at: $ROOT"
+          # Each of these is a `files` entry the docs depend on. Assert them
+          # by name so a dropped entry fails here and not in a user's terminal.
+          for required in dist/cli.js config skills examples guide README.md; do
+            test -e "$ROOT/$required" || { echo "missing from the published package: $required"; exit 1; }
+          done
+          test -x "$ROOT/skills/install.sh" || { echo "skills/install.sh is not executable"; exit 1; }
+
+      - name: Zero-token rehearsal from the packaged examples
+        run: |
+          set -euo pipefail
+          ROOT=$(npm root -g)/flowcrew
+          cd "$(mktemp -d)"
+          git init -q .
+          git config user.email ci@example.com
+          git config user.name CI
+          flowcrew rehearse "$ROOT/examples/hello-research.brief.md"
+
+  cold-install-clone:
+    # Push-only, and only to a branch that exists in this repository:
+    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
+    # branch is not. Running on main as well as tests is deliberate — a missing
+    # entry in the `files` allowlist is release-blocking and invisible to every
+    # in-repo test, since those all run inside a tree npm ci already prepared.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Deliberately NOT actions/checkout: this job exists to walk README step 1
+      # exactly as written, over HTTPS, into an empty directory, with a cold npm
+      # cache. Cloning the ref under test rather than the default branch.
+      - name: Clone over HTTPS and follow README step 1
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          git clone --depth 1 --branch "$GITHUB_REF_NAME" "https://github.com/$GITHUB_REPOSITORY.git" checkout
+          cd checkout
+          npm install
+          test -f dist/cli.js      || { echo "npm install did not build dist/"; exit 1; }
+          test -f ui/dist/index.html || { echo "npm install did not build ui/dist/"; exit 1; }
+          npm link
+          which flowcrew
+          flowcrew doctor || echo "doctor reported attention items (non-fatal here; the install itself is what this job proves)"
+
+  adapter-matrix:
+    # Push-only, and only to a branch that exists in this repository:
+    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
+    # branch is not. Running on main as well as tests is deliberate — a missing
+    # entry in the `files` allowlist is release-blocking and invisible to every
+    # in-repo test, since those all run inside a tree npm ci already prepared.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        setup: [none, codex-only, claude-only, both]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # Stand-in CLIs rather than the real ones: adapter DETECTION only asks
+      # whether the name resolves on PATH, and the real CLIs would need
+      # credentials this job must never have.
+      - name: Report what this axis looks like, and prove the shims took effect
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/adapter-bin"
+          mkdir -p "$BIN"
+          case "${{ matrix.setup }}" in
+            codex-only)  printf '#!/bin/sh\nexit 0\n' > "$BIN/codex" ;;
+            claude-only) printf '#!/bin/sh\nexit 0\n' > "$BIN/claude" ;;
+            both)        printf '#!/bin/sh\nexit 0\n' > "$BIN/codex"
+                         printf '#!/bin/sh\nexit 0\n' > "$BIN/claude" ;;
+            none)        : ;;
+          esac
+          chmod +x "$BIN"/* 2>/dev/null || true
+          echo "$BIN" >> "$GITHUB_PATH"
+
+      - name: doctor and adapter selection must be honest about this axis
+        run: |
+          set -euo pipefail
+          echo "--- what is actually reachable ---"
+          command -v codex  && echo "codex: present"  || echo "codex: absent"
+          command -v claude && echo "claude: present" || echo "claude: absent"
+          echo "--- doctor ---"
+          node dist/cli.js doctor 2>&1 | tee doctor.out || true
+          case "${{ matrix.setup }}" in
+            none)
+              grep -qi "npm i -g" doctor.out \
+                || { echo "with no agent CLI installed, doctor must name the install command"; exit 1; } ;;
+            codex-only|claude-only|both)
+              grep -qiE "codex|claude" doctor.out \
+                || { echo "doctor did not mention the installed adapter"; exit 1; } ;;
+          esac
+
+      - name: A background submit must refuse when nothing can execute it
+        if: matrix.setup == 'none'
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d); cd "$WORK"; git init -q .
+          set +e
+          printf '# Goal\nProbe.\n' | node "$GITHUB_WORKSPACE/dist/cli.js" quick --background \
+            --acknowledge-brief-warnings --project . - > submit.out 2>&1
+          RC=$?
+          set -e
+          cat submit.out
+          test "$RC" -ne 0 || { echo "submit succeeded with no adapter installed"; exit 1; }
+          grep -q "npm i -g" submit.out || { echo "refusal did not name the install command"; exit 1; }

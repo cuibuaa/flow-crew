@@ -5,6 +5,7 @@ import type { Server } from 'node:net';
 import type { TaskCreateInput, TaskEntry, TaskListFilter } from './task-registry.js';
 import { fcGlobalDir } from './store.js';
 import type { CancellationResult } from './run-control.js';
+import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 
 export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
 
@@ -57,6 +58,25 @@ export interface TaskListRpcResponse {
   registry_unreadable_records?: number;
 }
 
+/** Registry fields plus authoritative run.json fields merged by the daemon read path. */
+export interface TaskShowEntry extends Omit<TaskEntry, 'status'> {
+  status: string;
+  run_verdict?: string;
+  failure_reason?: string;
+}
+
+export interface TaskShowRpcResponse {
+  task: TaskShowEntry;
+  recent_ticks: string[];
+  unit_status?: UnitStatus;
+  exit_code?: number;
+}
+
+export interface TaskTailRpcResponse {
+  output: string;
+  source?: SupervisorLogSource;
+}
+
 export interface DaemonStatusRpcResponse {
   uptime: number;
   watched_tasks: number;
@@ -72,11 +92,11 @@ export interface DaemonStatusRpcResponse {
 export type RpcResponse =
   | RegisterRpcResponse
   | TaskListRpcResponse
-  | { task: TaskEntry; recent_ticks: string[] }
+  | TaskShowRpcResponse
   | { ok: true }
   | CancellationResult
   | { new_attempt: number; unit: string }
-  | { output: string }
+  | TaskTailRpcResponse
   | DaemonStatusRpcResponse
   | { error: string };
 

@@ -8,7 +8,12 @@ import {
   type RpcRequest,
   type RpcResponse,
 } from './orchestrator-rpc.js';
-import type { CancellationResult } from './run-control.js';
+import {
+  unitIsStopped,
+  type CancellationObservation,
+  type CancellationResult,
+} from './run-control.js';
+import { isUnitStatus } from './supervision.js';
 import { TaskRegistry, type TaskEntry } from './task-registry.js';
 
 export interface LocalCancellationControl {
@@ -23,16 +28,14 @@ export interface CancellationClientOptions {
   localControl?: LocalCancellationControl;
 }
 
-const STOPPED_UNIT_STATES = new Set(['inactive', 'failed', 'unknown', 'not-found']);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isCancellationObservation(value: unknown): boolean {
+function isCancellationObservation(value: unknown): value is CancellationObservation {
   if (!isRecord(value)) return false;
   return (value.unit === null || typeof value.unit === 'string')
-    && typeof value.unitState === 'string'
+    && isUnitStatus(value.unitState)
     && typeof value.runReadable === 'boolean'
     && (value.schedulerPid === null
       || (Number.isSafeInteger(value.schedulerPid) && Number(value.schedulerPid) > 0))
@@ -50,17 +53,21 @@ export function isCancellationResult(
   expected: { runId?: string; taskId?: number } = {},
 ): value is CancellationResult {
   if (!isRecord(value) || typeof value.ok !== 'boolean' || typeof value.message !== 'string') return false;
-  if (!['cancelled', 'cancelling', 'already-terminal'].includes(String(value.status))) return false;
+  if (!['cancelled', 'cancelling', 'already-terminal', 'outcome-unknown'].includes(String(value.status))) return false;
   if (!isCancellationObservation(value.observation)) return false;
   if (value.runId !== undefined && typeof value.runId !== 'string') return false;
   if (value.taskId !== undefined && !Number.isSafeInteger(value.taskId)) return false;
   if (expected.runId !== undefined && value.runId !== expected.runId) return false;
   if (expected.taskId !== undefined && value.taskId !== expected.taskId) return false;
 
-  if (!value.ok) return value.status === 'cancelling';
-  if (value.status === 'cancelling') return false;
-  const observation = value.observation as CancellationResult['observation'];
-  return STOPPED_UNIT_STATES.has(observation.unitState)
+  if (!value.ok) {
+    return value.status === 'cancelling'
+      || (value.status === 'outcome-unknown' && value.observation.unitState.kind === 'terminal-unknown');
+  }
+  if (value.status === 'cancelling' || value.status === 'outcome-unknown') return false;
+  const observation = value.observation;
+  return observation.unitState.kind !== 'terminal-unknown'
+    && unitIsStopped(observation.unitState)
     && observation.runReadable
     && !observation.schedulerAlive
     && !observation.launchInFlight;

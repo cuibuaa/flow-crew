@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Server } from 'node:net';
 import { PassThrough } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { cmdTask } from '../src/cli-task.js';
 import { startRpcServer, type RpcRequest, type RpcResponse } from '../src/orchestrator-rpc.js';
 import type { TaskEntry } from '../src/task-registry.js';
@@ -67,6 +68,50 @@ describe('cmdTask', () => {
     expect(code).toBe(0);
     expect(out.text()).toContain('Task #3');
     expect(out.text()).toContain('- tick');
+  });
+
+  it('projects a durable terminal exit without merging run.json', async () => {
+    server = await startRpcServer(socketPath, () => ({
+      task: task({ id: 3, status: 'running' }),
+      recent_ticks: [],
+      unit_status: { kind: 'terminal', exitCode: 3 },
+      exit_code: 3,
+    }));
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'show', '3', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    );
+
+    expect(code).toBe(0);
+    expect(out.text()).toContain('Status: terminal\n');
+    expect(out.text()).toContain('Exit code: 3\n');
+  });
+
+  it('renders daemon-merged run status, verdict, completion, and failure detail', async () => {
+    server = await startRpcServer(socketPath, () => ({
+      task: {
+        ...task({ id: 3, status: 'running' }),
+        status: 'complete',
+        completed_at: '2026-08-06T20:00:00.000Z',
+        run_verdict: 'PASS',
+        failure_reason: 'retained diagnostic',
+      },
+      recent_ticks: [],
+    }));
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'show', '3', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    );
+
+    expect(code).toBe(0);
+    expect(out.text()).toContain('Status: complete\n');
+    expect(out.text()).toContain('Verdict: PASS\n');
+    expect(out.text()).toContain('Completed: 2026-08-06T20:00:00.000Z\n');
+    expect(out.text()).toContain('Failure reason: retained diagnostic\n');
   });
 
   it('shows summary verdict and one-liner at the top of task details', async () => {
@@ -138,12 +183,138 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('journal');
   });
 
+  it('follows the daemon-selected portable log instead of spawning journalctl', async () => {
+    const followFile = vi.fn(async () => 0);
+    const spawnProcess = vi.fn(() => { throw new Error('journalctl must not be spawned'); });
+    const snapshotOffset = Buffer.byteLength('portable initial output\n');
+    server = await startRpcServer(socketPath, (request): RpcResponse => {
+      requests.push(request);
+      if (request.cmd === 'tail') {
+        return {
+          output: 'portable initial output\n',
+          source: { kind: 'file', path: join(tempDir, 'out.log'), offset: snapshotOffset },
+        };
+      }
+      return { error: 'unexpected command' };
+    });
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'tail', '7', '--follow', '--tail', '9', '--port', socketPath],
+      {
+        stdout: out.stream as any,
+        stderr: out.err as any,
+        followControls: { followFile, spawnProcess: spawnProcess as never },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(requests).toEqual([{ cmd: 'tail', id: 7, lines: 9, follow: true }]);
+    expect(out.text()).toContain('portable initial output');
+    expect(followFile).toHaveBeenCalledWith(
+      join(tempDir, 'out.log'),
+      out.stream,
+      out.err,
+      snapshotOffset,
+    );
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
+
+  it('follows cursorless daemon responses from byte zero without a blind interval', async () => {
+    const followFile = vi.fn(async () => 0);
+    server = await startRpcServer(socketPath, (): RpcResponse => ({
+      output: 'legacy snapshot\n',
+      source: { kind: 'file', path: join(tempDir, 'legacy.log') },
+    }));
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'tail', '7', '--follow', '--port', socketPath],
+      {
+        stdout: out.stream as any,
+        stderr: out.err as any,
+        followControls: { followFile },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(out.text()).toBe('legacy snapshot\n');
+    expect(followFile).toHaveBeenCalledWith(
+      join(tempDir, 'legacy.log'),
+      out.stream,
+      out.err,
+      0,
+    );
+  });
+
+  it('handles a journal follow spawn ENOENT without an uncaught stack', async () => {
+    server = await startRpcServer(socketPath, (): RpcResponse => ({
+      output: '',
+      source: { kind: 'journal', unit: 'flowcrew-task-8.service' },
+    }));
+    const child = new EventEmitter();
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit('error', Object.assign(new Error('spawn vanished'), { code: 'ENOENT' })));
+      return child;
+    });
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'tail', '8', '--follow', '--port', socketPath],
+      {
+        stdout: out.stream as any,
+        stderr: out.err as any,
+        followControls: {
+          findCommand: () => '/fixture/journalctl',
+          spawnProcess: spawnProcess as never,
+        },
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(out.errorText()).toContain('Could not follow journal for flowcrew-task-8.service: spawn vanished');
+    expect(out.errorText()).not.toContain('at ');
+  });
+
   it('reports missing daemon clearly', async () => {
     const out = new Capture();
     const code = await cmdTask(['task', 'list', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(1);
     expect(out.errorText()).toContain('daemon not running. Start with: flowcrew daemon start');
+  });
+
+  it('never prints cancelled for a terminal-unknown daemon result', async () => {
+    server = await startRpcServer(socketPath, (request): RpcResponse => {
+      if (request.cmd === 'show') return { task: task({ id: request.id }), recent_ticks: [] };
+      if (request.cmd === 'cancel') {
+        return {
+          ok: false,
+          status: 'outcome-unknown',
+          taskId: request.id,
+          observation: {
+            unit: `flowcrew-task-${request.id}.service`,
+            unitState: { kind: 'terminal-unknown', reason: 'shim-died-without-status' },
+            runReadable: true,
+            schedulerPid: null,
+            schedulerAlive: false,
+            launchInFlight: false,
+          },
+          message: 'one or more processes may still be running',
+        };
+      }
+      return { error: 'unexpected command' };
+    });
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'cancel', '4', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    );
+
+    expect(code).toBe(1);
+    expect(out.errorText()).toContain('Cancellation outcome unknown; processes may still be running');
+    expect(out.text()).not.toContain('cancelled');
   });
 });
 
@@ -172,7 +343,7 @@ function cancelledTask(taskId: number): CancellationResult {
     taskId,
     observation: {
       unit: `flowcrew-task-${taskId}.service`,
-      unitState: 'inactive',
+      unitState: { kind: 'terminal', exitCode: 0 },
       runReadable: true,
       schedulerPid: null,
       schedulerAlive: false,

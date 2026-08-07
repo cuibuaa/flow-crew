@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { cmdDoctorMaintenance } from '../src/cli-doctor.js';
+import { cmdDoctorMaintenance, detectSupervisorBackend } from '../src/cli-doctor.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 
@@ -81,6 +81,57 @@ describe('doctor registry maintenance CLI', () => {
       { stdout: ambiguous.stdout as any, stderr: ambiguous.stderr as any },
     )).toBe(2);
     expect(ambiguous.errorText()).toContain('Choose one registry maintenance operation');
+  });
+});
+
+describe('doctor process supervision probe', () => {
+  it('reports a usable systemd user session only when both tools and the user manager work', () => {
+    const lookedUp: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const report = detectSupervisorBackend({
+      findCommand: (command) => {
+        lookedUp.push(command);
+        return `/fixture/${command}`;
+      },
+      runCommand: (command, args) => { calls.push({ command, args }); },
+    });
+
+    expect(report).toEqual({
+      kind: 'systemd-user',
+      message: expect.stringContaining('systemd user-session cgroup wrapper'),
+    });
+    expect(lookedUp).toEqual(['systemctl', 'systemd-run']);
+    expect(calls).toEqual([{
+      command: '/fixture/systemctl',
+      args: ['--user', 'show-environment'],
+    }]);
+  });
+
+  it('reports the portable shim without probing when either systemd executable is absent', () => {
+    let probes = 0;
+    const missingSystemctl = detectSupervisorBackend({
+      findCommand: (command) => (command === 'systemd-run' ? '/fixture/systemd-run' : undefined),
+      runCommand: () => { probes += 1; },
+    });
+    const missingSystemdRun = detectSupervisorBackend({
+      findCommand: (command) => (command === 'systemctl' ? '/fixture/systemctl' : undefined),
+      runCommand: () => { probes += 1; },
+    });
+
+    expect(missingSystemctl.kind).toBe('portable-shim');
+    expect(missingSystemdRun.kind).toBe('portable-shim');
+    expect(missingSystemdRun.message).toContain('no systemd dependency');
+    expect(probes).toBe(0);
+  });
+
+  it('reports the portable shim when both tools exist but the user session is unusable', () => {
+    const unusable = detectSupervisorBackend({
+      findCommand: (command) => `/fixture/${command}`,
+      runCommand: () => { throw new Error('no user bus'); },
+    });
+
+    expect(unusable.kind).toBe('portable-shim');
+    expect(unusable.message).toContain('systemd user session unavailable');
   });
 });
 

@@ -96,6 +96,11 @@ export interface TaskEntry {
    *  failed, so the drain must consume an attempt and mint a fresh unit name (systemd
    *  refuses to reuse a transient unit name, and that refusal degrades silently). */
   defer_kind?: 'wait' | 'retry';
+  /** Durable ceiling for consecutive supervisor observations that cannot be verified. */
+  cancellation_unobservable_count?: number;
+  cancellation_unobservable_first_at?: string;
+  cancellation_unobservable_reason?: string;
+  cancellation_observation_limit_reached_at?: string;
 }
 
 export interface TaskCreateInput {

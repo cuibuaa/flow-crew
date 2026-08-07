@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { findExecutableOnPath } from './adapters/availability.js';
 import { fcGlobalDir } from './store.js';
 import {
   REGISTRY_COMPACTION_THRESHOLDS,
@@ -7,6 +9,45 @@ import {
 
 interface WritableLike {
   write(chunk: string): unknown;
+}
+
+export interface SupervisorBackendReport {
+  kind: 'systemd-user' | 'portable-shim';
+  message: string;
+}
+
+export interface SupervisorBackendProbeOptions {
+  findCommand?: (command: string) => string | undefined;
+  runCommand?: (command: string, args: string[]) => void;
+}
+
+/**
+ * The wrapper requires both `systemctl` and the `systemd-run` launcher, while
+ * their mere presence does not prove that this process has a usable user
+ * manager. Otherwise the portable shim remains the backend.
+ */
+export function detectSupervisorBackend(
+  options: SupervisorBackendProbeOptions = {},
+): SupervisorBackendReport {
+  const findCommand = options.findCommand ?? findExecutableOnPath;
+  const runCommand = options.runCommand ?? ((command, args) => {
+    execFileSync(command, args, { stdio: 'ignore', timeout: 2_000 });
+  });
+  const systemctl = findCommand('systemctl');
+  const systemdRun = findCommand('systemd-run');
+  if (systemctl && systemdRun) {
+    try {
+      runCommand(systemctl, ['--user', 'show-environment']);
+      return {
+        kind: 'systemd-user',
+        message: 'portable Node shim with an available systemd user-session cgroup wrapper',
+      };
+    } catch { /* no usable user manager; portable supervision remains available */ }
+  }
+  return {
+    kind: 'portable-shim',
+    message: 'portable Node shim (systemd user session unavailable; no systemd dependency)',
+  };
 }
 
 export interface DoctorMaintenanceOptions {

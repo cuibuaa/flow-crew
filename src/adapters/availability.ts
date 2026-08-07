@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 
 export type AdapterName = 'codex' | 'claude';
 
@@ -18,13 +19,36 @@ export const ADAPTER_INSTALL_HINT: Record<AdapterName, string> = {
 
 export type AdapterProbe = (command: string) => boolean;
 
-function commandExists(command: string): boolean {
+function isExecutableFile(path: string): boolean {
   try {
-    execFileSync('which', [command], { stdio: 'ignore', timeout: 2000 });
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+/** Resolve an executable without relying on the optional external `which` utility. */
+export function findExecutableOnPath(
+  command: string,
+  pathValue: string | undefined = process.env.PATH,
+): string | undefined {
+  if (!command) return undefined;
+  if (isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+    const candidate = resolve(command);
+    return isExecutableFile(candidate) ? candidate : undefined;
+  }
+  if (pathValue === undefined) return undefined;
+  for (const entry of pathValue.split(delimiter)) {
+    const candidate = join(entry || process.cwd(), command);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function commandExists(command: string): boolean {
+  return findExecutableOnPath(command) !== undefined;
 }
 
 /** Physical adapter CLIs currently visible on PATH, in stable recommendation order. */

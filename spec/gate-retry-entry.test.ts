@@ -46,18 +46,18 @@ let previousFcHome: string;
 let restoreLogs: (() => void) | undefined;
 
 function scoredVerdict(pass: boolean, reason: string): Record<string, unknown> {
-  return { pass, reason, metric: 'e18_quality', score: pass ? 1 : 0, threshold: 1 };
+  return { pass, reason, metric: 'e18_quality', score: pass ? 0 : -1, threshold: 0 };
 }
 
 function metricArtifact(pass: boolean): Record<string, unknown> {
   return {
     hasMetric: true,
     metric: 'e18_quality',
-    value: pass ? 1 : 0,
+    value: pass ? 0 : -1,
     higherIsBetter: true,
-    threshold: 1,
+    threshold: 0,
     pass,
-    source: { path: 'fixture', evidence: `e18_quality=${pass ? 1 : 0}` },
+    source: { path: 'fixture', evidence: `e18_quality=${pass ? 0 : -1}` },
   };
 }
 
@@ -170,9 +170,9 @@ async function runScenario(options: ScenarioOptions): Promise<{
           join(opts.runDir, `verdict_${GATE_ID}.json`),
           JSON.stringify(scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection'), null, 2) + '\n',
         );
+        const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
+        writeFileSync(metricPath, JSON.stringify(metricArtifact(pass), null, 2) + '\n');
         if (options.staleMetricReads !== undefined && gateCalls === 1) {
-          const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
-          writeFileSync(metricPath, JSON.stringify(metricArtifact(true), null, 2) + '\n');
           Object.assign(metricReadControl, {
             path: metricPath,
             reads: 0,
@@ -249,7 +249,7 @@ afterEach(() => {
 });
 
 describe('gate retry loop entry', () => {
-  it('keeps a first-pass verdict live, never dispatches repair, and terminates repair as skipped', async () => {
+  it('treats pass=true at score=0/threshold=0 as accepted and never dispatches repair', async () => {
     const result = await runScenario({ gatePasses: [true] });
 
     expect(result.final.status).toBe('complete');
@@ -257,7 +257,10 @@ describe('gate retry loop entry', () => {
     expect(result.repairCalls).toBe(0);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
-      pass: true, metric: 'e18_quality', score: 1, threshold: 1,
+      pass: true, metric: 'e18_quality', score: 0, threshold: 0,
+    });
+    expect(JSON.parse(readFileSync(join(result.runDirPath, 'stages', GATE_ID, 'metric.json'), 'utf-8'))).toMatchObject({
+      pass: true, metric: 'e18_quality', value: 0, threshold: 0,
     });
     expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
@@ -270,7 +273,16 @@ describe('gate retry loop entry', () => {
     expect(result.repairCalls).toBe(1);
     expect(result.repairSawArchivedNegative).toBe(true);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('complete');
-    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
+    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
+      pass: true, score: 0, threshold: 0,
+    });
+    expect(JSON.parse(readFileSync(join(
+      result.runDirPath,
+      'gate_reevaluation',
+      'iteration_1',
+      'round_1',
+      `rejected_verdict_${GATE_ID}.json`,
+    ), 'utf-8'))).toMatchObject({ pass: false, score: -1, threshold: 0 });
     expect(existsSync(join(
       result.runDirPath,
       'gate_reevaluation',

@@ -1,4 +1,13 @@
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  unwatchFile,
+  watchFile,
+} from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import {
@@ -8,13 +17,35 @@ import {
   type RpcRequest,
   type RpcResponse,
   type TaskListRpcResponse,
+  type TaskShowRpcResponse,
+  type TaskShowEntry,
+  type TaskTailRpcResponse,
 } from './orchestrator-rpc.js';
 import {
   cancelTaskThroughControlPlane,
   type CancellationClientOptions,
 } from './cancellation-client.js';
-import { TASK_LIST_STATUS, TASK_STATUS, type TaskEntry, type TaskListStatus } from './task-registry.js';
+import {
+  TASK_LIST_STATUS,
+  TASK_STATUS,
+  isActiveTaskStatus,
+  type TaskEntry,
+  type TaskListStatus,
+} from './task-registry.js';
+import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import { runsRoot } from './store.js';
+import { findExecutableOnPath } from './adapters/availability.js';
+
+export interface TaskFollowControls {
+  findCommand: (command: string) => string | undefined;
+  spawnProcess: typeof spawn;
+  followFile: (
+    path: string,
+    stdout: NodeJS.WriteStream,
+    stderr: NodeJS.WriteStream,
+    offset: number,
+  ) => Promise<number>;
+}
 
 export async function cmdTask(
   args: string[],
@@ -24,6 +55,7 @@ export async function cmdTask(
     stderr?: NodeJS.WriteStream;
     rpcTimeoutMs?: number;
     cancellationClient?: Omit<CancellationClientOptions, 'socketPath' | 'rpcTimeoutMs'>;
+    followControls?: Partial<TaskFollowControls>;
   } = {},
 ): Promise<number> {
   const stdout = opts.stdout ?? process.stdout;
@@ -46,7 +78,7 @@ export async function cmdTask(
     }
     if (sub === 'show') {
       const id = parseId(args[2]);
-      const res = await rpc<{ task: TaskEntry; recent_ticks: string[] }>({ cmd: 'show', id });
+      const res = await rpc<TaskShowRpcResponse>({ cmd: 'show', id });
       if (args.includes('--summary-only')) {
         if (!res.task.summary_full) {
           stderr.write(`Task #${id} has no parsed summary\n`);
@@ -55,7 +87,7 @@ export async function cmdTask(
         stdout.write(res.task.summary_full.endsWith('\n') ? res.task.summary_full : `${res.task.summary_full}\n`);
         return 0;
       }
-      printTask(res.task, res.recent_ticks, stdout);
+      printTask(res.task, res.recent_ticks, stdout, res.unit_status, res.exit_code);
       return 0;
     }
     if (sub === 'cancel') {
@@ -66,7 +98,11 @@ export async function cmdTask(
         rpcTimeoutMs: opts.rpcTimeoutMs,
       });
       if (!cancellation.ok) {
-        stderr.write(`Cancellation still in progress: ${cancellation.message}. Check progress with: flowcrew task show ${id}\n`);
+        if (cancellation.status === 'outcome-unknown') {
+          stderr.write(`Cancellation outcome unknown; processes may still be running: ${cancellation.message}\n`);
+        } else {
+          stderr.write(`Cancellation still in progress: ${cancellation.message}. Check progress with: flowcrew task show ${id}\n`);
+        }
         return 1;
       }
       stdout.write(`Task #${id} cancelled\n`);
@@ -83,12 +119,15 @@ export async function cmdTask(
       const follow = args.includes('--follow') || args.includes('-f');
       const lines = Number.parseInt(valueAfter(args, '--tail') ?? '100', 10);
       if (follow) {
-        const show = await rpc<{ task: TaskEntry; recent_ticks: string[] }>({ cmd: 'show', id });
-        const child = spawn('journalctl', ['--user', '-u', show.task.systemd_unit, '-f'], { stdio: 'inherit' });
-        await new Promise((resolve) => child.on('exit', resolve));
-        return child.exitCode ?? 0;
+        const res = await rpc<TaskTailRpcResponse>({ cmd: 'tail', id, lines, follow: true });
+        stdout.write(res.output);
+        if (!res.source) {
+          stderr.write('The daemon did not provide a follow source; restart it and retry.\n');
+          return 1;
+        }
+        return followTaskLog(res.source, stdout, stderr, opts.followControls);
       }
-      const res = await rpc<{ output: string }>({ cmd: 'tail', id, lines });
+      const res = await rpc<TaskTailRpcResponse>({ cmd: 'tail', id, lines });
       stdout.write(res.output);
       return 0;
     }
@@ -115,17 +154,32 @@ function printTaskList(tasks: TaskEntry[], stdout: NodeJS.WriteStream, withSumma
   }
 }
 
-function printTask(task: TaskEntry, ticks: string[], stdout: NodeJS.WriteStream): void {
+function printTask(
+  task: TaskShowEntry,
+  ticks: string[],
+  stdout: NodeJS.WriteStream,
+  unitStatus?: UnitStatus,
+  exitCode?: number,
+): void {
   stdout.write(`Task #${task.id}: ${task.name}\n`);
-  if (task.summary_verdict) stdout.write(`Verdict: ${task.summary_verdict}\n`);
+  const verdict = task.summary_verdict ?? task.run_verdict;
+  if (verdict) stdout.write(`Verdict: ${verdict}\n`);
   if (task.summary_one_liner) stdout.write(`Summary: ${task.summary_one_liner}\n`);
-  stdout.write(`Status: ${task.status}\n`);
+  const projectedStatus = isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal'
+    ? 'terminal'
+    : isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal-unknown'
+      ? 'terminal-unknown'
+      : task.status;
+  stdout.write(`Status: ${projectedStatus}\n`);
+  if (Number.isSafeInteger(exitCode)) stdout.write(`Exit code: ${exitCode}\n`);
+  if (unitStatus?.kind === 'terminal' && unitStatus.signal) stdout.write(`Signal: ${unitStatus.signal}\n`);
   stdout.write(`Attempt: ${task.attempt}/${task.max_retries}\n`);
   stdout.write(`Unit: ${task.systemd_unit}\n`);
   stdout.write(`Project: ${task.projectDir}\n`);
   if (task.brief_path) stdout.write(`Brief: ${task.brief_path}\n`);
   if (task.config_path) stdout.write(`Config: ${task.config_path}\n`);
   if (task.completed_at) stdout.write(`Completed: ${task.completed_at}\n`);
+  if (task.failure_reason) stdout.write(`Failure reason: ${task.failure_reason}\n`);
   if (task.notes) stdout.write(`Notes: ${task.notes}\n`);
   const failurePath = task.run_id ? join(runsRoot(), task.run_id, '.reality-gate.failures.md') : undefined;
   if (failurePath && existsSync(failurePath)) {
@@ -155,4 +209,128 @@ function parseId(raw: string | undefined): number {
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : value.slice(0, max);
+}
+
+async function followTaskLog(
+  source: SupervisorLogSource,
+  stdout: NodeJS.WriteStream,
+  stderr: NodeJS.WriteStream,
+  overrides: Partial<TaskFollowControls> = {},
+): Promise<number> {
+  const controls: TaskFollowControls = {
+    findCommand: findExecutableOnPath,
+    spawnProcess: spawn,
+    followFile: followPortableLog,
+    ...overrides,
+  };
+  switch (source.kind) {
+    case 'file': {
+      const offset = source.offset !== undefined
+        && Number.isSafeInteger(source.offset)
+        && source.offset >= 0
+        ? source.offset
+        : 0;
+      return controls.followFile(source.path, stdout, stderr, offset);
+    }
+    case 'journal': {
+      const journalctl = controls.findCommand('journalctl');
+      if (!journalctl) {
+        stderr.write(`Follow mode is unavailable: journalctl is not installed and no portable log exists for ${source.unit}.\n`);
+        return 1;
+      }
+      try {
+        const child = controls.spawnProcess(
+          journalctl,
+          ['--user', '-u', source.unit, '-n', '0', '-f'],
+          { stdio: 'inherit' },
+        );
+        return await new Promise<number>((resolve) => {
+          let settled = false;
+          const finish = (code: number) => {
+            if (settled) return;
+            settled = true;
+            resolve(code);
+          };
+          child.once('error', (error) => {
+            stderr.write(`Could not follow journal for ${source.unit}: ${error.message}\n`);
+            finish(1);
+          });
+          child.once('exit', (code, signal) => finish(code ?? (signal ? 1 : 0)));
+        });
+      } catch (error) {
+        stderr.write(`Could not follow journal for ${source.unit}: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 1;
+      }
+    }
+    case 'unavailable':
+      stderr.write(`Follow mode is unavailable: ${source.reason}\n`);
+      return 1;
+    default: {
+      const _exhaustive: never = source;
+      return _exhaustive;
+    }
+  }
+}
+
+async function followPortableLog(
+  path: string,
+  stdout: NodeJS.WriteStream,
+  stderr: NodeJS.WriteStream,
+  initialOffset: number,
+): Promise<number> {
+  let offset = initialOffset;
+
+  return new Promise<number>((resolve) => {
+    let settled = false;
+    let pumping = false;
+    let pending = false;
+    const onSignal = () => finish(0);
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
+      unwatchFile(path, onChange);
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      resolve(code);
+    };
+    const pump = () => {
+      if (pumping) {
+        pending = true;
+        return;
+      }
+      pumping = true;
+      do {
+        pending = false;
+        try {
+          const size = statSync(path).size;
+          if (size < offset) offset = 0;
+          if (size > offset) {
+            const fd = openSync(path, 'r');
+            try {
+              const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size - offset));
+              while (offset < size) {
+                const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, size - offset), offset);
+                if (bytesRead <= 0) break;
+                stdout.write(buffer.subarray(0, bytesRead));
+                offset += bytesRead;
+              }
+            } finally {
+              closeSync(fd);
+            }
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            stderr.write(`Could not follow portable task log ${path}: ${error instanceof Error ? error.message : String(error)}\n`);
+            finish(1);
+          }
+        }
+      } while (pending && !settled);
+      pumping = false;
+    };
+    const onChange = () => pump();
+    watchFile(path, { interval: 250 }, onChange);
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+    queueMicrotask(pump);
+  });
 }

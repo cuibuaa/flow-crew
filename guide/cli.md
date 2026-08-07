@@ -256,7 +256,10 @@ flowcrew task cancel <id>
 `flowcrew start` and `flowcrew daemon serve` are deliberately different: **start is the web dashboard**;
 **daemon serve is the long-lived background orchestrator** that owns `daemon.sock`. Existing `daemon start`
 scripts remain compatible, but `flowcrew daemon restart` is the operator entry point for loading a new engine build.
-It resolves the listener from the Unix-socket inode in Linux `/proc`, never from a command-line pattern.
+On Linux it resolves the listener from the Unix-socket inode in `/proc`, never from a command-line pattern.
+Off Linux there is no inode-to-pid map to consult, so it falls back to the pid the daemon recorded for itself
+and accepts it only while that process is still alive — strictly weaker than the inode lookup, and stated
+here rather than implied away.
 
 `flowcrew daemon status` prints the listener pid, `startedAt`, socket path, startup-time SHA-256 build hash,
 module count, uptime, watched-task count, and unreadable registry-record count. The startup identity is persisted
@@ -285,6 +288,11 @@ flowcrew task show <id> [--summary-only]
 flowcrew task retry <id>
 flowcrew task tail <id> [--tail N] [--follow|-f]
 ```
+
+`task tail` reads the run's captured output. Where a systemd user journal exists, `--follow` streams it
+through `journalctl`; where it does not — macOS, or any Linux without a systemd session — it follows the
+log the supervising shim captured instead. If neither is available it says so and exits, rather than
+failing on a missing binary.
 
 ### Registry maintenance
 

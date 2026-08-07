@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
+import { cmdDaemon, mergeTaskWithRunState, type DaemonProcessControls } from '../src/cli-daemon.js';
 import {
   STALE_DAEMON_MESSAGE,
   computeBuildFingerprint,
@@ -194,6 +194,39 @@ describe('daemon status local diagnosis', () => {
     expect(output.error()).toContain('flowcrew doctor --repair-registry\n');
     expect(output.error()).toContain('flowcrew doctor --repair-registry --apply');
     expect(output.error()).toContain('--force does not bypass registry corruption');
+  });
+
+  it('merges authoritative terminal run fields without mutating the stale registry entry', () => {
+    const registry = new TaskRegistry({ baseDir: tempDir });
+    const runRoot = join(tempDir, 'runs');
+    const runId = 'terminal-run';
+    const runPath = join(runRoot, runId);
+    mkdirSync(runPath, { recursive: true });
+    const task = registry.create({
+      projectDir: tempDir,
+      name: 'stale task',
+      run_id: runId,
+      status: 'running',
+    });
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+      runId,
+      status: 'complete',
+      completedAt: '2026-08-06T20:00:00.000Z',
+      verdict: 'PASS',
+      failureReason: 'retained diagnostic',
+    }), 'utf-8');
+
+    const merged = mergeTaskWithRunState(task, runRoot);
+
+    expect(merged).toMatchObject({
+      id: task.id,
+      status: 'complete',
+      completed_at: '2026-08-06T20:00:00.000Z',
+      run_verdict: 'PASS',
+      failure_reason: 'retained diagnostic',
+    });
+    expect(registry.get(task.id)).toMatchObject({ status: 'running' });
+    expect(registry.get(task.id)?.completed_at).toBeUndefined();
   });
 
   async function listenSilently(socketPath: string): Promise<void> {

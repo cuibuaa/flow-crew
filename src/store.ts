@@ -129,6 +129,21 @@ export interface RetiredStageUsage {
   status: StageStatus;
 }
 
+/**
+ * A required dynamic stage that was still pending/running when a plan could
+ * otherwise be replaced or the run could otherwise complete. The scheduler,
+ * not a later planner, owns this ledger so omitting the ID from a replacement
+ * DAG cannot erase the work. Re-dispatching the same ID and reaching complete
+ * or skipped discharges the obligation; an existing engine-owned scope
+ * resolve/defer disposition is the only cross-ID exception.
+ */
+export interface UnresolvedStageObligation {
+  stageId: string;
+  declaredIteration: number;
+  /** Existing explicit scope-planning dispositions that may safely supersede a blocked downstream stage. */
+  scopePlanningDigests?: string[];
+}
+
 export interface SupervisorAttempt {
   index: number;
   startedAt: string;
@@ -467,6 +482,8 @@ export interface StoreState {
   stages: Record<string, StageStatus>;
   /** Append-only cost ledger for dynamic stages replaced by later outer plans. */
   retiredStageUsage?: RetiredStageUsage[];
+  /** Required dynamic stages that a later plan must not silently forget. */
+  unresolvedStageObligations?: UnresolvedStageObligation[];
   /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */
   supervisor?: SupervisorUsage;
   startedAt: string;
@@ -887,24 +904,32 @@ function emitCampaignEnvelopeEvents(projectDir: string, runId: string, state: St
   }
 }
 
-/**
- * Derive a one-line display title from a task brief. Strips a leading YAML
- * frontmatter block (`--- ... ---`) so briefs that open with `research:`/etc.
- * frontmatter don't surface as a bare "---" name, then takes the first
- * meaningful line (skipping delimiters), dropping markdown heading markers.
- */
+/** Derive a one-line display title from an authored Markdown task brief. */
 export function extractTaskTitle(desc?: string): string {
   if (!desc) return '';
-  let body = desc;
-  const fm = body.match(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/);
-  if (fm) body = body.slice(fm[0].length);
-  for (const line of body.split('\n')) {
-    const trimmed = line.replace(/^#+\s*/, '').trim();
-    if (trimmed && trimmed !== '---' && trimmed.length > 2) {
-      return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
-    }
+  const lines = desc.split(/\r?\n/);
+  if (lines[0]?.charCodeAt(0) === 0xfeff) lines[0] = lines[0].slice(1);
+
+  let content = lines;
+  if (lines[0]?.trim() === '---') {
+    const closingDelimiter = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+    // An incomplete block is ambiguous. Keep it visible and search through it
+    // instead of swallowing the entire brief as frontmatter.
+    if (closingDelimiter >= 0) content = lines.slice(closingDelimiter + 1);
   }
-  return body.trim().slice(0, 80) || desc.slice(0, 80);
+
+  const shorten = (value: string): string => (
+    value.length > 80 ? `${value.slice(0, 77)}...` : value
+  );
+  for (const line of content) {
+    const heading = line.match(/^\s{0,3}#{1,6}[\t ]+(.+?)\s*#*\s*$/)?.[1]?.trim();
+    if (heading) return shorten(heading);
+  }
+  for (const line of content) {
+    const fallback = line.trim();
+    if (fallback && fallback !== '---') return shorten(fallback);
+  }
+  return '';
 }
 
 export function ensureGlobalRunsDir(): void {

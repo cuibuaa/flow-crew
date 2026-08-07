@@ -7,10 +7,8 @@ import { describe, expect, it } from 'vitest';
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 const VITEST_CLI = resolve(PROJECT_ROOT, 'node_modules', 'vitest', 'vitest.mjs');
-const TARGETS = [
-  'spec/negotiation.test.ts',
-  'spec/terminal-freshness.test.ts',
-];
+const RETRY_TARGET = 'spec/negotiation.test.ts';
+const FRESHNESS_TARGET = 'spec/terminal-freshness.test.ts';
 
 const EXPECTED_SEMANTIC = {
   expandable: { budgets: [50, 100], terminalDecision: 'soft_timeout' },
@@ -21,6 +19,8 @@ type ShapeName = 'default_parallel' | 'single_worker' | 'cpu_load';
 
 type ShapeEvidence = {
   exit: number;
+  retryExit: number;
+  freshnessExit: number;
   stdoutLines: number;
   stderrLines: number;
   semantic: typeof EXPECTED_SEMANTIC | null;
@@ -52,12 +52,17 @@ function echoRaw(shape: ShapeName, stream: 'stdout' | 'stderr', raw: string): vo
   process.stdout.write(`M4_MATRIX_RAW_END shape=${shape} stream=${stream}\n`);
 }
 
+function exitCode(result: ReturnType<typeof spawnSync>): number {
+  return result.status
+    ?? (result.error && 'code' in result.error && result.error.code === 'ETIMEDOUT' ? 124 : 1);
+}
+
 function runShape(shape: ShapeName): ShapeEvidence {
   const temporaryHome = mkdtempSync(join(tmpdir(), 'flowcrew-m4-home-'));
   const temporaryFcHome = mkdtempSync(join(tmpdir(), 'flowcrew-m4-fc-home-'));
   try {
-    const args = [VITEST_CLI, 'run', ...TARGETS, '--reporter=verbose'];
-    if (shape === 'single_worker') args.push('--maxWorkers=1');
+    const shapeArgs = ['--reporter=verbose'];
+    if (shape === 'single_worker') shapeArgs.push('--maxWorkers=1');
     if (shape === 'cpu_load') {
       const setupPath = join(temporaryFcHome, 'bounded-cpu-load.mjs');
       const configPath = join(temporaryFcHome, 'vitest.config.mjs');
@@ -78,39 +83,56 @@ function runShape(shape: ShapeName): ShapeEvidence {
         'const priorSetup = Array.isArray(baseTest.setupFiles) ? baseTest.setupFiles : [];',
         `export default { ...baseConfig, test: { ...baseTest, setupFiles: [...priorSetup, ${JSON.stringify(setupUrl)}] } };`,
       ].join('\n'));
-      args.push('--config', configPath);
+      shapeArgs.push('--config', configPath);
     }
-    const result = spawnSync(process.execPath, args, {
-      cwd: PROJECT_ROOT,
-      env: {
-        ...process.env,
-        HOME: temporaryHome,
-        FC_HOME: temporaryFcHome,
-        NO_COLOR: '1',
-        FORCE_COLOR: '0',
+    const runTarget = (target: string) => spawnSync(
+      process.execPath,
+      [VITEST_CLI, 'run', target, ...shapeArgs],
+      {
+        cwd: PROJECT_ROOT,
+        env: {
+          ...process.env,
+          HOME: temporaryHome,
+          FC_HOME: temporaryFcHome,
+          NO_COLOR: '1',
+          FORCE_COLOR: '0',
+        },
+        encoding: 'utf8',
+        timeout: 180_000,
+        maxBuffer: 32 * 1024 * 1024,
       },
-      encoding: 'utf8',
-      timeout: 180_000,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    const stdout = result.stdout ?? '';
+    );
+
+    // Each file still runs in full for every shape. Running them as separate
+    // child invocations prevents their process-global test seams from racing;
+    // the retry oracle's deliberate CPU load remains inside the retry run.
+    const retryResult = runTarget(RETRY_TARGET);
+    const freshnessResult = runTarget(FRESHNESS_TARGET);
+    const retryStdout = retryResult.stdout ?? '';
+    const freshnessStdout = freshnessResult.stdout ?? '';
+    const stdout = retryStdout + freshnessStdout;
     const stderr = [
-      result.stderr ?? '',
-      result.error ? `${result.error.name}: ${result.error.message}\n` : '',
+      retryResult.stderr ?? '',
+      retryResult.error ? `${retryResult.error.name}: ${retryResult.error.message}\n` : '',
+      freshnessResult.stderr ?? '',
+      freshnessResult.error ? `${freshnessResult.error.name}: ${freshnessResult.error.message}\n` : '',
     ].join('');
-    const exit = result.status
-      ?? (result.error && 'code' in result.error && result.error.code === 'ETIMEDOUT' ? 124 : 1);
+    const retryExit = exitCode(retryResult);
+    const freshnessExit = exitCode(freshnessResult);
+    const exit = retryExit === 0 ? freshnessExit : retryExit;
 
     echoRaw(shape, 'stdout', stdout);
     echoRaw(shape, 'stderr', stderr);
 
     return {
       exit,
+      retryExit,
+      freshnessExit,
       stdoutLines: countLines(stdout),
       stderrLines: countLines(stderr),
       semantic: parseSemantic(stdout),
       legacyCounterexampleKilled: /legacyCounterexampleKilled=true/.test(stdout),
-      hM4: exit === 0 && /spec\/terminal-freshness\.test\.ts/.test(stdout) ? 'green' : 'red',
+      hM4: freshnessExit === 0 && /spec\/terminal-freshness\.test\.ts/.test(freshnessStdout) ? 'green' : 'red',
     };
   } finally {
     rmSync(temporaryHome, { recursive: true, force: true });

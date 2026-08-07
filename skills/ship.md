@@ -339,8 +339,8 @@ Key Files: [files]
 ---
 
 Settings:
-- Max iterations: 5 (plan→execute→review cycles)
-- Stage timeout: 5 minutes (per-stage time limit)
+- Max iterations: from `config/defaults.yaml` `default_max_iterations` (currently 5)
+- Stage timeout: from `config/defaults.yaml` `default_timeout_ms` (currently 60 minutes)
 - Workflow: default | research (from step 2.5)
 [Campaign hygiene note from step 2, if triggered]
 [Research-mode note from step 2.5, if triggered]
@@ -398,7 +398,6 @@ flowcrew daemon status >/dev/null 2>&1 || flowcrew daemon start
 flowcrew quick --background \
   [--acknowledge-brief-warnings=<CONFIRMED_DIGEST>] \
   --project . \
-  --max-iterations <N> --timeout <MS> \
   --supervise \
   --no-inherit-campaign \
   [--campaign <name>] [--workflow research] \

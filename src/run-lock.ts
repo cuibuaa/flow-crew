@@ -22,6 +22,7 @@
  * the durable status flips back to running, so the hand-off remains guarded.
  */
 import {
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -36,6 +37,11 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { getItem, isPendingInboxItemState } from './inbox.js';
 import { fcGlobalDir, isPausedRunStatus, runsRoot } from './store.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
+
+// Process identity is a control-plane primitive and must not disappear when a
+// caller intentionally removes service-manager tools from PATH. macOS/BSD has
+// no procfs fallback, so resolve the standard system ps independently of PATH.
+const POSIX_PS_COMMAND = ['/bin/ps', '/usr/bin/ps'].find((path) => existsSync(path)) ?? 'ps';
 
 export interface LaunchIntent {
   version: 1;
@@ -177,29 +183,41 @@ export function parseSchedulerPidMarker(raw: string): number | null {
 
 const SCHEDULER_IDENTITY_FILE = 'scheduler.identity.json';
 
-interface SchedulerProcessIdentity {
+export type ProcessStartToken =
+  | { kind: 'linux'; value: string }
+  | { kind: 'posix-lstart'; value: string };
+
+interface SchedulerProcessIdentityV1 {
   version: 1;
   pid: number;
   runId: string;
   linuxStartTimeTicks?: string;
 }
 
-function processIsAlive(pid: number): boolean {
+interface SchedulerProcessIdentityV2 {
+  version: 2;
+  pid: number;
+  runId: string;
+  startToken?: ProcessStartToken;
+  command?: string;
+}
+
+type SchedulerProcessIdentity = SchedulerProcessIdentityV1 | SchedulerProcessIdentityV2;
+
+export function processIsAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // signal 0 has exactly one portable death proof: ESRCH. EPERM means the
+    // process exists but this user cannot signal it; unfamiliar probe failures
+    // must remain fail-closed rather than being upgraded into death evidence.
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
 }
 
-/**
- * Linux /proc stat field 22, stable for one PID lifetime and safe against PID reuse.
- * Exported so any code that signals a pid recorded earlier can prove the pid is still
- * the process it recorded, rather than one the kernel handed to somebody else.
- */
-export function processStartTimeTicks(pid: number): string | undefined {
+function linuxProcessStartTimeTicks(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
     const commEnd = stat.lastIndexOf(')');
@@ -212,33 +230,144 @@ export function processStartTimeTicks(pid: number): string | undefined {
   }
 }
 
+function posixProcessStartToken(pid: number): ProcessStartToken | undefined {
+  try {
+    const rendered = execFileSync(
+      POSIX_PS_COMMAND,
+      ['-ww', '-o', 'lstart=', '-p', String(pid)],
+      {
+        encoding: 'utf-8',
+        timeout: 2_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+      },
+    ).trim().replace(/\s+/g, ' ');
+    return rendered ? { kind: 'posix-lstart', value: rendered } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A PID-reuse-resistant identity token on every supported POSIX platform.
+ * Linux keeps the precise /proc field-22 token. A procfs-less Linux host and
+ * Darwin/BSD use a locale- and timezone-stable `ps lstart` value instead.
+ */
+export function processStartToken(pid: number): ProcessStartToken | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  if (process.platform === 'linux') {
+    const ticks = linuxProcessStartTimeTicks(pid);
+    if (ticks !== undefined) return { kind: 'linux', value: ticks };
+  }
+  if (process.platform !== 'win32') return posixProcessStartToken(pid);
+  return undefined;
+}
+
+/** Backward-compatible Linux-only view for callers that have not migrated yet. */
+export function processStartTimeTicks(pid: number): string | undefined {
+  const token = processStartToken(pid);
+  return token?.kind === 'linux' ? token.value : undefined;
+}
+
+export function processStartTokensMatch(
+  recorded: ProcessStartToken | undefined,
+  current: ProcessStartToken | undefined,
+): boolean {
+  return recorded !== undefined
+    && current !== undefined
+    && recorded.kind === current.kind
+    && recorded.value === current.value;
+}
+
 function canonicalPath(path: string): string {
   try { return realpathSync(path); } catch { return resolve(path); }
 }
 
+export function processArgumentsFromPs(pid: number): string[] | null {
+  try {
+    const out = execFileSync(POSIX_PS_COMMAND, ['-ww', '-o', 'args=', '-p', String(pid)], {
+      encoding: 'utf-8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+    }).trim();
+    if (!out) return null;
+    const argv = out.split(/\s+/).filter(Boolean);
+    return argv.length > 0 ? argv : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ProcessCommandBinding = 'bound' | 'unbound' | 'unreadable';
+
 function processArguments(pid: number): string[] | null {
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
-    return cmdline.split('\0').filter(Boolean);
+    const argv = cmdline.split('\0').filter(Boolean);
+    // A zombie (or an otherwise unreadable transition state) can expose an
+    // empty cmdline while its PID still exists. Empty argv carries no binding
+    // authority; classify it as unreadable instead of matching an empty text.
+    return argv.length > 0 ? argv : null;
   } catch {
     // No procfs. `ps` is POSIX and reports the same argument vector, just
     // space-joined — good enough for the "is this a flowcrew scheduler" question,
     // which only inspects argv positions and never a path containing spaces.
     // Without this the caller used to answer "yes, any live pid is ours", which
     // was measured returning true for an unrelated shell.
-    try {
-      const out = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], {
-        encoding: 'utf-8',
-        timeout: 2000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      if (!out) return null;
-      const argv = out.split(/\s+/).filter(Boolean);
-      return argv.length > 0 ? argv : null;
-    } catch {
-      return null;
-    }
+    return processArgumentsFromPs(pid);
   }
+}
+
+function decodeShellJoinedCommand(command: string): string[] | null {
+  if (!command.startsWith("'") || !command.endsWith("'")) return null;
+  return command.slice(1, -1)
+    .split("' '")
+    .map((argument) => argument.replace(/'\\''/g, "'"));
+}
+
+function normalizedCommandText(command: string): string {
+  return command
+    .replace(/'\\''/g, "'")
+    .replace(/["']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Bind a persisted command to the currently-live argv. New scheduler identity
+ * files store NUL-separated argv for an exact comparison. Fallback unit records
+ * store FlowCrew's shellJoin form, which is decoded before comparison; the text
+ * fallback covers BSD ps, whose `args=` output is necessarily space-joined.
+ */
+export function processCommandBinding(pid: number, recordedCommand: string): ProcessCommandBinding {
+  const current = processArguments(pid);
+  if (current === null) return 'unreadable';
+  if (recordedCommand.includes('\0')) {
+    return current.join('\0') === recordedCommand ? 'bound' : 'unbound';
+  }
+  // A shell that has not exec'd its only child keeps the complete shellJoin
+  // command as one argv entry. Compare that representation before normalizing
+  // it, particularly because embedded apostrophes use the `'\''` shell escape.
+  if (current.some((argument) => argument === recordedCommand)) return 'bound';
+  const decoded = decodeShellJoinedCommand(recordedCommand);
+  if (decoded && current.length === decoded.length) {
+    if (decoded.every((argument, index) => argument === current[index])) return 'bound';
+  }
+  const expectedText = normalizedCommandText(decoded?.join(' ') ?? recordedCommand);
+  const currentText = normalizedCommandText(current.join(' '));
+  const matches = expectedText.length > 0
+    && (expectedText === currentText
+      || currentText.includes(expectedText));
+  return matches ? 'bound' : 'unbound';
+}
+
+export function processCommandMatches(pid: number, recordedCommand: string): boolean {
+  return processCommandBinding(pid, recordedCommand) === 'bound';
+}
+
+function processCommandSnapshot(pid: number): string | undefined {
+  return processArguments(pid)?.join('\0');
 }
 
 function processArgumentPath(pid: number, argument: string): string | null {
@@ -328,15 +457,14 @@ function schedulerIdentityPath(runPath: string): string {
 /** Record the scheduler/run binding after scheduler.pid has been claimed. */
 export function writeSchedulerProcessIdentity(runPath: string, runId: string, pid = process.pid): void {
   if (!processIsAlive(pid)) throw new Error(`Cannot identify non-live scheduler pid ${pid}`);
-  const linuxStartTimeTicks = processStartTimeTicks(pid);
-  if (process.platform === 'linux' && linuxStartTimeTicks === undefined) {
-    throw new Error(`Cannot read Linux start time for scheduler pid ${pid}`);
-  }
+  const startToken = processStartToken(pid);
+  const command = processCommandSnapshot(pid);
   const identity: SchedulerProcessIdentity = {
-    version: 1,
+    version: 2,
     pid,
     runId,
-    ...(linuxStartTimeTicks ? { linuxStartTimeTicks } : {}),
+    ...(startToken ? { startToken } : {}),
+    ...(command ? { command } : {}),
   };
   writeFileSync(schedulerIdentityPath(runPath), JSON.stringify(identity, null, 2) + '\n', 'utf-8');
 }
@@ -346,26 +474,56 @@ export function removeSchedulerProcessIdentity(runPath: string, expectedPid?: nu
   const path = schedulerIdentityPath(runPath);
   if (expectedPid !== undefined) {
     try {
-      const identity = JSON.parse(readFileSync(path, 'utf-8')) as Partial<SchedulerProcessIdentity>;
+      const identity = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown };
       if (identity.pid !== expectedPid) return;
     } catch { return; }
   }
   try { unlinkSync(path); } catch { /* missing or concurrently removed */ }
 }
 
-function identityBindsSchedulerToRun(pid: number, runId: string, runPath: string): boolean {
+type SchedulerIdentityBinding = 'absent' | 'bound' | 'unbound';
+
+function identityBindsSchedulerToRun(
+  pid: number,
+  runId: string,
+  runPath: string,
+): SchedulerIdentityBinding {
   try {
     const identity = JSON.parse(
       readFileSync(schedulerIdentityPath(runPath), 'utf-8'),
-    ) as Partial<SchedulerProcessIdentity>;
-    if (identity.version !== 1 || identity.pid !== pid || identity.runId !== runId) return false;
-    const currentStartTime = processStartTimeTicks(pid);
-    if (identity.linuxStartTimeTicks !== undefined) {
-      return currentStartTime === identity.linuxStartTimeTicks;
+    ) as {
+      version?: unknown;
+      pid?: unknown;
+      runId?: unknown;
+      linuxStartTimeTicks?: unknown;
+      startToken?: unknown;
+      command?: unknown;
+    };
+    if (identity.pid !== pid || identity.runId !== runId) return 'unbound';
+    const currentToken = processStartToken(pid);
+    if (identity.version === 1) {
+      const recorded = typeof identity.linuxStartTimeTicks === 'string'
+        ? { kind: 'linux' as const, value: identity.linuxStartTimeTicks }
+        : undefined;
+      return processStartTokensMatch(recorded, currentToken) ? 'bound' : 'unbound';
     }
-    return process.platform !== 'linux';
-  } catch {
-    return false;
+    if (identity.version !== 2) return 'unbound';
+    const recorded = identity.startToken && typeof identity.startToken === 'object'
+      ? identity.startToken as Partial<ProcessStartToken>
+      : undefined;
+    if (!recorded || (recorded.kind !== 'linux' && recorded.kind !== 'posix-lstart')) return 'unbound';
+    if (typeof recorded.value !== 'string') return 'unbound';
+    const validatedRecorded: ProcessStartToken = { kind: recorded.kind, value: recorded.value };
+    if (!processStartTokensMatch(validatedRecorded, currentToken)) return 'unbound';
+    // BSD lstart has only second precision, so the persisted command is a
+    // required second factor. A missing/unreadable command is unbound, never a
+    // reason to call the process dead.
+    return recorded.kind !== 'posix-lstart'
+      || (typeof identity.command === 'string' && processCommandMatches(pid, identity.command))
+      ? 'bound'
+      : 'unbound';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unbound';
   }
 }
 
@@ -380,9 +538,29 @@ export function isLiveFlowcrewSchedulerPid(pid: number): boolean {
  */
 export function isLiveFlowcrewSchedulerForRun(pid: number, runId: string, runPath: string): boolean {
   if (!processIsAlive(pid)) return false;
-  return identityBindsSchedulerToRun(pid, runId, runPath)
-    || commandLooksLikeFlowcrewScheduler(pid, runId)
+  const identity = identityBindsSchedulerToRun(pid, runId, runPath);
+  // Once an identity file exists it is authoritative. In particular, a v2
+  // token-kind mismatch must not be bypassed by the scheduler-shaped argv
+  // compatibility path; that path is only for runs predating identity files.
+  if (identity !== 'absent') return identity === 'bound';
+  return commandLooksLikeFlowcrewScheduler(pid, runId)
     || legacyDirectCommandBindsRun(pid, runPath);
+}
+
+/**
+ * Cancellation liveness is deliberately more conservative than signal
+ * authority. A readable token and argv can prove that a live PID is unrelated;
+ * if either identity input is unreadable, the PID remains possibly-live work
+ * and must keep the cancellation barrier closed.
+ */
+export function schedulerProcessIsAliveForCancellation(
+  pid: number,
+  runId: string,
+  runPath: string,
+): boolean {
+  if (!processIsAlive(pid)) return false;
+  if (processStartToken(pid) === undefined || processArguments(pid) === null) return true;
+  return isLiveFlowcrewSchedulerForRun(pid, runId, runPath);
 }
 
 export interface LiveRunOwner {

@@ -4152,7 +4152,115 @@ export function shouldContinuePhaseAfterGatePass(projectDir: string, state: Stor
   return phase.phaseComplete === true && Boolean(nextPhase && nextPhase !== CAMPAIGN_PHASE_COMPLETE_SENTINEL);
 }
 
+function reconcileUnresolvedStageObligations(
+  state: StoreState,
+  dispatchedStages: readonly StageConfig[],
+  declaredIteration: number,
+  runDirPath: string,
+): { changed: boolean; stageIds: string[] } {
+  const before = state.unresolvedStageObligations ?? [];
+  const obligations = new Map(before.map((entry) => [entry.stageId, entry]));
+  const disposedScopeDigests = scopePlanningDispositionDigests(runDirPath);
+
+  // An obligation is discharged only by an engine-observed success or explicit
+  // skip of the same stage ID. A planner may also use the existing, durable
+  // scope-negotiation resolve/defer contract when that exact digest is what
+  // blocked the old downstream stage. Missing and failed stages otherwise stay.
+  for (const [stageId, obligation] of obligations) {
+    const status = state.stages[stageId]?.status;
+    if (status === STAGE_STATUS.COMPLETE || status === STAGE_STATUS.SKIPPED) {
+      obligations.delete(stageId);
+      continue;
+    }
+    if (
+      obligation.scopePlanningDigests?.length
+      && obligation.scopePlanningDigests.every((digest) => disposedScopeDigests.has(digest))
+    ) {
+      obligations.delete(stageId);
+    }
+  }
+
+  for (const stage of dispatchedStages) {
+    // Conditional stages and retry_to repair stages are optional by contract.
+    // A repair is eligible only after its gate rejects; a passing gate must not
+    // turn its intentionally pending repair into required downstream work.
+    if (stage.condition?.trim() || (!stage.is_gate && stage.retry_to?.length)) continue;
+    const status = state.stages[stage.id]?.status;
+    if (status === STAGE_STATUS.PENDING || status === STAGE_STATUS.RUNNING) {
+      const scopePlanningDigests = scopePlanningDigestsBlockingStage(runDirPath, stage.id, dispatchedStages);
+      const existing = obligations.get(stage.id);
+      if (!existing) {
+        obligations.set(stage.id, {
+          stageId: stage.id,
+          declaredIteration,
+          ...(scopePlanningDigests.length > 0 ? { scopePlanningDigests } : {}),
+        });
+      } else if (scopePlanningDigests.length > 0) {
+        obligations.set(stage.id, {
+          ...existing,
+          scopePlanningDigests: [...new Set([
+            ...(existing.scopePlanningDigests ?? []),
+            ...scopePlanningDigests,
+          ])].sort(),
+        });
+      }
+    }
+  }
+
+  const next = [...obligations.values()].sort((a, b) => (
+    a.declaredIteration - b.declaredIteration || a.stageId.localeCompare(b.stageId)
+  ));
+  const changed = JSON.stringify(before) !== JSON.stringify(next);
+  if (next.length > 0) state.unresolvedStageObligations = next;
+  else state.unresolvedStageObligations = undefined;
+  return { changed, stageIds: next.map((entry) => entry.stageId) };
+}
+
+function guardPlainCompletionWithStageObligations(
+  state: StoreState,
+  projectDir: string,
+  runId: string,
+  iteration: number,
+  completionPath: string,
+): string[] {
+  const dispatched = Array.isArray(state.dispatchedStages)
+    ? state.dispatchedStages as StageConfig[]
+    : [];
+  const reconciled = reconcileUnresolvedStageObligations(
+    state,
+    dispatched,
+    state.currentIteration ?? iteration,
+    runDir(projectDir, runId),
+  );
+  if (reconciled.changed) writeRunState(projectDir, runId, state);
+  if (reconciled.stageIds.length > 0) {
+    log.warn({
+      runId,
+      iteration,
+      completionPath,
+      unresolvedStageIds: reconciled.stageIds,
+    }, 'Plain completion blocked by unresolved stage obligations');
+  }
+  return reconciled.stageIds;
+}
+
+function appendUnresolvedStageObligationContext(prompt: string, state: StoreState): string {
+  const obligations = state.unresolvedStageObligations ?? [];
+  if (obligations.length === 0) return prompt;
+  const rows = obligations.map((entry) => {
+    const disposition = entry.scopePlanningDigests?.length
+      ? `; alternatively record the pending scope disposition(s): ${entry.scopePlanningDigests.join(', ')}`
+      : '';
+    return `- ${entry.stageId} (declared in iteration ${entry.declaredIteration}${disposition})`;
+  }).join('\n');
+  return `${prompt}\n\n# Engine-owned unresolved stage obligations\n${rows}\n`
+    + `A replacement plan cannot supersede these obligations by omission. Re-dispatch every exact stage ID above and let it reach complete or an explicit skipped disposition, unless the row names an existing scope-negotiation digest that this plan explicitly resolves or defers. `
+    + `Until then, the engine will reject plain completion and will end incomplete if the iteration budget is exhausted.`;
+}
+
 export function recoverTerminalStudyCompletion(projectDir: string, runId: string, state: StoreState): StoreState | null {
+  // This is an authored gate terminal contract, not a plain-complete exit. Like
+  // brief terminal_states, it intentionally outranks unresolved DAG work.
   const gateIds = orderedGateIdsForState(projectDir, state);
   for (const gateId of gateIds) {
     const evidence = readTerminalStudyCompletionEvidence(projectDir, runId, gateId);
@@ -4703,22 +4811,31 @@ export async function runWorkflow(
         // Terminal-state already took precedence at the top-of-iteration gate
         // above (call site 1), so reaching here means no terminal artifact —
         // a plain supervisor-DONE completion.
-        state.status = 'complete';
-        state.completedAt = new Date().toISOString();
-        const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-        if (!realityGate.allowed) return realityGate.state;
-        writeRunState(projectDir, runId, state);
-        writeCampaignEntry(projectDir, state);
-        recordRunEvent(projectDir, runId, {
-          type: 'run_completed',
+        const unresolvedStageIds = guardPlainCompletionWithStageObligations(
+          state,
+          projectDir,
           runId,
-          timestamp: state.completedAt,
           iteration,
-          detail: goalReason,
-        });
-        log.info({ runId, iteration, goalReason }, 'Supervisor DONE acknowledged; stopping iteration loop early');
-        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
-        return state;
+          'supervisor_goal_met',
+        );
+        if (unresolvedStageIds.length === 0) {
+          state.status = 'complete';
+          state.completedAt = new Date().toISOString();
+          const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
+          if (!realityGate.allowed) return realityGate.state;
+          writeRunState(projectDir, runId, state);
+          writeCampaignEntry(projectDir, state);
+          recordRunEvent(projectDir, runId, {
+            type: 'run_completed',
+            runId,
+            timestamp: state.completedAt,
+            iteration,
+            detail: goalReason,
+          });
+          log.info({ runId, iteration, goalReason }, 'Supervisor DONE acknowledged; stopping iteration loop early');
+          await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+          return state;
+        }
       }
     }
 
@@ -4803,6 +4920,18 @@ export async function runWorkflow(
     state = readRunState(projectDir, runId);
     // On iteration 2+, reset base stage statuses and clear old dispatched stages
     if (iteration > 1 && !isResumedIteration) {
+      // Persist required work before retiring the old dynamic DAG. The retired
+      // usage ledger preserves cost/history; this separate ledger preserves the
+      // fact that a pending/running required stage was never fulfilled.
+      const previousDispatchedStages = Array.isArray(state.dispatchedStages)
+        ? state.dispatchedStages as StageConfig[]
+        : [];
+      reconcileUnresolvedStageObligations(
+        state,
+        previousDispatchedStages,
+        Math.max(1, iteration - 1),
+        runDirPath,
+      );
       // Remove old dispatched stage entries from state
       const baseIds = new Set(baseStages.map(s => s.id));
       for (const sid of Object.keys(state.stages)) {
@@ -5266,6 +5395,13 @@ export async function runWorkflow(
         } catch { /* non-critical */ }
         return null;
       })();
+      const unresolvedStageIds = guardPlainCompletionWithStageObligations(
+        state,
+        projectDir,
+        runId,
+        iteration,
+        'gate_pass',
+      );
       if (pendingNextPhase && iteration < maxIterations) {
         log.info({ runId, iteration, gate: pendingNextPhase.gateId, nextPhase: pendingNextPhase.nextPhase }, 'Gate passed with nextPhase set — continuing to next iteration instead of marking complete');
         continue;
@@ -5285,44 +5421,51 @@ export async function runWorkflow(
       // Terminal-state already handled by the top gate + eager post-batch gate
       // (with an isTerminalStatus early-return after executeIteration), so
       // reaching here means a plain gate-passed completion.
-      state.status = 'complete';
-      state.completedAt = new Date().toISOString();
-      const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-      if (!realityGate.allowed) return realityGate.state;
-      // A retry stage that never ran because every related gate accepted the
-      // work has a truthful terminal disposition: skipped, not indefinitely
-      // pending and not falsely complete.
-      const terminalContract = loadGateContract(projectDir, runId, state.campaignStorageKey);
-      const stageById = new Map(sorted.map((stage) => [stage.id, stage]));
-      for (const repair of sorted) {
-        if (repair.is_gate || !repair.retry_to?.length) continue;
-        const repairStatus = state.stages[repair.id];
-        if (!repairStatus || !isPendingStageStatus(repairStatus.status)) continue;
-        const relatedGates = repair.retry_to
-          .map((gateId) => stageById.get(gateId))
-          .filter((gate): gate is StageConfig => gate?.is_gate === true);
-        const allRelatedGatesPassed = relatedGates.length === repair.retry_to.length
-          && relatedGates.every((gate) => (
-            state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
-            && readGateVerdict(projectDir, gate.id, runId, terminalContract)?.pass === true
-          ));
-        if (!allRelatedGatesPassed) continue;
-        const skipped = { ...repairStatus, status: STAGE_STATUS.SKIPPED };
-        state.stages[repair.id] = skipped;
-        writeStageStatus(projectDir, runId, repair.id, skipped);
+      if (unresolvedStageIds.length > 0) {
+        if (iteration < maxIterations) {
+          log.info({ runId, iteration, unresolvedStageIds }, 'Gate passed, but required stages remain unresolved — re-planning');
+          continue;
+        }
+      } else {
+        state.status = 'complete';
+        state.completedAt = new Date().toISOString();
+        const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
+        if (!realityGate.allowed) return realityGate.state;
+        // A retry stage that never ran because every related gate accepted the
+        // work has a truthful terminal disposition: skipped, not indefinitely
+        // pending and not falsely complete.
+        const terminalContract = loadGateContract(projectDir, runId, state.campaignStorageKey);
+        const stageById = new Map(sorted.map((stage) => [stage.id, stage]));
+        for (const repair of sorted) {
+          if (repair.is_gate || !repair.retry_to?.length) continue;
+          const repairStatus = state.stages[repair.id];
+          if (!repairStatus || !isPendingStageStatus(repairStatus.status)) continue;
+          const relatedGates = repair.retry_to
+            .map((gateId) => stageById.get(gateId))
+            .filter((gate): gate is StageConfig => gate?.is_gate === true);
+          const allRelatedGatesPassed = relatedGates.length === repair.retry_to.length
+            && relatedGates.every((gate) => (
+              state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
+              && readGateVerdict(projectDir, gate.id, runId, terminalContract)?.pass === true
+            ));
+          if (!allRelatedGatesPassed) continue;
+          const skipped = { ...repairStatus, status: STAGE_STATUS.SKIPPED };
+          state.stages[repair.id] = skipped;
+          writeStageStatus(projectDir, runId, repair.id, skipped);
+        }
+        writeRunState(projectDir, runId, state);
+        writeCampaignEntry(projectDir, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'run_completed',
+          runId,
+          timestamp: state.completedAt,
+          iteration,
+          detail: state.status,
+        });
+        log.info({ runId, iteration }, 'All gates passed, run complete');
+        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+        return state;
       }
-      writeRunState(projectDir, runId, state);
-      writeCampaignEntry(projectDir, state);
-      recordRunEvent(projectDir, runId, {
-        type: 'run_completed',
-        runId,
-        timestamp: state.completedAt,
-        iteration,
-        detail: state.status,
-      });
-      log.info({ runId, iteration }, 'All gates passed, run complete');
-      await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
-      return state;
     }
 
     // If no dispatched stages, check if all base stages passed
@@ -5341,21 +5484,35 @@ export async function runWorkflow(
         return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
       }
       // Terminal-state already handled by the top + eager gates (see above).
-      state.status = RUN_STATUS.COMPLETE;
-      state.completedAt = new Date().toISOString();
-      const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-      if (!realityGate.allowed) return realityGate.state;
-      writeRunState(projectDir, runId, state);
-      writeCampaignEntry(projectDir, state);
-      recordRunEvent(projectDir, runId, {
-        type: 'run_completed',
+      const unresolvedStageIds = guardPlainCompletionWithStageObligations(
+        state,
+        projectDir,
         runId,
-        timestamp: state.completedAt,
         iteration,
-        detail: state.status,
-      });
-      await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
-      return state;
+        'base_all_done',
+      );
+      if (unresolvedStageIds.length > 0) {
+        if (iteration < maxIterations) {
+          log.info({ runId, iteration, unresolvedStageIds }, 'Base stages passed, but required stages remain unresolved — re-planning');
+          continue;
+        }
+      } else {
+        state.status = RUN_STATUS.COMPLETE;
+        state.completedAt = new Date().toISOString();
+        const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
+        if (!realityGate.allowed) return realityGate.state;
+        writeRunState(projectDir, runId, state);
+        writeCampaignEntry(projectDir, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'run_completed',
+          runId,
+          timestamp: state.completedAt,
+          iteration,
+          detail: state.status,
+        });
+        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+        return state;
+      }
     }
 
     // Non-gate stage failure: if a stage failed and there are no gates to retry through,
@@ -5396,8 +5553,19 @@ export async function runWorkflow(
       // A+(c): budget/iteration exhausted mid-search WITHOUT a clean exhaustive
       // ceiling is `incomplete` — distinct from `failed` (crash) and `ceiling_hit`
       // (honest negative). The search simply ran out of attempts.
+      const activeDispatchedStages = Array.isArray(state.dispatchedStages)
+        ? state.dispatchedStages as StageConfig[]
+        : [];
+      const unresolvedStageIds = reconcileUnresolvedStageObligations(
+        state,
+        activeDispatchedStages,
+        state.currentIteration ?? iteration,
+        runDirPath,
+      ).stageIds;
       state.status = 'incomplete';
-      state.failureReason = `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s) — search budget exhausted mid-progress (incomplete, not a crash).`;
+      state.failureReason = unresolvedStageIds.length > 0
+        ? `Max iterations reached (${maxIterations}) with unresolved required stage obligation(s): ${unresolvedStageIds.join(', ')}. A replacement plan cannot satisfy declared work by omission.`
+        : `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s) — search budget exhausted mid-progress (incomplete, not a crash).`;
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, runId, state);
       writeCampaignEntry(projectDir, state);
@@ -5731,6 +5899,41 @@ function pendingScopePlanningInputs(runDirPath: string): ScopePlanningInputV1[] 
       .map((entry) => entry.digest),
   );
   return inputs.filter((entry) => !disposed.has(entry.digest));
+}
+
+function scopePlanningDispositionDigests(runDirPath: string): Set<string> {
+  return new Set(
+    readJsonArtifacts<ScopePlanningDispositionV1>(runDirPath, SCOPE_PLANNING_DISPOSITION_PREFIX)
+      .filter((entry) => entry.disposition === 'resolve' || entry.disposition === 'defer')
+      .map((entry) => entry.digest),
+  );
+}
+
+function scopePlanningDigestsBlockingStage(
+  runDirPath: string,
+  stageId: string,
+  dispatchedStages: readonly StageConfig[],
+): string[] {
+  const inputs = pendingScopePlanningInputs(runDirPath);
+  if (inputs.length === 0) return [];
+  const digestsByStage = new Map<string, string[]>();
+  for (const input of inputs) {
+    const current = digestsByStage.get(input.stageId) ?? [];
+    if (!current.includes(input.digest)) current.push(input.digest);
+    digestsByStage.set(input.stageId, current);
+  }
+  const stageById = new Map(dispatchedStages.map((stage) => [stage.id, stage]));
+  const visited = new Set<string>();
+  const digests = new Set<string>();
+  const queue = [stageId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const digest of digestsByStage.get(current) ?? []) digests.add(digest);
+    for (const dependency of stageById.get(current)?.depends_on ?? []) queue.push(dependency);
+  }
+  return [...digests].sort();
 }
 
 function appendScopePlanningInput(prompt: string, runDirPath: string): string {
@@ -6442,7 +6645,10 @@ async function executeSingleStage(
 
   resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
   resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
-  if (stage.dynamic_dispatch) resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+  if (stage.dynamic_dispatch) {
+    resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+    resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
+  }
 
   resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
   resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
@@ -6883,7 +7089,10 @@ async function executeIteration(
       // Prepend retry context if this is a retry (timeout or supervisor abort)
       resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
       resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
-      if (stage.dynamic_dispatch) resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+      if (stage.dynamic_dispatch) {
+        resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
+        resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
+      }
       resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
       resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, sorted, readRunState(projectDir, runId), runDirPath);
 
