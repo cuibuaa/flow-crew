@@ -2,7 +2,14 @@ import type { CheckContext, RealityCheck } from '../types.js';
 import { readJsonFile, result } from './_utils.js';
 
 interface Schema {
-  type?: string;
+  /** A single JSON Schema type name, or a union of them. JSON Schema allows both, and a
+   *  union is the standard way to say "nullable" — `type: [string, "null"]`. Declaring this
+   *  as `string` alone silently rejected every union: the array is truthy, so validation
+   *  ran, then every comparison in matchesType compared a string against an array and the
+   *  `typeof value === type` fallback could not match, so nullable fields ALWAYS failed
+   *  regardless of their value. Reality gates and research-loop `result_schema` both go
+   *  through validate(), so both were affected. */
+  type?: string | string[];
   required?: string[];
   properties?: Record<string, Schema>;
   items?: Schema;
@@ -39,7 +46,9 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
  *  brief-declared round_result schema). Returns a list of human-readable path errors. */
 export function validate(value: unknown, schema: Schema, path: string): string[] {
   const errors: string[] = [];
-  if (schema.type && !matchesType(value, schema.type)) errors.push(`${path} expected ${schema.type}`);
+  if (hasTypeConstraint(schema.type) && !matchesType(value, schema.type)) {
+    errors.push(`${path} expected ${describeType(schema.type)}`);
+  }
   if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) errors.push(`${path} not in enum`);
   if (typeof value === 'number') {
     if (typeof schema.minimum === 'number' && value < schema.minimum) errors.push(`${path} below minimum`);
@@ -60,7 +69,22 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
   return errors;
 }
 
-function matchesType(value: unknown, type: string): boolean {
+/** An empty union constrains nothing; treat it as absent rather than as "matches nothing". */
+function hasTypeConstraint(type: string | string[] | undefined): type is string | string[] {
+  if (Array.isArray(type)) return type.length > 0;
+  return typeof type === 'string' && type.length > 0;
+}
+
+function describeType(type: string | string[]): string {
+  return Array.isArray(type) ? type.join('|') : type;
+}
+
+function matchesType(value: unknown, type: string | string[]): boolean {
+  if (Array.isArray(type)) return type.some((one) => matchesOneType(value, one));
+  return matchesOneType(value, type);
+}
+
+function matchesOneType(value: unknown, type: string): boolean {
   if (type === 'array') return Array.isArray(value);
   if (type === 'object') return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
   if (type === 'integer') return Number.isInteger(value);

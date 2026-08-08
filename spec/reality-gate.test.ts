@@ -89,6 +89,32 @@ describe('reality gate check types', () => {
     expect(fail.pass).toBe(false);
   });
 
+  it('accepts every member of a union type and still rejects non-members', async () => {
+    // `type: [string, "null"]` is how JSON Schema says "nullable". Before this was
+    // supported, the array was truthy so validation ran, but matchesType compared a string
+    // against an array and nothing could match — so a nullable field failed for BOTH null
+    // and a string, i.e. always. Every reality gate and research-loop result_schema that
+    // declared an optional reason field was blocked regardless of its content.
+    const schema = { type: 'object', properties: { blocked_reason: { type: ['string', 'null'] } } };
+    const run = async (body: object) => {
+      write('u.json', JSON.stringify(body));
+      return runAllChecks([{ name: 'union', type: 'json-schema-match', params: { file: 'u.json', schema } }], context());
+    };
+    // Both union members must pass — testing only one would not have caught the old bug.
+    expect((await run({ blocked_reason: null })).pass).toBe(true);
+    expect((await run({ blocked_reason: 'ran out of data' })).pass).toBe(true);
+    // And the union must still reject a type it does not list, or it is not a check.
+    const rejected = await run({ blocked_reason: 42 });
+    expect(rejected.pass).toBe(false);
+    expect(JSON.stringify(rejected)).toContain('string|null');
+  });
+
+  it('treats an empty union as no type constraint', async () => {
+    write('e.json', JSON.stringify({ anything: 7 }));
+    const checks = [{ name: 'empty', type: 'json-schema-match', params: { file: 'e.json', schema: { type: 'object', properties: { anything: { type: [] } } } } }];
+    expect((await runAllChecks(checks, context())).pass).toBe(true);
+  });
+
   it('checks variance floor positive and negative cases', async () => {
     write('scores.json', JSON.stringify({ rows: [{ score: 1 }, { score: 2 }, { score: 3 }] }));
     write('flat.json', JSON.stringify({ rows: [{ score: 1 }, { score: 1 }, { score: 1 }] }));
