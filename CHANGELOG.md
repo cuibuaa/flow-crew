@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.1] - 2026-08-08
+
+### Fixed — a 0.6.0 launch regression, and nullable fields in declared schemas
+
+- **The agent runs under a login shell again.** v0.5.0 used `bash -lc`; v0.6.0 dropped the
+  `-l` while the supervisor was rewritten around the portable shim. The systemd user
+  manager's PATH does not include nvm or `~/.local/bin`, and only the login profile puts
+  them there, so on a machine where `codex` or `claude` was plainly installed every
+  background launch failed with *"No adapter CLI is installed or visible on PATH"*. `-lc` is
+  accepted by `/bin/bash`, `/bin/sh` and `/bin/dash`, so this does not narrow which shells
+  can host a run. Three CI axes missed it because a runner's PATH is already complete.
+
+- **`type: [string, "null"]` in a declared schema can pass.** A union arrived as an array,
+  which is truthy, so validation ran — but every type comparison then checked a string
+  against an array and could not match, so a nullable field failed for *both* `null` and a
+  string, i.e. always, regardless of content. The error read `expected string,null`, which
+  was the array flattened by string interpolation. Unions now pass if any member matches, an
+  empty union constrains nothing, and errors render as `string|null`. This affected both
+  reality-gate `json-schema-match` checks and the research loop's per-round `result_schema`
+  enforcement, so a brief that declared an optional reason field the standard way had its
+  terminal state blocked by a false negative.
+
 ## [0.6.0] - 2026-08-07
 
 ### Changed — supervision no longer requires a service manager
