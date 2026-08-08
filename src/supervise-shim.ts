@@ -215,7 +215,14 @@ function main(): void {
 
   logFd = openSync(logPath, 'a');
   try {
-    agent = spawn(launch.shellPath, ['-c', launch.command], {
+    // Login shell, not a bare -c. The user's agent CLIs live in per-user
+    // directories (nvm, ~/.local/bin) that the systemd user manager's PATH does
+    // not contain; only the login profile puts them there. v0.5.0 used
+    // `bash -lc` and v0.6.0 dropped the -l, which made every launch fail with
+    // "No adapter CLI is installed or visible on PATH" on a machine where the
+    // adapter was plainly installed. CI never caught it because a runner's PATH
+    // is already complete.
+    agent = spawn(launch.shellPath, ['-lc', launch.command], {
       cwd: launch.workingDirectory,
       detached: true,
       stdio: ['ignore', logFd, logFd],

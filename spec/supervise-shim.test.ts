@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
@@ -508,3 +509,20 @@ function linkFirstAvailable(targetDir: string, name: string, candidates: string[
   if (!source) throw new Error(`required fixture command ${name} was not found`);
   symlinkSync(source, join(targetDir, name));
 }
+
+describe('the agent runs under a login shell', () => {
+  // v0.6.0 shipped `-c` instead of `-lc`. The systemd user manager's PATH does
+  // not include nvm or ~/.local/bin, so every launch failed with "No adapter
+  // CLI is installed or visible on PATH" on a machine where codex was plainly
+  // installed. Three CI axes missed it because a runner's PATH is already
+  // complete — so this asserts the flag, which is the thing that actually
+  // differs, rather than trying to reproduce an incomplete PATH.
+  it('passes -lc so the login profile is sourced', () => {
+    const source = readFileSync(
+      new URL('../src/supervise-shim.ts', import.meta.url),
+      'utf-8',
+    );
+    expect(source).toContain("spawn(launch.shellPath, ['-lc', launch.command]");
+    expect(source).not.toContain("spawn(launch.shellPath, ['-c', launch.command]");
+  });
+});
