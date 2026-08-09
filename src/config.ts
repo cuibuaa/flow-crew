@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -172,6 +173,57 @@ function booleanValue(raw: Record<string, unknown>, template: Record<string, unk
 }
 
 // --- Public API: Project Defaults ---
+
+/**
+ * Directory whose basename names the default campaign.
+ *
+ * A linked git worktree has its own basename, so deriving the campaign from
+ * projectDir gave every worktree a campaign of its own and split one line of
+ * work across as many campaigns as there were worktrees — auditing "what did
+ * this project actually try" then meant opening all of them. Worktrees of one
+ * repository are one project, so they resolve to the main worktree.
+ *
+ * The rule is therefore "the campaign of a repository is the repository": any
+ * directory inside one resolves to its main worktree. A checkout's own root is
+ * unchanged, and so is the common case of running from it. Two cases do move:
+ * a linked worktree (the bug this fixes) and a subdirectory of a repository,
+ * which previously took the subdirectory's name — `repo/src/deep` gave
+ * `deep`, and now gives `repo`.
+ *
+ * A non-repository, or any git failure, falls back to projectDir. An explicit
+ * --campaign or defaults.yaml::campaign still wins over all of this.
+ *
+ * `readCommonDir` exists so tracked tests can drive the path arithmetic without
+ * building real repositories on the host — the project forbids host
+ * child-process use in tracked tests. Real-git behaviour is what the default
+ * encodes: `--git-common-dir` prints a relative `.git` from an ordinary
+ * checkout and an absolute path to the main repository's `.git` from a linked
+ * worktree.
+ */
+export interface CampaignBaseDirectoryOptions {
+  readCommonDir?: (projectDir: string) => string;
+}
+
+export function campaignBaseDirectory(
+  projectDir: string,
+  options: CampaignBaseDirectoryOptions = {},
+): string {
+  const readCommonDir = options.readCommonDir ?? ((cwd: string) => execFileSync(
+    'git',
+    ['rev-parse', '--git-common-dir'],
+    { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+  ));
+  try {
+    const commonDir = readCommonDir(projectDir).trim();
+    if (!commonDir) return projectDir;
+    // `--git-common-dir` is relative to cwd when the repo is not a worktree.
+    const absoluteCommonDir = resolve(projectDir, commonDir);
+    const mainWorktree = dirname(absoluteCommonDir);
+    return mainWorktree && mainWorktree !== '.' ? mainWorktree : projectDir;
+  } catch {
+    return projectDir;
+  }
+}
 
 export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
   const p = ensureProjectDefaultsFile(projectDir);

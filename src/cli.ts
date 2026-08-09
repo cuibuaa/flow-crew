@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, parseDocument } from 'yaml';
@@ -15,7 +15,7 @@ import {
   runsRoot,
   STAGE_STATUS,
 } from './store.js';
-import { ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
+import { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
 import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
 import { diffVersions, readHead, rollback } from './brief-versioning.js';
 import { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
@@ -868,7 +868,7 @@ async function cmdQuick() {
     console.error('  --timeout <ms>          Override config/defaults.yaml for this run');
     console.error('  --supervise             Enable supervisor brain (default: ON)');
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
-    console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug(basename(projectDir)))');
+    console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug of the main worktree)');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
     console.error('  --campaign-context=inherit|skip  Planner history context; skip preserves campaign ownership (default: inherit)');
     console.error('  --project <path>        Project directory (default: cwd)');
@@ -1055,10 +1055,11 @@ async function cmdQuick() {
   console.log(`Max iterations: ${config.defaults.max_iterations ?? projectDefaults.max_iterations}`);
   console.log(`Stage timeout: ${config.defaults.timeout_ms ?? projectDefaults.timeout_ms}ms`);
   console.log(`Supervisor: ${supervise ? 'enabled' : 'disabled'}`);
-  // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(projectDir)).
+  // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).
   const campaignFromDefaults = projectDefaults.campaign;
-  const campaignBaseSlug = (projectDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
+  const campaignBaseDir = campaignBaseDirectory(projectDir);
+  const campaignBaseSlug = (campaignBaseDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
@@ -1066,6 +1067,11 @@ async function cmdQuick() {
     ? undefined
     : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
+  if (!campaignDisabled && !campaignArg && !campaignFromDefaults && campaignBaseDir !== projectDir) {
+    // Only reachable inside a linked worktree. Say so, because the name does
+    // not match the directory the user is standing in.
+    console.log(`Campaign source: main worktree of this repository (${campaignBaseDir})`);
+  }
   if (resolvedCampaign && !inheritCampaignContext) {
     console.log('Campaign context: skipped (campaign ownership preserved)');
   }
