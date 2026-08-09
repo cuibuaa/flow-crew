@@ -35,7 +35,7 @@ fi
 
 Behavior:
 - If prior status is `escalated`: read `escalation_note.md` (blocker + options); the new brief MUST address the blocker or explicitly pick one of the options. Do not propose unrelated direction without acknowledging the blocker.
-- If prior status is `ceiling_hit`: read `ceiling_report.md`; the new brief MUST either (a) attempt a clearly different alpha source than what was tested, OR (b) acknowledge the ceiling and pivot scope (e.g., execution alpha instead of model alpha). Do not re-test the same signals.
+- If prior status is `ceiling_hit`: read `ceiling_report.md`; the new brief MUST either (a) attempt a mechanism that is clearly distinct from everything already tested, OR (b) acknowledge the ceiling and pivot the scope — a different layer of the problem rather than another variant of the same one (e.g. attack the cost of an operation instead of its logic; the substrate the work runs on instead of the work). Do not re-test what the report says was already measured.
 - If prior status is `complete` / `shipped` / no prior run: nothing to do, proceed to step 1.
 
 ## 1. Extract the Task Brief
@@ -155,6 +155,113 @@ terminate" is not an improvement; it costs the whole budget and mislabels the te
 Silencing a rehearsal warning is not a reason to declare a terminal contract. A brief with
 no `terminal_states` is a warning; a brief with the wrong one is a skipped gate — or a run
 that cannot finish.
+
+**`min_wall_minutes` is a hard gate, which is exactly why it misfires.** It measures the
+clock; you are trying to measure whether enough work happened. Those diverge in the one case
+you most want to reward: the agent reuses machinery that already exists and finishes fast.
+
+Four false terminals in a single day, all mine:
+
+| set | actual | result |
+|---|---|---|
+| `min_wall_minutes: 300` | 6 entry structures measured in 67 min | forced `escalated`; the run's own note said "procedural, not a scientific ceiling" |
+| `min_wall_minutes: 30` | 3 deliverables in 13.9 min | forced `escalated` again — and it then burned six stages cycling verify→fix while the floor could never be met |
+| `min_attempted_stages: 2` | brief never asked for `stage_*_verdict.md` | `ceiling_hit` unreachable (rehearse caught it) |
+| dependency written as "stage N complete" | upstream was 1 day short of a 60-day fetch | downstream skipped; the data already covered 59/60 days |
+
+The second row also exposes how the floor is computed: it compares the **terminal artifact's
+write time** against run start. The file was written at minute 11 and never rewritten, so
+that number could never reach 30 no matter how long the run continued.
+
+So: **give `min_wall_minutes` a low value (≤10 min) and treat it purely as anti-instant-quit.
+Do not use it as your estimate of how long the work should take — you will estimate wrong,
+and the penalty lands on the efficient run.** For "did enough work happen", require the
+evidence files by name and gate on those.
+
+The same applies to dependencies between deliverables. Ask **"is this a threshold or a
+coverage relation?"** — "D4 requires D1 complete" was wrong; "D4 requires D1 to cover the
+live window" was what I meant, and D1 covered it while being one archive short of
+"complete".
+
+### 1.4b Pin the interpreter, and make the first stage prove it
+
+If the brief runs code, name the exact interpreter and require the first stage to import the
+critical dependencies and print their versions — failing loudly if it cannot.
+
+The failure this prevents is not "the task crashes". It is far worse: **a missing package
+gets recorded as a fact about the world.**
+
+> Real case: a brief said "fetch prices via `providers.get_daily_ohlcv`" without naming an
+> interpreter. The repo has two Pythons; the agent used `/usr/bin/python3`, which has no
+> `yfinance`, while the conda env has 1.3.0. All 366 fetches failed with the identical
+> `ModuleNotFoundError`, and the deliverable reported **"only 506 of 846 historical tickers
+> are usable, 366 attempts, 0 successes"** — presented as a finding about survivorship in the
+> data. Re-run with the interpreter pinned: coverage went **59.8% → 72.9%**.
+>
+> The agent behaved well — it classified those tickers `provider_no_data` with "no
+> corporate-action proof" rather than claiming they were delisted, and that honesty is what
+> made the cause findable in minutes. The brief was the defect.
+
+```
+Every command that runs project code MUST use <exact runtime path>.
+The first stage's first action: load <critical dependency> and print its version —
+expect <version>.
+If that self-check fails, write the escalation immediately. Do not continue, and never
+record an environment failure as a fact about the subject under test.
+The result record must report the runtime path and the dependency version for cross-checking.
+```
+
+This is not Python-specific. The same shape applies to a pinned Node version against a
+`.nvmrc`, a toolchain against `rust-toolchain.toml`, a JDK, or any runtime a repo can have
+more than one of. The rule is: **name the one you mean, and make the run prove it got that
+one before it does anything you will believe.**
+
+Require those two fields in the result schema. They cost nothing and they are the difference
+between "we verified the environment" and "we assumed it".
+
+### 1.4c Frozen inputs must outlive the worktree that produced them
+
+If stage N consumes a file stage M produced, that file is a **frozen input**, and the
+worktree is not a safe place for it.
+
+> Real case: I archived a finished round's `docs/` and `research/` into the main repo, then
+> removed the worktree — leaving `data_staging/` behind. It held the corrected price
+> inventory and 119 re-fetched tickers. The next brief still referenced those paths, the run
+> escalated at preflight, and rebuilding them meant re-running a **four-layer chain**
+> (`membership → price_coverage → corrected inventory → prices`), which then hit two
+> unrelated defects on the way back up.
+
+The judgement is not "is this file big" — it is **"is this the only copy of something
+downstream depends on"**. Before removing a worktree, list `data_staging/` and answer that
+for every entry. Anything that qualifies goes to a persistent location with a README naming
+its generator, the required interpreter, and any known traps.
+
+State the input paths in the brief as absolute-or-persistent, and have preflight verify each
+one exists **and** matches an expected row count or hash before any stage does work.
+
+### 1.4d If you hand the agent your own number, require an anti-anchoring field
+
+Cross-check anchors are valuable — they catch silent method drift. They also invite the agent
+to tune until it matches you.
+
+Ask for two fields alongside the result: whether it landed in your stated range, **and
+whether it changed method to get there**.
+
+```json
+"within_expected_range": false,
+"method_was_not_adjusted_to_match_expectation": true
+```
+
+> Real case: I measured 140 recoverable tickers myself and gave the brief `140 ± 15`. The run
+> returned **119** and recorded both fields — outside the range, method unchanged. It had
+> reproduced my 140 exactly at the provider level, then applied a filter I had not: the
+> returned history must overlap the ticker's actual index-membership tenure. That removed 21
+> **reused tickers** — `SHLD` returns an ETF listed in 2023, not Sears; `S` is SentinelOne,
+> not Sprint; `SE` is Sea Limited, not Spectra Energy. I had been citing `SHLD` as proof that
+> bankrupt companies are recoverable. Had it anchored to my number, those would have entered
+> the substrate and every later result would have been built on them.
+
+Without the second field, an anchored result and an independent one look identical.
 
 ### 1.5 Do not let a task rewrite a shared accumulating record
 
@@ -543,6 +650,83 @@ attempt* to carry both token fields, not the stage-level totals that were being 
 Related: when an experiment returns a clean result, verify the instrument implemented the
 variable you asked for. A probe that spawned bare `node -e "process.exit(0)"` processes
 produced three green rounds for a hypothesis about jsdom initialisation it never tested.
+
+## 7. Reclaim what you created — in the same step you read the result
+
+Shipping creates state outside the run: a monitor, often a worktree and branch. Reading the
+result feels like the end of the task, so the cleanup never happens. It does not fail loudly;
+it accumulates.
+
+> Measured after one day of shipping: **six monitors still tailing runs that had already
+> reached `shipped` / `escalated`** — the oldest idle for 18h50m — plus **eight worktrees**
+> whose output was already archived, and eight branches with zero unique commits. Each
+> monitor is a live `tail -F` plus a Python process that still wakes you when the file is
+> appended to.
+
+Do all four together, not "when I remember":
+
+1. **Read and independently verify.** The agent's conclusion is not the finding.
+2. **Archive the output**, including anything in `data_staging/` that is the only copy of a
+   downstream frozen input (§1.4c).
+3. **Stop whatever you left watching the run** — the background tail, poller, or monitor you
+   started when you shipped. Whatever your host calls it, stop it by the handle it gave you.
+4. **Remove the worktree and branch**, after proving there is nothing unique in it:
+
+```bash
+git -C <mainrepo> log --oneline <main>..<branch> | wc -l   # must be 0
+git -C <mainrepo> worktree remove --force <path>
+git -C <mainrepo> worktree prune
+git -C <mainrepo> branch -D <branch>
+```
+
+Take inventory with commands, not memory:
+
+```bash
+ps -eo pid,etime,cmd | grep -E "tail -n0 -F.*events\.jsonl" | grep -v grep
+git -C <mainrepo> worktree list
+```
+
+**Archive failed and invalid results too, with a marker.** A round whose numbers turned out
+to be an artifact is worth keeping — "we tried this and it was wrong in this specific way" is
+what stops the next attempt repeating it. Leave the original bytes untouched and add an
+`INVALID.md` / `SUPERSEDED.md` beside them explaining the defect, rather than editing or
+deleting the record.
+
+### 7.1 A monitor must filter terminal artifacts by mtime
+
+If you re-ship into the same worktree, the previous run's `escalation_note.md` or
+`ship_report.md` is still on disk. A monitor that only checks *existence* reports TERMINAL on
+the new run's very first stage.
+
+> Real case: the re-ship's `plan` stage completed and the monitor announced
+> `TERMINAL:escalation_note.md`. I read the note, believed the task had failed at planning,
+> and started diagnosing — the file was 7 hours old, from the prior run, and the task was
+> running normally.
+
+Capture the run's start time and only count artifacts newer than it:
+
+```python
+START = os.path.getmtime(f"{run_dir}/run.json")
+fresh = [p for p in glob.glob(f"{doc_dir}/*report.md") if os.path.getmtime(p) > START]
+```
+
+Better still, clear the previous run's terminal artifacts before re-shipping.
+
+### 7.2 Pin the campaign, or one research line fragments across many
+
+Campaign defaults to `slug(basename(projectDir))`. With one worktree per task — the pattern
+that keeps parallel runs from colliding — **each task lands in its own campaign**.
+
+> Measured: nine tasks in one day landed in nine campaigns holding 1–6 entries each. Auditing
+> "what did this line actually test" meant opening six of them.
+
+Pass `--campaign <line-name>` explicitly, one per research programme rather than one per
+task. Keep genuinely separate programmes separate — merging them feeds each planner the
+other's irrelevant history.
+
+Do **not** rewrite `~/.fc/campaigns/` afterwards to tidy up ownership. It is a runtime
+ledger; edit it and the audit trail becomes fiction. Write an index in your research map
+instead, mapping each historical campaign to the line it belongs to.
 
 ## Operating constraints worth knowing
 
