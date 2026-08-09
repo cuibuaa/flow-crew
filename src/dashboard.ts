@@ -50,7 +50,9 @@ import {
   describeLiveRunOwner,
   findLiveRunOwnerForProject,
   invalidateRunLockCache,
+  isLiveFlowcrewSchedulerForRun,
   isProjectBusy,
+  parseSchedulerPidMarker,
   releaseLaunchIntent,
 } from "./run-lock.js";
 import {
@@ -1068,6 +1070,38 @@ function readRunStateSafe(projectDir: string, runId: string): StoreState | null 
   }
 }
 
+/**
+ * Death evidence for stale detection. Quiet output is not death: a single stage
+ * can run far longer than STALE_MS without touching state.json or
+ * iteration_log.jsonl — a long test suite, a fetch, a research backtest. The
+ * process holding the run is the authority on whether it is still working.
+ *
+ * Fails closed in the direction that matters. An unreadable or absent
+ * scheduler.pid returns false, so a run with no identifiable owner can still be
+ * called stale; only a live process bound to *this* run suppresses the warning,
+ * which is why the run-bound check is used rather than bare PID liveness — a
+ * recycled PID must not keep a dead run looking alive.
+ *
+ * Deliberately NOT hasLiveScheduler(), and the two must not be merged: they
+ * fail safe in opposite directions because they guard opposite actions.
+ * hasLiveScheduler decides whether performStartupRecovery may rewrite a run to
+ * `failed` — destroying state — so it must over-report liveness; tightening it
+ * once already caused healthy runs to be marked failed (see the note at its
+ * definition). This one only decides whether to suppress a warning, where
+ * over-reporting liveness hides a genuinely lost run, so it must under-report.
+ */
+export function schedulerIsAliveForRun(projectDir: string, runId: string): boolean {
+  if (!projectDir || !runId) return false;
+  try {
+    const runPath = runDir(projectDir, runId);
+    const pid = parseSchedulerPidMarker(readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'));
+    if (pid === null) return false;
+    return isLiveFlowcrewSchedulerForRun(pid, runId, runPath);
+  } catch {
+    return false;
+  }
+}
+
 function campaignStorageAliases(id: string): Set<string> {
   const aliases = new Set<string>([id]);
   const normalized = id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -1413,7 +1447,7 @@ function latestIterationOutcome(iterations: unknown[]): string | undefined {
   return undefined;
 }
 
-function campaignSummary(id: string, dir: string): WorkspaceCampaign {
+export function campaignSummary(id: string, dir: string): WorkspaceCampaign {
   const state = readJsonFile(join(dir, 'state.json'));
   const iterations = readJsonlFile(join(dir, 'iteration_log.jsonl'));
   const stat = statSync(dir);
@@ -1436,14 +1470,19 @@ function campaignSummary(id: string, dir: string): WorkspaceCampaign {
     try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'state.json')).mtimeMs); } catch { /* ignore */ }
     try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'iteration_log.jsonl')).mtimeMs); } catch { /* ignore */ }
     if (lastMtime > 0 && Date.now() - lastMtime > STALE_MS) {
-      const underlying = latestRunId ? readRunStateSafe(getStringAt(state, ['projectDir']) ?? '', latestRunId) : null;
+      const projectDir = getStringAt(state, ['projectDir']) ?? '';
+      const underlying = latestRunId ? readRunStateSafe(projectDir, latestRunId) : null;
       status = underlying && (
         isTerminalRunStatus(underlying.status)
         || isPausedRunStatus(underlying.status)
         || isAwaitingApprovalRunStatus(underlying.status)
       )
         ? underlying.status
-        : CAMPAIGN_PRESENTATION_STATUS.STALE;
+        // Silence is not death. Only demote to stale once no live scheduler
+        // process is bound to the run; a long stage is quiet, not lost.
+        : latestRunId && schedulerIsAliveForRun(projectDir, latestRunId)
+          ? status
+          : CAMPAIGN_PRESENTATION_STATUS.STALE;
     }
   }
   const latestScore = numericValue(latest?.score);
@@ -1618,7 +1657,14 @@ function campaignFromHistory(
   if (rawStatus === CAMPAIGN_PRESENTATION_STATUS.RUNNING) {
     const STALE_MS = 30 * 60 * 1000;
     const lastActivity = latest?.timestamp ? Date.parse(latest.timestamp) || 0 : 0;
-    if (lastActivity > 0 && Date.now() - lastActivity > STALE_MS) rawStatus = CAMPAIGN_PRESENTATION_STATUS.STALE;
+    // Silence is not death — check the process before demoting. See
+    // schedulerIsAliveForRun.
+    const quietRunId = runs.find((run) => run.outcome === RUN_STATUS.RUNNING)?.id ?? latest?.runId;
+    if (
+      lastActivity > 0
+      && Date.now() - lastActivity > STALE_MS
+      && !(quietRunId && schedulerIsAliveForRun(projectDir, quietRunId))
+    ) rawStatus = CAMPAIGN_PRESENTATION_STATUS.STALE;
   }
   const status = rawStatus;
   const staleRunId = status === CAMPAIGN_PRESENTATION_STATUS.STALE
