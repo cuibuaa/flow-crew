@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.6.2] - 2026-08-09
+
+### Fixed — three defects found while running research tasks through the engine
+
+- **A gate could be made unpassable by a naming difference between two files it wrote
+  itself.** A gate wrote `verdict.metric = "failing_checks"` — its own health metric, zero
+  checks failing — beside `metric.json.metric = "max_abs_train_spearman_to_vanilla_momentum"`,
+  the domain metric its brief had asked it to report. Both files agreed the gate passed.
+  `validateVerdictAgainstMetricFile` rejected the pair for the naming difference alone, so
+  `readGateVerdict` returned `pass:false` for a file that said `pass:true` — every time, no
+  matter what the stage did. On one run all four audits were rejected this way, fifteen times
+  in the log; it escaped only when the three-round repair budget ran out, after ~2.5h of
+  repair rounds that had nothing to repair. A rename is evidence of self-deception only when
+  there is a failure for it to hide, so the check now also requires the metric file to
+  indicate one — an explicit `pass: false`, or a numeric value missing its own threshold. The
+  case the guard exists for, a failing domain metric replaced by a different passing one,
+  still rejects. The violation now names both sides; it was a bare `metric name redefined`
+  carrying neither, so the clash could not be diagnosed from the message.
+
+  The repair stage was also handed the archived verdict as its "rejection evidence" — a file
+  saying `pass:true` — with no way to see what the engine had objected to.
+  `engine_verdict_<gate>.json` now records the engine's effective verdict and reason beside
+  it, and the re-evaluation preamble points at it.
+
+  This was never caught because its contract test lives in `tests/`, which is gitignored
+  **and** outside the CI command. Every existing case sets `metric.pass === false`, which
+  returns at the first branch and never reaches the name comparison, so the breaking
+  combination was never constructed. One fixture even uses that exact clash but asserts null
+  via the `phaseComplete` early return. That file now lives in `spec/`.
+
+- **A run is no longer called stale just because it is quiet.** Both stale sites demoted a
+  running campaign purely because neither `state.json` nor `iteration_log.jsonl` had been
+  touched for 30 minutes. A single long stage — a fetch, a test suite, a research backtest —
+  is silent for far longer than that while its scheduler works normally, so live runs were
+  reported lost. Silence is now checked against the process holding the run: only a live
+  process bound to *that* run suppresses the warning, so an absent, malformed or dead
+  `scheduler.pid` still goes stale, and a recycled pid bound to a different run does not
+  suppress. This deliberately does not reuse `hasLiveScheduler`, which guards
+  `performStartupRecovery` rewriting a run to `failed` and must therefore over-report
+  liveness; the two fail safe in opposite directions and must not be merged.
+
+### Changed — the default campaign follows the repository, not the directory
+
+- **Worktrees of one repository now share one campaign.** The default campaign name was
+  `slug(basename(projectDir))`, so every linked git worktree got a campaign of its own and a
+  single line of work split across as many campaigns as there were worktrees — auditing what
+  a project had actually tried meant opening all of them. Any directory inside a repository
+  now resolves to its main worktree.
+
+  Two cases move: a linked worktree, and a subdirectory of a repository — `repo/src/deep`
+  gave `deep` and now gives `repo`. **A checkout's own root, the common case, is unchanged**,
+  as are an explicit `--campaign`, `defaults.yaml::campaign`, and any directory that is not a
+  repository. If you have been running from worktrees, your next run lands in a campaign
+  named for the repository rather than the worktree; the earlier campaign directories stay as
+  they are. Inside a worktree `flowcrew quick` now prints which directory the name came from,
+  since it no longer matches the one you are standing in.
+
 ## [0.6.1] - 2026-08-08
 
 ### Fixed — a 0.6.0 launch regression, and nullable fields in declared schemas
