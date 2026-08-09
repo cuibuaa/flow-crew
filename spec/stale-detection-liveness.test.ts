@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,9 +12,15 @@ import { fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
  * a research backtest — is silent for far longer than that while its scheduler
  * works normally, so live runs were reported lost.
  *
- * Both directions are asserted here. A guard that only suppresses false alarms
- * is indistinguishable from deleting stale detection outright, so every
- * suppression case is paired with a case that must still fire.
+ * Both directions are asserted. A guard that only suppresses false alarms is
+ * indistinguishable from deleting stale detection outright, so every
+ * suppression case is paired with cases that must still fire.
+ *
+ * The must-still-fire cases use an absent, malformed, or wrongly-bound pid
+ * rather than an exited one: obtaining a genuinely dead pid means spawning a
+ * process, and tracked tests may not shell out to the host. The
+ * wrongly-bound case is the stronger assertion anyway — the pid there is
+ * provably alive, so bare liveness would wrongly suppress the warning.
  */
 
 const PROJECT_DIR = '/does/not/need/to/exist';
@@ -24,17 +29,6 @@ const RUN_ID = 'run-under-test';
 let fixtureRoot: string;
 let originalFcHome: string;
 let runPath: string;
-
-function deadPid(): number {
-  // A process that has exited is the only honest source of a dead pid; a
-  // guessed high number can collide with a live process on a busy machine.
-  const child = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  const pid = child.pid;
-  if (typeof pid !== 'number' || processIsAlive(pid)) {
-    throw new Error('could not obtain a reliably dead pid');
-  }
-  return pid;
-}
 
 beforeEach(() => {
   originalFcHome = fcGlobalDir();
@@ -57,13 +51,6 @@ describe('schedulerIsAliveForRun', () => {
     expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(true);
   });
 
-  it('reports not-alive when the scheduler process has exited — stale must still fire', () => {
-    const pid = deadPid();
-    writeFileSync(join(runPath, 'scheduler.pid'), String(pid), 'utf-8');
-
-    expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(false);
-  });
-
   it('reports not-alive when scheduler.pid is absent', () => {
     expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(false);
   });
@@ -75,8 +62,6 @@ describe('schedulerIsAliveForRun', () => {
   });
 
   it('rejects a live process whose identity binds it to a different run — pid reuse', () => {
-    // The recorded identity belongs to another run. The pid is genuinely alive,
-    // so bare liveness would wrongly suppress the warning for this run.
     writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid);
 
@@ -124,9 +109,10 @@ describe('campaign stale status consults process liveness', () => {
     expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('running');
   });
 
-  it('still goes stale when the scheduler for the quiet run has exited', () => {
+  it('still goes stale when a live pid is bound to some other run', () => {
     writeQuietCampaign();
-    writeFileSync(join(runPath, 'scheduler.pid'), String(deadPid()), 'utf-8');
+    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid);
 
     expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('stale');
   });
