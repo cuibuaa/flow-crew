@@ -3760,6 +3760,22 @@ function metricNamesMatch(metricName: string, verdictName: string): boolean {
     || (GATE_METRIC_SYNONYMS[verdict] ?? []).map(s => s.toLowerCase()).includes(metric);
 }
 
+/**
+ * Does metric.json itself report a failure? Either an explicit `pass: false`, or
+ * a numeric value that misses its own threshold. Used to decide whether a
+ * metric-name difference could be masking anything.
+ */
+function metricFileIndicatesFailure(metric: Record<string, unknown>): boolean {
+  if (metric.pass === false) return true;
+  const value = typeof metric.value === 'number'
+    ? metric.value
+    : typeof metric.score === 'number' ? metric.score : null;
+  const threshold = typeof metric.threshold === 'number' ? metric.threshold : null;
+  if (value === null || threshold === null) return false;
+  const higherIsBetter = metric.higherIsBetter !== false && metric.higher_is_better !== false;
+  return higherIsBetter ? value < threshold : value > threshold;
+}
+
 export function validateVerdictAgainstMetricFile(
   verdict: Record<string, unknown>,
   metric: Record<string, unknown>,
@@ -3777,8 +3793,18 @@ export function validateVerdictAgainstMetricFile(
     if (verdict.phaseComplete === true || verdict.phase_complete === true || verdict.nextPhase || verdict.next_phase) return null;
     return 'verdict/metric.json mismatch: metric says fail, verdict says pass';
   }
-  if (typeof metric.metric === 'string' && typeof verdict.metric === 'string' && !metricNamesMatch(metric.metric, verdict.metric)) {
-    return 'metric name redefined';
+  if (
+    typeof metric.metric === 'string'
+    && typeof verdict.metric === 'string'
+    && !metricNamesMatch(metric.metric, verdict.metric)
+    // A rename is evidence of self-deception only when there is a failure for it
+    // to hide. When the metric file reports no failure, the two files simply name
+    // different things — a gate's own health metric ("failing_checks") beside the
+    // domain metric the brief asked the stage to report — and rejecting that pair
+    // makes the gate unpassable no matter what the stage does.
+    && metricFileIndicatesFailure(metric)
+  ) {
+    return `metric name redefined: metric.json="${metric.metric}" vs verdict="${verdict.metric}"`;
   }
   if (typeof metric.threshold === 'number' && typeof verdict.threshold === 'number' && verdict.threshold < metric.threshold) {
     return 'threshold downgraded';
@@ -5166,6 +5192,11 @@ export async function runWorkflow(
               runDirPath,
               gateArchiveCoordinate(iteration, repairRound),
               activeGateIds,
+              new Map(
+                dispatchCheck.evaluations
+                  .filter((e) => e.effectiveVerdict)
+                  .map((e) => [e.id, e.effectiveVerdict!] as const),
+              ),
             );
             const repairSnapshot = captureRepairRoundSnapshot(projectDir, activeRetryStages);
 
@@ -6334,6 +6365,22 @@ function archivedGateVerdictReadPath(
   return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `rejected_verdict_${gateId}.json`);
 }
 
+function archivedGateEffectiveVerdictWritePath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `engine_verdict_${gateId}.json`);
+}
+
+function archivedGateEffectiveVerdictReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `engine_verdict_${gateId}.json`);
+}
+
 function archivedGateOutputWritePath(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
@@ -6354,6 +6401,7 @@ function archiveGateRoundEvidence(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
   gateIds: string[],
+  effectiveVerdicts?: Map<string, { pass: boolean; reason?: string }>,
 ): void {
   const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
   mkdirSync(artifactDir, { recursive: true });
@@ -6363,6 +6411,38 @@ function archiveGateRoundEvidence(
     const output = join(runDirPath, 'stages', gateId, 'output.md');
     try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     try { if (existsSync(output)) copyFileSync(output, archivedGateOutputWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
+    // The archived verdict is the file the gate WROTE. The engine can reject it
+    // for reasons the file cannot show — a metric.json inconsistency, a contract
+    // violation — and a repair handed only the written file then sees `pass:
+    // true` with nothing to fix, and burns the retry budget. Archive what the
+    // engine concluded, and why, beside it.
+    const effective = effectiveVerdicts?.get(gateId);
+    if (effective) {
+      try {
+        writeFileSync(
+          archivedGateEffectiveVerdictWritePath(runDirPath, coordinate, gateId),
+          JSON.stringify({
+            gateId,
+            written_verdict_pass: readWrittenVerdictPass(verdict),
+            engine_effective_pass: effective.pass,
+            engine_rejection_reason: effective.reason ?? null,
+            note: 'The engine\'s conclusion. If engine_effective_pass is false while '
+              + 'written_verdict_pass is true, the gate file is not the thing to fix — '
+              + 'engine_rejection_reason is.',
+          }, null, 2) + '\n',
+          'utf-8',
+        );
+      } catch { /* best effort */ }
+    }
+  }
+}
+
+function readWrittenVerdictPass(verdictPath: string): boolean | null {
+  try {
+    const parsed = JSON.parse(readFileSync(verdictPath, 'utf-8')) as Record<string, unknown>;
+    return typeof parsed.pass === 'boolean' ? parsed.pass : null;
+  } catch {
+    return null;
   }
 }
 
@@ -6385,6 +6465,10 @@ export function buildGateReevaluationPreamble(input: {
     '',
     'Evidence you must read:',
     `- Rejected verdict: ${archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
+    `- The engine's own conclusion and rejection reason: ${archivedGateEffectiveVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
+    '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
+    '  verdict file is not the defect — engine_rejection_reason names what the engine',
+    '  objected to, and that is what must change.',
     `- Original first-pass validator-owned Coverage Map: ${firstCoverageOutput}`,
     ...(input.repairRound > 1 ? [`- Immediately previous gate output: ${previousOutput}`] : []),
     `- Complete, untruncated repair-round diff: ${input.roundDiffPath}`,
