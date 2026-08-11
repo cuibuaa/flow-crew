@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -50,7 +51,11 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  const root = mkdtempSync(join(tmpdir(), 'flowcrew-ship-setup-'));
+  // Canonicalize the fixture root: on macOS the temp directory is reached through a
+  // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
+  // path differ from what the code under test computes. Reproducible on Linux by
+  // pointing TMPDIR at a symlink.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'flowcrew-ship-setup-')));
   fixture = {
     root,
     project: join(root, 'source-project'),
