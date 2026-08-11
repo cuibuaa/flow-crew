@@ -99,6 +99,13 @@ import { isSessionReuseEnabled, loadProjectDefaults, loadSupervisorConfig } from
 import { readCodexSession, type CodexSessionMetadata } from './adapters/codex.js';
 import { createLogger } from './logging.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
+import {
+  demoteRealityCheckAdvisories,
+  formatRealityCheckPreflightFindings,
+  inspectRealityChecks,
+  type RealityCheckPreflightFinding,
+  type RealityCheckPreflightReport,
+} from './reality-check-preflight.js';
 
 const log = createLogger({ name: 'scheduler' });
 const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
@@ -1731,6 +1738,8 @@ function countGlobMatches(projectDir: string, glob: string, startedAtMs: number)
 // but produced zero valid injected stages (empty/invalid dispatch.yaml). The
 // retry preamble keys off this prefix to render a dispatch-specific re-prompt.
 const INVALID_DISPATCH_ERROR_PREFIX = 'invalid dispatch.yaml';
+const INVALID_REALITY_CHECKS_ERROR_PREFIX = 'invalid reality_checks.md';
+const REALITY_CHECK_PREFLIGHT_ARTIFACT = 'reality_check_preflight.json';
 
 // Canonical dispatch.yaml schema reminder, single-sourced for the re-prompt so
 // the planner re-emits a well-formed file. Generic mechanism (no task content).
@@ -1770,6 +1779,16 @@ export function buildRetryPreamble(
     const status = JSON.parse(statusRaw) as { error?: string };
     prevError = status.error;
   } catch { /* status not readable; fall through to generic message */ }
+  if (prevError && prevError.startsWith(INVALID_REALITY_CHECKS_ERROR_PREFIX)) {
+    const detail = prevError.slice(INVALID_REALITY_CHECKS_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
+    return [
+      `RE-PLAN (attempt ${retries + 1}): pre-dispatch lint refused one or more hard checks in your previous reality_checks.md before any work stage ran.`,
+      detail ? `Specific preflight finding(s): ${detail}` : 'A hard check could false-block a result that satisfies the task brief.',
+      `Read ${runDirPath}/${REALITY_CHECK_PREFLIGHT_ARTIFACT} for the complete blocking and advisory findings from that proposal.`,
+      'Write fresh, complete dispatch.yaml and reality_checks.md files. Replace or omit each rejected hard check; preserve the brief\'s explicit exceptions and test the claimed contract property rather than a presentation or bookkeeping proxy.',
+      `Write both files in ${runDirPath}. Do not continue from partial planner artifacts: the rejected dispatch and checks were removed before this retry.`,
+    ].join('\n\n');
+  }
   // Empty/invalid dispatch.yaml — re-plan, do NOT "continue from partial". The
   // detail (parse error / unknown roles) is carried in the error string itself.
   if (prevError && prevError.startsWith(INVALID_DISPATCH_ERROR_PREFIX)) {
@@ -1904,6 +1923,57 @@ export function decideEmptyDispatchAction(
     reason: `Planner failed to emit a valid dispatch.yaml after ${maxRetries} bounded retr${maxRetries === 1 ? 'y' : 'ies'}. Last problem: ${diagnosis.detail}`,
     unknownRoles: [],
   };
+}
+
+export type RealityCheckPreflightAction =
+  | { action: 'retry'; nextRetry: number; error: string; detail: string }
+  | { action: 'fail'; status: 'failed'; reason: string };
+
+/** Apply the existing bounded plan-artifact retry budget to refused hard checks. */
+export function decideRealityCheckPreflightAction(
+  findings: readonly RealityCheckPreflightFinding[],
+  retriesUsed: number,
+  maxRetries: number,
+): RealityCheckPreflightAction {
+  const detail = formatRealityCheckPreflightFindings(findings);
+  if (retriesUsed < maxRetries) {
+    return {
+      action: 'retry',
+      nextRetry: retriesUsed + 1,
+      error: `${INVALID_REALITY_CHECKS_ERROR_PREFIX}: ${detail}`,
+      detail,
+    };
+  }
+  return {
+    action: 'fail',
+    status: 'failed',
+    reason: `Planner emitted inadmissible hard Reality-Gate checks after ${maxRetries} bounded retr${maxRetries === 1 ? 'y' : 'ies'}: ${detail}`,
+  };
+}
+
+function writeRealityCheckPreflightArtifact(
+  runDirPath: string,
+  plannerStageId: string,
+  report: RealityCheckPreflightReport,
+  disposition: 'admitted' | 'admitted_with_advisories' | 'refused',
+  demotedCheckIndexes: readonly number[] = [],
+): void {
+  writeFileSync(join(runDirPath, REALITY_CHECK_PREFLIGHT_ARTIFACT), JSON.stringify({
+    version: 1,
+    writtenAt: new Date().toISOString(),
+    plannerStageId,
+    checksInspected: report.checksInspected,
+    disposition,
+    blockingTierFindings: report.blockingTierFindings,
+    structuralFindings: report.structuralFindings,
+    advisoryFindings: report.advisoryFindings,
+    demotedCheckIndexes,
+    delivery: {
+      runtime: 'advisory findings are applied to reality_checks.md before dispatch and cannot reject terminal success',
+      operator: 'a reality_gate_advisory entry is appended to events.jsonl when advisory findings are present',
+      planner: `the planner prompt requires reading ${REALITY_CHECK_PREFLIGHT_ARTIFACT} on a later planning attempt`,
+    },
+  }, null, 2) + '\n', 'utf-8');
 }
 
 /** A pending supervisor REJECT signal read off disk (signals/reject_<stage>.json
@@ -7214,6 +7284,107 @@ async function executeIteration(
     for (const stage of sorted) {
       if (stage.dynamic_dispatch && !injectedDispatchStages.has(stage.id) &&
           state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) {
+        const plannerChecksPath = join(runDirPath, 'reality_checks.md');
+        let exactTaskBrief = state.taskDescription ?? taskDescription ?? '';
+        try {
+          const persistedBriefPath = join(runDirPath, 'task_brief.md');
+          if (existsSync(persistedBriefPath)) exactTaskBrief = readFileSync(persistedBriefPath, 'utf-8');
+        } catch { /* state.taskDescription remains the admitted fallback */ }
+
+        if (exactTaskBrief.trim()) {
+          const plannerChecks = existsSync(plannerChecksPath)
+            ? readFileSync(plannerChecksPath, 'utf-8')
+            : '';
+          const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks);
+          if (preflight.refusingFindings.length > 0) {
+            writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
+            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
+            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
+            const decision = decideRealityCheckPreflightAction(
+              preflight.refusingFindings,
+              retriesUsed,
+              maxPlanRetries,
+            );
+
+            if (decision.action === 'retry') {
+              // Both planner artifacts belong to one proposal. Removing both is
+              // what prevents a corrected dispatch from inheriting stale checks.
+              for (const artifact of [join(runDirPath, 'dispatch.yaml'), plannerChecksPath]) {
+                try { if (existsSync(artifact)) unlinkSync(artifact); } catch { /* already gone */ }
+              }
+              planStageRetries.set(stage.id, decision.nextRetry);
+              injectedDispatchStages.delete(stage.id);
+              const replanStatus: StageStatus = {
+                ...state.stages[stage.id],
+                status: STAGE_STATUS.PENDING,
+                retries: decision.nextRetry,
+                error: decision.error,
+              };
+              writeStageStatus(projectDir, runId, stage.id, replanStatus);
+              state.stages[stage.id] = replanStatus;
+              writeRunState(projectDir, runId, state);
+              log.warn(
+                { stage: stage.id, retry: decision.nextRetry, max: maxPlanRetries, detail: decision.detail },
+                'Planner Reality-Gate checks refused before dispatch — bounded re-plan retry',
+              );
+              recordRunEvent(projectDir, runId, {
+                type: 'plan_dispatch_retry',
+                runId,
+                timestamp: new Date().toISOString(),
+                iteration: state.currentIteration ?? 1,
+                stageId: stage.id,
+                detail: `Reality-check preflight retry ${decision.nextRetry}/${maxPlanRetries}: ${decision.detail}`,
+              });
+              break;
+            }
+
+            log.error({ stage: stage.id, findings: preflight.refusingFindings }, decision.reason);
+            state.status = decision.status;
+            state.failureReason = decision.reason;
+            state.completedAt = new Date().toISOString();
+            writeRunState(projectDir, runId, state);
+            recordRunEvent(projectDir, runId, {
+              type: 'run_completed',
+              runId,
+              timestamp: state.completedAt,
+              iteration: state.currentIteration ?? 1,
+              stageId: stage.id,
+              detail: `failed: ${decision.reason}`,
+            });
+            return state;
+          }
+
+          if (preflight.advisoryFindings.length > 0) {
+            const rewrite = demoteRealityCheckAdvisories(plannerChecks, preflight.advisoryFindings);
+            if (rewrite.markdown !== plannerChecks) {
+              writeFileSync(plannerChecksPath, rewrite.markdown, 'utf-8');
+            }
+            writeRealityCheckPreflightArtifact(
+              runDirPath,
+              stage.id,
+              preflight,
+              'admitted_with_advisories',
+              rewrite.demotedCheckIndexes,
+            );
+            const detail = formatRealityCheckPreflightFindings(preflight.advisoryFindings);
+            log.warn(
+              { stage: stage.id, demotedCheckIndexes: rewrite.demotedCheckIndexes, detail },
+              'Planner Reality-Gate intent findings admitted as runtime advisories before dispatch',
+            );
+            recordRunEvent(projectDir, runId, {
+              type: 'reality_gate_advisory',
+              runId,
+              timestamp: new Date().toISOString(),
+              iteration: state.currentIteration ?? 1,
+              stageId: stage.id,
+              level: 'warning',
+              detail: `Pre-dispatch lint demoted check indexes ${rewrite.demotedCheckIndexes.join(', ') || 'none'} to advisory: ${detail}`,
+            });
+          } else {
+            writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'admitted');
+          }
+        }
+
         injectedDispatchStages.add(stage.id);
         const injected = injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId);
 

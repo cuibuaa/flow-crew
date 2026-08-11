@@ -130,7 +130,37 @@ const REALITY_CHECK_CLAUSES = [
     id: 'objective-evidence-remains-hard',
     pattern: /Evidence checks \(file existence, command exit code,\s+numeric thresholds, schema\/integrity constraints\) MUST stay hard/,
   },
+  {
+    id: 'planner-reads-preflight-feedback',
+    pattern: /if \{run_dir\}\/reality_check_preflight\.json exists,\s+read it before writing new checks/,
+  },
+  {
+    id: 'advisories-have-explicit-delivery',
+    pattern: /marks intent-dependent findings advisory in `reality_checks\.md` before\s+dispatch[\s\S]*emits an operator-visible\s+`reality_gate_advisory` run event/,
+  },
 ] as const;
+
+const REALITY_CHECK_ADMISSIBILITY_CLAUSES = [
+  {
+    id: 'check-can-fail',
+    pattern: /A hard Reality-Gate\s+check is admissible only if it is capable of failing/,
+  },
+  {
+    id: 'failure-set-matches-claimed-property',
+    pattern: /every state in which it fails must be\s+one where the contract property named by the check is false/,
+  },
+  {
+    id: 'derive-property-with-exceptions',
+    pattern: /Derive that property from the brief,\s+including every explicit exception/,
+  },
+] as const;
+
+const MOTIVATING_FALSE_BLOCK = /observed: a clean gated-0 round was wrongly\s+`reality_gate_failed` because a self-authored archived-copy path was absent/;
+const FORMER_INSTANCE_ONLY_RULE = [
+  'ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping.',
+  'A reality check may reference ONLY required files.',
+  'Do NOT require EXTRA self-created archive/copy files or assert byte-equality between copies.',
+].join(' ');
 
 function readPlannerPrompt(): string {
   const parsed = parse(readFileSync(PLANNER_PATH, 'utf-8')) as PlannerConfig;
@@ -153,9 +183,13 @@ function contractViolations(prompt: string): string[] {
 }
 
 function realityCheckContractViolations(prompt: string): string[] {
-  return REALITY_CHECK_CLAUSES
+  const missing = [...REALITY_CHECK_CLAUSES, ...REALITY_CHECK_ADMISSIBILITY_CLAUSES]
     .filter(({ pattern }) => !pattern.test(prompt))
     .map(({ id }) => `missing:${id}`);
+  const instanceOnly = /self-created archive\/copy files/i.test(prompt)
+    && /byte-equality between copies/i.test(prompt)
+    && REALITY_CHECK_ADMISSIBILITY_CLAUSES.some(({ pattern }) => !pattern.test(prompt));
+  return [...missing, ...(instanceOnly ? ['forbidden:instance-only-enumeration'] : [])];
 }
 
 function referenceExamples(prompt: string): string {
@@ -199,16 +233,29 @@ describe('planner dispatch contract', () => {
 });
 
 describe('planner reality-check contract', () => {
-  it('uses structural documentation evidence and treats terminology matching as advisory', () => {
+  it('uses a general failure-set criterion alongside structural and advisory guidance', () => {
     expect(realityCheckContractViolations(readPlannerPrompt())).toEqual([]);
   });
 
-  it.each(REALITY_CHECK_CLAUSES)('rejects omission of $id', ({ id, pattern }) => {
+  it.each([...REALITY_CHECK_CLAUSES, ...REALITY_CHECK_ADMISSIBILITY_CLAUSES])('rejects omission of $id', ({ id, pattern }) => {
     const prompt = readPlannerPrompt();
     const match = prompt.match(pattern);
     expect(match, `fixture setup must find ${id}`).not.toBeNull();
     const withoutClause = prompt.replace(match![0], '');
     expect(realityCheckContractViolations(withoutClause)).toContain(`missing:${id}`);
+  });
+
+  it('rejects the former two-instance enumeration as a substitute for the criterion', () => {
+    expect(realityCheckContractViolations(FORMER_INSTANCE_ONLY_RULE)).toEqual(expect.arrayContaining([
+      'missing:check-can-fail',
+      'missing:failure-set-matches-claimed-property',
+      'missing:derive-property-with-exceptions',
+      'forbidden:instance-only-enumeration',
+    ]));
+  });
+
+  it('preserves the incident that explains why the criterion exists', () => {
+    expect(readPlannerPrompt()).toMatch(MOTIVATING_FALSE_BLOCK);
   });
 });
 

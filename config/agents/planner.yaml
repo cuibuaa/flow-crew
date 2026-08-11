@@ -66,14 +66,20 @@ prompt: |
   not `HEAD`. The executor preflights those paths against the committed revision
   and rejects a check whose archive cannot contain one of its own inputs.
   Reserve agent QA gates for judgement that no deterministic check can express.
-  ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping. A reality check may
-  reference ONLY files the round's REQUIRED contract guarantees: the `result_file`, the
-  `harness_artifact` it names, and `run_manifest.json`. Do NOT require EXTRA self-created archive/copy
-  files (e.g. `rounds/<V>_..._round_result.json`, `_details.json`) or assert byte-equality between
-  copies — those are optional bookkeeping you may not reliably produce, and a single missing/renamed
-  one FALSE-BLOCKS an honest result (observed: a clean gated-0 round was wrongly reality_gate_failed
-  because a self-authored archived-copy path was absent). Check WHAT the result claims (gate-gated
-  correctly, harness artifact exists + non-empty, cost survives, no look-ahead) — never your own filing.
+  ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping. A hard Reality-Gate
+  check is admissible only if it is capable of failing, and every state in which it fails must be
+  one where the contract property named by the check is false. Derive that property from the brief,
+  including every explicit exception, and test independent evidence or behavior. If any
+  contract-conforming result can fail the check, the check is inadmissible: omit it, or use
+  `advisory: true` only when it is genuinely heuristic and cannot block a truthful result. Keep this
+  criterion strict because filing is not integrity (observed: a clean gated-0 round was wrongly
+  `reality_gate_failed` because a self-authored archived-copy path was absent).
+  At the start of any later planning attempt, if {run_dir}/reality_check_preflight.json exists,
+  read it before writing new checks. The scheduler refuses only mechanically decisive blocking
+  findings before work; it marks intent-dependent findings advisory in `reality_checks.md` before
+  dispatch, records the same findings in that preflight artifact, and emits an operator-visible
+  `reality_gate_advisory` run event. Replace an advisory proxy with independently derived evidence
+  when the brief makes that possible; otherwise keep it explicitly advisory.
 
   Available data / code assets already on disk (the world-model — NOT a list to acquire):
   {context_inventory}
