@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
   buildSupervisorSystemPrompt,
@@ -6,7 +9,71 @@ import {
   summarizeSupervisorGuidanceHistory,
   SUPERVISOR_VERDICTS,
 } from '../src/supervisor.js';
+import { loadSupervisorConfig } from '../src/config.js';
 import type { StoreState } from '../src/store.js';
+
+function productionAssessmentTimeoutMs(): number {
+  const sourcePath = join(import.meta.dirname, '..', 'src', 'supervisor.ts');
+  const sourceFile = ts.createSourceFile(
+    sourcePath,
+    readFileSync(sourcePath, 'utf-8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const numericConstants = new Map<string, ts.Expression>();
+  let timeout: number | undefined;
+
+  function evaluateNumber(expression: ts.Expression, seen = new Set<string>()): number | undefined {
+    if (ts.isNumericLiteral(expression)) return Number(expression.text);
+    if (
+      ts.isPrefixUnaryExpression(expression)
+      && (expression.operator === ts.SyntaxKind.PlusToken || expression.operator === ts.SyntaxKind.MinusToken)
+    ) {
+      const operand = evaluateNumber(expression.operand, seen);
+      return operand === undefined
+        ? undefined
+        : expression.operator === ts.SyntaxKind.MinusToken ? -operand : operand;
+    }
+    if (ts.isIdentifier(expression) && !seen.has(expression.text)) {
+      const initializer = numericConstants.get(expression.text);
+      if (initializer) return evaluateNumber(initializer, new Set([...seen, expression.text]));
+    }
+    return undefined;
+  }
+
+  function collectConstants(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+    ) {
+      numericConstants.set(node.name.text, node.initializer);
+    }
+    ts.forEachChild(node, collectConstants);
+  }
+  collectConstants(sourceFile);
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'run'
+      && node.expression.expression.getText(sourceFile) === 'this.adapter'
+      && node.arguments[2]
+      && ts.isObjectLiteralExpression(node.arguments[2])
+    ) {
+      const property = node.arguments[2].properties.find((candidate): candidate is ts.PropertyAssignment => (
+        ts.isPropertyAssignment(candidate)
+        && candidate.name.getText(sourceFile) === 'timeout_ms'
+      ));
+      if (property) timeout = evaluateNumber(property.initializer);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  if (timeout === undefined) throw new Error('Supervisor assessment timeout is not statically numeric');
+  return timeout;
+}
 
 function baseState(): StoreState {
   return {
@@ -80,7 +147,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 4096, routineAssessmentsThisIteration: 20 })).toBe('none');
   });
 
-  it('retains enough semantic opportunities for the real 2789-second 10 GUIDE → ABORT case', () => {
+  it('retains enough semantic opportunities for the recorded 10 GUIDE → ABORT case', () => {
     const historical = [
       [5, '2026-07-06T08:04:10.409Z', 'GUIDE'],
       [7, '2026-07-06T08:05:43.309Z', 'GUIDE'],
@@ -97,16 +164,13 @@ describe('supervisor routine/anomaly scheduling', () => {
     expect(historical.filter(([, , verdict]) => verdict === 'GUIDE')).toHaveLength(10);
     expect(historical.at(-1)).toEqual([92, '2026-07-06T08:49:48.315Z', 'ABORT']);
     const timestamps = historical.map(([, timestamp]) => Date.parse(timestamp));
-    expect(timestamps.at(-1)! - timestamps[0]).toBe(2_737_906);
-    expect(timestamps.at(-1)! - timestamps.at(-2)!).toBe(306_248);
-    expect(Math.max(...timestamps.slice(1).map((timestamp, index) => timestamp - timestamps[index]))).toBe(336_642);
-
-    const historicalWindowMs = 2_789_000;
-    const conservativeCycleMs = 180_000 + 30_000; // cadence plus full assessment timeout
+    const historicalWindowMs = timestamps.at(-1)! - timestamps[0];
+    const requiredAssessments = historical.length;
+    const supervisor = loadSupervisorConfig();
+    const conservativeCycleMs = supervisor.routineAssessmentIntervalMs + productionAssessmentTimeoutMs();
     const opportunities = Math.floor(historicalWindowMs / conservativeCycleMs);
-    expect(opportunities).toBe(13);
-    expect(opportunities).toBeGreaterThanOrEqual(11); // ten GUIDE decisions plus ABORT
-    expect(20).toBeGreaterThanOrEqual(opportunities); // routine cap cannot truncate the sequence
+    expect(opportunities).toBeGreaterThanOrEqual(requiredAssessments);
+    expect(supervisor.maxAssessmentsPerIteration).toBeGreaterThanOrEqual(opportunities);
   });
 
   it('detects every enumerated immediate signal class', () => {

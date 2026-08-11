@@ -135,31 +135,45 @@ describe('Group E: Edge Cases', () => {
   });
 
   it('large KG (55 nodes, 50 edges) operations work', () => {
+    const nodeCount = 55;
+    const edgeCount = 50;
     const nodes: KGNode[] = [];
-    for (let i = 0; i < 55; i++) {
+    for (let i = 0; i < nodeCount; i++) {
       nodes.push(makeNode({ type: i % 2 === 0 ? 'goal' : 'approach', label: `N${i}` }));
     }
     const edges: KnowledgeGraph['edges'] = [];
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < edgeCount; i++) {
       edges.push({ from: nodes[i].id, to: nodes[i + 1].id, type: 'explored_by' });
     }
     const kg = makeKG(nodes, edges);
     writeKG(projectDir, runId, kg);
 
     const loaded = readKG(projectDir, runId);
-    expect(loaded.nodes).toHaveLength(55);
-    expect(loaded.edges).toHaveLength(50);
-
     const summary = summarizeKG(loaded);
-    expect(summary).toContain('55 nodes');
+    const summaryPopulation = /^Knowledge Graph Summary \((\d+) nodes, (\d+) edges\):/.exec(summary)
+      ?.slice(1)
+      .map(Number);
     expect(summary.length).toBeLessThan(5000);
 
     addNode(projectDir, runId, { type: 'insight', label: 'Extra' });
-    expect(readKG(projectDir, runId).nodes).toHaveLength(56);
+    const afterAdd = readKG(projectDir, runId);
 
     const removed = removeNode(projectDir, runId, nodes[0].id);
     expect(removed).toBe(true);
-    expect(readKG(projectDir, runId).nodes).toHaveLength(55);
+    const afterRemove = readKG(projectDir, runId);
+    expect({
+      loadedNodes: loaded.nodes.length,
+      loadedEdges: loaded.edges.length,
+      summaryPopulation,
+      afterAddNodes: afterAdd.nodes.length,
+      afterRemoveNodes: afterRemove.nodes.length,
+    }).toEqual({
+      loadedNodes: nodes.length,
+      loadedEdges: edges.length,
+      summaryPopulation: [nodes.length, edges.length],
+      afterAddNodes: nodes.length + 1,
+      afterRemoveNodes: nodes.length,
+    });
   });
 
   it('rapid sequential addNode calls do not corrupt', () => {

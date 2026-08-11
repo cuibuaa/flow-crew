@@ -626,7 +626,8 @@ describe('flowcrew land inventory and refusal boundary', () => {
 describe('land parsers preserve path data', () => {
   it('retains a complete Git census larger than the former 8 MiB tail buffer', () => {
     const padding = 'x'.repeat(180);
-    const raw = `.fc/campaigns/head-only.jsonl\0${`dist/chunk-00000-${padding}.js\0`.repeat(44_000)}`;
+    const repeatedPathCount = 44_000;
+    const raw = `.fc/campaigns/head-only.jsonl\0${`dist/chunk-00000-${padding}.js\0`.repeat(repeatedPathCount)}`;
     expect(Buffer.byteLength(raw)).toBeGreaterThan(8 * 1024 * 1024);
     const capture = createLandOutputCapture();
     for (let offset = 0; offset < raw.length; offset += 64 * 1024) {
@@ -638,7 +639,7 @@ describe('land parsers preserve path data', () => {
     expect(result.complete).toBe(true);
     const records = result.value.split('\0').filter(Boolean);
     expect(records[0]).toBe('.fc/campaigns/head-only.jsonl');
-    expect(records).toHaveLength(44_001);
+    expect(records).toHaveLength(repeatedPathCount + 1);
   });
 
   it('marks output incomplete instead of returning a misleading tail after overflow', () => {

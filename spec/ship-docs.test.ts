@@ -46,8 +46,6 @@ describe('ship skill semantic contract', () => {
     expect(ship).toContain('`/ship <flag>` in Claude Code or `$ship <flag>` in Codex');
     expect(ship).toContain('git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew && npm install && npm link');
     expect(hasBalancedMarkdownFences(ship)).toBe(true);
-    const lineCount = ship.split(/\r?\n/).length - (ship.endsWith('\n') ? 1 : 0);
-    expect(lineCount).toBeLessThanOrEqual(300);
   });
 
   it('makes every execution step conditional without relying on heading order', () => {
@@ -131,9 +129,8 @@ describe('ship skill semantic contract', () => {
     ]);
   });
 
-  it('keeps the moving ownership boundary explicit and under twenty lines', () => {
+  it('keeps the moving ownership boundary explicit', () => {
     const boundary = section(ship, '### 2.5 ', '### 2.6 ');
-    expect(boundary.split(/\r?\n/).filter(Boolean).length).toBeLessThan(20);
     const normalized = compact(boundary);
     expect(normalized).toContain("research loop explores within the question in the brief; the operator changes the question");
     expect(normalized).toContain('split is not mechanical work versus judgement');

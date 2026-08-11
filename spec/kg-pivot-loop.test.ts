@@ -367,11 +367,12 @@ describe('Group F: Edge Cases', () => {
   });
 
   it('F3: large KG (50+ nodes) — operations complete', () => {
-    for (let i = 0; i < 50; i++) {
-      addNode(projectDir, runId, { type: 'approach', label: `Approach ${i}` });
+    const labels = Array.from({ length: 50 }, (_, index) => `Approach ${index}`);
+    for (const label of labels) {
+      addNode(projectDir, runId, { type: 'approach', label });
     }
     const kg = readKG(projectDir, runId);
-    expect(kg.nodes).toHaveLength(50);
+    expect(kg.nodes.map((node) => node.label).toSorted()).toEqual(labels.toSorted());
     const target = kg.nodes[25];
     markDeadEnd(projectDir, runId, target.id, 'plateau');
     updateMetadata(projectDir, runId, 99, 'accuracy');

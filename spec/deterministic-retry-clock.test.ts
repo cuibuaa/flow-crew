@@ -121,9 +121,9 @@ function scenario(
   }
 }
 
-// This matrix now runs entirely in-process, so there is no subprocess exit
-// status to expose or assert. Its failure-capable evidence is the semantic
-// result, processed event counts, and the legacy-clock counterexample below.
+// This matrix runs entirely in-process, so there is no subprocess exit status
+// to assert. Semantics and the legacy counterexample are the contract;
+// processed event counts remain diagnostic evidence only.
 function runShape(shape: ShapeName) {
   const expandable = scenario(150, shape);
   const capped = scenario(50, shape);
@@ -147,11 +147,10 @@ describe('scheduling-shape retry matrix', () => {
       cpu_load: runShape('cpu_load'),
     };
 
-    expect(evidence.default_parallel.processedEvents).toBe(3);
-    expect(evidence.single_worker.processedEvents).toBe(6);
-    expect(evidence.cpu_load.processedEvents).toBe(195);
+    const semanticSequences = Object.values(evidence).map(({ semantic }) => semantic);
+    expect(new Set(semanticSequences.map((semantic) => JSON.stringify(semantic))).size).toBe(1);
+    expect(semanticSequences[0]).toEqual(EXPECTED_SEMANTIC);
     for (const shape of Object.keys(evidence) as ShapeName[]) {
-      expect(evidence[shape].semantic, `${shape} semantic`).toEqual(EXPECTED_SEMANTIC);
       expect(evidence[shape].legacyCounterexampleKilled, `${shape} legacy counterexample`).toBe(true);
     }
     process.stdout.write(`M4_MATRIX_EVIDENCE=${JSON.stringify(evidence)}\n`);

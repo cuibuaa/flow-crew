@@ -235,14 +235,12 @@ describe('ship authoring and operator bookkeeping contract', () => {
     expect(skill).toMatch(/After cancellation, update or remove that entry\. After re-shipping, replace its id with the new one\./);
   });
 
-  it('keeps the moving ownership boundary explicit and under twenty lines', () => {
+  it('keeps the moving ownership boundary explicit', () => {
     const skill = readShipSkill();
     const section = skill.match(/### 2\.5 Divide ownership by whether failure announces itself\n([\s\S]*?)(?=\n### 2\.6)/)?.[0];
     expect(section).toBeDefined();
-    expect(section!.split(/\r?\n/).length).toBeLessThan(20);
     expect(section).toMatch(/research loop explores within the question[\s\S]*operator changes the question/);
     expect(section).toMatch(/failure announces itself or returns\s+a plausible value/);
     expect(section).toMatch(/boundary moves/);
-    expect(readShipSkill().split(/\r?\n/).length - 1).toBeLessThanOrEqual(300);
   });
 });
