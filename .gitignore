@@ -27,14 +27,10 @@ docs/*
 tests/
 !tests/
 tests/*
-!tests/p2-m4-detector-evidence-replay.test.ts
-!tests/p2-m4-identity-probe-fixture.test.ts
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/p2-m4-detector-evidence/
 !tests/fixtures/p2-m4-detector-evidence/**
-!tests/fixtures/p2-m4-typed-probe/
-!tests/fixtures/p2-m4-typed-probe/**
 ui/tests/
 design/*
 !design/atom-architecture.md
