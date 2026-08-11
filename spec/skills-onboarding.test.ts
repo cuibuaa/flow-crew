@@ -320,18 +320,22 @@ describe('FlowCrew skill installer', () => {
   it('force-terminates a Codex verifier that ignores SIGTERM', () => {
     const fixture = onboardingFixture();
     const pidFile = installStubbornFakeCodex(fixture);
+    // The PID write is the fake verifier's first action, but 100ms was still
+    // shorter than process startup under the three-worker suite. One second
+    // keeps the timeout behavior fast while making readiness observable.
+    const verificationTimeoutMs = 1_000;
     const startedAt = Date.now();
     const result = runInstaller(
       fixture,
       ['--codex'],
       repositoryRoot,
-      { FLOWCREW_CODEX_VERIFY_TIMEOUT_MS: '100' },
+      { FLOWCREW_CODEX_VERIFY_TIMEOUT_MS: String(verificationTimeoutMs) },
     );
     const elapsedMs = Date.now() - startedAt;
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.status, output).toBe(1);
-    expect(elapsedMs).toBeLessThan(3_000);
+    expect(elapsedMs).toBeLessThan(verificationTimeoutMs + 4_000);
     expect(output).toContain('Codex skills/list timed out');
     expect(output).not.toContain('✓ Codex skills installed');
     const childPid = Number.parseInt(readFileSync(pidFile, 'utf8'), 10);

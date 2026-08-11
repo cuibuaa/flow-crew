@@ -20,8 +20,9 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { inspectBrief } from './brief-preflight.js';
+import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
 import { routeLogsToFile } from './logging.js';
+import { extractBriefPathMentions } from './ship-inputs.js';
 
 export { lintInstrumentCriteria } from './brief-preflight.js';
 export type { CriterionLintWarning } from './brief-preflight.js';
@@ -29,6 +30,45 @@ export type { CriterionLintWarning } from './brief-preflight.js';
 export interface Finding {
   level: 'ok' | 'warn' | 'fail';
   text: string;
+}
+
+export type GitIgnoreProbe = (
+  projectDir: string,
+  candidatePaths: readonly string[],
+) => readonly string[];
+
+function probeGitignoredPaths(projectDir: string, candidatePaths: readonly string[]): string[] {
+  if (candidatePaths.length === 0) return [];
+  try {
+    const output = execFileSync('git', ['check-ignore', '--stdin', '-z'], {
+      cwd: projectDir,
+      input: `${candidatePaths.join('\0')}\0`,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return output.split('\0').filter(Boolean);
+  } catch {
+    // Exit 1 means none are ignored. A missing Git repository/tool likewise
+    // contributes no exact ignore facts; the normal launch/rehearsal checks
+    // retain ownership of reporting those environment failures.
+    return [];
+  }
+}
+
+/** Build the repository-dependent part of brief inspection from exact Git facts. */
+export function projectBriefPreflightContext(
+  projectDir: string,
+  brief: string,
+  probe: GitIgnoreProbe = probeGitignoredPaths,
+): BriefPreflightContext {
+  const candidates = [...new Set(extractBriefPathMentions(brief).map((mention) => mention.path))];
+  if (candidates.length === 0) return {};
+  const candidateSet = new Set(candidates);
+  const ignored = [...new Set(probe(projectDir, candidates))]
+    .filter((path) => candidateSet.has(path));
+  return ignored.length > 0 ? { gitignoredPathPrefixes: ignored } : {};
 }
 
 const mark = { ok: '✓', warn: '⚠', fail: '✗' } as const;
@@ -138,7 +178,9 @@ async function runRehearsal(argv: string[]): Promise<void> {
   const add = (level: Finding['level'], text: string) => findings.push({ level, text });
 
   // ---------- static contract checks ----------
-  const preflight = inspectBrief(brief);
+  const projectDir = process.env.PROJECT_DIR || process.cwd();
+  const preflightContext = projectBriefPreflightContext(projectDir, brief);
+  const preflight = inspectBrief(brief, preflightContext);
   for (const finding of preflight.findings) {
     add(finding.level, finding.message
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')

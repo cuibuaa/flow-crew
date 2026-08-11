@@ -130,7 +130,7 @@ async function launchOwnedProcessTree(
   await backend.runUnit({
     unit,
     workingDirectory: baseDir,
-    command: shellJoin([process.execPath, '-e', agentSource]),
+    command: `exec ${shellJoin([process.execPath, '-e', agentSource])}`,
   });
 
   const recordPath = fallbackRecordPath(baseDir, unit);
@@ -143,6 +143,7 @@ async function launchOwnedProcessTree(
   expect(running).toBeDefined();
   ownedShimPids.add(running!.shimPid);
   const groupPid = recorded.pid!;
+  expect(agentPid, 'fixture agent must replace the shell process-group leader').toBe(groupPid);
   ownedProcessGroups.add(groupPid);
   return { groupPid, agentPid, childPid, recordPath };
 }

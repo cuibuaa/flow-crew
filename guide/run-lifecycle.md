@@ -20,7 +20,7 @@ that same definition.
 | `reality_gate_failed` | Yes | No | The Reality-Gate when a requested successful terminal state fails a hard deterministic check | Fix the evidence, implementation, or incorrect check declaration; do not treat the original success claim as valid. |
 | `phase_complete` | Yes | No | The scheduler after detecting a declared `phase_complete` artifact | Inspect the phase artifact and program ledger. Verify any post-termination hook before advancing the next phase. |
 | `stopped` | Yes | No | The scheduler after detecting a brief-declared `stopped` artifact, or `flowcrew task cancel` and the dashboard cancel action after both the unit and scheduler process are confirmed stopped | Read the terminal artifact or `failureReason` (a cancellation reads `Cancelled by user`), then start a new run only if work should continue. |
-| `incomplete` | Yes | No | The scheduler when the iteration budget ends mid-progress, including research with too few accepted measurements for a real ceiling | Inspect rejected rounds and unfinished gates; revise the brief or increase the relevant budget before rerunning. |
+| `incomplete` | Yes | No | The scheduler when the iteration budget ends mid-progress, including research with too few accepted measurements for a real ceiling, or when a settled DAG cannot match its declared terminal contract | Inspect `failureReason`, rejected rounds, terminal-artifact diagnostics, and unfinished gates; correct the artifact or revise the brief before rerunning. |
 
 `complete`, `shipped`, and `ceiling_hit` are the only successful statuses. The
 CLI exits successfully for all three. A foreground command also exits zero when
@@ -68,6 +68,37 @@ checks any declared floor, snapshots the artifact into the run directory, and
 then applies Reality-Gate before committing successful statuses. A hard
 Reality-Gate failure replaces the requested success with
 `reality_gate_failed`.
+
+Terminal evaluation is a decision point at iteration entry and after every
+settled execution batch, including a batch that contains a failed stage. A
+fresh artifact still requires proof that a non-plan stage actually ran: a
+non-plan stage settled as `complete` or `failed` supplies that proof, while the
+plan stage alone and a skipped stage do not. Evaluation distinguishes a
+matched terminal, a candidate deferred by a floor or confirmation check, and
+no match.
+
+Gate repair, downstream continuation, and an eligible outer re-plan retain
+their normal opportunity to run. Once those transitions are exhausted and all
+relevant stages are final, the scheduler evaluates the declaration again. A
+match commits its declared status; otherwise the run commits `incomplete`,
+puts the exact deferred/no-match reasons in `failureReason`, and emits a
+`run_completed` event. A settled run therefore cannot remain silently
+`running`, and a declared terminal contract cannot silently degrade to plain
+`complete`.
+
+Lifecycle `status` and the terminal artifact remain independent evidence; the
+diagnostic never rewrites `status`. `flowcrew status`, `flowcrew list`, daemon
+task list/show, and `flowcrew watch` report a status mismatch in both
+directions:
+
+- a recorded `terminalArtifact` maps unambiguously to a different declared
+  terminal status; or
+- a non-terminal lifecycle has no recorded terminal artifact, every stage is
+  settled, and exactly one safe, fresh declared artifact is present at its
+  project path or scheduler snapshot.
+
+Active stages, stale files, unsafe paths, and multiple fresh candidates remain
+silent because none proves a unique terminal outcome.
 
 ## When the supervisor is hard-killed
 

@@ -204,14 +204,12 @@ describe('detectPlateau edge cases', () => {
 describe('concurrent KG writes', () => {
   it('rapid sequential addNode calls all persist', () => {
     // Sequential calls should all persist since they're synchronous
-    for (let i = 0; i < 10; i++) {
-      addNode(projectDir, runId, { type: 'finding', label: `Node-${i}` });
+    const labels = Array.from({ length: 10 }, (_, index) => `Node-${index}`);
+    for (const label of labels) {
+      addNode(projectDir, runId, { type: 'finding', label });
     }
     const kg = readKG(projectDir, runId);
-    expect(kg.nodes).toHaveLength(10);
-    for (let i = 0; i < 10; i++) {
-      expect(kg.nodes.some(n => n.label === `Node-${i}`)).toBe(true);
-    }
+    expect(kg.nodes.map((node) => node.label).toSorted()).toEqual(labels.toSorted());
   });
 
   it('concurrent addNode calls may lose writes (documents race condition)', async () => {
@@ -268,13 +266,16 @@ describe('ratchet loop integration with KG summary', () => {
   });
 
   it('multiple ratchet iterations build up result nodes', () => {
-    for (let i = 0; i < 5; i++) {
-      ratchetCheck(projectDir, runId, 70 + i * 5, 'accuracy');
+    const scores = Array.from({ length: 5 }, (_, index) => 70 + index * 5);
+    for (const score of scores) {
+      ratchetCheck(projectDir, runId, score, 'accuracy');
     }
     const kg = readKG(projectDir, runId);
     const results = kg.nodes.filter(n => n.type === 'result');
-    expect(results).toHaveLength(5);
-    expect(kg.metadata.bestScore).toBe(90);
+    expect({ resultCount: results.length, bestScore: kg.metadata.bestScore }).toEqual({
+      resultCount: scores.length,
+      bestScore: Math.max(...scores),
+    });
   });
 
   it('metricName is set on first ratchetCheck and updated on improvement', () => {

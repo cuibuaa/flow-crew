@@ -19,7 +19,9 @@ These three are the ones that most often go wrong:
   neither allowed to write nor told it may ask.
 - **Declare terminal artifacts only on what the last stage writes.** Naming a path that some
   mid-pipeline stage produces lets the run reach a terminal state before the gates that were
-  supposed to guard it have run.
+  supposed to guard it have run. Keep earlier deliverables out of the terminal artifact's
+  directory as well: a planner can otherwise co-locate the files in one early stage even when
+  their basenames differ.
 
 ## Contract flow
 
@@ -205,7 +207,9 @@ artifacts remain in the selected project.
 |---|---|---|---|
 | `task_brief.md` | CLI or dashboard | Scheduler and every worker | `<runDir>/task_brief.md`; immutable input for the run and for same-ID resume. |
 | `dispatch.yaml` | Dynamic planner stage | Scheduler | `<runDir>/dispatch.yaml`; read after planning, replaced on a later re-plan. |
-| `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; durable gate evidence for retries, summaries, and campaign metadata. |
+| `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; live evidence for the current attempt. A retry or later planner iteration may replace it. |
+| `stages/<stageId>/metric.json` | Scheduler, then optionally the gate stage | Scheduler | Seeded before every gate attempt as `hasMetric:false`; the gate replaces it only when that attempt has a trustworthy numeric metric. |
+| Rejected gate evidence | Scheduler | Repairs, reports, operator | `<runDir>/gate_reevaluation/iteration_<n>/round_<n>/`; durable copies of the rejected verdict, evaluated metric, gate output, and engine-effective verdict. |
 | Round result | Measurement stage | Research advance gate | Path from `research.result_file`; one fresh JSON object per round. After ingestion it is moved to `<runDir>/research_round_<N>_consumed.json` and journaled. |
 | `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
 | `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
@@ -291,6 +295,11 @@ declared scope is reverted to its pre-stage contents once the attempt ends — t
 what backs the "do not edit the project while a run is working in it" rule: your edit and
 the stage's are indistinguishable in the snapshot diff that scope enforcement reads.
 
+For an authored multi-stage brief, include an explicit writable-path mapping for every stage,
+including planning and gates. Brief preflight warns when the mapping is absent; it cannot
+choose the correct paths for the author. The planner still translates that contract into each
+generated stage's `scope`.
+
 Three states, not two:
 
 - **declared** — `scope` is present. Only those paths (and, once negotiated, any
@@ -334,6 +343,27 @@ A gate stage is instructed to write:
 `metric`, and `threshold`; campaign phase gates may carry the phase metadata
 listed in their prompt. The path is specific to the gate stage, so concurrent
 gates do not overwrite one another.
+
+A numeric metric is optional unless a `gate_contract.json` contract applies to
+that gate. Before each attempt, the scheduler replaces any older metric artifact
+with an engine-owned `hasMetric:false` marker. This makes “no metric for this
+attempt” explicit and prevents a failing metric from an earlier planner
+iteration from contradicting a new qualitative verdict. When an applicable
+contract names a metric and threshold, the current verdict or metric artifact
+must contain the numeric value; omission fails the run at that first gate
+evaluation, naming the missing metric and threshold, before any product repair
+or outer re-plan is dispatched.
+
+When a gate does write a metric, the verdict must agree with it. In particular,
+a passing verdict paired with a failing metric from the same attempt remains an
+engine rejection. This freshness rule does not relax the measure-round
+self-deception guard.
+
+The root verdict path is live, not a permanent report citation. Gate prompts
+receive the exact durable path where a rejection will be archived under
+`gate_reevaluation/iteration_<n>/round_<n>/`; reports should cite that injected
+path. The archive also preserves the metric actually evaluated and the engine's
+effective verdict when it differs from the gate's written verdict.
 
 ### Round results
 
@@ -390,7 +420,40 @@ run guidance.
 
 ## Validate before launch
 
-Run `flowcrew rehearse <brief.md>` before a live research launch. It validates
-the frontmatter and exercises the terminal, confirmation, floor, and round-file
-paths with a scripted adapter. It does not validate research quality; see
-[Zero-token rehearsal](rehearse.md).
+Inspect and rehearse the exact bytes before a live launch, then create the launch worktree:
+
+```bash
+flowcrew ship-preflight --brief <brief.md> [--campaign <name>]
+flowcrew rehearse <brief.md>
+flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name> [--project <source>]
+flowcrew watch --once
+```
+
+Preflight reports prior-run and campaign facts, verifies declared input claims, and records the
+configuration-discovered validation baseline as a delta contract. Rehearsal validates the
+frontmatter and exercises the terminal, confirmation, floor, and round-file paths with a
+scripted adapter. It does not validate research quality; see [Zero-token rehearsal](rehearse.md).
+
+Values under the leading frontmatter `inputs:` key are explicit path declarations. A safe bare
+directory name is accepted there without a trailing slash because the key already supplies the
+path context. An explicit value that is unsafe or cannot be normalized is retained and reported
+as unresolved; it is never silently dropped. Path discovery in ordinary prose remains
+conservative, so a bare noun outside an explicit declaration is not promoted into an input.
+
+Setup is the fail-closed boundary: it creates the declared worktree and reconciles each declared
+input by content. A wholly missing input is linked as before. When Git created only part of a
+declared directory, setup walks the source directory, materializes missing subdirectories, and
+copies their files into the target. Copies remain untracked and isolate the source from target
+edits; they also keep test-module paths rooted in the target instead of resolving through a
+symlink to the source checkout. Existing target files are never overwritten: a type or content
+collision is a blocker. Setup then verifies the input assertions again through the target.
+
+Before recording the target baseline, setup also derives an exact test-file collector from the
+project's configured test command (Vitest and pytest are supported), or uses an explicit
+`package.json` `flowcrew.testPopulation.files` list. It compares the normalized source and target
+identity sets—not just their counts—and refuses setup when collection is unavailable or either
+set differs. This check runs whether or not the brief remembered to declare the ignored test
+directory, so a smaller launch suite cannot silently become the baseline. Only after population
+parity and executable validation are established does setup write its ready record, keyed by the
+exact brief digest plus the canonical target. Use `flowcrew watch` after launch for a continuous
+heartbeat and edge-triggered stalls; `--once` performs one read-only pass.

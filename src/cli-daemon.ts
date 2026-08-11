@@ -26,6 +26,7 @@ import {
 } from './orchestrator-rpc.js';
 import type { CancellationResult } from './run-control.js';
 import { runsRoot } from './store.js';
+import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
 
@@ -184,9 +185,12 @@ export function mergeTaskWithRunState(
       failureReason?: unknown;
       verdict?: unknown;
       realityGate?: unknown;
+      terminalArtifact?: unknown;
+      terminalStates?: unknown;
     };
     if (typeof state.status !== 'string' || !state.status) return { ...task };
     const verdict = runVerdict(state.verdict, state.realityGate);
+    const mismatch = terminalArtifactStatusMismatch(state, { runDir: runPath });
     return {
       ...task,
       status: state.status,
@@ -199,6 +203,13 @@ export function mergeTaskWithRunState(
       ...(typeof state.failureReason === 'string' && state.failureReason
         ? { failure_reason: state.failureReason }
         : {}),
+      ...(mismatch ? {
+        terminal_status_mismatch: {
+          lifecycle_status: mismatch.lifecycleStatus,
+          terminal_status: mismatch.terminalStatus,
+          terminal_artifact: mismatch.terminalArtifact,
+        },
+      } : {}),
     };
   } catch {
     return { ...task };
@@ -237,7 +248,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     if (req.cmd === 'list') {
       return {
-        tasks: registry.list(req.filter),
+        tasks: registry.list(req.filter).map((task) => mergeTaskWithRunState(task)),
         registry_unreadable_records: registry.health().unreadableRecords,
       };
     }

@@ -32,6 +32,25 @@ function isRunStatusLiteral(node: ts.Node | undefined): boolean {
   return value !== undefined && RUN_STATUS_LITERALS.has(value);
 }
 
+function isStatusExpression(node: ts.Node | undefined): boolean {
+  if (!node) return false;
+  if (ts.isParenthesizedExpression(node)
+      || ts.isAsExpression(node)
+      || ts.isTypeAssertionExpression(node)
+      || ts.isNonNullExpression(node)) {
+    return isStatusExpression(node.expression);
+  }
+  if (ts.isIdentifier(node)) return /status/i.test(node.text);
+  if (ts.isPropertyAccessExpression(node)) {
+    return /status/i.test(node.name.text) || isStatusExpression(node.expression);
+  }
+  if (ts.isElementAccessExpression(node)) {
+    return /status/i.test(stringLiteralValue(node.argumentExpression) ?? '')
+      || isStatusExpression(node.expression);
+  }
+  return false;
+}
+
 function scanSource(sourceText: string, filePath: string): Violation[] {
   const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const lines = sourceText.split(/\r?\n/);
@@ -41,11 +60,15 @@ function scanSource(sourceText: string, filePath: string): Violation[] {
     if (ts.isBinaryExpression(node)) {
       const strictComparison = node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
         || node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken;
-      if (strictComparison && (isRunStatusLiteral(node.left) || isRunStatusLiteral(node.right))) {
+      const literalComparedToStatus = (isRunStatusLiteral(node.left) && isStatusExpression(node.right))
+        || (isRunStatusLiteral(node.right) && isStatusExpression(node.left));
+      if (strictComparison && literalComparedToStatus) {
         offendingNodes.push(node);
       }
     } else if (ts.isCaseClause(node) && isRunStatusLiteral(node.expression)) {
-      offendingNodes.push(node);
+      const switchStatement = node.parent?.parent;
+      if (switchStatement && ts.isSwitchStatement(switchStatement)
+          && isStatusExpression(switchStatement.expression)) offendingNodes.push(node);
     } else if (
       ts.isCallExpression(node)
       && ts.isPropertyAccessExpression(node.expression)
@@ -55,7 +78,9 @@ function scanSource(sourceText: string, filePath: string): Violation[] {
       const receiver = node.expression.expression;
       const handCopiedLiteralSet = ts.isArrayLiteralExpression(receiver)
         && receiver.elements.some((element) => isRunStatusLiteral(element));
-      if (directLiteralArgument || handCopiedLiteralSet) offendingNodes.push(node);
+      const comparesStatus = node.arguments.some((argument) => isStatusExpression(argument));
+      if ((directLiteralArgument && isStatusExpression(receiver))
+          || (handCopiedLiteralSet && comparesStatus)) offendingNodes.push(node);
     }
     ts.forEachChild(node, visit);
   };
@@ -110,6 +135,13 @@ describe('central run-status semantics', () => {
       "['complete', 'failed'].includes(status);",
     ].join('\n');
     expect(scanSource(executable, join(SOURCE_ROOT, '__executable_fixture.ts'))).toHaveLength(3);
+
+    const validationTally = [
+      "declare const normalized: string; if (normalized === 'failed') recordTally();",
+      "switch (normalized) { case 'failed': recordTally(); }",
+      "['passed', 'failed'].includes(normalized);",
+    ].join('\n');
+    expect(scanSource(validationTally, join(SOURCE_ROOT, '__tally_fixture.ts'))).toEqual([]);
   });
 
   it('classifies every declared run status into exactly one lifecycle bucket', () => {

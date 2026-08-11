@@ -351,6 +351,11 @@ describe('gate retry loop entry', () => {
     expect(logs).toContain(`"activeGateIds":["${GATE_ID}"]`);
     expect(logs).toContain('"decision":"skip-repair-dispatch"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
-    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
+    const archiveDir = join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    expect(existsSync(join(archiveDir, `rejected_verdict_${GATE_ID}.json`))).toBe(false);
+    expect(JSON.parse(readFileSync(
+      join(archiveDir, `rejected_verdict_${UNRELATED_GATE_ID}.json`),
+      'utf-8',
+    ))).toMatchObject({ pass: false, reason: 'unrelated rejection' });
   });
 });

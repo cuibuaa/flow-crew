@@ -758,7 +758,7 @@ describe('quick and operator entry behavior', () => {
     expect(launch).toBeGreaterThan(postReportQuestion);
     expect(source.slice(postReportQuestion, launch)).toContain('Wait for a new explicit answer');
     expect(source.slice(launch, launch + 700)).toContain('- < docs/task_brief.md');
-    expect(source).toContain('Do not treat Step 3\'s “ship it” as this answer');
+    expect(source).toContain('Do not treat the original `/ship` request or an earlier “ship it” as');
   });
 
   it('shows outer and generated campaign reports and refuses a newly introduced child finding before reservation', () => {

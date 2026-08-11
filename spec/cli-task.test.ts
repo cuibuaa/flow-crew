@@ -153,6 +153,29 @@ describe('cmdTask', () => {
     expect(out.text()).not.toContain('A'.repeat(81));
   });
 
+  it('keeps lifecycle status visible while surfacing a terminal-artifact disagreement in task list', async () => {
+    server = await startRpcServer(socketPath, () => ({
+      tasks: [{
+        ...task({ id: 2, status: 'done' }),
+        status: 'complete',
+        terminal_status_mismatch: {
+          lifecycle_status: 'complete',
+          terminal_status: 'escalated',
+          terminal_artifact: 'escalation_note.md',
+        },
+      }],
+    }));
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'list', '--status', 'all', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    );
+
+    expect(code).toBe(0);
+    expect(out.text()).toContain('complete [terminal artifact says escalated]');
+  });
+
   it('prints only summary markdown with --summary-only', async () => {
     const summary = '# Task Summary\n\n**Verdict**: PASS\n';
     server = await startRpcServer(socketPath, () => ({ task: task({ id: 3, status: 'done', summary_full: summary }), recent_ticks: ['- tick'] }));

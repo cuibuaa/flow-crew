@@ -345,12 +345,13 @@ describe('KG realistic scenarios', () => {
   });
 
   it('multiple addNode calls produce unique IDs', () => {
+    const labels = Array.from({ length: 20 }, (_, index) => `F${index}`);
     const ids = new Set<string>();
-    for (let i = 0; i < 20; i++) {
-      const node = addNode(projectDir, runId, { type: 'finding', label: `F${i}` });
+    for (const label of labels) {
+      const node = addNode(projectDir, runId, { type: 'finding', label });
       ids.add(node.id);
     }
-    expect(ids.size).toBe(20);
+    expect(ids.size).toBe(labels.length);
   });
 
   it('updateNode preserves fields not being updated', () => {

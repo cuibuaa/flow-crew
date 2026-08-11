@@ -61,6 +61,7 @@ import {
   sendRpc,
   type RegisterRpcResponse,
   type TaskListRpcResponse,
+  type TaskShowEntry,
 } from './orchestrator-rpc.js';
 import type { CancellationResult } from './run-control.js';
 import {
@@ -70,7 +71,6 @@ import {
 import {
   TASK_STATUS,
   type TaskCreateInput,
-  type TaskEntry,
   type TaskListFilter,
 } from './task-registry.js';
 import { readKG, readKGSafe, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
@@ -1875,14 +1875,14 @@ function unifiedDiff(fromName: string, fromText: string, toName: string, toText:
 }
 
 type DashboardTaskRegistrar = (task: TaskCreateInput) => Promise<RegisterRpcResponse>;
-type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskEntry[]>;
+type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskShowEntry[]>;
 type DashboardRunCanceller = (runId: string) => Promise<CancellationResult>;
 
 async function registerTaskWithDaemon(task: TaskCreateInput): Promise<RegisterRpcResponse> {
   return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task });
 }
 
-async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskEntry[]> {
+async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskShowEntry[]> {
   const response = await sendRpc<TaskListRpcResponse>(defaultSocketPath(), { cmd: 'list', filter });
   return response.tasks;
 }

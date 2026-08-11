@@ -214,6 +214,11 @@ describe('daemon status local diagnosis', () => {
       completedAt: '2026-08-06T20:00:00.000Z',
       verdict: 'PASS',
       failureReason: 'retained diagnostic',
+      terminalArtifact: 'escalation_note.md',
+      terminalStates: {
+        complete: { paths: ['docs/parity_verification.md'] },
+        escalated: { paths: ['docs/front_end_parity/escalation_note.md'] },
+      },
     }), 'utf-8');
 
     const merged = mergeTaskWithRunState(task, runRoot);
@@ -224,9 +229,59 @@ describe('daemon status local diagnosis', () => {
       completed_at: '2026-08-06T20:00:00.000Z',
       run_verdict: 'PASS',
       failure_reason: 'retained diagnostic',
+      terminal_status_mismatch: {
+        lifecycle_status: 'complete',
+        terminal_status: 'escalated',
+        terminal_artifact: 'escalation_note.md',
+      },
     });
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
     expect(registry.get(task.id)?.completed_at).toBeUndefined();
+  });
+
+  it('projects a fresh terminal artifact mismatch while preserving a running lifecycle', () => {
+    const registry = new TaskRegistry({ baseDir: tempDir });
+    const runRoot = join(tempDir, 'runs');
+    const runId = 'settled-running-run';
+    const runPath = join(runRoot, runId);
+    const projectDir = join(tempDir, 'project');
+    mkdirSync(join(runPath), { recursive: true });
+    mkdirSync(join(projectDir, 'docs'), { recursive: true });
+    writeFileSync(join(projectDir, 'docs', 'final_verification.md'), '# verified\n', 'utf-8');
+    const task = registry.create({
+      projectDir,
+      name: 'settled but stale lifecycle',
+      run_id: runId,
+      status: 'running',
+    });
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+      runId,
+      projectDir,
+      status: 'running',
+      startedAt: '2000-01-01T00:00:00.000Z',
+      stages: {
+        implementation: { status: 'complete' },
+        verification: { status: 'complete' },
+      },
+      terminalStates: {
+        complete: { paths: ['docs/final_verification.md'] },
+        escalated: { paths: ['docs/escalation_note.md'] },
+      },
+    }), 'utf-8');
+
+    const merged = mergeTaskWithRunState(task, runRoot);
+
+    expect(merged).toMatchObject({
+      id: task.id,
+      status: 'running',
+      terminal_status_mismatch: {
+        lifecycle_status: 'running',
+        terminal_status: 'complete',
+        terminal_artifact: 'final_verification.md',
+      },
+    });
+    expect(merged.completed_at).toBeUndefined();
+    expect(registry.get(task.id)).toMatchObject({ status: 'running' });
   });
 
   async function listenSilently(socketPath: string): Promise<void> {

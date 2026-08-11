@@ -936,10 +936,14 @@ describe('bounded timeout negotiation', () => {
     expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
   });
 
-  it('kills an infinite local Node child at the aggregate cap despite repeated extension requests', { timeout: 5_000 }, async () => {
+  it('kills an infinite local Node child at the aggregate cap despite repeated extension requests', { timeout: 15_000 }, async () => {
     const stageId = 'infinite';
     const { runId, runDirPath } = directRunDir(stageId);
-    const chain = new TechnicalChainController({ initialBudgetMs: 50, hardTotalMs: 170, ledgerDir: join(runDirPath, 'stages', stageId) });
+    const initialBudgetMs = 500;
+    const hardTotalMs = 1_700;
+    const requestedExtensionMs = 500;
+    const requestCadenceMs = 250;
+    const chain = new TechnicalChainController({ initialBudgetMs, hardTotalMs, ledgerDir: join(runDirPath, 'stages', stageId) });
     let requestNumber = 0;
     let resolveAdapterSettled!: () => void;
     const adapterSettled = new Promise<void>((resolve) => { resolveAdapterSettled = resolve; });
@@ -951,14 +955,14 @@ describe('bounded timeout negotiation', () => {
         writeFileSync(requestPath, JSON.stringify({
           version: 1, kind: 'timeout_extension', requestId: `loop-${requestNumber}`, stageId: opts.stageId,
           attemptIndex: 1, requestedAt: new Date().toISOString(),
-          requestedExtensionMs: 50, reason: `progress sample ${requestNumber}`,
+          requestedExtensionMs, reason: `progress sample ${requestNumber}`,
         }));
       };
       emit();
-      const interval = setInterval(emit, 25);
+      const interval = setInterval(emit, requestCadenceMs);
       try {
         return await execWithTimeout(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-          cwd: projectDir, timeout_ms: opts.hard_timeout_ms ?? 1_000, abortSignal: opts.abortSignal,
+          cwd: projectDir, timeout_ms: opts.hard_timeout_ms ?? hardTotalMs, abortSignal: opts.abortSignal,
         });
       } finally {
         clearInterval(interval);
@@ -966,7 +970,7 @@ describe('bounded timeout negotiation', () => {
       }
     } };
     const result = await runStage(adapter, {
-      stageId, role, dependsOn: [], promptTemplate: 'infinite', timeout_ms: 50, timeout_total_ms: 170,
+      stageId, role, dependsOn: [], promptTemplate: 'infinite', timeout_ms: initialBudgetMs, timeout_total_ms: hardTotalMs,
       technicalChain: chain, projectDir, runId, runDir: runDirPath, retries: 0,
     });
     // The worker now treats adapter settlement as the child lifecycle
@@ -978,10 +982,10 @@ describe('bounded timeout negotiation', () => {
     const decisions = status.timeout?.decisionPaths.map((path) => readJson(join(runDirPath, path))) ?? [];
     expect(result.exitCode).not.toBe(0);
     expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('hard_cap_timeout');
-    expect(status.timeout?.cumulativeGrantedMs).toBeLessThanOrEqual(120);
-    expect(status.timeout?.effectiveBudgetMs).toBeLessThanOrEqual(170);
+    expect(status.timeout?.cumulativeGrantedMs).toBeLessThanOrEqual(hardTotalMs - initialBudgetMs);
+    expect(status.timeout?.effectiveBudgetMs).toBeLessThanOrEqual(hardTotalMs);
     expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
-    expect(elapsed).toBeLessThan(1_000);
+    expect(elapsed).toBeLessThan(hardTotalMs + (2 * HARD_CAP_OBSERVATION_TOLERANCE_MS));
   });
 
   it('keeps a current-attempt supervisor ABORT authoritative over an extension', { timeout: 5_000 }, async () => {

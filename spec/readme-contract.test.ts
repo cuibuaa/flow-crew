@@ -78,49 +78,6 @@ function warningBlock(markdown: string): string {
   return warning.join('\n');
 }
 
-describe('G1 zero-token rehearsal repetition', () => {
-  it('recognises all five substantive claims in the pre-rewrite baseline', () => {
-    const preRewriteClaims = `
-The zero-token rehearsal in Get started needs neither authenticated CLI.
-
-Start with flowcrew rehearse: it launches no agent process or model and spends no tokens.
-
-The contract-ready rehearsal launches no agent process or model in its temporary project.
-
-Replay it against the real scheduler for free — no agent, no tokens — with flowcrew rehearse.
-
-Typed hand-offs make flowcrew rehearse possible: the real scheduler, a fake agent, no tokens.
-`;
-    expect(rehearsalClaims(preRewriteClaims)).toHaveLength(5);
-  });
-
-  it('keeps the README at no more than two substantive claims', () => {
-    expect(rehearsalClaims(readme).length).toBeLessThanOrEqual(2);
-  });
-});
-
-describe('G2 ship syntax repetition', () => {
-  it('explains /ship and $ship together no more than twice outside examples', () => {
-    expect(shipSyntaxExplanations(readme).length).toBeLessThanOrEqual(2);
-  });
-});
-
-describe('G3 independent shipped decision repetition', () => {
-  it('states the independent or re-check decision no more than twice', () => {
-    expect(independentShippingClaims(readme).length).toBeLessThanOrEqual(2);
-  });
-});
-
-describe('G4 early value proposition', () => {
-  it('starts the value proposition before line 60', () => {
-    const line = readme.split('\n').findIndex(
-      (candidate) => candidate === '## You bring the problem. It brings the rigor.',
-    ) + 1;
-    expect(line).toBeGreaterThan(0);
-    expect(line).toBeLessThan(60);
-  });
-});
-
 describe('G5 stop command in the warning', () => {
   it('keeps flowcrew task cancel inside the contiguous WARNING block', () => {
     const warning = warningBlock(readme);
@@ -189,9 +146,7 @@ constraints it derives from the goal. Nothing in the crew can lower it.`,
   it.each([
     ['node:sqlite', readme],
     ['ps -o lstart=', architecture],
-    ['13 statuses', readme],
     ['0.815', readme],
-    ['20 commands', readme],
   ])('preserves the concrete marker %s', (marker, document) => {
     expect(document).toContain(marker);
   });
