@@ -20,7 +20,7 @@ let priorFcRoot: string;
 
 beforeAll(() => {
   priorFcRoot = fcGlobalDir();
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-verify-all-fixes-'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-approval-policy-'));
   projectDir = join(fixtureRoot, 'project');
   mkdirSync(projectDir, { recursive: true });
   setFcGlobalDir(join(fixtureRoot, 'fc-home'));
@@ -46,7 +46,7 @@ function pendingRequest(requestId: string, action: string, target: string) {
   return runId;
 }
 
-describe('verify-all-fixes QA probes', () => {
+describe('approval policy and request identifiers', () => {
   it('mints a standing rule only for a winning always-approve decision', () => {
     const approvedRun = pendingRequest('qa-approved', 'deploy', 'target-approved');
     const deniedRun = pendingRequest('qa-denied', 'spend', 'target-denied');

@@ -904,7 +904,7 @@ describe('fallback stop binds the pid to a process identity', () => {
   // (see spec/purity.ts `child-process`; CI runs this suite with no host dependencies). The
   // machine-independent half is proven here instead: the refusal is recorded, and the recorded
   // reason is a field the previous code never wrote, so a regression is visible even against a
-  // pid that does not exist. The live-process proof lives in `tests/`, which may use the host.
+  // pid that does not exist. A host-dependent live-process probe remains local operator tooling.
   const unit = 'flowcrew-task-999999.service';
   const NONEXISTENT_PID = 0x7ffffff0;
   let base: string;

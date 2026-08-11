@@ -6,7 +6,7 @@
  * Maintenance contract: this is a permanent schema/routing regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -179,24 +179,15 @@ describe('closed supervisor state contract', () => {
     expect(predicate).toContain('const _exhaustive: never = status');
   });
 
-  it('migrates the named runtime test backends available in this checkout', () => {
+  it('routes every published runtime test backend through the shared contract', () => {
     const publicBackends = [
       ['spec/cancellation-liveness.test.ts', 'class FakeSystemd implements SupervisorBackend'],
       ['spec/entry-guards.test.ts', 'class CapturingSystemd implements SupervisorBackend'],
       ['spec/cancellation-park.test.ts', 'class FakeSystemd implements SupervisorBackend'],
       ['spec/orchestrator.test.ts', 'class FakeSystemd implements SupervisorBackend'],
     ] as const;
-    const localBackends = [
-      ['tests/verify-e3-qa.test.ts', 'class ProbeSystemd implements SupervisorBackend'],
-      ['tests/e2e/background-flow.test.ts', 'class MemorySystemd implements SupervisorBackend'],
-    ] as const;
 
     for (const [path, declaration] of publicBackends) expect(source(path)).toContain(declaration);
-    // tests/** is intentionally gitignored and absent from public/CI checkouts.
-    // When the private local suite is present, verify both runtime-only doubles too.
-    for (const [path, declaration] of localBackends) {
-      if (existsSync(join(repositoryRoot, path))) expect(source(path)).toContain(declaration);
-    }
   });
 
   it('keeps the four promoted probes discoverable, invariant-named, and documented', () => {

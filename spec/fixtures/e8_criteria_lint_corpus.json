@@ -4,31 +4,26 @@
     {
       "id": "en-illustrative-list",
       "text": "Available means, for example:\n- The probe must import jsdom.\n- The probe must call `createEnvironment()`.",
-      "expectedWarnings": 0,
       "tags": ["example-not-criterion", "negative"]
     },
     {
       "id": "en-mandatory-bare-module",
       "text": "The probe must import jsdom.",
-      "expectedWarnings": 1,
       "tags": ["positive"]
     },
     {
       "id": "en-ordinary-import-object",
       "text": "The probe must import the configuration produced by the operator.",
-      "expectedWarnings": 0,
       "tags": ["negative"]
     },
     {
       "id": "zh-illustrative-not-criterion",
       "text": "证明真实环境路径，例如源码里可以调用 `createEnvironment()`；这是例子，不是判据。",
-      "expectedWarnings": 0,
       "tags": ["example-not-criterion", "negative", "zh"]
     },
     {
       "id": "zh-mandatory-constructor",
       "text": "# 验收判据\n\n源码里必须出现 `new JSDOM(...)`。\n",
-      "expectedWarnings": 1,
       "tags": ["positive", "zh"]
     }
   ]

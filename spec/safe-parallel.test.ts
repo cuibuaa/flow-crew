@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import {
+  detectParallelWriteConflicts,
   findAllReady,
   runWorkflow,
   selectRunnableBatch,
@@ -13,7 +14,13 @@ import {
   WorkflowConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
-import { createRun, runDir, type StoreState } from '../src/store.js';
+import {
+  createRun,
+  runDir,
+  type StageStatus,
+  type StoreState,
+  type WriteAttribution,
+} from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
 
 let projectDir: string;
@@ -27,6 +34,23 @@ function stateFor(stages: StageConfig[]): StoreState {
     runId: 'r', workflowName: 'w', projectDir, status: 'running',
     startedAt: new Date().toISOString(),
     stages: Object.fromEntries(stages.map((item) => [item.id, { status: 'pending', retries: 0 }])),
+  };
+}
+
+function completedWithWrite(path: string, writeAttribution: WriteAttribution): StageStatus {
+  return {
+    status: 'complete',
+    retries: 0,
+    attempts: [{
+      index: 1,
+      startedAt: '2026-07-31T00:00:00.000Z',
+      completedAt: '2026-07-31T00:00:01.000Z',
+      status: 'complete',
+      duration_ms: 1_000,
+      exitCode: 0,
+      writes: [path],
+      writeAttribution,
+    }],
   };
 }
 
@@ -174,6 +198,23 @@ describe('safe scope batching', () => {
     expect(measured.final.status).toBe('failed');
     expect(measured.final.stages.left.error).toContain('scope_violation');
     expect(measured.final.stages.right.error).toContain('scope_violation');
+  });
+
+  it('warns when snapshot-attributed stages record the same run artifact outside the project', () => {
+    const shared = '../fc-home/runs/example/knowledge_graph.json';
+    const conflicts = detectParallelWriteConflicts(
+      ['left', 'right'],
+      {
+        left: completedWithWrite(shared, 'snapshot'),
+        right: completedWithWrite(shared, 'snapshot'),
+      },
+    );
+
+    expect(conflicts).toEqual([{
+      stageIds: ['left', 'right'],
+      files: [shared],
+      attribution: ['snapshot', 'snapshot'],
+    }]);
   });
 
   it('keeps a linear DAG one-stage-at-a-time', () => {

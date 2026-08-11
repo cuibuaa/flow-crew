@@ -25,12 +25,6 @@ Thumbs.db
 ui/*.d.ts.map
 docs/*
 tests/
-!tests/
-tests/*
-!tests/fixtures/
-tests/fixtures/*
-!tests/fixtures/p2-m4-detector-evidence/
-!tests/fixtures/p2-m4-detector-evidence/**
 ui/tests/
 design/*
 !design/atom-architecture.md
@@ -49,3 +43,6 @@ config/defect-definition-index.json
 scripts/check-delivery-truth-table.mjs
 scripts/check-m3-control-boundaries.mjs
 spec/delivery-truth-table.test.ts
+
+# Operator-local vitest config: names the machine-private verification tree, never published.
+vitest.local.config.ts

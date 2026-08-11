@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,24 +16,53 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(here, '..');
-const fixtureRelative = 'tests/fixtures/p2-m4-detector-evidence';
-const fixturePath = join(projectRoot, fixtureRelative, 'complete-manifest.json');
-const completeManifest = JSON.parse(readFileSync(fixturePath, 'utf8')) as DetectorEvidenceManifest;
+const DETECTOR_INPUT_PATH = 'fixtures/detector-evidence/input.txt';
+const DETECTOR_INPUT = [
+  'u-1|candidate|keep|independent review confirmed this candidate',
+  'u-2|candidate|drop|candidate duplicates u-1',
+  'u-3|candidate|keep|independent review confirmed this candidate',
+  'u-4|control|drop|control row is outside the candidate set',
+  '',
+].join('\n');
+const DETECTOR_SCRIPT = String.raw`import{readFileSync as r}from'node:fs';const rows=r(process.argv[1],'utf8').split(/\r?\n/).filter(line=>line.length>0).map((line,index)=>{const[id,kind,disposition,reason]=line.split('|');if(!id||!kind||!disposition||!reason||!['keep','drop'].includes(disposition))throw new Error('malformed fixture row '+(index+1));return{id,kind,disposition,reason,line:index+1}});const rawCandidates=rows.filter(row=>row.kind==='candidate').map(row=>({id:row.id,attributes:{sourceLine:row.line,value:row.id}}));const candidateIds=new Set(rawCandidates.map(candidate=>candidate.id));const filters=rows.filter(row=>candidateIds.has(row.id)).map(row=>({candidateId:row.id,disposition:row.disposition,reason:row.reason}));process.stdout.write(JSON.stringify({schema:'flowcrew.detector-output/v1',detector:{id:'fixture.generic-row-detector',version:'1.0.0'},universe:{definition:'all non-empty rows in the committed fixture input',members:rows.map(row=>row.id)},rawCandidates,filters})+String.fromCharCode(10))`;
+const INDEPENDENT_LABELS: DetectorEvidenceManifest['independentLabels'] = [
+  {
+    candidateId: 'u-1',
+    verdict: 'true_positive',
+    reviewer: 'independent-reviewer-a',
+    rationale: 'confirmed against the committed fixture row',
+  },
+  {
+    candidateId: 'u-2',
+    verdict: 'false_positive',
+    reviewer: 'independent-reviewer-a',
+    rationale: 'duplicate does not support a separate conclusion',
+  },
+  {
+    candidateId: 'u-3',
+    verdict: 'true_positive',
+    reviewer: 'independent-reviewer-a',
+    rationale: 'confirmed against the committed fixture row',
+  },
+];
+
+// Expected evidence is derived from source rows with a test-local parser and
+// canonicalizer. Neither production validation nor replay participates in its
+// construction; the executable detector below is a second implementation.
+const completeManifest = constructManifestFromSourceRows(DETECTOR_INPUT);
 
 // This process is isolated from user state and implements the committed-input
 // oracle without importing the production runner or canonical digest helper.
 const INDEPENDENT_COMMITTED_REPLAY_PROBE = String.raw`
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
-const [temporaryRoot, fixtureRelative, labelsJson] = process.argv.slice(1);
+const [temporaryRoot, committedPath, inputText, labelsJson] = process.argv.slice(1);
 const repositoryPath = join(temporaryRoot, 'repository');
-const committedFixture = join(repositoryPath, fixtureRelative);
-const committedPath = fixtureRelative + '/input.txt';
-await mkdir(committedFixture, { recursive: true });
-await copyFile(join(process.cwd(), committedPath), join(repositoryPath, committedPath));
+await mkdir(dirname(join(repositoryPath, committedPath)), { recursive: true });
+await writeFile(join(repositoryPath, committedPath), inputText);
 const git = (args) => execFileSync('git', args, { cwd: repositoryPath });
 git(['init', '--quiet']);
 git(['config', 'user.email', 'fixture@example.invalid']);
@@ -82,6 +110,86 @@ process.stdout.write(JSON.stringify({ repositoryPath, commitOid, inputSha256, in
 
 function cloneManifest(): DetectorEvidenceManifest {
   return structuredClone(completeManifest);
+}
+
+function constructManifestFromSourceRows(input: string): DetectorEvidenceManifest {
+  const rows = input
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+    .map((line, index) => {
+      const [id, kind, disposition, reason] = line.split('|');
+      if (!id || !kind || !reason || (disposition !== 'keep' && disposition !== 'drop')) {
+        throw new Error(`malformed source row ${index + 1}`);
+      }
+      return { id, kind, disposition, reason, line: index + 1 };
+    });
+  const rawCandidates: DetectorEvidenceManifest['rawCandidates'] = rows
+    .filter((row) => row.kind === 'candidate')
+    .map((row) => ({
+      id: row.id,
+      attributes: { sourceLine: row.line, value: row.id },
+    }));
+  const candidateIds = new Set(rawCandidates.map(({ id }) => id));
+  const filters: DetectorEvidenceManifest['filters'] = rows
+    .filter(({ id }) => candidateIds.has(id))
+    .map(({ id, disposition, reason }) => ({ candidateId: id, disposition, reason }));
+  const universeValue = {
+    definition: 'all non-empty rows in the committed fixture input',
+    members: rows.map(({ id }) => id),
+  };
+  const parserResult: DetectorEvidenceManifest['parser']['result'] = {
+    schema: 'flowcrew.detector-output/v1',
+    detector: { id: 'fixture.generic-row-detector', version: '1.0.0' },
+    universe: universeValue,
+    rawCandidates,
+    filters,
+  };
+  const fileSha256 = independentSha256(Buffer.from(input, 'utf8'));
+  const files = [{ path: DETECTOR_INPUT_PATH, sha256: fileSha256 }];
+  const count = filters.filter(({ disposition }) => disposition === 'keep').length;
+  const truePositiveCount = INDEPENDENT_LABELS
+    .filter(({ verdict }) => verdict === 'true_positive').length;
+  const precision = INDEPENDENT_LABELS.length === 0
+    ? null
+    : truePositiveCount / INDEPENDENT_LABELS.length;
+  const disposition = precision !== null && precision >= 0.5 ? 'rankable' : 'candidate_only';
+
+  return {
+    schema: 'flowcrew.detector-evidence/v1',
+    detector: {
+      id: 'fixture.generic-row-detector',
+      version: '1.0.0',
+      argv: ['node', '--input-type=module', '--eval', DETECTOR_SCRIPT, `{{inputRoot}}/${DETECTOR_INPUT_PATH}`],
+    },
+    input: {
+      ref: 'HEAD',
+      commitOid: '0'.repeat(40),
+      files,
+      digest: independentDigest({ files }),
+    },
+    universe: {
+      ...universeValue,
+      digest: independentDigest({
+        definition: universeValue.definition,
+        members: [...universeValue.members].sort((left, right) => left.localeCompare(right)),
+      }),
+    },
+    rawCandidates,
+    raw: { stdout: `${JSON.stringify(parserResult)}\n`, stderr: '' },
+    exit: { code: 0, signal: null, timedOut: false },
+    parser: { id: 'flowcrew.detector-output-json', version: '1', result: parserResult },
+    filters,
+    independentLabels: structuredClone(INDEPENDENT_LABELS),
+    result: {
+      count,
+      precision,
+      disposition,
+      digest: independentDigest({ count, disposition }),
+      ...(disposition === 'rankable'
+        ? { conclusion: { statement: 'Kept candidates are backed by independently constructed evidence.' } }
+        : {}),
+    },
+  };
 }
 
 function replayFrom(manifest: DetectorEvidenceManifest): DetectorReplayEvidence {
@@ -151,7 +259,7 @@ describe('detector evidence admission contract', () => {
     manifest.independentLabels[0]!.verdict = 'false_positive';
     manifest.result.precision = 1 / 3;
     manifest.result.disposition = 'candidate_only';
-    manifest.result.digest = '8dbe603a2eb0e3512754763a400b5d27ea8bdc9bab2b1d9ef1fa6a3ac3ecf1cb';
+    manifest.result.digest = independentDigest({ count: manifest.result.count, disposition: 'candidate_only' });
     delete manifest.result.conclusion;
 
     expect(validateDetectorEvidenceManifest(manifest)).toMatchObject({ ok: true });
@@ -310,7 +418,8 @@ async function createCommittedReplayFixture(): Promise<CommittedReplayFixture> {
       '--eval',
       INDEPENDENT_COMMITTED_REPLAY_PROBE,
       temporaryRoot,
-      fixtureRelative,
+      DETECTOR_INPUT_PATH,
+      DETECTOR_INPUT,
       JSON.stringify(completeManifest.independentLabels),
     ], {
       cwd: projectRoot,
@@ -349,6 +458,10 @@ async function createRankableFixtureAdmission() {
 
 function independentDigest(value: unknown): string {
   return createHash('sha256').update(independentCanonicalJson(value)).digest('hex');
+}
+
+function independentSha256(value: Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function independentCanonicalJson(value: unknown): string {

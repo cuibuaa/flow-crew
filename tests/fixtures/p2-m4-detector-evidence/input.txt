@@ -1,4 +1,0 @@
-u-1|candidate|keep|independent review confirmed this candidate
-u-2|candidate|drop|candidate duplicates u-1
-u-3|candidate|keep|independent review confirmed this candidate
-u-4|control|drop|control row is outside the candidate set

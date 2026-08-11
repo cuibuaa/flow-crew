@@ -1,5 +1,5 @@
 /**
- * engine-precision-r3 regression contracts — 4 framework-pure precision/observability fixes
+ * Engine terminal truthfulness contracts for budget, integrity, summary, and confirm state.
  * (honesty edges the prior A+ work did not cover). All task-agnostic: no domain field/threshold.
  *
  *   FIX A — budget-exhaustion with INSUFFICIENT banked measured rounds → `incomplete`, not a

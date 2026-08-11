@@ -108,7 +108,7 @@ function dispatchYaml(includeUnrelatedRejectedGate = false): string {
     'stages:',
     `  - id: ${GATE_ID}`,
     '    role: qa',
-    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, tests/e18-gate-retry-entry.test.ts]',
+    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, checks/e18-gate-retry-entry.test.ts]',
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "audit the planned E18 change"}',
     '    is_gate: true',

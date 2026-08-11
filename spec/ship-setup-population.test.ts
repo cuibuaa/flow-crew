@@ -16,27 +16,11 @@ import {
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
-import { readGateVerdict } from '../src/scheduler.js';
-import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
-
-const GATE_ID = 'qa_contract_gate';
-const RUN_ID = 'qa-contract-run';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let root: string;
 let projectDir: string;
 let previousGlobalDir: string;
-
-function writeGateVerdict(value: Record<string, unknown>): void {
-  const directory = runDir(projectDir, RUN_ID);
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, `verdict_${GATE_ID}.json`), `${JSON.stringify(value)}\n`);
-}
-
-function writeGateMetric(contents: string): void {
-  const directory = join(runDir(projectDir, RUN_ID), 'stages', GATE_ID);
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'metric.json'), contents);
-}
 
 function writeNodeProject(): void {
   mkdirSync(projectDir, { recursive: true });
@@ -74,7 +58,7 @@ const collectTests: ValidationCommandRunner = (request) => {
 
 beforeEach(() => {
   previousGlobalDir = fcGlobalDir();
-  root = join(tmpdir(), `flowcrew-verify-contracts-${randomBytes(6).toString('hex')}`);
+  root = join(tmpdir(), `flowcrew-ship-setup-population-${randomBytes(6).toString('hex')}`);
   projectDir = join(root, 'source');
   setFcGlobalDir(join(root, 'fc-home'));
 });
@@ -84,57 +68,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('gate evidence contract QA probe', () => {
-  it('accepts a qualitative verdict when no metric file exists', () => {
-    writeGateVerdict({ pass: true, reason: 'qualitative evidence is sufficient' });
-
-    expect(readGateVerdict(projectDir, GATE_ID, RUN_ID)).toEqual({
-      pass: true,
-      reason: 'qualitative evidence is sufficient',
-    });
-  });
-
-  it('rejects a current passing verdict that contradicts its failing metric', () => {
-    writeGateVerdict({ pass: true, reason: 'claimed pass' });
-    writeGateMetric(JSON.stringify({ hasMetric: true, metric: 'quality', value: 0, threshold: 1, pass: false }));
-
-    expect(readGateVerdict(projectDir, GATE_ID, RUN_ID)).toEqual({
-      pass: false,
-      reason: 'verdict/metric.json mismatch: metric says fail, verdict says pass',
-    });
-  });
-
-  it('names the missing value and threshold when a scored contract has no current numeric evidence', () => {
-    writeGateVerdict({ pass: true, metric: 'quality', reason: 'unmeasured claim' });
-    writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
-
-    expect(readGateVerdict(projectDir, GATE_ID, RUN_ID, {
-      metric: 'quality', threshold: 7, higherIsBetter: true,
-    })).toEqual({
-      pass: false,
-      reason: expect.stringMatching(/missing required numeric gate value[\s\S]*metric="quality"[\s\S]*threshold=7/),
-    });
-  });
-
-  it('rejects an overflowing JSON number instead of treating Infinity as finite metric evidence', () => {
-    const directory = runDir(projectDir, RUN_ID);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(
-      join(directory, `verdict_${GATE_ID}.json`),
-      '{"pass":true,"metric":"quality","value":1e400,"threshold":7}\n',
-    );
-    writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
-
-    expect(readGateVerdict(projectDir, GATE_ID, RUN_ID, {
-      metric: 'quality', threshold: 7, higherIsBetter: true,
-    })).toEqual({
-      pass: false,
-      reason: expect.stringMatching(/finite numeric|missing required numeric/),
-    });
-  });
-});
-
-describe('launch-workspace population QA probe', () => {
+describe('ship-setup test population integrity', () => {
   it('refuses equal-sized source and target populations when their identities differ', async () => {
     writeNodeProject();
     mkdirSync(join(projectDir, 'spec'), { recursive: true });
@@ -172,17 +106,17 @@ describe('launch-workspace population QA probe', () => {
 
   it('refuses a declared target directory that resolves outside the launch workspace', async () => {
     writeNodeProject();
-    mkdirSync(join(projectDir, 'tests'), { recursive: true });
-    writeFileSync(join(projectDir, 'tests', 'private.test.ts'), 'export {};\n');
+    mkdirSync(join(projectDir, 'checks'), { recursive: true });
+    writeFileSync(join(projectDir, 'checks', 'private.test.ts'), 'export {};\n');
     const briefPath = join(projectDir, 'brief.md');
-    writeFileSync(briefPath, '---\ninputs:\n  - tests\n---\n# Goal\nRun all tests.\n');
+    writeFileSync(briefPath, '---\ninputs:\n  - checks\n---\n# Goal\nRun the configured checks.\n');
     const targetDir = join(root, 'target');
     const outside = join(root, 'outside-target');
     mkdirSync(outside, { recursive: true });
     writeFileSync(join(outside, 'sentinel.txt'), 'unchanged\n');
     const createWorktree = vi.fn<GitWorktreeCreator>((request) => {
       copyManifest(request.targetDir);
-      symlinkSync(outside, join(request.targetDir, 'tests'), 'dir');
+      symlinkSync(outside, join(request.targetDir, 'checks'), 'dir');
       return { exitCode: 0 };
     });
     const baseline = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
@@ -198,7 +132,7 @@ describe('launch-workspace population QA probe', () => {
       state: 'refused',
       blockers: [expect.objectContaining({
         phase: 'target',
-        input: 'tests',
+        input: 'checks',
         reason: expect.stringContaining('resolves outside the worktree'),
       })],
     });

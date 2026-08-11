@@ -12,6 +12,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = join(HERE, '..');
 const GATE_ID = 'contract_gate';
 const REPAIR_ID = 'repair_contract';
+const UNIT_RUN_ID = 'gate-verdict-unit-run';
 
 let root: string;
 let projectDir: string;
@@ -175,6 +176,18 @@ function failingMetric(): Record<string, unknown> {
   };
 }
 
+function writeGateVerdict(value: Record<string, unknown>): void {
+  const directory = runDir(projectDir, UNIT_RUN_ID);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `verdict_${GATE_ID}.json`), `${JSON.stringify(value)}\n`);
+}
+
+function writeGateMetric(contents: string): void {
+  const directory = join(runDir(projectDir, UNIT_RUN_ID), 'stages', GATE_ID);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'metric.json'), contents);
+}
+
 beforeEach(() => {
   previousFcHome = fcGlobalDir();
   root = join(tmpdir(), `flowcrew-gate-attempt-${randomBytes(6).toString('hex')}`);
@@ -280,5 +293,55 @@ describe('per-attempt gate metric contract', () => {
     expect(result.planCalls).toBe(1);
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
+  });
+});
+
+describe('gate verdict and metric consistency', () => {
+  it('accepts a qualitative verdict when no metric file exists', () => {
+    writeGateVerdict({ pass: true, reason: 'qualitative evidence is sufficient' });
+
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
+      pass: true,
+      reason: 'qualitative evidence is sufficient',
+    });
+  });
+
+  it('rejects a current passing verdict that contradicts its failing metric', () => {
+    writeGateVerdict({ pass: true, reason: 'claimed pass' });
+    writeGateMetric(JSON.stringify({ hasMetric: true, metric: 'quality', value: 0, threshold: 1, pass: false }));
+
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
+      pass: false,
+      reason: 'verdict/metric.json mismatch: metric says fail, verdict says pass',
+    });
+  });
+
+  it('names the missing value and threshold when a scored contract has no current numeric evidence', () => {
+    writeGateVerdict({ pass: true, metric: 'quality', reason: 'unmeasured claim' });
+    writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
+
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID, {
+      metric: 'quality', threshold: 7, higherIsBetter: true,
+    })).toEqual({
+      pass: false,
+      reason: expect.stringMatching(/missing required numeric gate value[\s\S]*metric="quality"[\s\S]*threshold=7/),
+    });
+  });
+
+  it('rejects an overflowing JSON number instead of treating Infinity as finite metric evidence', () => {
+    const directory = runDir(projectDir, UNIT_RUN_ID);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      join(directory, `verdict_${GATE_ID}.json`),
+      '{"pass":true,"metric":"quality","value":1e400,"threshold":7}\n',
+    );
+    writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
+
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID, {
+      metric: 'quality', threshold: 7, higherIsBetter: true,
+    })).toEqual({
+      pass: false,
+      reason: expect.stringMatching(/finite numeric|missing required numeric/),
+    });
   });
 });

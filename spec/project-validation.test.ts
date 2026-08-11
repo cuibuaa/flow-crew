@@ -79,7 +79,7 @@ describe('configuration-driven project validation baseline', () => {
         'dependencies = ["pytest>=8", "ruff>=0.6"]',
         '',
         '[tool.pytest.ini_options]',
-        'testpaths = ["tests"]',
+        'testpaths = ["checks"]',
         '',
         '[tool.ruff]',
         'line-length = 100',

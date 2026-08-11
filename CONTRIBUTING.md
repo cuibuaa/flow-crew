@@ -13,9 +13,9 @@ npm test
 
 ## Tests
 
-`spec/` is the tracked, machine-independent public suite. `tests/` is an
-ignored private workbench and must remain ignored. The root Vitest configuration
-runs both when both exist; a clean clone contains only `spec/`.
+`spec/` is the complete tracked, machine-independent suite. The root Vitest
+configuration collects that suite, so a clean clone and CI exercise the same
+published contracts.
 
 > If a test needs anything from your own machine, it does not belong in `spec/`.
 
@@ -26,9 +26,9 @@ the precise file, line, and rule when this boundary is crossed. See the
 [detailed contributing guide](guide/contributing.md) for the full public-test
 contract.
 
-Add or update a public test when changing observable behavior. Keep a test in
-the private workbench only when its environment-specific fixture cannot meet
-the public contract.
+Add or update a public test when changing observable behavior. Keep
+machine-specific harnesses outside the published repository when their
+environment-specific fixtures cannot meet the public contract.
 
 ## Commits and pull requests
 

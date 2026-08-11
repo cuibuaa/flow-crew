@@ -1,9 +1,9 @@
 # Contributing guide
 
-The repository has two deliberately different test surfaces. Keeping that
+The repository publishes one machine-independent test surface. Keeping that
 boundary intact is part of making a change reviewable from a clean clone.
 
-## Public and private tests
+## Public suite and local-only verification
 
 `spec/` is the tracked public contract suite. It must run on any supported
 machine with repository dependencies installed. Public tests may use temporary
@@ -13,28 +13,23 @@ history, agent CLIs, or network.
 
 > If a test needs anything from your own machine, it does not belong in `spec/`.
 
-`tests/` is an ignored private workbench for machine- or project-specific
-harnesses. Do not weaken that ignore rule and do not move a test into `spec/`
-until it passes the public purity gate.
+Machine- or project-specific harnesses are operator tooling, not repository
+content. Keep them outside the published tree, and move coverage into `spec/`
+only after it passes the public purity gate.
 
 `spec/spec-purity.test.ts` recursively enforces the public boundary. It scans
-every source under `spec/` plus any Git-tracked source found under ignored test
-trees, so a file forced in with `git add -f` still meets the same bar instead
-of becoming a blind spot. In an exported archive, where Git metadata is absent, purity scans every test
-source that the archive contains. It rejects host home paths,
+every source under `spec/`. It rejects host home paths,
 mounted-drive and Windows paths, repository-escaping relative paths, direct
 `node_modules` imports, local project identifiers, implicit home access,
 unisolated child processes, real network clients, personal run/task history,
 and externally required environment inputs that do not skip when absent.
-Diagnostics name the file, line, and rule. `git add -f` therefore cannot make a
-machine-local test invisible to the public gate.
+Diagnostics name the file, line, and rule.
 
-The root Vitest configuration discovers both trees. Therefore:
+The root Vitest configuration discovers the published suite. Therefore:
 
-- a clean clone runs only tracked `spec/` tests with `npm test`;
-- a maintainer checkout may run both `spec/` and local `tests/` with the same
-  command; and
-- `npx vitest run spec` is the explicit public-only command.
+- a clean clone and a maintainer checkout collect the same tracked files with
+  `npm test`; and
+- `npx vitest run spec` is the explicit command for that suite.
 
 CI proves the stronger environmental condition by running the public suite with
 a clean home, no existing FlowCrew state, no agent CLI on `PATH`, and no network
@@ -75,10 +70,10 @@ ready-aware worker tests before merging an upgrade. If that API disappears,
 temporarily remove the custom pool and set `maxWorkers: 1`; the measured cost
 for the root suite is 437.80s → 1131.80s.
 
-Add or update public tests for behavior that downstream users can rely on. Use
-private tests only when the fixture genuinely cannot satisfy the public-machine
-contract. Documentation-only changes should still be checked for broken links,
-stale command names, and invalid examples.
+Add or update public tests for behavior that downstream users can rely on. Keep
+local-only verification outside the published repository when its fixture
+cannot satisfy the public-machine contract. Documentation-only changes should
+still be checked for broken links, stale command names, and invalid examples.
 
 ## Verifying a dashboard change
 

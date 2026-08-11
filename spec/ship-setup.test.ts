@@ -149,19 +149,19 @@ function writePopulationFixture(): void {
     devDependencies: { vitest: 'fixture' },
   }), 'utf-8');
   mkdirSync(join(fixture.project, 'spec'), { recursive: true });
-  mkdirSync(join(fixture.project, 'tests', 'fixtures'), { recursive: true });
+  mkdirSync(join(fixture.project, 'checks', 'fixtures'), { recursive: true });
   writeFileSync(join(fixture.project, 'spec', 'public.test.ts'), 'export const publicTest = true;\n');
-  writeFileSync(join(fixture.project, 'tests', 'fixtures', 'published.test.ts'), 'export const published = true;\n');
-  writeFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'export const privateTest = true;\n');
+  writeFileSync(join(fixture.project, 'checks', 'fixtures', 'published.test.ts'), 'export const published = true;\n');
+  writeFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'export const privateTest = true;\n');
 }
 
 function copyPopulationTrackedFiles(request: GitWorktreeRequest): void {
   mkdirSync(join(request.targetDir, 'spec'), { recursive: true });
-  mkdirSync(join(request.targetDir, 'tests', 'fixtures'), { recursive: true });
+  mkdirSync(join(request.targetDir, 'checks', 'fixtures'), { recursive: true });
   copyFileSync(join(request.projectDir, 'spec', 'public.test.ts'), join(request.targetDir, 'spec', 'public.test.ts'));
   copyFileSync(
-    join(request.projectDir, 'tests', 'fixtures', 'published.test.ts'),
-    join(request.targetDir, 'tests', 'fixtures', 'published.test.ts'),
+    join(request.projectDir, 'checks', 'fixtures', 'published.test.ts'),
+    join(request.targetDir, 'checks', 'fixtures', 'published.test.ts'),
   );
 }
 
@@ -283,7 +283,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       '[project]',
       'dependencies = ["pytest", "ruff"]',
       '[tool.pytest.ini_options]',
-      'testpaths = ["tests"]',
+      'testpaths = ["checks"]',
       '[tool.ruff]',
       'line-length = 100',
     ].join('\n');
@@ -718,7 +718,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeBrief([
       '---',
       'inputs:',
-      '  - tests',
+      '  - checks',
       '---',
       '# Goal',
       'Run the complete configured test population.',
@@ -734,13 +734,13 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     expect(report.state).toBe('ready');
     expect(report.copies).toContainEqual(expect.objectContaining({
-      path: 'tests/private.test.ts',
+      path: 'checks/private.test.ts',
     }));
-    expect(lstatSync(join(fixture.target, 'tests', 'private.test.ts')).isSymbolicLink()).toBe(false);
-    expect(readFileSync(join(fixture.target, 'tests', 'private.test.ts'), 'utf-8'))
-      .toBe(readFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'utf-8'));
-    writeFileSync(join(fixture.target, 'tests', 'private.test.ts'), 'target-only edit\n');
-    expect(readFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'utf-8'))
+    expect(lstatSync(join(fixture.target, 'checks', 'private.test.ts')).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(fixture.target, 'checks', 'private.test.ts'), 'utf-8'))
+      .toBe(readFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'utf-8'));
+    writeFileSync(join(fixture.target, 'checks', 'private.test.ts'), 'target-only edit\n');
+    expect(readFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'utf-8'))
       .toContain('privateTest = true');
     expect(report.testPopulation).toMatchObject({
       state: 'matched',
@@ -771,12 +771,12 @@ describe('ship-setup fail-closed worktree transaction', () => {
         state: 'mismatched',
         source: { count: 3 },
         target: { count: 2 },
-        missingFromTarget: ['tests/private.test.ts'],
+        missingFromTarget: ['checks/private.test.ts'],
         extraInTarget: [],
       },
       blockers: [expect.objectContaining({
         phase: 'validation',
-        reason: expect.stringContaining('tests/private.test.ts'),
+        reason: expect.stringContaining('checks/private.test.ts'),
       })],
     });
     expect(population).toHaveBeenCalledTimes(2);
@@ -789,7 +789,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeBrief([
       '---',
       'inputs:',
-      '  - tests',
+      '  - checks',
       '---',
       '# Goal',
       'Run the complete configured test population.',
@@ -798,7 +798,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const git = successfulGit((request) => {
       copyPopulationTrackedFiles(request);
       writeFileSync(
-        join(request.targetDir, 'tests', 'fixtures', 'published.test.ts'),
+        join(request.targetDir, 'checks', 'fixtures', 'published.test.ts'),
         'export const published = false;\n',
       );
     });
@@ -813,11 +813,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       state: 'refused',
       blockers: [expect.objectContaining({
         phase: 'target',
-        input: 'tests/fixtures/published.test.ts',
+        input: 'checks/fixtures/published.test.ts',
         reason: expect.stringContaining('content collision'),
       })],
     });
-    expect(readFileSync(join(fixture.target, 'tests', 'fixtures', 'published.test.ts'), 'utf-8'))
+    expect(readFileSync(join(fixture.target, 'checks', 'fixtures', 'published.test.ts'), 'utf-8'))
       .toContain('false');
     expect(baseline).not.toHaveBeenCalled();
     expect(noReadyRecord()).toBe(true);

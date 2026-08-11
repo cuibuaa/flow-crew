@@ -189,13 +189,10 @@ export default defineConfig({
     ],
   },
   test: {
-    // spec/ is the machine-independent public contract suite. The ignored
-    // tests/ tree remains available for private, machine-local verification.
+    // spec/ is the machine-independent public contract suite.
     include: [
       "spec/**/*.test.ts",
       "spec/**/*.test.tsx",
-      "tests/**/*.test.ts",
-      "tests/**/*.test.tsx",
     ],
     setupFiles: [
       "./vitest.setup.ts",

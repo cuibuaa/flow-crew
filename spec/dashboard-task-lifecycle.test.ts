@@ -67,7 +67,7 @@ beforeAll(() => {
 });
 
 beforeEach(async () => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-dashboard-p3p4-'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-dashboard-task-lifecycle-'));
   projectDir = join(fixtureRoot, 'project');
   process.env.HOME = fixtureRoot;
   setFcGlobalDir(join(fixtureRoot, '.fc'));

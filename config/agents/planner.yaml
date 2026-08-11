@@ -217,7 +217,7 @@ prompt: |
     1. Implement <specific change> in <files>.
     2. Write minimal tests at <test path> covering each acceptance criterion from the brief.
     3. Run the tests with <exact command>, e.g. `pytest <test path>` or
-       `python -m pytest tests/test_X.py -q`.
+       `python -m pytest spec/test_X.py -q`.
     4. If tests fail, iterate within this stage — do NOT exit with failing tests
        unless you can document a fundamental blocker (write that to handoff).
 
@@ -255,13 +255,13 @@ prompt: |
   Example A — tiny bug fix, single stage:
   - id: fix_hash_mismatch
     role: coder
-    scope: [scripts/foo.py, tests/qa_foo.py]
+    scope: [scripts/foo.py, spec/qa_foo.test.py]
     depends_on: []
     dependency_reasons: {}
     prompt_template: |
       Align the feature schema hash in {project}/scripts/foo.py with the assertion in
-      {project}/tests/qa_foo.py. Add a shared helper compute_schema_hash() that both
-      call. Re-run tests/qa_foo.py and verify exit 0.
+      {project}/spec/qa_foo.test.py. Add a shared helper compute_schema_hash() that both
+      call. Re-run spec/qa_foo.test.py and verify exit 0.
 
   Example B — implement + verify:
   - id: implement_thing

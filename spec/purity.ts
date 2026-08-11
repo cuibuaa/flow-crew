@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { extname, join, posix, relative, resolve } from "node:path";
+import { extname, join, posix, relative } from "node:path";
 import ts from "typescript";
 
 export interface PurityViolation {
@@ -14,9 +13,7 @@ export interface ScanOptions {
   testOwnedEnvKeys?: ReadonlySet<string>;
 }
 
-export interface ProjectScanOptions extends ScanOptions {
-  trackedPaths?: readonly string[];
-}
+export type ProjectScanOptions = ScanOptions;
 
 interface PurityRule {
   id: string;
@@ -1014,50 +1011,11 @@ export function scanTree(
   ));
 }
 
-function isExternalTestSource(path: string): boolean {
-  const normalized = normalizedFile(path).replace(/^\.\//, "");
-  return SOURCE_EXTENSIONS.has(posix.extname(normalized))
-    && (normalized.startsWith("tests/") || normalized.startsWith("ui/tests/"));
-}
-
-export function discoverExternalTestFiles(
-  projectRoot: string,
-  options: Pick<ProjectScanOptions, "trackedPaths"> = {},
-): string[] {
-  if (!options.trackedPaths && !existsSync(join(projectRoot, ".git"))) {
-    return [
-      ...sourceFiles(join(projectRoot, "tests")),
-      ...sourceFiles(join(projectRoot, "ui", "tests")),
-    ].sort();
-  }
-
-  const paths = options.trackedPaths ?? execFileSync(
-    "git",
-    ["ls-files", "-z", "--", "tests", "ui/tests"],
-    { cwd: projectRoot, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, timeout: 10_000 },
-  ).split("\0").filter(Boolean);
-
-  return paths
-    .filter(isExternalTestSource)
-    .map((path) => resolve(projectRoot, path))
-    .filter((path) => {
-      const projectRelative = normalizedFile(relative(projectRoot, path));
-      return projectRelative !== ".."
-        && !projectRelative.startsWith("../")
-        && existsSync(path);
-    })
-    .sort();
-}
-
 export function scanProjectTests(
   projectRoot: string,
   options: ProjectScanOptions = {},
 ): PurityViolation[] {
-  const files = [
-    ...sourceFiles(join(projectRoot, "spec")),
-    ...discoverExternalTestFiles(projectRoot, { trackedPaths: options.trackedPaths }),
-  ];
-  return [...new Set(files)].sort().flatMap((file) => (
+  return sourceFiles(join(projectRoot, "spec")).flatMap((file) => (
     scanSource(readFileSync(file, "utf-8"), relative(projectRoot, file), options)
   ));
 }

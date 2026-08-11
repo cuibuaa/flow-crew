@@ -14,7 +14,7 @@ The daemon now records operator-readable task summaries at completion.
 
 ## Files produced
 - src/task-summary-parser.ts
-- tests/task-summary-parser.test.ts
+- spec/task-summary-parser.test.ts
 
 ## What operator should do next
 Review the displayed summary before closing the task.
@@ -37,7 +37,7 @@ describe('parseTaskSummary', () => {
     ['verdict', VALID_SUMMARY.replace('**Verdict**: PASS\n\n', ''), 'missing verdict line'],
     ['What was achieved', VALID_SUMMARY.replace('## What was achieved\nThe daemon now records operator-readable task summaries at completion.\n\n', ''), 'missing section: What was achieved'],
     ['Key numbers', VALID_SUMMARY.replace('## Key numbers\n- 1 parser added\n- 3 CLI paths covered\n\n', ''), 'missing section: Key numbers'],
-    ['Files produced', VALID_SUMMARY.replace('## Files produced\n- src/task-summary-parser.ts\n- tests/task-summary-parser.test.ts\n\n', ''), 'missing section: Files produced'],
+    ['Files produced', VALID_SUMMARY.replace('## Files produced\n- src/task-summary-parser.ts\n- spec/task-summary-parser.test.ts\n\n', ''), 'missing section: Files produced'],
     ['What operator should do next', VALID_SUMMARY.replace('## What operator should do next\nReview the displayed summary before closing the task.\n', ''), 'missing section: What operator should do next'],
   ])('reports a specific error when %s is missing', (_section, markdown, error) => {
     expect(parseTaskSummary(markdown).errors).toContain(error);
@@ -75,7 +75,7 @@ describe('parseTaskSummary', () => {
   it('requires bullets in bullet sections', () => {
     const parsed = parseTaskSummary(VALID_SUMMARY
       .replace('- 1 parser added\n- 3 CLI paths covered', '1 parser added')
-      .replace('- src/task-summary-parser.ts\n- tests/task-summary-parser.test.ts', 'src/task-summary-parser.ts'));
+      .replace('- src/task-summary-parser.ts\n- spec/task-summary-parser.test.ts', 'src/task-summary-parser.ts'));
 
     expect(parsed.errors).toContain('section requires at least 1 bullet: Key numbers');
     expect(parsed.errors).toContain('section requires at least 1 bullet: Files produced');

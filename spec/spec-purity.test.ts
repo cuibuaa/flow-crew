@@ -7,10 +7,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  discoverExternalTestFiles,
   environmentKeysWrittenBy,
   formatViolations,
   scanProjectTests,
@@ -24,8 +23,8 @@ const TEST_OWNED_ENV_KEYS = environmentKeysWrittenBy(
   "vitest.setup.ts",
 );
 
-describe("public and tracked-test purity", () => {
-  it("keeps every spec source and tracked external test machine-independent", () => {
+describe("public specification purity", () => {
+  it("keeps every spec source machine-independent", () => {
     const violations = scanProjectTests(PROJECT_ROOT, {
       testOwnedEnvKeys: TEST_OWNED_ENV_KEYS,
     });
@@ -34,15 +33,12 @@ describe("public and tracked-test purity", () => {
     }
   });
 
-  it("keeps the retired legacy paths out of the index and their canonical copies in spec", () => {
-    const discovered = discoverExternalTestFiles(PROJECT_ROOT)
-      .map((file) => relative(PROJECT_ROOT, file).replaceAll("\\", "/"));
-    expect(discovered).toEqual([]);
+  it("keeps canonical published coverage in subject-named spec files", () => {
     for (const path of [
       "spec/acceptance-gate.qa.test.ts",
       "spec/api/campaign-schema.test.ts",
       "spec/dashboard-campaign.test.ts",
-      "spec/dashboard-p3p4.test.ts",
+      "spec/dashboard-task-lifecycle.test.ts",
       "spec/ui/Inbox.test.tsx",
       "spec/ui/Truthfulness.test.tsx",
       "spec/ui/static-reachability.test.tsx",
@@ -92,13 +88,13 @@ describe("public and tracked-test purity", () => {
 
   it("resolves parent imports from their real file and rejects direct node_modules paths", () => {
     const localImport = ["..", "/", "..", "/src/components/Inbox"].join("");
-    expect(scanSource(`import Inbox from '${localImport}';`, "ui/tests/ui/Inbox.test.tsx"))
+    expect(scanSource(`import Inbox from '${localImport}';`, "ui/checks/Inbox.test.tsx"))
       .toEqual([]);
 
     const dependencyPath = ["..", "/", "..", "/ui/", "node", "_modules/react"].join("");
-    expect(scanSource(`import React from '${dependencyPath}';`, "tests/ui/probe.test.tsx"))
+    expect(scanSource(`import React from '${dependencyPath}';`, "checks/ui/probe.test.tsx"))
       .toContainEqual(expect.objectContaining({
-        file: "tests/ui/probe.test.tsx",
+        file: "checks/ui/probe.test.tsx",
         line: 1,
         rule: "direct-node-modules",
       }));
@@ -322,69 +318,14 @@ describe("public and tracked-test purity", () => {
     }
   });
 
-  it("scans only Git-tracked external tests in a checkout", () => {
-    const root = mkdtempSync(join(tmpdir(), "flowcrew-purity-tracked-"));
-    try {
-      mkdirSync(join(root, ".git"));
-      mkdirSync(join(root, "spec"));
-      mkdirSync(join(root, "tests"));
-      mkdirSync(join(root, "ui", "tests", "ui"), { recursive: true });
-      const forbidden = ["/", "home", "/alice/work/file"].join("");
-      writeFileSync(join(root, "spec", "safe.ts"), "export {};\n", "utf-8");
-      writeFileSync(join(root, "tests", "tracked.test.ts"), `const path = '${forbidden}';\n`, "utf-8");
-      writeFileSync(join(root, "tests", "untracked.test.ts"), `const path = '${forbidden}';\n`, "utf-8");
-      writeFileSync(join(root, "ui", "tests", "ui", "portable.test.tsx"), "export {};\n", "utf-8");
-      const trackedPaths = ["tests/tracked.test.ts", "ui/tests/ui/portable.test.tsx"];
-
-      expect(discoverExternalTestFiles(root, { trackedPaths }).map((file) => relative(root, file)))
-        .toEqual(trackedPaths);
-      expect(scanProjectTests(root, { trackedPaths })).toEqual([
-        expect.objectContaining({
-          file: "tests/tracked.test.ts",
-          line: 1,
-          rule: "absolute-home",
-        }),
-      ]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("falls back to every archived external test when Git metadata is absent", () => {
-    const root = mkdtempSync(join(tmpdir(), "flowcrew-purity-archive-"));
-    try {
-      mkdirSync(join(root, "spec"));
-      mkdirSync(join(root, "tests"));
-      mkdirSync(join(root, "ui", "tests", "ui"), { recursive: true });
-      writeFileSync(join(root, "spec", "safe.ts"), "export {};\n", "utf-8");
-      writeFileSync(
-        join(root, "tests", "archive.test.ts"),
-        "const fixture = process.env.ARCHIVE_ONLY_INPUT;\n",
-        "utf-8",
-      );
-      writeFileSync(join(root, "ui", "tests", "ui", "portable.test.tsx"), "export {};\n", "utf-8");
-
-      const discovered = discoverExternalTestFiles(root).map((file) => relative(root, file));
-      expect(discovered).toEqual(["tests/archive.test.ts", "ui/tests/ui/portable.test.tsx"]);
-      const violations = scanProjectTests(root);
-      expect(formatViolations(violations)).toBe(
-        "tests/archive.test.ts:1 [required-env-without-skip] "
-          + "environment variable ARCHIVE_ONLY_INPUT is externally required; missing input must skip instead of fail",
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("scans the complete spec tree even when Git reports no tracked paths", () => {
+  it("scans the complete spec tree without consulting Git metadata", () => {
     const root = mkdtempSync(join(tmpdir(), "flowcrew-purity-untracked-spec-"));
     try {
-      mkdirSync(join(root, ".git"));
       mkdirSync(join(root, "spec"));
       const forbidden = ["/", "home", "/alice/work/file"].join("");
       writeFileSync(join(root, "spec", "untracked-probe.ts"), `const path = '${forbidden}';\n`, "utf-8");
 
-      expect(scanProjectTests(root, { trackedPaths: [] })).toEqual([
+      expect(scanProjectTests(root)).toEqual([
         expect.objectContaining({
           file: "spec/untracked-probe.ts",
           line: 1,
