@@ -2,7 +2,7 @@
 
 ## Top-level Commands
 
-The current `src/cli.ts` dispatcher exposes 25 commands:
+The current `src/cli.ts` dispatcher exposes these commands:
 
 | Command | Purpose |
 |---|---|

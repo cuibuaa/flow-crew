@@ -75,12 +75,18 @@ describe('documented command count', () => {
     return [...names].sort();
   }
 
-  it('keeps every README command total equal to the real dispatch table', () => {
+  /**
+   * The README is not required to quote a total. A count helps no reader decide anything,
+   * and it has to be re-edited every time a command is added — so the docs now describe the
+   * surface instead of tallying it. What survives is the honesty rule: a total that IS
+   * written must be true. Completeness is guarded where it belongs, in ship-docs, which
+   * asserts the reference documents every command the dispatcher accepts.
+   */
+  it('keeps any README command total equal to the real dispatch table', () => {
     const total = helpCommands().length;
     expect(total).toBeGreaterThan(0);
     const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
     const quoted = [...readme.matchAll(/\b(?:all|All)\s+(\d+)\s+commands\b/g)].map((m) => Number(m[1]));
-    expect(quoted.length, 'README should quote the command total at least once').toBeGreaterThan(0);
     for (const n of quoted) expect(n, `README says ${n} commands; the dispatch table has ${total}`).toBe(total);
   });
 });

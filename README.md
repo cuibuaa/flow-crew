@@ -152,10 +152,20 @@ Shape the task in the conversation, then invoke `/ship` in **Claude Code** or `$
 > /ship        # Claude Code; use $ship in Codex
 ```
 
-FlowCrew turns the confirmed discussion into a brief, runs the crew, and reports back. It
-works in your current checkout; the engine does not itself create a branch, commit, or pull
-request. Permitted edits remain there for review, while a shell-enabled worker can still
-commit if the brief explicitly asks it to.
+The skill writes a brief, rehearses it for free, and then **shows you its exact digest and waits.**
+Nothing is created and nothing is launched until you confirm those precise bytes, so what runs is
+what you approved rather than a paraphrase of it.
+
+On confirmation it prepares an isolated launch workspace — a worktree on its own branch, with the
+declared inputs linked and the project's own build, test, and lint commands measured there to fix a
+baseline the gates will hold the run to. Your working checkout is left alone; permitted edits land
+in that workspace for review. The engine itself never commits, tags, pushes, or opens a pull
+request, and a shell-enabled worker commits only if the brief explicitly asks it to.
+
+When the run ends, `flowcrew land` audits that workspace before you remove it: it grades every
+unique file, refuses while anything it could not prove regenerable remains, and makes you state the
+regenerable count out loud. Hand teardown is how work gets lost — a 2,379-line generator went that
+way — so the command exists to make the loss impossible rather than unlikely.
 
 ### 5. Watch it, and be there when it needs you
 
@@ -389,6 +399,8 @@ flowcrew rehearse <brief.md>      # replay a brief for free before spending anyt
 flowcrew ship-preflight --brief <brief.md>  # inspect inputs, history, and validation baseline
 flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name>
 flowcrew watch                    # heartbeat plus edge-triggered live-run stall judgements
+flowcrew land --run <id>          # audit a finished run's workspace before removing it
+flowcrew audit-report --report <file> --run-dir <dir>  # re-derive a report's numbers and paths
 flowcrew status                   # latest run for the current project
 flowcrew status --all             # latest run across all projects
 flowcrew status --project ../app  # inspect another project explicitly
@@ -399,8 +411,8 @@ flowcrew task cancel <id>         # stop a run
 `flowcrew init` picks a backend once and writes it into the project; change it later with
 `flowcrew adapter <name>`.
 
-All 25 commands — the existing 21 commands plus fail-closed launch setup, tested watching, safe
-landing, and report auditing — are documented with their options and exit codes in the
+Every command — including fail-closed launch setup, tested watching, safe landing, and report
+auditing — is documented with its options and exit codes in the
 **[CLI reference](guide/cli.md)**.
 
 ## Known issues
@@ -417,7 +429,7 @@ Defects reproduced on the current release. Fixes land in the [changelog](CHANGEL
 
 - [Atom Architecture](design/atom-architecture.md): self-describing atoms and the planner composition model.
 - [Architecture](guide/architecture.md): scheduler, worker, supervisor, loops, storage.
-- [Run Lifecycle](guide/run-lifecycle.md): all 13 statuses and their operator meaning.
+- [Run Lifecycle](guide/run-lifecycle.md): every run status and what it means for the operator.
 - [Brief and File Contract](guide/brief-contract.md): frontmatter and agent-engine artifacts.
 - [Approval Inbox](guide/approvals.md): park/resume, decisions, CLI, dashboard, and standing rules.
 - [Zero-token Rehearsal](guide/rehearse.md): what the wind tunnel proves and what it cannot prove.
@@ -425,7 +437,7 @@ Defects reproduced on the current release. Fixes land in the [changelog](CHANGEL
 - [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
 - [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
 - [Agent Skills](guide/skills.md): Claude Code slash commands, Codex skills, and installation.
-- [CLI Reference](guide/cli.md): all 25 commands and their subcommands/options.
+- [CLI Reference](guide/cli.md): every command with its subcommands and options.
 - [Contributing](CONTRIBUTING.md): build, test, documentation, commit, and PR expectations.
 
 ## License

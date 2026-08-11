@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const ship = readFileSync(join(repositoryRoot, 'skills', 'ship.md'), 'utf-8');
+const cliSource = readFileSync(join(repositoryRoot, 'src', 'cli.ts'), 'utf-8');
 const cliGuide = readFileSync(join(repositoryRoot, 'guide', 'cli.md'), 'utf-8');
 const briefGuide = readFileSync(join(repositoryRoot, 'guide', 'brief-contract.md'), 'utf-8');
 const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
@@ -212,7 +213,14 @@ describe('public autonomous launch documentation', () => {
     expect(cliGuide).toContain('--brief <path> --target <path> --base <ref> --branch <name>');
     expect(cliGuide).toContain('No ready record is written');
     expect(cliGuide).toContain('does not write run or task status');
-    expect(cliGuide).toContain('25 commands');
+    // Derived, so it cannot go stale and it can actually fail: every command the
+    // dispatcher accepts must appear in the reference. A count in prose could do
+    // neither -- it passes while wrong, and needs editing every time one is added.
+    const dispatched = [...cliSource.matchAll(/^\s+case '([a-z][a-z-]*)':/gm)].map((m) => m[1]);
+    expect(dispatched.length).toBeGreaterThan(20);
+    for (const command of new Set(dispatched)) {
+      expect(cliGuide, `guide/cli.md does not document \`${command}\``).toContain(`${command}`);
+    }
     expect(cliGuide).toContain('flowcrew land --run <run-id> --remove');
     expect(normalizedGuide).toContain('takes an unfiltered Git census');
     expect(normalizedGuide).toContain('proven build outputs and installed dependencies are summarized by count');
