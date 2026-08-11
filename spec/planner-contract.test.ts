@@ -284,7 +284,7 @@ describe('ship authoring and operator bookkeeping contract', () => {
 
   it('keeps the moving ownership boundary explicit', () => {
     const skill = readShipSkill();
-    const section = skill.match(/### 2\.5 Divide ownership by whether failure announces itself\n([\s\S]*?)(?=\n### 2\.6)/)?.[0];
+    const section = skill.match(/### 2\.\d+ Divide ownership by whether failure announces itself\n([\s\S]*?)(?=\n### 2\.\d+ )/)?.[0];
     expect(section).toBeDefined();
     expect(section).toMatch(/research loop explores within the question[\s\S]*operator changes the question/);
     expect(section).toMatch(/failure announces itself or returns\s+a plausible value/);

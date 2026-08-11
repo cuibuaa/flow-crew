@@ -73,9 +73,20 @@ preflight's as a brief's permitted failure set.
 **Precondition — draft only after preflight:** Write the brief only after §1.1 has gathered the
 source-project facts and no active-run blocker requires stopping.
 
+**Scope by class before drafting.** Work of one kind belongs in one task, because the planner can
+decompose and parallelise inside it far better than a chain of tasks can be sequenced from outside.
+Split only when the kinds genuinely differ — and then launch the pieces in parallel rather than in
+series, since a queue of related tasks is the shape that looks organised and finishes last.
+
 The planner does not receive this conversation. Write `docs/task_brief.md` so a capable practitioner
 who has never seen it knows the outcome, context, constraints, approach, success criteria, relevant
 paths, and exclusions. Never refer to “above”, “as discussed”, or an unstated plan.
+
+**Write the property, not the answer you derived by hand.** A figure you measured is measured in
+your environment, not the run's, and a brief that states it converts a check the run could perform
+into a fact it must accept. State what must be true and require the run to establish it in the
+target. Supply your figure only as a cross-check, alongside the anti-anchoring fields, so a
+disagreement surfaces instead of being reconciled silently.
 
 Follow the [canonical brief and file contract](https://github.com/cuibuaa/flow-crew/blob/main/guide/brief-contract.md)
 for frontmatter, research/program loops, Reality checks, approvals, verdicts, and terminal artifacts.
@@ -188,6 +199,11 @@ After any successful launch, use the front-end's persistent session task mechani
 exact sentence, replacing `<id>` with the registered task id:
 `FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`
 After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
+Record the exact brief digest and the governing baseline's failing identities beside it, so a later
+failure can be attributed without re-deriving them. Creating the entry is prompted by the launch;
+keeping it true is prompted by nothing, which is why an entry naming a cancelled id outlives the run
+it described. Close it when the wrap-up above is finished, not when the run reaches a terminal
+status — the run ending is what starts the work of accepting it.
 
 Report the actual mode and settings. For background work, give `flowcrew task list`,
 `flowcrew task show <id>`, `flowcrew task cancel <id>`, and `flowcrew watch`; do not claim daemon
@@ -215,6 +231,12 @@ human wrap-up is complete, or turn a terminal status into acceptance.
   fact the executor cannot obtain or correction of the operator's error, not delayed scope. Repeated
   engineering guidance is evidence the brief was incomplete; research loops are different because
   steering on intermediate evidence is their purpose.
+
+Guidance is a request, not an effect. It reaches a stage on the supervisor's next tick, which may
+be after that stage has already acted, and a stage can be overruled by an earlier instruction or by
+a scope the engine enforces mechanically. Check the artifact you asked to change rather than the
+fact that you sent the message: a correction that silently did not land looks exactly like one that
+was ignored on purpose.
 
 ### 2.2 Demand decision-grade evidence
 
@@ -253,7 +275,19 @@ an execution failure from a verdict: a near-instant, zero-token attempt calls fo
 Before reporting a decision-changing number, ask what the probe returns when it is broken. If the answer
 is something plausible, verify it a second way. Prefer structured parsing to lossy shell pipelines.
 
-### 2.4 Review the deciding artifact and mechanism
+### 2.4 A conclusion you did not derive arrives without its evidence
+
+Relaying what a subagent, a report, or an earlier document concluded preserves its confident tone
+and drops the chain that earned it. State whose conclusion it is, or re-establish it yourself before
+adopting it — the version that collapses under one question was never yours to assert.
+
+The same discipline applies to explanations you reach for. **"Flaky" is an observation awaiting a
+cause, not a cause.** A second failure of the same family obliges you to look for a shared external
+variable rather than label it again; the fastest way to find one is a controlled comparison that
+changes a single condition. Three separate flaky labels in one session turned out to be one
+mechanism, and each label had ended the investigation that would have found it.
+
+### 2.5 Review the deciding artifact and mechanism
 
 For a UI, generated report, document, or CLI output, inspect the actual rendered, served, or readable
 artifact—not only source and metric totals. Match environment to property: use the real served path for
@@ -264,7 +298,7 @@ When a result surprises you, inspect the deciding code, query, formula, protocol
 rubric, predicate, or other mechanism before theorizing. Also prove an experiment actually varied the
 variable it claims to test.
 
-### 2.5 Divide ownership by whether failure announces itself
+### 2.6 Divide ownership by whether failure announces itself
 
 FlowCrew's research loop explores within the question in the brief; the operator changes the question.
 The split is not mechanical work versus judgement. Ask whether the failure announces itself or returns
@@ -273,7 +307,7 @@ claims—belong in commands and gates. Plausible values can still answer the wro
 must expose assumptions, challenge the question, and judge the result independently. The boundary moves:
 after a check reliably forces an operator error into the open, that failure belongs on the machine side.
 
-### 2.6 Archive, reclaim, and stop safely
+### 2.7 Archive, reclaim, and stop safely
 
 Read and independently verify the result, archive unique output, stop any watcher you started, then
 inspect committed, modified, untracked, and ignored state before removing a disposable worktree/branch:

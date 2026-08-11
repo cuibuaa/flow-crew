@@ -130,7 +130,7 @@ describe('ship skill semantic contract', () => {
   });
 
   it('keeps the moving ownership boundary explicit', () => {
-    const boundary = section(ship, '### 2.5 ', '### 2.6 ');
+    const boundary = section(ship, '### 2.6 Divide ownership', '### 2.7 ');
     const normalized = compact(boundary);
     expect(normalized).toContain("research loop explores within the question in the brief; the operator changes the question");
     expect(normalized).toContain('split is not mechanical work versus judgement');
