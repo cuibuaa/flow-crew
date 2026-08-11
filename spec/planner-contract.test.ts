@@ -4,6 +4,7 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const PLANNER_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml');
+const BRIEF_CONTRACT_PATH = resolve(import.meta.dirname, '..', 'guide', 'brief-contract.md');
 const SHIP_SKILL_PATH = resolve(import.meta.dirname, '..', 'skills', 'ship.md');
 const LAUNCH_WRAP_UP_SENTENCE = 'FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.';
 
@@ -27,6 +28,22 @@ const REQUIRED_CLAUSES = [
   {
     id: 'terminal-path-final-stage-only',
     pattern: /Every path declared by the task frontmatter under `terminal_states\.<status>\.paths` MUST be scoped to and written only by the final stage whose success commits that status\. Never put a declared terminal path in a non-final stage's `scope` or instruct a non-final stage to create or modify it: a fresh write commits the terminal status and skips every stage still pending, including verification and repair\./,
+  },
+  {
+    id: 'gate-metric-optional-unless-contracted',
+    pattern: /A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate\./,
+  },
+  {
+    id: 'missing-contracted-metric-refuses-before-repair',
+    pattern: /A missing required value is an engine refusal before product repair or re-planning, not a defect for a repair stage to chase\./,
+  },
+  {
+    id: 'metric-verdict-consistency-remains-strict',
+    pattern: /The engine rejects `pass:true` when the same attempt's metric says fail; never weaken or route around that self-deception guard\./,
+  },
+  {
+    id: 'durable-gate-report-citation',
+    pattern: /Gate reports MUST cite the scheduler-injected durable rejected-verdict path under `gate_reevaluation\/iteration_<n>\/round_<n>\/`/,
   },
   {
     id: 'headline-distribution',
@@ -192,6 +209,18 @@ describe('planner reality-check contract', () => {
     expect(match, `fixture setup must find ${id}`).not.toBeNull();
     const withoutClause = prompt.replace(match![0], '');
     expect(realityCheckContractViolations(withoutClause)).toContain(`missing:${id}`);
+  });
+});
+
+describe('public gate and launch-workspace contract', () => {
+  it('documents attempt-fresh metrics, durable verdicts, recursive overlays, and population parity', () => {
+    const guide = readFileSync(BRIEF_CONTRACT_PATH, 'utf-8');
+    expect(guide).toMatch(/Before each attempt, the scheduler replaces any older metric artifact\s+with an engine-owned `hasMetric:false` marker/);
+    expect(guide).toMatch(/omission fails the run at that first gate\s+evaluation[\s\S]*before any product repair\s+or outer re-plan is dispatched/);
+    expect(guide).toMatch(/Gate prompts\s+receive the exact durable path where a rejection will be archived/);
+    expect(guide).toMatch(/setup walks the source directory, materializes missing subdirectories, and\s+copies their files into the target/);
+    expect(guide).toMatch(/compares the normalized source and target\s+identity sets—not just their counts—and refuses setup/);
+    expect(guide).toMatch(/whether or not the brief remembered to declare the ignored test\s+directory/);
   });
 });
 

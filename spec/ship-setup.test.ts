@@ -23,7 +23,6 @@ import {
   type GitCommandRunner,
   type GitWorktreeCreator,
   type GitWorktreeRequest,
-  type ShipSetupDependencies,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
@@ -62,6 +61,7 @@ beforeEach(() => {
   mkdirSync(fixture.project, { recursive: true });
   writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
     scripts: { build: 'compile', test: 'check', lint: 'style' },
+    flowcrew: { testPopulation: { files: [] } },
   }), 'utf-8');
   writeFileSync(join(fixture.project, 'package-lock.json'), '{}', 'utf-8');
   writeFileSync(join(fixture.project, '.gitignore'), 'data/\nnode_modules/\n', 'utf-8');
@@ -116,6 +116,48 @@ function validationRunner(testExit = 0): ReturnType<typeof vi.fn<ValidationComma
       : `${request.role} passed`,
     durationMs: 4,
   }));
+}
+
+function testPopulationRunner(): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
+  return vi.fn<ValidationCommandRunner>((request) => {
+    const files: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (/\.test\.tsx?$/.test(entry.name)) files.push(path);
+      }
+    };
+    walk(request.cwd);
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify(files.sort().map((file) => ({ file }))),
+      durationMs: 2,
+    };
+  });
+}
+
+function writePopulationFixture(): void {
+  writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
+    scripts: { build: 'compile', test: 'vitest run', lint: 'style' },
+    devDependencies: { vitest: 'fixture' },
+  }), 'utf-8');
+  mkdirSync(join(fixture.project, 'spec'), { recursive: true });
+  mkdirSync(join(fixture.project, 'tests', 'fixtures'), { recursive: true });
+  writeFileSync(join(fixture.project, 'spec', 'public.test.ts'), 'export const publicTest = true;\n');
+  writeFileSync(join(fixture.project, 'tests', 'fixtures', 'published.test.ts'), 'export const published = true;\n');
+  writeFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'export const privateTest = true;\n');
+}
+
+function copyPopulationTrackedFiles(request: GitWorktreeRequest): void {
+  mkdirSync(join(request.targetDir, 'spec'), { recursive: true });
+  mkdirSync(join(request.targetDir, 'tests', 'fixtures'), { recursive: true });
+  copyFileSync(join(request.projectDir, 'spec', 'public.test.ts'), join(request.targetDir, 'spec', 'public.test.ts'));
+  copyFileSync(
+    join(request.projectDir, 'tests', 'fixtures', 'published.test.ts'),
+    join(request.targetDir, 'tests', 'fixtures', 'published.test.ts'),
+  );
 }
 
 function noReadyRecord(): boolean {
@@ -227,6 +269,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('reaches READY for a Python worktree using pyproject-inferred validation argv', async () => {
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
     const pyproject = [
       '[build-system]',
       'requires = ["setuptools"]',
@@ -257,6 +301,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       validationBaseline: { discovery: { state: 'configured', missingRoles: [] } },
     });
     expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+      ['python', ['-m', 'pytest', '--collect-only', '-q']],
+      ['python', ['-m', 'pytest', '--collect-only', '-q']],
       ['python', ['-m', 'build']],
       ['python', ['-m', 'pytest']],
       ['python', ['-m', 'ruff', 'check', '.']],
@@ -660,6 +706,116 @@ describe('ship-setup fail-closed worktree transaction', () => {
       path: 'dependency_cache', type: 'directory',
     }));
     expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(true);
+  });
+
+  it('reconciles missing descendants when a declared directory already has tracked target content', async () => {
+    writePopulationFixture();
+    writeBrief([
+      '---',
+      'inputs:',
+      '  - tests',
+      '---',
+      '# Goal',
+      'Run the complete configured test population.',
+    ]);
+    const baseline = validationRunner();
+    const population = testPopulationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(copyPopulationTrackedFiles),
+      runValidationCommand: baseline,
+      runTestCollectionCommand: population,
+    });
+
+    expect(report.state).toBe('ready');
+    expect(report.copies).toContainEqual(expect.objectContaining({
+      path: 'tests/private.test.ts',
+    }));
+    expect(lstatSync(join(fixture.target, 'tests', 'private.test.ts')).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(fixture.target, 'tests', 'private.test.ts'), 'utf-8'))
+      .toBe(readFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'utf-8'));
+    writeFileSync(join(fixture.target, 'tests', 'private.test.ts'), 'target-only edit\n');
+    expect(readFileSync(join(fixture.project, 'tests', 'private.test.ts'), 'utf-8'))
+      .toContain('privateTest = true');
+    expect(report.testPopulation).toMatchObject({
+      state: 'matched',
+      source: { count: 3 },
+      target: { count: 3 },
+      missingFromTarget: [],
+      extraInTarget: [],
+    });
+    expect(population).toHaveBeenCalledTimes(2);
+    expect(baseline).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses a smaller target test population before baseline when the ignored input was omitted', async () => {
+    writePopulationFixture();
+    writeBrief(['# Goal', 'Run the complete configured test population.']);
+    const baseline = validationRunner();
+    const population = testPopulationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(copyPopulationTrackedFiles),
+      runValidationCommand: baseline,
+      runTestCollectionCommand: population,
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      testPopulation: {
+        state: 'mismatched',
+        source: { count: 3 },
+        target: { count: 2 },
+        missingFromTarget: ['tests/private.test.ts'],
+        extraInTarget: [],
+      },
+      blockers: [expect.objectContaining({
+        phase: 'validation',
+        reason: expect.stringContaining('tests/private.test.ts'),
+      })],
+    });
+    expect(population).toHaveBeenCalledTimes(2);
+    expect(baseline).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses a content collision inside a declared directory without overwriting the target', async () => {
+    writePopulationFixture();
+    writeBrief([
+      '---',
+      'inputs:',
+      '  - tests',
+      '---',
+      '# Goal',
+      'Run the complete configured test population.',
+    ]);
+    const baseline = validationRunner();
+    const git = successfulGit((request) => {
+      copyPopulationTrackedFiles(request);
+      writeFileSync(
+        join(request.targetDir, 'tests', 'fixtures', 'published.test.ts'),
+        'export const published = false;\n',
+      );
+    });
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: baseline,
+      runTestCollectionCommand: testPopulationRunner(),
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({
+        phase: 'target',
+        input: 'tests/fixtures/published.test.ts',
+        reason: expect.stringContaining('content collision'),
+      })],
+    });
+    expect(readFileSync(join(fixture.target, 'tests', 'fixtures', 'published.test.ts'), 'utf-8'))
+      .toContain('false');
+    expect(baseline).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
   });
 
   it('reports and refuses an invalid explicit input instead of dropping it', async () => {

@@ -3057,9 +3057,51 @@ function allDone(state: StoreState): boolean {
   );
 }
 
-function appendGateMetricInstruction(prompt: string, runDirPath: string, stageId: string): string {
+function gateAttemptCoordinate(iteration: number, innerRetry?: number): GateArchiveCoordinate {
+  return gateArchiveCoordinate(iteration, innerRetry === undefined ? 1 : innerRetry + 2);
+}
+
+function initializeGateMetricAttempt(
+  runDirPath: string,
+  stageId: string,
+  iteration: number,
+  round: number,
+  technicalRetry: number,
+): void {
+  const metricDirectory = join(runDirPath, 'stages', stageId);
+  const metricPath = join(metricDirectory, 'metric.json');
+  mkdirSync(metricDirectory, { recursive: true });
+  if (existsSync(metricPath)) unlinkSync(metricPath);
+  writeFileSync(metricPath, JSON.stringify({
+    version: 1,
+    hasMetric: false,
+    reason: 'This gate attempt did not supply a trustworthy numeric campaign metric.',
+    source: {
+      kind: 'engine_attempt_default',
+      iteration,
+      round,
+      technicalRetry,
+    },
+  }, null, 2) + '\n', 'utf-8');
+}
+
+function appendGateMetricInstruction(
+  prompt: string,
+  runDirPath: string,
+  stageId: string,
+  coordinate: GateArchiveCoordinate,
+): string {
   const metricPath = join(runDirPath, 'stages', stageId, 'metric.json');
+  const durableVerdictPath = archivedGateVerdictWritePath(runDirPath, coordinate, stageId);
   return `${prompt}
+
+## Gate Verdict Evidence Lifetime
+
+Write the live verdict to ${join(runDirPath, `verdict_${stageId}.json`)}. If the verdict rejects,
+the scheduler archives that exact attempt after evaluation. Reports must cite the durable archive,
+not the live root path that a retry or later iteration clears.
+
+Durable rejected-verdict citation: ${durableVerdictPath}
 
 ## Optional Campaign Metric Artifact
 
@@ -3669,7 +3711,6 @@ function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignP
     || nextPhase !== undefined
     || outcome !== undefined
     || artifactSummary !== undefined
-    || reason !== undefined
     || phaseComplete !== undefined;
   if (!hasPhaseMetadata) return null;
   return {
@@ -3946,6 +3987,13 @@ function validateVerdictAgainstContract(
   stageId: string,
 ): string | null {
   if (contract.appliesToGates && !contract.appliesToGates.includes(stageId)) return null;
+  const candidateValues: unknown[] = [verdict.value, verdict.score, metric?.value, metric?.score];
+  const value = candidateValues.find(
+    (candidate): candidate is number => typeof candidate === 'number' && Number.isFinite(candidate),
+  );
+  if (typeof value !== 'number') {
+    return `missing required numeric gate value for metric="${contract.metric}"; only finite numeric evidence is accepted, no finite numeric value was found in the current verdict or metric.json, and contract threshold=${contract.threshold} must be checked mechanically.`;
+  }
   const expectedMetric = contract.metric.toLowerCase();
   const synonyms = (contract.metricSynonyms ?? []).map(s => s.toLowerCase());
   const acceptableNames = new Set([expectedMetric, ...synonyms]);
@@ -3964,11 +4012,6 @@ function validateVerdictAgainstContract(
     if (!higherIsBetter && verdictThreshold > contract.threshold) {
       return `verdict.threshold=${verdictThreshold} raised above contract.threshold=${contract.threshold} (lower-is-better). Gate threshold was relaxed — verdict invalid.`;
     }
-  }
-  const candidateValues: unknown[] = [verdict.value, verdict.score, metric?.value, metric?.score];
-  const value = candidateValues.find(v => typeof v === 'number') as number | undefined;
-  if (typeof value !== 'number') {
-    return `no numeric value found in verdict or metric.json. Cannot mechanically verify gate. Contract requires value compared against threshold=${contract.threshold}.`;
   }
   const mechanicalPass = higherIsBetter ? value >= contract.threshold : value <= contract.threshold;
   if (verdict.pass === true && !mechanicalPass) {
@@ -4078,6 +4121,7 @@ interface GateRuntimeFacts {
   failedGateIds: string[];
   /** Completed gates with a validated pass:false fact; pending gates are excluded. */
   rejectedGateIds: string[];
+  contractRefusals: Array<{ id: string; reason: string }>;
   evaluations: Array<{
     id: string;
     status?: string;
@@ -4170,11 +4214,14 @@ function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, pr
     seenGateIds.add(s.id);
     return true;
   });
-  if (gateStages.length === 0) return { allPass: true, failedGateIds: [], rejectedGateIds: [], evaluations: [] };
+  if (gateStages.length === 0) {
+    return { allPass: true, failedGateIds: [], rejectedGateIds: [], contractRefusals: [], evaluations: [] };
+  }
   // Load the campaign gate contract once per check; reused across all gates.
   const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
   const failedGateIds: string[] = [];
   const rejectedGateIds: string[] = [];
+  const contractRefusals: GateRuntimeFacts['contractRefusals'] = [];
   const evaluations: GateRuntimeFacts['evaluations'] = [];
   for (const g of gateStages) {
     const gateStatus = state.stages[g.id]?.status;
@@ -4202,9 +4249,47 @@ function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, pr
     if (verdict && verdict.pass === true) continue; // explicit pass (contract-honored if any)
     // Missing verdict or explicit fail → treat as failure
     failedGateIds.push(g.id);
-    if (verdict?.pass === false) rejectedGateIds.push(g.id);
+    if (verdict?.pass === false) {
+      rejectedGateIds.push(g.id);
+      if (verdict.reason?.startsWith('Gate contract violation: missing required numeric gate value')) {
+        contractRefusals.push({ id: g.id, reason: verdict.reason });
+      }
+    }
   }
-  return { allPass: failedGateIds.length === 0, failedGateIds, rejectedGateIds, evaluations };
+  return {
+    allPass: failedGateIds.length === 0,
+    failedGateIds,
+    rejectedGateIds,
+    contractRefusals,
+    evaluations,
+  };
+}
+
+function terminateForGateContractRefusal(
+  state: StoreState,
+  facts: GateRuntimeFacts,
+  projectDir: string,
+  runId: string,
+  iteration: number,
+): boolean {
+  if (facts.contractRefusals.length === 0) return false;
+  const detail = facts.contractRefusals
+    .map((refusal) => `${refusal.id}: ${refusal.reason}`)
+    .join('; ');
+  state.status = RUN_STATUS.FAILED;
+  state.failureReason = `Gate contract refusal before repair dispatch — ${detail}`;
+  state.completedAt = new Date().toISOString();
+  writeRunState(projectDir, runId, state);
+  writeCampaignEntry(projectDir, state);
+  recordRunEvent(projectDir, runId, {
+    type: 'run_completed',
+    runId,
+    timestamp: state.completedAt,
+    iteration,
+    detail: state.failureReason,
+  });
+  log.error({ runId, iteration, contractRefusals: facts.contractRefusals }, 'Gate contract refused before product repair');
+  return true;
 }
 
 /** Check all is_gate stages. Preserve the established public result shape. */
@@ -5219,6 +5304,14 @@ export async function runWorkflow(
         rejectedGateIds,
         ...gateRetryDiagnosticSnapshot(sorted, state, projectDir, runId, runDirPath, outerCheck),
       }, 'Gate retry outer check');
+      if (outerCheck.contractRefusals.length > 0) {
+        archiveRejectedGateRuntimeFacts(
+          runDirPath,
+          gateArchiveCoordinate(iteration, 1),
+          outerCheck,
+        );
+      }
+      if (terminateForGateContractRefusal(state, outerCheck, projectDir, runId, iteration)) return state;
       if (!allPass) {
         // Terminal incompleteness is not a repair verdict. Only a completed,
         // validated pass:false fact can make its retry_to stage eligible.
@@ -5235,6 +5328,14 @@ export async function runWorkflow(
             // fact read. Round zero must not inherit the outer snapshot because a
             // verdict/metric/status may have been reconciled after that snapshot.
             const currentCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+            if (currentCheck.contractRefusals.length > 0) {
+              archiveRejectedGateRuntimeFacts(
+                runDirPath,
+                gateArchiveCoordinate(iteration, inner + 1),
+                currentCheck,
+              );
+            }
+            if (terminateForGateContractRefusal(state, currentCheck, projectDir, runId, iteration)) return state;
             const currentRejectedGateIds = currentCheck.rejectedGateIds;
             const breakConditions = { allPass: currentCheck.allPass };
             const shouldBreakForPassingGates = breakConditions.allPass;
@@ -5277,6 +5378,16 @@ export async function runWorkflow(
               projectDir,
               runId,
             );
+            if (dispatchCheck.contractRefusals.length > 0) {
+              archiveRejectedGateRuntimeFacts(
+                runDirPath,
+                gateArchiveCoordinate(iteration, repairRound),
+                dispatchCheck,
+              );
+            }
+            if (terminateForGateContractRefusal(dispatchState, dispatchCheck, projectDir, runId, iteration)) {
+              return dispatchState;
+            }
             if (dispatchCheck.allPass) {
               state = dispatchState;
               log.info({
@@ -5403,6 +5514,14 @@ export async function runWorkflow(
 
             // Check gates again
             const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+            if (recheck.contractRefusals.length > 0) {
+              archiveRejectedGateRuntimeFacts(
+                runDirPath,
+                gateArchiveCoordinate(iteration, inner + 2),
+                recheck,
+              );
+            }
+            if (terminateForGateContractRefusal(state, recheck, projectDir, runId, iteration)) return state;
             if (recheck.allPass) break;
             if (inner === maxInnerRetries - 1) {
               log.info({ runId, iteration }, 'Inner loop exhausted, falling back to outer re-plan');
@@ -5691,6 +5810,19 @@ export async function runWorkflow(
       });
       log.info({ runId, iteration, failedStageIds }, 'Stage failed with no gates — run failed');
       return state;
+    }
+
+    // Preserve a stable rejected verdict even when there is no repair stage or
+    // the bounded repair loop is exhausted. Earlier retry-entry reads can be
+    // transient while verdict/metric files are settling, so only the rejection
+    // that survives the whole iteration earns a durable archive here.
+    if (iterationDispatchedIds.length > 0) {
+      const stableGateFacts = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+      archiveRejectedGateRuntimeFacts(
+        runDirPath,
+        gateArchiveCoordinate(iteration, innerRetriesUsed + 1),
+        stableGateFacts,
+      );
     }
 
     // Max iterations reached
@@ -6508,6 +6640,22 @@ function archivedGateEffectiveVerdictReadPath(
   return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `engine_verdict_${gateId}.json`);
 }
 
+function archivedGateMetricWritePath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `metric_${gateId}.json`);
+}
+
+function archivedGateMetricReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `metric_${gateId}.json`);
+}
+
 function archivedGateOutputWritePath(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
@@ -6536,8 +6684,10 @@ function archiveGateRoundEvidence(
     const perGateVerdict = join(runDirPath, `verdict_${gateId}.json`);
     const verdict = existsSync(perGateVerdict) ? perGateVerdict : join(runDirPath, 'verdict.json');
     const output = join(runDirPath, 'stages', gateId, 'output.md');
+    const metric = join(runDirPath, 'stages', gateId, 'metric.json');
     try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     try { if (existsSync(output)) copyFileSync(output, archivedGateOutputWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
+    try { if (existsSync(metric)) copyFileSync(metric, archivedGateMetricWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     // The archived verdict is the file the gate WROTE. The engine can reject it
     // for reasons the file cannot show — a metric.json inconsistency, a contract
     // violation — and a repair handed only the written file then sees `pass:
@@ -6562,6 +6712,25 @@ function archiveGateRoundEvidence(
       } catch { /* best effort */ }
     }
   }
+}
+
+function archiveRejectedGateRuntimeFacts(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  facts: GateRuntimeFacts,
+): void {
+  if (facts.rejectedGateIds.length === 0) return;
+  const rejected = new Set(facts.rejectedGateIds);
+  archiveGateRoundEvidence(
+    runDirPath,
+    coordinate,
+    facts.rejectedGateIds,
+    new Map(
+      facts.evaluations
+        .filter((evaluation) => rejected.has(evaluation.id) && evaluation.effectiveVerdict)
+        .map((evaluation) => [evaluation.id, evaluation.effectiveVerdict!] as const),
+    ),
+  );
 }
 
 function readWrittenVerdictPass(verdictPath: string): boolean | null {
@@ -6593,6 +6762,7 @@ export function buildGateReevaluationPreamble(input: {
     'Evidence you must read:',
     `- Rejected verdict: ${archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
     `- The engine's own conclusion and rejection reason: ${archivedGateEffectiveVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
+    `- Metric artifact actually evaluated: ${archivedGateMetricReadPath(input.runDirPath, coordinate, input.gateId)}`,
     '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
     '  verdict file is not the defect — engine_rejection_reason names what the engine',
     '  objected to, and that is what must change.',
@@ -6618,6 +6788,7 @@ function buildGateFixCorrectionContract(
   const entries = gateIds.map((gateId) => [
     `- Gate ${gateId}:`,
     `  - archived rejected verdict: ${archivedGateVerdictReadPath(runDirPath, coordinate, gateId)}`,
+    `  - archived evaluated metric: ${archivedGateMetricReadPath(runDirPath, coordinate, gateId)}`,
     `  - archived QA output: ${archivedGateOutputReadPath(runDirPath, coordinate, gateId)}`,
     `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
   ].join('\n')).join('\n');
@@ -6814,6 +6985,9 @@ async function executeSingleStage(
   const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
   const hardTotal = stageHardTotal(stage, initialTimeout);
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
+  const currentGateAttempt = stage.is_gate
+    ? gateAttemptCoordinate(state.currentIteration ?? 1, innerRetry)
+    : undefined;
 
   let resolvedPrompt = stage.prompt_template || '';
   if (!resolvedPrompt) resolvedPrompt = taskDescription ?? '';
@@ -6864,7 +7038,9 @@ async function executeSingleStage(
   resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
   resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
 
-  if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
+  if (stage.is_gate) {
+    resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id, currentGateAttempt!);
+  }
 
   let availableRoles: string | undefined;
   if (stage.dynamic_dispatch) {
@@ -6906,6 +7082,15 @@ async function executeSingleStage(
       break;
     }
     const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+    if (currentGateAttempt) {
+      initializeGateMetricAttempt(
+        runDirPath,
+        stage.id,
+        currentGateAttempt.iteration,
+        currentGateAttempt.round,
+        retries,
+      );
+    }
     const result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
@@ -7209,6 +7394,9 @@ async function executeIteration(
       const agent = agents.get(stage.role)!;
       const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
       const hardTotal = stageHardTotal(stage, initialTimeout);
+      const currentGateAttempt = stage.is_gate
+        ? gateAttemptCoordinate(state.currentIteration ?? 1)
+        : undefined;
       let technicalChain = technicalChains.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
@@ -7307,7 +7495,9 @@ async function executeIteration(
       resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
       resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, sorted, readRunState(projectDir, runId), runDirPath);
 
-      if (stage.is_gate) resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id);
+      if (stage.is_gate) {
+        resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id, currentGateAttempt!);
+      }
 
       const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
@@ -7330,6 +7520,15 @@ async function executeIteration(
       }
       if (currentRetries > 0) {
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
+      }
+      if (currentGateAttempt) {
+        initializeGateMetricAttempt(
+          runDirPath,
+          stage.id,
+          currentGateAttempt.iteration,
+          currentGateAttempt.round,
+          currentRetries,
+        );
       }
       const result = await runStage(stageAdapter, {
         stageId: stage.id,
