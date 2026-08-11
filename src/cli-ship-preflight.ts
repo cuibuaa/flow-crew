@@ -36,6 +36,7 @@ import {
   verifyBriefInputs,
   type BriefInputAssertionResult,
   type ShipInputStat,
+  type UnresolvedBriefInputDeclaration,
   type VerifiedBriefInput,
 } from './ship-inputs.js';
 import { RUN_STATUS, runsRoot, type StoreState } from './store.js';
@@ -161,6 +162,7 @@ export interface ShipPreflightReport {
     state: 'checked' | 'not_requested';
     briefPath?: string;
     inputs: BriefInputReport[];
+    unresolvedInputs: UnresolvedBriefInputDeclaration[];
     unboundAssertions: BriefInputAssertionResult[];
   };
   validationBaseline: ProjectValidationBaseline;
@@ -651,7 +653,9 @@ function inspectBriefInputs(
   briefArgument: string | undefined,
   deps: ResolvedDependencies,
 ): ShipPreflightReport['briefInputs'] {
-  if (!briefArgument) return { state: 'not_requested', inputs: [], unboundAssertions: [] };
+  if (!briefArgument) return {
+    state: 'not_requested', inputs: [], unresolvedInputs: [], unboundAssertions: [],
+  };
   const requested = isAbsolute(briefArgument) ? briefArgument : join(project, briefArgument);
   const briefPath = resolve(requested);
   let brief: string;
@@ -756,7 +760,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
 
   if (report.briefInputs.state === 'not_requested') {
     writer.write('Brief inputs: not checked (pass --brief <path>)\n');
-  } else if (report.briefInputs.inputs.length === 0) {
+  } else if (report.briefInputs.inputs.length === 0 && report.briefInputs.unresolvedInputs.length === 0) {
     writer.write('Brief inputs: no workspace-relative input references detected\n');
   } else {
     writer.write(`Brief inputs: ${report.briefInputs.inputs.length}\n`);
@@ -768,6 +772,9 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
         writer.write(`    ${assertion.state.toUpperCase()} ${assertion.kind} expected=${JSON.stringify(assertion.expected)}${observed} — ${assertion.reason}\n`);
       }
     }
+  }
+  for (const input of report.briefInputs.unresolvedInputs) {
+    writer.write(`  UNRESOLVED DECLARED ${JSON.stringify(input.value)} at line ${input.line} — ${input.reason}\n`);
   }
   for (const assertion of report.briefInputs.unboundAssertions) {
     writer.write(`  NOT_CHECKABLE ${assertion.kind} at line ${assertion.line} — ${assertion.reason}\n`);

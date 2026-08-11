@@ -22,6 +22,7 @@ class Capture {
 class WatchFixture {
   readonly root = join(tmpdir(), 'flowcrew-watch-memory', 'runs');
   readonly files = new Map<string, string>();
+  readonly mtimes = new Map<string, number>();
   readonly directories = new Map<string, string[]>();
   rootReads = 0;
   readonly livePids = new Set<number>();
@@ -66,6 +67,10 @@ class WatchFixture {
     this.files.set(join(this.root, runId, 'run.json'), JSON.stringify(state));
   }
 
+  addArtifact(path: string, mtimeMs: number): void {
+    this.mtimes.set(path, mtimeMs);
+  }
+
   addVerdict(
     runId: string,
     gateId: string,
@@ -103,6 +108,7 @@ class WatchFixture {
         return value;
       },
       isProcessAlive: this.livenessProbe,
+      artifactMtimeMs: (path) => this.mtimes.get(path),
       nowMs: () => {
         const value = this.clockValue;
         this.clockValue += 275;
@@ -116,6 +122,7 @@ class WatchFixture {
     return JSON.stringify({
       directories: [...this.directories].map(([path, entries]) => [path, [...entries]]),
       files: [...this.files],
+      mtimes: [...this.mtimes],
     });
   }
 }
@@ -174,6 +181,41 @@ describe('watch heartbeat and edge semantics', () => {
     const second = poll(fixture, first.state);
     expect(second.alerts).toEqual([]);
     expect(formatWatchPoll(second)).toEqual([]);
+    expect(fixture.snapshot()).toBe(before);
+  });
+
+  it('alerts when a settled running run has one fresh declared terminal artifact', () => {
+    const fixture = new WatchFixture();
+    const projectDir = join(fixture.root, 'projects', 'settled');
+    fixture.addArtifact(join(projectDir, 'docs', 'final_verification.md'), 2_000);
+    fixture.addRun('settled-but-running', {
+      status: 'running',
+      startedAt: new Date(1_000).toISOString(),
+      projectDir,
+      stages: {
+        implement: { status: 'complete' },
+        verify: { status: 'complete' },
+      },
+      terminalStates: {
+        complete: { paths: ['docs/final_verification.md'] },
+        escalated: { paths: ['docs/escalation_note.md'] },
+      },
+    });
+    const before = fixture.snapshot();
+
+    const first = poll(fixture);
+    expect(first.alerts).toEqual([expect.objectContaining({
+      kind: 'terminal_status_mismatch',
+      runId: 'settled-but-running',
+      lifecycleStatus: 'running',
+      terminalStatus: 'complete',
+      terminalArtifact: 'final_verification.md',
+    })]);
+    expect(formatWatchPoll(first)).toContain(
+      '[STATUS MISMATCH] settled-but-running: lifecycle status running; terminal artifact "final_verification.md" declares complete',
+    );
+    const second = poll(fixture, first.state);
+    expect(second.alerts).toEqual([]);
     expect(fixture.snapshot()).toBe(before);
   });
 

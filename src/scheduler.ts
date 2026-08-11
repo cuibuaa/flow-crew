@@ -516,8 +516,10 @@ function appendProgramLedger(
  * Check terminal_states and, if any matches with floor satisfied, commit the
  * terminal status (run.json, campaign entry, run_completed event, summary),
  * auto-append the program ledger row (when applicable), and fire the
- * post_terminate_hook. Returns the updated state if it terminated; null
- * otherwise.
+ * post_terminate_hook. Every call returns an explicit decision: `matched`
+ * carries the committed state, `deferred` names a terminal candidate whose
+ * proof is not yet sufficient, and `not_matched` says no declared artifact is
+ * currently eligible.
  *
  * This is the SINGLE unified terminal-state gate. It is called at exactly two
  * places (consolidated from the prior 5 scattered call sites):
@@ -525,9 +527,10 @@ function appendProgramLedger(
  *   2. EAGER post-batch (inside executeIteration) — catches verdicts written
  *      DURING this iteration's stages, BEFORE a later stage's git hygiene can
  *      delete them (bug #8).
- * All other completion paths (gate-passed, allDone, supervisor-DONE) no longer
- * need their own terminal check: the top check + eager check cover every case,
- * and an isTerminalStatus() guard after executeIteration prevents double-fire.
+ * Plain completion paths also re-evaluate after repair/re-plan continuations
+ * are exhausted. That final decision point turns an unmatched declared
+ * terminal contract into an explicit `incomplete` outcome instead of silence
+ * or an unrelated plain `complete` status.
  *
  * Detection accepts the project-dir artifact OR a run-dir snapshot (if the
  * project copy was clobbered). Floor-unmet writes a one-time supervisor hint.
@@ -939,17 +942,27 @@ function writeCampaignEntryUnlessPaused(projectDir: string, state: StoreState): 
   writeCampaignEntry(projectDir, state);
 }
 
+interface TerminalEvaluationContext {
+  projectDir: string;
+  runId: string;
+  runDirPath: string;
+  iteration: number;
+  adapter: Adapter;
+}
+
+type TerminalEvaluation =
+  | { decision: 'matched'; state: StoreState; reasons: string[] }
+  | { decision: 'deferred' | 'not_matched'; reasons: string[] };
+
 async function tryTerminateOnTerminalState(
   state: StoreState,
-  ctx: {
-    projectDir: string;
-    runId: string;
-    runDirPath: string;
-    iteration: number;
-    adapter: Adapter;
-  },
-): Promise<StoreState | null> {
-  if (!state.terminalStates) return null;
+  ctx: TerminalEvaluationContext,
+): Promise<TerminalEvaluation> {
+  if (!state.terminalStates) {
+    return { decision: 'not_matched', reasons: ['the brief declares no terminal states'] };
+  }
+  const notMatchedReasons: string[] = [];
+  const deferredReasons: string[] = [];
   for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
     for (const path of entry.paths) {
       // Detect the artifact at its project path, OR — if a prior detection
@@ -963,7 +976,10 @@ async function tryTerminateOnTerminalState(
         if (!existsSync(candidate)) return [];
         try { return [{ path: candidate, mtimeMs: statSync(candidate).mtimeMs }]; } catch { return []; }
       });
-      if (candidates.length === 0) continue;
+      if (candidates.length === 0) {
+        notMatchedReasons.push(`${terminalStatus}: ${path} is absent`);
+        continue;
+      }
       const source = Number.isFinite(startedAtMs)
         ? candidates.find((candidate) => candidate.mtimeMs >= startedAtMs)
         : undefined;
@@ -981,6 +997,7 @@ async function tryTerminateOnTerminalState(
           }
         } catch { /* non-critical */ }
         log.warn({ runId: ctx.runId, terminalStatus, path, reason }, 'Terminal-state file exists but is stale — NOT terminating');
+        notMatchedReasons.push(`${terminalStatus}: ${reason}`);
         continue;
       }
       const sourcePath = source.path;
@@ -1002,20 +1019,23 @@ async function tryTerminateOnTerminalState(
           { runId: ctx.runId, terminalStatus, path, reason: floorCheck.reason, stageGlob: entry.stageGlob },
           'Terminal-state file exists but floor unmet — NOT terminating (check stage_glob / floor config)',
         );
+        deferredReasons.push(`${terminalStatus}: ${floorCheck.reason ?? `${path} did not satisfy its floor`}`);
         continue;
       }
-      const hasCompletedNonPlanStage = Object.entries(state.stages ?? {})
-        .some(([stageId, stage]) => stageId !== 'plan' && stage.status === STAGE_STATUS.COMPLETE);
-      if (!hasCompletedNonPlanStage) {
+      const hasSettledNonPlanStage = Object.entries(state.stages ?? {})
+        .some(([stageId, stage]) => stageId !== 'plan'
+          && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.FAILED));
+      if (!hasSettledNonPlanStage) {
         const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:non-plan-complete]`;
         try {
           const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
           const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
           if (!prior.includes(hintMarker)) {
-            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} is fresh, but terminal status '${terminalStatus}' requires at least one non-plan stage to complete during this run. Continue planned work; the plan stage alone is not proof of execution.\n`, 'utf-8');
+            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} is fresh, but terminal status '${terminalStatus}' requires at least one non-plan stage to complete during this run (a failed non-plan stage that reached execution also counts as settled proof). Continue planned work; the plan stage alone is not proof of execution.\n`, 'utf-8');
           }
         } catch { /* non-critical */ }
-        log.warn({ runId: ctx.runId, terminalStatus, path }, 'Fresh terminal-state file exists before any non-plan stage completed — NOT terminating');
+        log.warn({ runId: ctx.runId, terminalStatus, path }, 'Fresh terminal-state file exists before any non-plan stage settled — NOT terminating');
+        deferredReasons.push(`${terminalStatus}: ${path} is fresh, but no non-plan stage has settled as complete or failed`);
         continue;
       }
       // Engine hole #5 (found by the engine-fix validation campaign): the research-loop
@@ -1046,6 +1066,7 @@ async function tryTerminateOnTerminalState(
             }
           } catch { /* non-critical */ }
           log.warn({ runId: ctx.runId, terminalStatus, path, detail }, 'Shipped terminal file REJECTED by confirm gate — NOT terminating');
+          deferredReasons.push(`${terminalStatus}: ${path} was rejected by research confirm: ${detail}`);
           continue;
         }
         log.info({ runId: ctx.runId, path }, 'Shipped terminal file passed confirm gate');
@@ -1064,7 +1085,7 @@ async function tryTerminateOnTerminalState(
         if (sourcePath !== snapPath) copyFileSync(sourcePath, snapPath);
       } catch { /* non-critical */ }
       const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-      if (!gate.allowed) return gate.state;
+      if (!gate.allowed) return { decision: 'matched', state: gate.state, reasons: [] };
       writeRunState(ctx.projectDir, ctx.runId, state);
       writeCampaignEntry(ctx.projectDir, state);
       recordRunEvent(ctx.projectDir, ctx.runId, {
@@ -1111,10 +1132,85 @@ async function tryTerminateOnTerminalState(
           log.warn({ runId: ctx.runId, err: String(err) }, 'post_terminate_hook threw unexpectedly');
         });
       }
-      return state;
+      return { decision: 'matched', state, reasons: [] };
     }
   }
-  return null;
+  if (deferredReasons.length > 0) {
+    return { decision: 'deferred', reasons: [...deferredReasons, ...notMatchedReasons] };
+  }
+  return {
+    decision: 'not_matched',
+    reasons: notMatchedReasons.length > 0
+      ? notMatchedReasons
+      : ['the brief declares terminal states, but none has an eligible artifact path'],
+  };
+}
+
+function terminalDagHasNoRemainingTransition(
+  state: StoreState,
+  stages: readonly StageConfig[],
+): boolean {
+  const entries = Object.entries(state.stages ?? {});
+  if (entries.length === 0) return false;
+  const byId = new Map(stages.map((stage) => [stage.id, stage]));
+  return entries.every(([stageId, stageState]) => {
+    if (
+      stageState.status === STAGE_STATUS.COMPLETE
+      || stageState.status === STAGE_STATUS.FAILED
+      || stageState.status === STAGE_STATUS.SKIPPED
+    ) {
+      return true;
+    }
+    const config = byId.get(stageId);
+    return isPendingStageStatus(stageState.status)
+      && config?.is_gate !== true
+      && (config?.retry_to?.length ?? 0) > 0;
+  });
+}
+
+/**
+ * A declared terminal contract owns the final conclusion once the DAG has no
+ * transition left. Matching still wins; otherwise persist why the scheduler
+ * could not select a declared terminal instead of falling through to a plain
+ * completion or leaving the run `running`.
+ */
+async function concludeDeclaredTerminalAtQuiescence(
+  state: StoreState,
+  stages: readonly StageConfig[],
+  ctx: TerminalEvaluationContext,
+  completionPath: string,
+): Promise<StoreState | null> {
+  if (!state.terminalStates || !terminalDagHasNoRemainingTransition(state, stages)) return null;
+  const evaluation = await tryTerminateOnTerminalState(state, ctx);
+  if (evaluation.decision === 'matched') return evaluation.state;
+
+  const reasonDetail = evaluation.reasons.slice(0, 8).join('; ')
+    || 'no terminal candidate supplied a reason';
+  const conclusion = evaluation.decision === 'not_matched'
+    ? `All stages settled, but no declared terminal state matched (${completionPath}): ${reasonDetail}`
+    : `All stages settled, but declared terminal evaluation could not decide (${completionPath}): ${reasonDetail}`;
+  state.status = RUN_STATUS.INCOMPLETE;
+  state.failureReason = conclusion;
+  state.completedAt = new Date().toISOString();
+  markLeftoverStagesSkipped(state, conclusion);
+  writeRunState(ctx.projectDir, ctx.runId, state);
+  writeCampaignEntry(ctx.projectDir, state);
+  recordRunEvent(ctx.projectDir, ctx.runId, {
+    type: 'run_completed',
+    runId: ctx.runId,
+    timestamp: state.completedAt,
+    iteration: ctx.iteration,
+    detail: `terminal evaluation ${evaluation.decision}: ${conclusion}`,
+  });
+  log.warn({
+    runId: ctx.runId,
+    iteration: ctx.iteration,
+    completionPath,
+    terminalDecision: evaluation.decision,
+    reasons: evaluation.reasons,
+  }, 'Settled DAG reached an explicit unmatched terminal conclusion');
+  await generateRunSummary(ctx.projectDir, ctx.runId, ctx.adapter).catch(() => { /* non-critical */ });
+  return state;
 }
 
 /**
@@ -4806,8 +4902,8 @@ export async function runWorkflow(
     const parkedTop = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration });
     if (parkedTop) return parkedTop;
 
-    const terminatedTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
-    if (terminatedTop) return terminatedTop;
+    const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
+    if (terminalTop.decision === 'matched') return terminalTop.state;
 
     // [Research advance gate, call site 1 of 2] If research mode, consume any
     // round result written by a prior iteration, journal+evaluate, and either
@@ -4845,6 +4941,16 @@ export async function runWorkflow(
           'supervisor_goal_met',
         );
         if (unresolvedStageIds.length === 0) {
+          const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
+            state,
+            [
+              ...baseStages,
+              ...(Array.isArray(state.dispatchedStages) ? state.dispatchedStages as StageConfig[] : []),
+            ],
+            { projectDir, runId, runDirPath, iteration, adapter },
+            'supervisor_goal_met',
+          );
+          if (terminalConclusion) return terminalConclusion;
           state.status = 'complete';
           state.completedAt = new Date().toISOString();
           const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -5458,6 +5564,13 @@ export async function runWorkflow(
           continue;
         }
       } else {
+        const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
+          state,
+          sorted,
+          { projectDir, runId, runDirPath, iteration, adapter },
+          'gate_pass',
+        );
+        if (terminalConclusion) return terminalConclusion;
         state.status = 'complete';
         state.completedAt = new Date().toISOString();
         const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -5528,6 +5641,13 @@ export async function runWorkflow(
           continue;
         }
       } else {
+        const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
+          state,
+          sorted,
+          { projectDir, runId, runDirPath, iteration, adapter },
+          'base_all_done',
+        );
+        if (terminalConclusion) return terminalConclusion;
         state.status = RUN_STATUS.COMPLETE;
         state.completedAt = new Date().toISOString();
         const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -5581,6 +5701,13 @@ export async function runWorkflow(
       // verdict the outer loop must see — overwriting it to 'incomplete' here
       // would manufacture a false outcome.
       if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
+      const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
+        state,
+        sorted,
+        { projectDir, runId, runDirPath, iteration, adapter },
+        'max_iterations',
+      );
+      if (terminalConclusion) return terminalConclusion;
       // A+(c): budget/iteration exhausted mid-search WITHOUT a clean exhaustive
       // ceiling is `incomplete` — distinct from `failed` (crash) and `ceiling_hit`
       // (honest negative). The search simply ran out of attempts.
@@ -7360,9 +7487,10 @@ async function executeIteration(
     const parkedEager = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1 });
     if (parkedEager) return parkedEager;
 
+    const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
+    if (terminalEager.decision === 'matched') return terminalEager.state;
+
     if (!failed) {
-      const terminatedEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
-      if (terminatedEager) return terminatedEager;
       // [Research advance gate, call site 2 of 2] Same eager timing for research
       // mode: consume the round result a stage just wrote, evaluate, terminate
       // or steer — before any later stage can clobber it.

@@ -94,7 +94,10 @@ function writeProjectFile(path: string, contents = 'fixture\n'): void {
 function gitRunner(
   responses: Partial<Record<LandGitRequest['operation'], LandGitResponse>> = {},
 ): ReturnType<typeof vi.fn<LandGitRunner>> {
-  return vi.fn<LandGitRunner>((request) => responses[request.operation] ?? { exitCode: 0, stdout: '' });
+  return vi.fn<LandGitRunner>((request) => responses[request.operation]
+    ?? (request.operation === 'branch'
+      ? { exitCode: 0, stdout: 'topic-work\n' }
+      : { exitCode: 0, stdout: '' }));
 }
 
 function cleanRemovalResponses(): Partial<Record<LandGitRequest['operation'], LandGitResponse>> {
@@ -169,12 +172,16 @@ describe('flowcrew land inventory and refusal boundary', () => {
     });
     expect(report.refusalReasons).toEqual(expect.arrayContaining([
       '1 tracked worktree change remains',
-      '1 commit is absent from every remote ref',
     ]));
     expect(runner.mock.calls.map(([request]) => request.args)).toEqual([
       ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
       ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
       ['rev-list', '--reverse', `${BASE}..HEAD`, '--not', '--remotes'],
+      [
+        'rev-list', '--reverse', `${BASE}..HEAD`, '--not',
+        '--exclude=refs/heads/topic-work', '--all',
+      ],
     ]);
   });
 
@@ -199,8 +206,8 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(stdout.value).toBe('');
     expect(stderr.value).toContain('UNTRACKED SOURCE FILE "unarchived-generator.ts"');
     expect(stderr.value).toContain('IGNORED DATA_OR_STATE FILE "evidence/frozen.parquet"');
-    expect(stderr.value).toContain('REFUSED 1 untracked path remains');
-    expect(stderr.value).toContain('REFUSED 1 ignored path remains');
+    expect(stderr.value).toContain('REFUSED 1 untracked ungraded path remains');
+    expect(stderr.value).toContain('REFUSED 1 ignored ungraded path remains');
     expect(destructiveOperations(runner)).toEqual([]);
   });
 
@@ -297,6 +304,97 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(stdout.value).not.toContain('ui/dist/assets/index-AbCd1234.js');
   });
 
+  it('requires the exact regenerable count and never lets that acknowledgement cover an ungraded path', async () => {
+    writeProjectFile('src/generated.ts', 'export const generated = true;\n');
+    writeProjectFile('dist/generated.js', 'export const generated = true;\n');
+    const responses = {
+      ...cleanRemovalResponses(),
+      ignored: { exitCode: 0, stdout: ['dist/generated.js', ''].join('\0') },
+    };
+
+    const absentRunner = gitRunner(responses);
+    const absent = await runLand(['land', '--run', fixture.runId, '--remove'], { git: absentRunner });
+    expect(absent).toMatchObject({
+      state: 'refused',
+      removalAcknowledgement: { expectedRegenerableCount: 1, matches: false },
+    });
+    expect(absent.refusalReasons).toContain('regenerable-path acknowledgement is required: expected 1');
+    expect(destructiveOperations(absentRunner)).toEqual([]);
+
+    const wrongRunner = gitRunner(responses);
+    const wrong = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=2',
+    ], { git: wrongRunner });
+    expect(wrong).toMatchObject({
+      state: 'refused',
+      removalAcknowledgement: { expectedRegenerableCount: 1, suppliedRegenerableCount: 2, matches: false },
+    });
+    expect(wrong.refusalReasons).toContain('regenerable-path acknowledgement mismatch: received 2, expected 1');
+    expect(destructiveOperations(wrongRunner)).toEqual([]);
+
+    const exactRunner = gitRunner(responses);
+    const exact = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=1',
+    ], { git: exactRunner });
+    expect(exact).toMatchObject({
+      state: 'removed',
+      removalAcknowledgement: { expectedRegenerableCount: 1, suppliedRegenerableCount: 1, matches: true },
+    });
+    expect(destructiveOperations(exactRunner)).toEqual(['remove_worktree', 'prune_worktrees', 'delete_branch']);
+
+    writeProjectFile('unique-generator.ts', 'export function generate() {}\n');
+    const ungradedRunner = gitRunner({
+      ...responses,
+      status: { exitCode: 0, stdout: ['?? unique-generator.ts', ''].join('\0') },
+    });
+    const ungraded = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=1',
+    ], { git: ungradedRunner });
+    expect(ungraded.state).toBe('refused');
+    expect(ungraded.refusalReasons).toContain('1 untracked ungraded path remains');
+    expect(destructiveOperations(ungradedRunner)).toEqual([]);
+  });
+
+  it('reports unpushed commits but refuses only commits with no ref surviving topic-branch deletion', async () => {
+    const runnerFor = (atRisk: string): ReturnType<typeof vi.fn<LandGitRunner>> => {
+      const responses = cleanRemovalResponses();
+      return vi.fn<LandGitRunner>((request) => {
+        if (request.operation === 'unpushed') return { exitCode: 0, stdout: `${LOCAL_COMMIT}\n` };
+        if ((request.operation as string) === 'at_risk') return { exitCode: 0, stdout: atRisk };
+        return responses[request.operation] ?? { exitCode: 0, stdout: '' };
+      });
+    };
+
+    const integratedRunner = runnerFor('');
+    const integrated = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: integratedRunner });
+    expect(integrated.state).toBe('removed');
+    expect(integrated.inventory.unpushedCommits).toEqual([LOCAL_COMMIT]);
+    expect(integrated.inventory.atRiskCommits).toEqual([]);
+    expect(integrated.refusalReasons).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('absent from every remote ref'),
+    ]));
+    expect(integratedRunner).toHaveBeenCalledWith({
+      command: 'git',
+      args: [
+        'rev-list', '--reverse', `${BASE}..HEAD`, '--not',
+        '--exclude=refs/heads/topic-work', '--all',
+      ],
+      cwd: fixture.project,
+      operation: 'at_risk',
+    });
+
+    const exposedRunner = runnerFor(`${LOCAL_COMMIT}\n`);
+    const exposed = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: exposedRunner });
+    expect(exposed.state).toBe('refused');
+    expect(exposed.inventory.atRiskCommits).toEqual([LOCAL_COMMIT]);
+    expect(exposed.refusalReasons).toContain('1 commit has no ref that would survive worktree branch deletion');
+    expect(destructiveOperations(exposedRunner)).toEqual([]);
+  });
+
   it('enumerates untracked source and ignored state even beneath dependency roots', async () => {
     const dependencyRoot = ['node', '_modules'].join('');
     const sourcePath = `${dependencyRoot}/local-only.ts`;
@@ -315,6 +413,28 @@ describe('flowcrew land inventory and refusal boundary', () => {
       expect.objectContaining({ path: statePath, grade: 'data_or_state' }),
     ]));
     expect(report.inventory.regenerable.installedDependencies.count).toBe(0);
+  });
+
+  it('never lets an acknowledgement discard ignored source directly beneath a dependency root', async () => {
+    const dependencyRoot = ['node', '_modules'].join('');
+    const sourcePath = `${dependencyRoot}/local-only-generator.ts`;
+    writeProjectFile(sourcePath, 'export function generateUniqueEvidence() { return 2379; }\n');
+    const runner = gitRunner({
+      ...cleanRemovalResponses(),
+      ignored: { exitCode: 0, stdout: [sourcePath, ''].join('\0') },
+    });
+
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=1',
+    ], { git: runner });
+
+    expect(report.state).toBe('refused');
+    expect(report.inventory.enumerated).toContainEqual(expect.objectContaining({
+      origin: 'ignored', path: sourcePath, grade: 'source',
+    }));
+    expect(report.inventory.regenerable.installedDependencies.count).toBe(0);
+    expect(report.refusalReasons).toContain('1 ignored ungraded path remains');
+    expect(destructiveOperations(runner)).toEqual([]);
   });
 
   it('requires a build root and byte equality before summarizing artifact-like or copied files', async () => {
@@ -365,7 +485,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
       path: '.fc/campaigns/only-copy.jsonl',
       grade: 'data_or_state',
     }));
-    expect(report.refusalReasons).toContain('1 ignored path remains');
+    expect(report.refusalReasons).toContain('1 ignored ungraded path remains');
     expect(destructiveOperations(runner)).toEqual([]);
   });
 
@@ -373,7 +493,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
     rmSync(join(fixture.project, 'docs', 'result.md'));
     const runner = gitRunner();
 
-    const report = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
 
     expect(report.state).toBe('refused');
     expect(report.refusalReasons).toContain('declared terminal artifacts are absent: docs/result.md');
@@ -394,7 +516,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
   it('treats an incomplete Git inspection as unknown and refuses removal', async () => {
     const runner = gitRunner({ ignored: { exitCode: 2, stderr: 'index unreadable' } });
 
-    const report = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
 
     expect(report.state).toBe('refused');
     expect(report.inspectionIssues).toEqual([
@@ -407,7 +531,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
   it('removes only a proven linked worktree, then prunes and non-force deletes its exact branch', async () => {
     const runner = gitRunner(cleanRemovalResponses());
 
-    const report = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
 
     expect(report.state).toBe('removed');
     expect(report.branch).toBe('topic-work');
@@ -449,7 +575,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
       remove_worktree: { exitCode: 1, stderr: 'worktree still locked' },
     });
 
-    const report = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
 
     expect(report.state).toBe('removal_failed');
     expect(report.removalSteps).toEqual([
@@ -472,7 +600,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
     responses.branch = { exitCode: 0, stdout: 'main\n' };
     const runner = gitRunner(responses);
 
-    const report = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
 
     expect(report.state).toBe('refused');
     expect(report.refusalReasons).toContain('the primary or bare worktree cannot be removed by `flowcrew land`');
@@ -487,7 +617,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
 
     expect(report.state).toBe('refused');
     expect(report.refusalReasons).toContain('run has not reached a terminal status');
-    expect(runner.mock.calls.map(([request]) => request.operation)).toEqual(['status', 'ignored', 'unpushed']);
+    expect(runner.mock.calls.map(([request]) => request.operation)).toEqual([
+      'status', 'ignored', 'branch', 'unpushed', 'at_risk',
+    ]);
   });
 });
 

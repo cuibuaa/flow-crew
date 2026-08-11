@@ -64,7 +64,9 @@ after §1.5 confirms an exact draft and launch identity.
 Exit 0 and `Ship setup: READY` mean the verified ready record was written. A non-zero refusal names
 the blocker and writes no ready record; an already-created target may remain for diagnosis. Do not
 replace a refusal with manual Git or link commands. Setup cannot choose the target identity, decide
-whether an input is the only durable copy, or judge the future result.
+whether an input is the only durable copy, or judge the future result. Its baseline, not §1.1's, is
+what the gates enforce — preflight measures the source and setup the target — so never quote
+preflight's as a brief's permitted failure set.
 
 ### 1.3 Draft a self-contained brief
 

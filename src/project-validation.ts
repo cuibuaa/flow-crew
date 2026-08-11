@@ -526,6 +526,20 @@ export async function runProjectValidationBaseline(
       });
       continue;
     }
+    if (response.exitCode === 127) {
+      results.push({
+        role,
+        display: command.display,
+        state: 'launch_error',
+        exitCode: response.exitCode,
+        durationMs,
+        output,
+        failureIdentifiers: [],
+        failureIdentity: 'unknown',
+        reason: 'Validation command could not run in the target environment (exit 127)',
+      });
+      continue;
+    }
     const facts = response.exitCode === 0 ? { identifiers: [] as string[] } : failureFacts(output);
     results.push({
       role,

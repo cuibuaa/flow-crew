@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -19,7 +20,6 @@ import {
   createGitWorktree,
   nodeShipSetupFileSystem,
   runShipSetup,
-  shipSetupReadyRecordPath,
   type GitCommandRunner,
   type GitWorktreeCreator,
   type GitWorktreeRequest,
@@ -119,7 +119,8 @@ function validationRunner(testExit = 0): ReturnType<typeof vi.fn<ValidationComma
 }
 
 function noReadyRecord(): boolean {
-  return !existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state));
+  const directory = join(fixture.state, 'ship-setups');
+  return !existsSync(directory) || readdirSync(directory).length === 0;
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
@@ -196,9 +197,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(readlinkSync(linkedDirectory)).toBe(join(fixture.project, 'node_modules', 'revision-generator'));
     expect(lstatSync(join(fixture.target, 'package.json')).isSymbolicLink()).toBe(false);
 
-    const recordPath = shipSetupReadyRecordPath(fixture.target, fixture.state);
+    const rendered = JSON.parse(stdout.value) as Record<string, any>;
+    const recordPath = rendered.readyRecordPath as string;
     const record = JSON.parse(readFileSync(recordPath, 'utf-8')) as Record<string, any>;
-    expect(record).toEqual(JSON.parse(stdout.value));
+    expect(record).toEqual(rendered);
     expect(record).toMatchObject({
       version: 1,
       ready: true,
@@ -259,7 +261,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       ['python', ['-m', 'pytest']],
       ['python', ['-m', 'ruff', 'check', '.']],
     ]);
-    expect(existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state))).toBe(true);
+    if (report.state !== 'ready') throw new Error('Python setup unexpectedly refused');
+    expect(existsSync(report.readyRecordPath)).toBe(true);
   });
 
   it('refuses UNKNOWN validation before READY when no command can be inferred', async () => {
@@ -322,7 +325,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(stdout.value).toContain('Ship setup: READY');
     expect(stdout.value).toContain('gate build: must_remain_green');
     expect(stdout.value).toContain('gate test: must_remain_green');
-    expect(existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state))).toBe(true);
+    expect(noReadyRecord()).toBe(false);
   });
 
   it('refuses a missing declared source input before creating a worktree or running validation', async () => {
@@ -608,6 +611,127 @@ describe('ship-setup fail-closed worktree transaction', () => {
       ],
     });
     expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses an all-role exit-127 baseline in the verdict line and writes no ready record', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const runner = vi.fn<ValidationCommandRunner>(({ role }) => ({
+      exitCode: 127,
+      stderr: `sh: ${role}-tool: command not found`,
+    }));
+    const stdout = new Capture();
+    const stderr = new Capture();
+
+    const code = await cmdShipSetupWithDeps(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(1);
+    expect(stdout.value).toBe('');
+    expect(stderr.value.split('\n')[0]).toBe('Ship setup: REFUSED');
+    expect(stderr.value).toContain('REFUSED [validation]');
+    expect(stderr.value).toContain('exit 127');
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('links a bare directory named in the explicit inputs list', async () => {
+    mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
+    writeFileSync(join(fixture.project, 'dependency_cache', 'tool.js'), 'export {};\n', 'utf-8');
+    writeBrief([
+      '---',
+      'inputs:',
+      '  - package.json',
+      '  - dependency_cache',
+      '---',
+      '# Goal',
+      'Use the declared inputs.',
+    ]);
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: validationRunner(),
+    });
+
+    expect(report.state).toBe('ready');
+    expect(report.links).toContainEqual(expect.objectContaining({
+      path: 'dependency_cache', type: 'directory',
+    }));
+    expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(true);
+  });
+
+  it('reports and refuses an invalid explicit input instead of dropping it', async () => {
+    writeBrief([
+      '---',
+      'inputs:',
+      '  - ../outside-cache',
+      '---',
+      '# Goal',
+      'Use the declared input.',
+    ]);
+    const git = successfulGit();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: validationRunner(),
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      sourceVerification: {
+        unresolvedInputs: [expect.objectContaining({ value: '../outside-cache', line: 3 })],
+      },
+      blockers: [expect.objectContaining({
+        phase: 'source', input: '../outside-cache', reason: expect.stringContaining('Unresolved explicit input'),
+      })],
+    });
+    expect(git).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+
+    const stdout = new Capture();
+    const stderr = new Capture();
+    const code = await cmdShipSetupWithDeps(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: validationRunner(),
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+    expect(code).toBe(1);
+    expect(stdout.value).toBe('');
+    expect(stderr.value).toContain('UNRESOLVED DECLARED "../outside-cache" at line 3');
+    expect(stderr.value).toContain('REFUSED [source] ../outside-cache');
+  });
+
+  it('binds ready records to the exact brief bytes as well as the target identity', async () => {
+    const firstBrief = '# Goal\nMeasure the first brief.\n';
+    writeFileSync(fixture.brief, firstBrief, 'utf-8');
+    const first = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: validationRunner(),
+    });
+    expect(first.state).toBe('ready');
+    if (first.state !== 'ready') throw new Error('first setup unexpectedly refused');
+
+    rmSync(fixture.target, { recursive: true, force: true });
+    const secondBrief = '# Goal\nMeasure a substantively different second brief.\n';
+    writeFileSync(fixture.brief, secondBrief, 'utf-8');
+    const second = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: validationRunner(),
+    });
+    expect(second.state).toBe('ready');
+    if (second.state !== 'ready') throw new Error('second setup unexpectedly refused');
+
+    expect(first.briefDigest).toBe(createHash('sha256').update(firstBrief).digest('hex'));
+    expect(second.briefDigest).toBe(createHash('sha256').update(secondBrief).digest('hex'));
+    expect(second.briefDigest).not.toBe(first.briefDigest);
+    expect(second.readyRecordPath).not.toBe(first.readyRecordPath);
+    expect(existsSync(first.readyRecordPath)).toBe(true);
+    expect(existsSync(second.readyRecordPath)).toBe(true);
+    expect(JSON.parse(readFileSync(first.readyRecordPath, 'utf-8')).briefDigest).toBe(first.briefDigest);
+    expect(JSON.parse(readFileSync(second.readyRecordPath, 'utf-8')).briefDigest).toBe(second.briefDigest);
   });
 
   it('validates required and duplicate CLI options while help remains non-mutating', async () => {

@@ -222,7 +222,9 @@ interface ShipSetupFacts {
   version: 1;
   projectDir: string;
   targetDir: string;
+  targetCanonicalDir?: string;
   briefPath: string;
+  briefDigest: string;
   base: string;
   branch: string;
   worktreeCreated: boolean;
@@ -319,9 +321,18 @@ export function shipSetupUsage(): string {
   ].join('\n');
 }
 
-/** Stable FC-global path for the ready record associated with a target worktree. */
-export function shipSetupReadyRecordPath(targetDir: string, globalRoot = fcGlobalDir()): string {
-  const identity = createHash('sha256').update(resolve(targetDir)).digest('hex').slice(0, 32);
+/** Content-addressed FC-global path for one canonical target and measured brief. */
+export function shipSetupReadyRecordPath(
+  canonicalTargetDir: string,
+  briefDigest: string,
+  globalRoot = fcGlobalDir(),
+): string {
+  if (!/^[a-f0-9]{64}$/.test(briefDigest)) throw new Error('brief digest must be a lowercase SHA-256');
+  const identity = createHash('sha256')
+    .update(resolve(canonicalTargetDir))
+    .update('\0')
+    .update(briefDigest)
+    .digest('hex');
   return join(resolve(globalRoot), 'ship-setups', `${identity}.json`);
 }
 
@@ -339,6 +350,11 @@ function verificationBlockers(
     assertion: assertion.kind,
     reason: `${assertion.state}: ${assertion.reason} (line ${assertion.line})`,
   }));
+  blockers.push(...verification.unresolvedInputs.map((input) => ({
+    phase,
+    input: input.value,
+    reason: `Unresolved explicit input at line ${input.line}: ${input.reason}`,
+  })));
   for (const input of verification.inputs) {
     if (!input.exists) blockers.push({ phase, input: input.path, reason: 'Declared input does not exist' });
     else if (!input.readable) blockers.push({ phase, input: input.path, reason: 'Declared input is not readable' });
@@ -363,11 +379,15 @@ function refused(
   return { ...facts, state: 'refused', blockers };
 }
 
-function safeReadBrief(path: string, fs: ShipSetupFileSystem): string {
+function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; digest: string } {
   if (!fs.exists(path)) throw new Error(`requested brief does not exist: ${path}`);
   if (!fs.readable(path)) throw new Error(`requested brief is not readable: ${path}`);
   try {
-    return fs.readText(path);
+    const bytes = fs.readBytes(path);
+    return {
+      text: Buffer.from(bytes).toString('utf-8'),
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
   } catch (error) {
     throw new Error(`cannot read requested brief ${path}: ${errorMessage(error)}`, { cause: error });
   }
@@ -388,6 +408,7 @@ function setupFacts(
   projectDir: string,
   targetDir: string,
   briefPath: string,
+  briefDigest: string,
   parsed: ParsedShipSetupArgs,
   sourceVerification: BriefInputVerification,
 ): Omit<ShipSetupFacts, 'blockers'> {
@@ -396,6 +417,7 @@ function setupFacts(
     projectDir,
     targetDir,
     briefPath,
+    briefDigest,
     base: parsed.base as string,
     branch: parsed.branch as string,
     worktreeCreated: false,
@@ -471,9 +493,17 @@ export async function runShipSetup(
   const briefPath = resolve(isAbsolute(parsed.brief as string)
     ? parsed.brief as string
     : join(projectDir, parsed.brief as string));
-  const brief = safeReadBrief(briefPath, deps.fs);
+  const measuredBrief = safeReadBrief(briefPath, deps.fs);
+  const brief = measuredBrief.text;
   const sourceVerification = verifyBriefInputs(brief, projectDir, deps.fs);
-  let facts = setupFacts(projectDir, targetDir, briefPath, parsed, sourceVerification);
+  let facts = setupFacts(
+    projectDir,
+    targetDir,
+    briefPath,
+    measuredBrief.digest,
+    parsed,
+    sourceVerification,
+  );
   const sourceBlockers = verificationBlockers('source', sourceVerification);
   if (sourceBlockers.length > 0) return refused(facts, sourceBlockers);
   if (deps.fs.entryExists(targetDir)) {
@@ -511,6 +541,16 @@ export async function runShipSetup(
       reason: 'Git reported success but the target worktree directory is not reachable',
     }]);
   }
+  let targetCanonicalDir: string;
+  try {
+    targetCanonicalDir = deps.fs.realpath(targetDir);
+    facts = { ...facts, targetCanonicalDir };
+  } catch (error) {
+    return refused(facts, [{
+      phase: 'target',
+      reason: `Cannot canonicalize target worktree: ${errorMessage(error)}`,
+    }]);
+  }
 
   let linked: { links: ShipSetupLink[]; blockers: ShipSetupBlocker[] };
   try {
@@ -544,7 +584,11 @@ export async function runShipSetup(
       reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
     })));
   if (validationBlockers.length > 0) return refused(facts, validationBlockers);
-  const readyRecordPath = shipSetupReadyRecordPath(targetDir, deps.globalDir());
+  const readyRecordPath = shipSetupReadyRecordPath(
+    targetCanonicalDir,
+    measuredBrief.digest,
+    deps.globalDir(),
+  );
   const report: ShipSetupReadyReport = {
     ...facts,
     state: 'ready',
@@ -578,6 +622,9 @@ function renderInputVerification(label: string, verification: BriefInputVerifica
   for (const assertion of verification.unboundAssertions) {
     writer.write(`  NOT_CHECKABLE ${assertion.kind}: ${assertion.reason}\n`);
   }
+  for (const input of verification.unresolvedInputs) {
+    writer.write(`  UNRESOLVED DECLARED ${JSON.stringify(input.value)} at line ${input.line}: ${input.reason}\n`);
+  }
 }
 
 function renderVerification(report: ShipSetupReport, writer: Writer): void {
@@ -589,6 +636,7 @@ function renderVerification(report: ShipSetupReport, writer: Writer): void {
 function renderHuman(report: ShipSetupReport, writer: Writer): void {
   writer.write(`Ship setup: ${report.state.toUpperCase()}\n`);
   writer.write(`Project: ${report.projectDir}\nTarget: ${report.targetDir}\n`);
+  writer.write(`Brief digest: ${report.briefDigest}\n`);
   writer.write(`Git: branch ${report.branch} at base ${report.base}\n`);
   renderVerification(report, writer);
   if (report.state === 'ready') {

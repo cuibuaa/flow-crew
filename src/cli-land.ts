@@ -17,6 +17,7 @@ export interface LandGitRequest {
     | 'status'
     | 'ignored'
     | 'unpushed'
+    | 'at_risk'
     | 'root'
     | 'worktrees'
     | 'branch'
@@ -70,6 +71,7 @@ export interface ParsedLandArgs {
   help: boolean;
   json: boolean;
   remove: boolean;
+  acknowledgeRegenerable?: number;
   run?: string;
 }
 
@@ -120,6 +122,13 @@ export interface LandInventory {
   gradeCounts: Record<LandInventoryGrade, number>;
   rawPathCounts: Record<LandInventoryOrigin, number>;
   unpushedCommits: string[];
+  atRiskCommits: string[];
+}
+
+export interface LandRemovalAcknowledgement {
+  expectedRegenerableCount: number;
+  suppliedRegenerableCount?: number;
+  matches: boolean;
 }
 
 export interface LandInspectionIssue {
@@ -145,6 +154,7 @@ export interface LandReport {
   inventory: LandInventory;
   inspectionIssues: LandInspectionIssue[];
   removalRequested: boolean;
+  removalAcknowledgement: LandRemovalAcknowledgement;
   readyForRemoval: boolean;
   refusalReasons: string[];
   branch?: string;
@@ -277,6 +287,7 @@ function optionValue(args: string[], index: number, option: string): { value: st
 export function parseLandArgs(args: string[]): ParsedLandArgs {
   const parsed: ParsedLandArgs = { help: false, json: false, remove: false };
   let runSeen = false;
+  let acknowledgementSeen = false;
   const start = args[0] === 'land' ? 1 : 0;
   for (let index = start; index < args.length;) {
     const argument = args[index];
@@ -303,6 +314,21 @@ export function parseLandArgs(args: string[]): ParsedLandArgs {
       index += value.consumed;
       continue;
     }
+    if (argument === '--acknowledge-regenerable' || argument.startsWith('--acknowledge-regenerable=')) {
+      if (acknowledgementSeen) throw new Error('--acknowledge-regenerable may be specified only once');
+      const value = optionValue(args, index, '--acknowledge-regenerable');
+      if (!/^(?:0|[1-9]\d*)$/.test(value.value)) {
+        throw new Error('--acknowledge-regenerable requires a non-negative integer');
+      }
+      const count = Number(value.value);
+      if (!Number.isSafeInteger(count)) {
+        throw new Error('--acknowledge-regenerable exceeds the largest safe integer');
+      }
+      parsed.acknowledgeRegenerable = count;
+      acknowledgementSeen = true;
+      index += value.consumed;
+      continue;
+    }
     throw new Error(`unknown land option: ${argument}`);
   }
   if (!parsed.help && !parsed.run) throw new Error('--run is required');
@@ -311,9 +337,9 @@ export function parseLandArgs(args: string[]): ParsedLandArgs {
 
 export function landUsage(): string {
   return [
-    'Usage: flowcrew land --run <run-id> [--remove] [--json]',
+    'Usage: flowcrew land --run <run-id> [--remove] [--json] [--acknowledge-regenerable=<count>]',
     'Audits terminal artifacts and all unique worktree state; proven-regenerable paths are counted, everything else is named.',
-    '--remove stays fail-closed until the complete ungraded inventory is empty.',
+    '--remove requires the exact audited regenerable count and stays fail-closed while any ungraded item remains.',
   ].join('\n');
 }
 
@@ -500,6 +526,7 @@ function emptyInventory(): LandInventory {
     },
     rawPathCounts: { untracked: 0, ignored: 0 },
     unpushedCommits: [],
+    atRiskCommits: [],
   };
 }
 
@@ -668,13 +695,17 @@ function gradeInventoryPaths(
     }
 
     const parts = pathParts(item.path);
-    const dependencyPath = parts.some((part) => DEPENDENCY_ROOTS.has(part));
+    const dependencyRootIndex = parts.findIndex((part) => DEPENDENCY_ROOTS.has(part));
+    const dependencyPath = dependencyRootIndex >= 0;
+    const directlyUnderDependencyRoot = dependencyRootIndex === parts.length - 2;
     if (dataOrStateLike(item.path)) {
       inventory.enumerated.push({ ...item, grade: 'data_or_state', kind });
       inventory.gradeCounts.data_or_state += 1;
       continue;
     }
-    if (dependencyPath && item.origin === 'untracked' && sourceLike(item.path)) {
+    if (dependencyPath
+      && sourceLike(item.path)
+      && (item.origin === 'untracked' || directlyUnderDependencyRoot)) {
       inventory.enumerated.push({ ...item, grade: 'source', kind });
       inventory.gradeCounts.source += 1;
       continue;
@@ -720,7 +751,7 @@ async function inspectInventory(
   projectDir: string,
   git: LandGitRunner,
   fs: LandFileSystem,
-): Promise<{ inventory: LandInventory; issues: LandInspectionIssue[] }> {
+): Promise<{ inventory: LandInventory; issues: LandInspectionIssue[]; branch?: string }> {
   const inventory = emptyInventory();
   const issues: LandInspectionIssue[] = [];
   let untrackedPaths: string[] = [];
@@ -752,6 +783,28 @@ async function inspectInventory(
   if (ignored.ok) ignoredPaths = nulPaths(ignored.stdout);
   else issues.push(ignored.issue);
 
+  const branchRequest: LandGitRequest = {
+    command: 'git', args: ['symbolic-ref', '--quiet', '--short', 'HEAD'], cwd: projectDir, operation: 'branch',
+  };
+  let branch: string | undefined;
+  let branchInspectionComplete = false;
+  try {
+    const response = await git(branchRequest);
+    if (response.exitCode === 0 && !response.error) {
+      branch = response.stdout?.trim();
+      if (branch) branchInspectionComplete = true;
+      else issues.push({ operation: 'branch', reason: 'symbolic-ref returned an empty branch name' });
+    } else if (response.exitCode === 1 && !response.error && !response.stderr?.trim()) {
+      // `symbolic-ref --quiet` uses exit 1 to report a detached HEAD. That is a
+      // complete observation, not a failed Git inspection.
+      branchInspectionComplete = true;
+    } else {
+      issues.push({ operation: 'branch', reason: gitFailure(branchRequest, response) });
+    }
+  } catch (error) {
+    issues.push({ operation: 'branch', reason: errorMessage(error) });
+  }
+
   if (!state.baseCommit || !/^[0-9a-f]{7,64}$/i.test(state.baseCommit)) {
     issues.push({
       operation: 'unpushed',
@@ -772,6 +825,27 @@ async function inspectInventory(
         issues.push({ operation: 'unpushed', reason: errorMessage(error) });
       }
     } else issues.push(unpushed.issue);
+
+    if (branchInspectionComplete) {
+      const atRiskRequest: LandGitRequest = {
+        command: 'git',
+        args: [
+          'rev-list', '--reverse', `${state.baseCommit}..HEAD`, '--not',
+          ...(branch ? [`--exclude=refs/heads/${branch}`] : []),
+          '--all',
+        ],
+        cwd: projectDir,
+        operation: 'at_risk',
+      };
+      const atRisk = await checkedGit(atRiskRequest, git);
+      if (atRisk.ok) {
+        try {
+          inventory.atRiskCommits = unpushedHashes(atRisk.stdout);
+        } catch (error) {
+          issues.push({ operation: 'at_risk', reason: errorMessage(error) });
+        }
+      } else issues.push(atRisk.issue);
+    }
   }
   const graded = gradeInventoryPaths(projectDir, [
     ...untrackedPaths.map((path) => ({ origin: 'untracked' as const, path })),
@@ -782,7 +856,7 @@ async function inspectInventory(
   inventory.gradeCounts = graded.inventory.gradeCounts;
   inventory.rawPathCounts = graded.inventory.rawPathCounts;
   issues.push(...graded.issues);
-  return { inventory, issues };
+  return { inventory, issues, ...(branch ? { branch } : {}) };
 }
 
 interface WorktreeRecord {
@@ -822,6 +896,8 @@ function refusalReasons(
   artifacts: LandTerminalArtifact[],
   inventory: LandInventory,
   issues: LandInspectionIssue[],
+  removalRequested: boolean,
+  acknowledgement: LandRemovalAcknowledgement,
 ): string[] {
   const reasons: string[] = [];
   if (!terminal) reasons.push('run has not reached a terminal status');
@@ -829,9 +905,18 @@ function refusalReasons(
   if (missing.length > 0) reasons.push(`declared terminal artifacts are absent: ${missing.map((item) => item.path).join(', ')}`);
   if (issues.length > 0) reasons.push(`inventory inspection is incomplete (${issues.length} issue${issues.length === 1 ? '' : 's'})`);
   if (inventory.tracked.length > 0) reasons.push(`${inventory.tracked.length} tracked worktree change${inventory.tracked.length === 1 ? ' remains' : 's remain'}`);
-  if (inventory.rawPathCounts.untracked > 0) reasons.push(`${inventory.rawPathCounts.untracked} untracked path${inventory.rawPathCounts.untracked === 1 ? ' remains' : 's remain'}`);
-  if (inventory.rawPathCounts.ignored > 0) reasons.push(`${inventory.rawPathCounts.ignored} ignored path${inventory.rawPathCounts.ignored === 1 ? ' remains' : 's remain'}`);
-  if (inventory.unpushedCommits.length > 0) reasons.push(`${inventory.unpushedCommits.length} commit${inventory.unpushedCommits.length === 1 ? ' is' : 's are'} absent from every remote ref`);
+  for (const origin of ['untracked', 'ignored'] as const) {
+    const count = inventory.enumerated.filter((item) => item.origin === origin).length;
+    if (count > 0) reasons.push(`${count} ${origin} ungraded path${count === 1 ? ' remains' : 's remain'}`);
+  }
+  if (inventory.atRiskCommits.length > 0) {
+    reasons.push(`${inventory.atRiskCommits.length} commit${inventory.atRiskCommits.length === 1 ? ' has' : 's have'} no ref that would survive worktree branch deletion`);
+  }
+  if (removalRequested && acknowledgement.suppliedRegenerableCount === undefined) {
+    reasons.push(`regenerable-path acknowledgement is required: expected ${acknowledgement.expectedRegenerableCount}`);
+  } else if (removalRequested && !acknowledgement.matches) {
+    reasons.push(`regenerable-path acknowledgement mismatch: received ${acknowledgement.suppliedRegenerableCount}, expected ${acknowledgement.expectedRegenerableCount}`);
+  }
   return reasons;
 }
 
@@ -844,6 +929,7 @@ function projectDirectory(state: StoreState, fs: LandFileSystem): string {
 
 async function removalContext(
   projectDir: string,
+  branch: string | undefined,
   deps: ResolvedLandDependencies,
 ): Promise<{
   branch?: string;
@@ -892,18 +978,8 @@ async function removalContext(
     }
   }
 
-  const branchRequest: LandGitRequest = {
-    command: 'git', args: ['symbolic-ref', '--quiet', '--short', 'HEAD'], cwd: projectDir, operation: 'branch',
-  };
-  const branchResult = await checkedGit(branchRequest, deps.git);
-  let branch: string | undefined;
-  if (!branchResult.ok) issues.push(branchResult.issue);
-  else {
-    branch = branchResult.stdout.trim();
-    if (!branch) reasons.push('worktree is detached or has an empty branch name');
-    if (selected?.branch && branch && selected.branch !== branch) {
-      reasons.push(`worktree list branch ${selected.branch} disagrees with symbolic branch ${branch}`);
-    }
+  if (selected?.branch && branch && selected.branch !== branch) {
+    reasons.push(`worktree list branch ${selected.branch} disagrees with symbolic branch ${branch}`);
   }
   if (canonicalTop && canonicalTop !== projectDir) branch = undefined;
   return { branch, primaryWorktree, reasons, issues };
@@ -956,7 +1032,24 @@ export async function runLand(
   const inspected = await inspectInventory(state, projectDir, deps.git, deps.fs);
   const inspectionIssues = [...artifactIssues, ...inspected.issues];
   const terminal = isTerminalRunStatus(state.status);
-  let reasons = refusalReasons(terminal, artifacts, inspected.inventory, inspectionIssues);
+  const expectedRegenerableCount = inspected.inventory.regenerable.buildOutputs.count
+    + inspected.inventory.regenerable.installedDependencies.count;
+  const removalAcknowledgement: LandRemovalAcknowledgement = {
+    expectedRegenerableCount,
+    ...(parsed.acknowledgeRegenerable === undefined
+      ? {}
+      : { suppliedRegenerableCount: parsed.acknowledgeRegenerable }),
+    matches: parsed.acknowledgeRegenerable !== undefined
+      && parsed.acknowledgeRegenerable === expectedRegenerableCount,
+  };
+  let reasons = refusalReasons(
+    terminal,
+    artifacts,
+    inspected.inventory,
+    inspectionIssues,
+    parsed.remove,
+    removalAcknowledgement,
+  );
   const baseReport: LandReport = {
     version: 1,
     state: 'audit',
@@ -969,13 +1062,15 @@ export async function runLand(
     inventory: inspected.inventory,
     inspectionIssues,
     removalRequested: parsed.remove,
+    removalAcknowledgement,
     readyForRemoval: reasons.length === 0,
     refusalReasons: reasons,
+    ...(inspected.branch ? { branch: inspected.branch } : {}),
   };
   if (!parsed.remove) return baseReport;
   if (reasons.length > 0) return { ...baseReport, state: 'refused' };
 
-  const context = await removalContext(projectDir, deps);
+  const context = await removalContext(projectDir, inspected.branch, deps);
   inspectionIssues.push(...context.issues);
   reasons = [...context.reasons];
   if (context.issues.length > 0) reasons.push(`removal context inspection is incomplete (${context.issues.length} issue${context.issues.length === 1 ? '' : 's'})`);
@@ -1034,6 +1129,11 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
       + `(project=${artifact.projectPresent ? 'yes' : 'no'}, snapshot=${artifact.snapshotPresent ? 'yes' : 'no'})\n`);
   }
   writer.write(`Unique inventory: ${inventorySize(report.inventory)} item(s)\n`);
+  writer.write(`Regenerable acknowledgement: expected=${report.removalAcknowledgement.expectedRegenerableCount}`
+    + `${report.removalAcknowledgement.suppliedRegenerableCount === undefined
+      ? ' supplied=absent'
+      : ` supplied=${report.removalAcknowledgement.suppliedRegenerableCount}`}`
+    + ` match=${report.removalAcknowledgement.matches ? 'yes' : 'no'}\n`);
   writer.write('Path grades:'
     + ` build_output=${report.inventory.gradeCounts.build_output}`
     + ` installed_dependency=${report.inventory.gradeCounts.installed_dependency}`
@@ -1057,6 +1157,7 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
       + `${item.linkTarget === undefined ? '' : ` -> ${displayPath(item.linkTarget)}`}\n`);
   }
   for (const hash of report.inventory.unpushedCommits) writer.write(`  UNPUSHED ${hash}\n`);
+  for (const hash of report.inventory.atRiskCommits) writer.write(`  AT_RISK ${hash}\n`);
   for (const issue of report.inspectionIssues) writer.write(`  UNKNOWN [${issue.operation}] ${issue.reason}\n`);
   for (const reason of report.refusalReasons) writer.write(`  REFUSED ${reason}\n`);
   for (const step of report.removalSteps ?? []) {
@@ -1064,7 +1165,7 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
   }
   if (!report.removalRequested) {
     writer.write(report.readyForRemoval
-      ? 'Audit complete: rerun with --remove after independently judging and archiving the result.\n'
+      ? `Audit complete: after independently judging the result, rerun with --remove --acknowledge-regenerable=${report.removalAcknowledgement.expectedRegenerableCount}.\n`
       : 'Audit complete: account for every listed item before requesting removal.\n');
   }
 }

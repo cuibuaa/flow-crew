@@ -411,7 +411,15 @@ configuration-discovered validation baseline as a delta contract. Rehearsal vali
 frontmatter and exercises the terminal, confirmation, floor, and round-file paths with a
 scripted adapter. It does not validate research quality; see [Zero-token rehearsal](rehearse.md).
 
+Values under the leading frontmatter `inputs:` key are explicit path declarations. A safe bare
+directory name is accepted there without a trailing slash because the key already supplies the
+path context. An explicit value that is unsafe or cannot be normalized is retained and reported
+as unresolved; it is never silently dropped. Path discovery in ordinary prose remains
+conservative, so a bare noun outside an explicit declaration is not promoted into an input.
+
 Setup is the fail-closed boundary: it creates the declared worktree, links exact ignored inputs
 that Git omitted, verifies their assertions again through the target, and records the target's
-baseline only when everything is reachable. Use `flowcrew watch` after launch for a continuous
-heartbeat and edge-triggered stalls; `--once` performs one read-only pass.
+baseline only when everything is reachable and the commands can actually run. Its ready record
+stores the exact brief digest and is keyed by that digest plus the canonical target. Use
+`flowcrew watch` after launch for a continuous heartbeat and edge-triggered stalls; `--once`
+performs one read-only pass.

@@ -23,6 +23,7 @@ import {
 import {
   extractBriefPathMentions,
   extractDeclaredBriefInputPaths,
+  parseBriefInputs,
   verifyBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
@@ -375,6 +376,79 @@ describe('ship-preflight declared brief inputs fact', () => {
       'ignored/declared.csv',
       'ignored/only-mentioned.csv',
     ]);
+  });
+
+  it('takes explicit bare-directory entries literally, reports invalid declarations, and keeps prose conservative', async () => {
+    mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
+    const brief = [
+      '---',
+      'inputs:',
+      '  - dependency_cache',
+      '  - ../outside-cache',
+      '---',
+      '# Background',
+      'The ordinary words scheduler and generator are descriptive prose.',
+    ].join('\n');
+
+    expect(extractDeclaredBriefInputPaths(brief)).toEqual(['dependency_cache']);
+    const verification = verifyBriefInputs(brief, fixture.project);
+    expect(verification.inputs).toEqual([
+      expect.objectContaining({ path: 'dependency_cache', exists: true, readable: true }),
+    ]);
+    expect(verification.unresolvedInputs).toEqual([
+      expect.objectContaining({ value: '../outside-cache', line: 4, reason: expect.stringContaining('project-relative') }),
+    ]);
+    expect(extractBriefInputPaths('# Background\nThe scheduler and generator remain ordinary nouns.')).toEqual([]);
+
+    writeFileSync(join(fixture.project, 'brief.md'), brief, 'utf-8');
+    const stdout = new Capture();
+    const code = await cmdShipPreflightWithDeps(
+      ['ship-preflight', '--brief', 'brief.md'],
+      commonDeps({ stdout: stdout.writer, stderr: new Capture().writer }),
+    );
+    expect(code).toBe(0);
+    expect(stdout.value).toContain('UNRESOLVED DECLARED "../outside-cache" at line 4');
+  });
+
+  it('reports explicit punctuation, traversal, null, and malformed YAML instead of rewriting or dropping them', () => {
+    const punctuation = parseBriefInputs([
+      '---',
+      'inputs:',
+      '  - "package.json,"',
+      '---',
+    ].join('\n'));
+    expect(punctuation.references).not.toContainEqual(expect.objectContaining({ path: 'package.json' }));
+    expect(punctuation.unresolvedInputs).toContainEqual(expect.objectContaining({
+      value: 'package.json,', line: 3,
+    }));
+
+    const traversal = parseBriefInputs([
+      '---',
+      'inputs:',
+      '  - cache/..',
+      '---',
+    ].join('\n'));
+    expect(traversal.unresolvedInputs).toContainEqual(expect.objectContaining({
+      value: 'cache/..', line: 3,
+    }));
+
+    const nullEntry = parseBriefInputs([
+      '---',
+      'inputs:',
+      '  -',
+      '---',
+    ].join('\n'));
+    expect(nullEntry.unresolvedInputs).toContainEqual(expect.objectContaining({ line: 3 }));
+
+    const malformed = parseBriefInputs([
+      '---',
+      'inputs:',
+      '  - [unterminated',
+      '---',
+    ].join('\n'));
+    expect(malformed.unresolvedInputs).toContainEqual(expect.objectContaining({
+      value: '[unterminated', line: 3, reason: expect.stringContaining('YAML'),
+    }));
   });
 
   it('rejects a numeric fraction while accepting a genuinely path-shaped numeric fixture', () => {

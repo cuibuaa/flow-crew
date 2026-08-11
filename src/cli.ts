@@ -1309,7 +1309,7 @@ function cmdStatus() {
     return;
   }
   const { id, directory: runDir, state } = selected;
-  const mismatch = terminalArtifactStatusMismatch(state);
+  const mismatch = terminalArtifactStatusMismatch(state, { runDir });
   if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
 
   // Show summary.md if generated (best overview of what was done)
@@ -1352,7 +1352,7 @@ function cmdList() {
   for (const runId of runs) {
     try {
       const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8'));
-      const mismatch = terminalArtifactStatusMismatch(state);
+      const mismatch = terminalArtifactStatusMismatch(state, { runDir: join(root, runId) });
       const lifecycle = state.status === RUN_STATUS.COMPLETE ? '✓ complete' : state.status === RUN_STATUS.FAILED ? '✗ failed  ' : state.status === RUN_STATUS.RUNNING ? '⟳ running ' : '· ' + state.status.padEnd(8);
       const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
       const startMs = new Date(state.startedAt).getTime();

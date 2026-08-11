@@ -33,8 +33,15 @@ export interface BriefInputReference {
   assertions: BriefInputAssertionDeclaration[];
 }
 
+export interface UnresolvedBriefInputDeclaration {
+  value: string;
+  line: number;
+  reason: string;
+}
+
 export interface ParsedBriefInputs {
   references: BriefInputReference[];
+  unresolvedInputs: UnresolvedBriefInputDeclaration[];
   unboundAssertions: BriefInputAssertionResult[];
 }
 
@@ -55,6 +62,7 @@ export interface VerifiedBriefInput {
 
 export interface BriefInputVerification {
   inputs: VerifiedBriefInput[];
+  unresolvedInputs: UnresolvedBriefInputDeclaration[];
   unboundAssertions: BriefInputAssertionResult[];
 }
 
@@ -95,6 +103,7 @@ const INPUT_DIRECTIVE = /\b(?:input|inputs|read|reads|consume|consumes|load|load
 const OUTPUT_DIRECTIVE = /\b(?:write|writes|written|create|creates|produce|produces|generate|generates|emit|emits|save|saves|deliverable|deliverables|output|outputs|modify|modifies|edit|edits)\b/i;
 const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_manifest|source|sources|dataset|datasets|fixture|fixtures|consume|consumes|read|reads)(?:_|$)/i;
 const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
+const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter)$/i;
 
 function leadingFrontmatter(brief: string): { yaml: string; body: string; bodyLineOffset: number } | undefined {
   const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(brief);
@@ -107,25 +116,74 @@ function leadingFrontmatter(brief: string): { yaml: string; body: string; bodyLi
   };
 }
 
-/** Normalize a token only when it can safely name one workspace-relative path. */
-export function normalizeBriefInputPath(raw: string): string | undefined {
-  let candidate = raw.trim()
-    .replace(/^[`'"(<\u005b]+/, '')
-    .replace(/[`'">)\],.;:]+$/, '')
-    .replace(/:\d+(?::\d+)?$/, '')
-    .replace(/^\.\//, '')
-    .replaceAll('\\', '/');
-  if (!candidate || candidate.includes('::') || /\s/.test(candidate)) return undefined;
-  if (candidate.startsWith('~') || isAbsolute(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) return undefined;
-  if (/^(?:https?|file):\/\//i.test(candidate) || candidate.includes('://')) return undefined;
-  if (/[?*{}[\]]/.test(candidate) || /[$<>]/.test(candidate)) return undefined;
-  if (candidate === '.' || candidate === '..' || candidate.startsWith('../') || candidate.includes('/../')) return undefined;
+interface NormalizedBriefInputPath {
+  path?: string;
+  reason?: string;
+}
+
+function normalizedBriefInputPath(raw: string, explicit: boolean): NormalizedBriefInputPath {
+  const authored = explicit ? raw : raw.trim();
+  if (explicit && authored !== authored.trim()) {
+    return { reason: 'Explicit input must not contain leading or trailing whitespace' };
+  }
+  if (explicit && /[<>]/.test(authored)) {
+    return { reason: 'Explicit input must be one literal project-relative path, not a template' };
+  }
+  if (explicit && (
+    /^[`'"([]/.test(authored)
+    || /[`'">)\],;:]$/.test(authored)
+    || /:\d+(?::\d+)?$/.test(authored)
+  )) {
+    return { reason: 'Explicit input contains wrapper or trailing punctuation and cannot be rewritten as another path' };
+  }
+  if (explicit && authored.includes('\\')) {
+    return { reason: 'Explicit input must use project-relative forward-slash separators' };
+  }
+  let candidate = explicit
+    ? authored.replace(/^\.\//, '')
+    : authored
+      .replace(/^[`'"(<\u005b]+/, '')
+      .replace(/[`'">)\],.;:]+$/, '')
+      .replace(/:\d+(?::\d+)?$/, '')
+      .replace(/^\.\//, '')
+      .replaceAll('\\', '/');
+  if (!candidate) return { reason: 'Explicit input is empty' };
+  if (candidate.includes('::') || /\s/.test(candidate)) {
+    return { reason: 'Explicit input must name one project-relative path without whitespace' };
+  }
+  if (candidate.startsWith('~') || isAbsolute(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) {
+    return { reason: 'Explicit input must be a project-relative path' };
+  }
+  if (/^(?:https?|file):\/\//i.test(candidate) || candidate.includes('://')) {
+    return { reason: 'Explicit input must be a project-relative path, not a URL' };
+  }
+  if (/[?*{}[\]]/.test(candidate) || /[$<>]/.test(candidate)) {
+    return { reason: 'Explicit input must be one literal project-relative path, not a glob or template' };
+  }
+  const pathSegments = candidate.split('/');
+  if (candidate === '.'
+    || pathSegments.some((segment) => segment === '..')
+    || pathSegments.slice(1).some((segment) => segment === '.')) {
+    return { reason: 'Explicit input must be project-relative and stay within the project root' };
+  }
+  if (explicit && candidate.endsWith('.')) {
+    return { reason: 'Explicit input contains trailing punctuation and cannot be rewritten as another path' };
+  }
   const directoryShaped = candidate.endsWith('/');
   candidate = candidate.replace(/\/$/, '');
   // Fractions and progress counters are not paths, even though they contain a slash.
-  if (candidate.split('/').every((segment) => /^\d+$/.test(segment))) return undefined;
-  if (!directoryShaped && !candidate.includes('/') && !candidate.startsWith('.') && !PATH_EXTENSION.test(candidate)) return undefined;
-  return candidate;
+  if (candidate.split('/').every((segment) => /^\d+$/.test(segment))) {
+    return { reason: 'Explicit input is a numeric fraction or counter, not a path' };
+  }
+  if (!explicit && !directoryShaped && !candidate.includes('/') && !candidate.startsWith('.') && !PATH_EXTENSION.test(candidate)) {
+    return { reason: 'Prose token is not sufficiently path-shaped' };
+  }
+  return { path: candidate };
+}
+
+/** Normalize prose only when a token is both safe and recognizably path-shaped. */
+export function normalizeBriefInputPath(raw: string): string | undefined {
+  return normalizedBriefInputPath(raw, false).path;
 }
 
 interface PathToken {
@@ -242,19 +300,83 @@ function lineForPath(brief: string, path: string): number {
   return index < 0 ? 1 : index + 1;
 }
 
+function yamlInputKeyLine(line: string): { indent: number; value: string } | undefined {
+  const match = /^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+  if (!match || !INPUT_KEY.test(match[2])) return undefined;
+  return { indent: match[1].length, value: match[3].trim() };
+}
+
+function malformedYamlInputDeclarations(
+  yamlText: string,
+  error: unknown,
+): UnresolvedBriefInputDeclaration[] {
+  const lines = yamlText.split(/\r?\n/);
+  const declarations: UnresolvedBriefInputDeclaration[] = [];
+  const reason = `Explicit input declaration could not be parsed because frontmatter YAML is malformed: ${error instanceof Error ? error.message : String(error)}`;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const key = yamlInputKeyLine(lines[index]);
+    if (!key) continue;
+    let foundValue = false;
+    if (key.value) {
+      declarations.push({ value: key.value, line: index + 2, reason });
+      foundValue = true;
+    }
+    for (let nested = index + 1; nested < lines.length; nested += 1) {
+      const line = lines[nested];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const indent = /^\s*/.exec(line)?.[0].length ?? 0;
+      if (indent <= key.indent) break;
+      const item = /^\s*-\s*(.*)$/.exec(line);
+      if (!item) continue;
+      declarations.push({ value: item[1].trim() || '<empty>', line: nested + 2, reason });
+      foundValue = true;
+    }
+    if (!foundValue) declarations.push({ value: '<unparsed inputs>', line: index + 2, reason });
+  }
+  return declarations;
+}
+
+function explicitNullInputLocations(yamlText: string): Array<{ value: string; line: number }> {
+  const lines = yamlText.split(/\r?\n/);
+  const locations: Array<{ value: string; line: number }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const key = yamlInputKeyLine(lines[index]);
+    if (!key) continue;
+    if (/^(?:null|~)$/i.test(key.value)) locations.push({ value: key.value, line: index + 2 });
+    for (let nested = index + 1; nested < lines.length; nested += 1) {
+      const line = lines[nested];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const indent = /^\s*/.exec(line)?.[0].length ?? 0;
+      if (indent <= key.indent) break;
+      const item = /^\s*-\s*(.*?)(?:\s+#.*)?$/.exec(line);
+      if (item && (!item[1].trim() || /^(?:null|~)$/i.test(item[1].trim()))) {
+        locations.push({ value: item[1].trim() || '<empty>', line: nested + 2 });
+      }
+    }
+  }
+  return locations;
+}
+
 function collectYamlInputs(
   brief: string,
   yamlText: string,
   addReference: (path: string, line: number, assertions: BriefInputAssertionDeclaration[]) => void,
+  addUnresolvedInput: (input: UnresolvedBriefInputDeclaration) => void,
   addUnbound: (assertion: BriefInputAssertionResult) => void,
 ): void {
   let root: unknown;
   try {
     root = parseYaml(yamlText) as unknown;
-  } catch {
+  } catch (error) {
+    for (const declaration of malformedYamlInputDeclarations(yamlText, error)) {
+      addUnresolvedInput(declaration);
+    }
     return;
   }
   if (!root || typeof root !== 'object' || Array.isArray(root)) return;
+  const nullLocations = explicitNullInputLocations(yamlText);
+  let nullLocationIndex = 0;
 
   const processItem = (value: unknown): void => {
     if (Array.isArray(value)) {
@@ -262,33 +384,68 @@ function collectYamlInputs(
       return;
     }
     if (typeof value === 'string') {
-      const path = normalizeBriefInputPath(value);
-      if (path) addReference(path, lineForPath(brief, path), []);
+      const normalized = normalizedBriefInputPath(value, true);
+      if (normalized.path) addReference(normalized.path, lineForPath(brief, value), []);
+      else addUnresolvedInput({
+        value,
+        line: lineForPath(brief, value),
+        reason: normalized.reason ?? 'Explicit input could not be normalized',
+      });
       return;
     }
-    if (!value || typeof value !== 'object') return;
+    if (value === null) {
+      const location = nullLocations[nullLocationIndex++] ?? { value: 'null', line: 2 };
+      addUnresolvedInput({
+        ...location,
+        reason: 'Explicit input must be a string path, not a null or empty entry',
+      });
+      return;
+    }
+    if (typeof value !== 'object') {
+      const authoredValue = String(value);
+      addUnresolvedInput({
+        value: authoredValue,
+        line: lineForPath(brief, authoredValue),
+        reason: 'Explicit input must be a string path',
+      });
+      return;
+    }
     const mapping = value as Record<string, unknown>;
     const paths: string[] = [];
     const assertionText: string[] = [];
     for (const [key, entry] of Object.entries(mapping)) {
       if (OUTPUT_KEY.test(key) && !INPUT_KEY.test(key)) continue;
       if (typeof entry === 'string') {
-        const path = normalizeBriefInputPath(entry);
-        if (path) paths.push(path);
+        if (!ASSERTION_KEY.test(key)) {
+          const normalized = normalizedBriefInputPath(entry, true);
+          if (normalized.path) paths.push(normalized.path);
+          else addUnresolvedInput({
+            value: entry,
+            line: lineForPath(brief, entry),
+            reason: normalized.reason ?? 'Explicit input could not be normalized',
+          });
+        }
         assertionText.push(`${key}: ${entry}`);
       } else if (typeof entry === 'number') {
         assertionText.push(`${key}: ${entry}`);
       } else if (Array.isArray(entry) && entry.every((item) => typeof item === 'string')) {
-        for (const item of entry) {
-          const path = normalizeBriefInputPath(item);
-          if (path) paths.push(path);
+        if (!ASSERTION_KEY.test(key)) {
+          for (const item of entry) {
+            const normalized = normalizedBriefInputPath(item, true);
+            if (normalized.path) paths.push(normalized.path);
+            else addUnresolvedInput({
+              value: item,
+              line: lineForPath(brief, item),
+              reason: normalized.reason ?? 'Explicit input could not be normalized',
+            });
+          }
         }
       }
     }
     const uniquePaths = [...new Set(paths)];
     if (uniquePaths.length === 0) {
       for (const [key, entry] of Object.entries(mapping)) {
-        if (!OUTPUT_KEY.test(key)) processItem(entry);
+        if (!OUTPUT_KEY.test(key) && entry && typeof entry === 'object') processItem(entry);
       }
       return;
     }
@@ -339,7 +496,7 @@ export function extractDeclaredBriefInputPaths(brief: string): string[] {
   const declared = new Set<string>();
   const visit = (value: unknown): void => {
     if (typeof value === 'string') {
-      const path = normalizeBriefInputPath(value);
+      const path = normalizedBriefInputPath(value, true).path;
       if (path) declared.add(path);
       return;
     }
@@ -348,7 +505,9 @@ export function extractDeclaredBriefInputPaths(brief: string): string[] {
       return;
     }
     if (!value || typeof value !== 'object') return;
-    for (const entry of Object.values(value as Record<string, unknown>)) visit(entry);
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (!OUTPUT_KEY.test(key) && !ASSERTION_KEY.test(key)) visit(entry);
+    }
   };
   visit(inputs);
   return [...declared].sort();
@@ -411,7 +570,9 @@ export function extractBriefPathMentions(brief: string): BriefPathMention[] {
 /** Parse input references and factual claims from their authored syntactic roles. */
 export function parseBriefInputs(brief: string): ParsedBriefInputs {
   const references = new Map<string, BriefInputReference>();
+  const unresolvedInputs: UnresolvedBriefInputDeclaration[] = [];
   const unboundAssertions: BriefInputAssertionResult[] = [];
+  const seenUnresolvedInputs = new Set<string>();
   const seenUnbound = new Set<string>();
   const addReference = (
     path: string,
@@ -435,9 +596,22 @@ export function parseBriefInputs(brief: string): ParsedBriefInputs {
       unboundAssertions.push(assertion);
     }
   };
+  const addUnresolvedInput = (input: UnresolvedBriefInputDeclaration): void => {
+    const key = JSON.stringify([input.value, input.line, input.reason]);
+    if (!seenUnresolvedInputs.has(key)) {
+      seenUnresolvedInputs.add(key);
+      unresolvedInputs.push(input);
+    }
+  };
 
   const frontmatter = leadingFrontmatter(brief);
-  if (frontmatter) collectYamlInputs(brief, frontmatter.yaml, addReference, addUnbound);
+  if (frontmatter) collectYamlInputs(
+    brief,
+    frontmatter.yaml,
+    addReference,
+    addUnresolvedInput,
+    addUnbound,
+  );
   const body = frontmatter?.body ?? brief;
   const offset = frontmatter?.bodyLineOffset ?? 0;
   let section: 'input' | 'output' | 'neutral' = 'neutral';
@@ -510,6 +684,7 @@ export function parseBriefInputs(brief: string): ParsedBriefInputs {
 
   return {
     references: [...references.values()].sort((left, right) => left.path.localeCompare(right.path)),
+    unresolvedInputs: unresolvedInputs.sort((left, right) => left.line - right.line || left.value.localeCompare(right.value)),
     unboundAssertions,
   };
 }
@@ -740,5 +915,9 @@ export function verifyBriefInputs(
     });
     return { ...reference, resolvedPath, exists, readable, assertions };
   });
-  return { inputs, unboundAssertions: parsed.unboundAssertions };
+  return {
+    inputs,
+    unresolvedInputs: parsed.unresolvedInputs,
+    unboundAssertions: parsed.unboundAssertions,
+  };
 }

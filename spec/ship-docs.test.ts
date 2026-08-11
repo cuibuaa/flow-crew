@@ -219,8 +219,15 @@ describe('public autonomous launch documentation', () => {
     expect(normalizedGuide).toContain('source, data or state, symlinks, and anything not proven regenerable are named individually');
     expect(normalizedGuide).toContain('symlink is identified as a link and includes its exact target');
     expect(normalizedGuide).toContain('source-like file inside a build directory stays named');
-    expect(normalizedGuide).toContain('refusal uses the complete pre-grading set');
-    expect(normalizedGuide).toContain('any non-terminal status, absent declared artifact, incomplete Git inspection, or inventory item is a non-zero refusal');
+    expect(normalizedGuide).toContain('requires the operator to state the exact count of paths the audit proved regenerable');
+    expect(normalizedGuide).toContain('acknowledgement is only consent to discard that measured set');
+    expect(normalizedGuide).toContain('cannot cover tracked changes, source, data or state, symlinks, unknown items, inspection failures, or any other ungraded path');
+    expect(normalizedGuide).toContain('commit already merged into another local branch is still reported as unpushed but is not at risk');
+    expect(normalizedGuide).toContain('any non-terminal status, absent declared artifact, incomplete Git inspection, at-risk commit, or ungraded inventory item is a non-zero refusal');
+    expect(normalizedGuide).toContain('exit 127 makes the verdict line `Ship setup: REFUSED`');
+    expect(normalizedGuide).toContain('record stores the SHA-256 of the exact brief bytes');
+    expect(compact(briefGuide)).toContain('safe bare directory name is accepted there without a trailing slash');
+    expect(compact(briefGuide)).toContain('explicit value that is unsafe or cannot be normalized is retained and reported as unresolved');
     expect(normalizedGuide).toContain('terminal artifact unambiguously declares a status different from the persisted lifecycle status');
     expect(normalizedGuide).toContain('terminal and live runs are both covered');
     expect(normalizedGuide).toContain('display that artifact status beside the lifecycle status');

@@ -112,10 +112,15 @@ same assertions are evaluated again through the target path.
 
 Only a fully verified target advances to the configuration-discovered build, test, and lint
 baseline. A pre-existing red check is recorded honestly with a no-new-failure delta criterion;
-it is not rewritten as an impossible absolute-zero gate. Success exits 0 and atomically stores
-the JSON-ready record under the FlowCrew state root. Refusal exits non-zero and names every
-blocker. **No ready record is written** for a partial link, a target mismatch, a validation
-launch error, or a record-write failure; an already-created worktree may remain for diagnosis.
+it is not rewritten as an impossible absolute-zero gate. A command that cannot run in the target
+environment is not a red baseline: in particular, exit 127 makes the verdict line
+`Ship setup: REFUSED` and leaves every affected gate unresolved. Success exits 0 and atomically
+stores the JSON-ready record under the FlowCrew state root. The record stores the SHA-256 of the
+exact brief bytes and its path is content-addressed by that digest together with the canonical
+target, so different briefs at the conventional path cannot overwrite or impersonate one
+another. Refusal exits non-zero and names every blocker. **No ready record is written** for a
+partial link, a target mismatch, an unusable validation baseline, a validation launch error, or
+a record-write failure; an already-created worktree may remain for diagnosis.
 
 ## `flowcrew land`
 
@@ -124,28 +129,36 @@ Inspect one explicitly selected run before reclaiming its linked worktree:
 ```bash
 flowcrew land --run <run-id>
 flowcrew land --run <run-id> --json
-flowcrew land --run <run-id> --remove
+flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count>
 ```
 
 The audit reports the run's recorded status and every artifact declared for that status. An
 artifact is present when either its project path or the scheduler's preserved run snapshot
 exists. It takes an unfiltered Git census of tracked modifications and deletions, every
 untracked and ignored path, and each commit after the recorded base that is absent from all
-remote refs. Grading happens only after that complete census: proven build outputs and installed
-dependencies are summarized by count, while source, data or state, symlinks, and anything not
-proven regenerable are named individually. A symlink is identified as a link and includes its
+remote refs. It reports those unpushed commits, then separately identifies commits with no ref
+that would survive deletion of the selected worktree branch. Grading happens only after that
+complete census: proven build outputs and installed dependencies are summarized by count, while
+source, data or state, symlinks, and anything not proven regenerable are named individually. A
+symlink is identified as a link and includes its
 exact target. A source-like file inside a build directory stays named; an inspection failure is
 an issue and an enumerated unknown, never a hidden count.
 
-There is no operator-supplied path exclusion or acknowledgement option. Archive, move, commit
-and push, or otherwise account for unique content outside the worktree, remove the local copy,
-and rerun the audit.
+Removal requires the operator to state the exact count of paths the audit proved regenerable.
+An absent or mismatched count refuses before any destructive Git call. That acknowledgement is
+only consent to discard that measured set; it cannot cover tracked changes, source, data or
+state, symlinks, unknown items, inspection failures, or any other ungraded path. Archive, move,
+commit, or otherwise account for such unique content, remove the local copy, and rerun the
+audit.
 
 Without `--remove`, inventory is read-only and unique items are reported without turning the
-audit itself into a removal attempt. With `--remove`, refusal uses the complete pre-grading set:
-summarized regenerable items still count as remaining inventory. Before a destructive Git call,
-any non-terminal status, absent declared artifact, incomplete Git inspection, or inventory item
-is a non-zero refusal. A clean request still has to prove that the target is a linked
+audit itself into a removal attempt. With `--remove`, every enumerated ungraded item remains an
+unconditional non-zero refusal, while the summarized regenerable set crosses the boundary only
+under an exact count acknowledgement. Before a destructive Git call, any non-terminal status,
+absent declared artifact, incomplete Git inspection, at-risk commit, or ungraded inventory item
+is a non-zero refusal. A commit already merged into another local branch is still reported as
+unpushed but is not at risk merely because no remote contains it. A clean request still has to
+prove that the target is a linked
 (not primary or bare) worktree with an attached local branch. Removal uses non-force worktree
 removal, pruning, and `branch -d`, stopping at the first failure.
 

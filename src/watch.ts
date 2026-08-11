@@ -13,6 +13,7 @@ export interface WatchPollDependencies {
   readDirectory?: (path: string) => readonly string[];
   readText?: (path: string) => string;
   isProcessAlive?: (pid: number) => boolean;
+  artifactMtimeMs?: (path: string) => number | undefined;
   nowMs?: () => number;
 }
 
@@ -75,6 +76,7 @@ interface ResolvedWatchPollDependencies {
   readDirectory: (path: string) => readonly string[];
   readText: (path: string) => string;
   isProcessAlive: (pid: number) => boolean;
+  artifactMtimeMs?: (path: string) => number | undefined;
   nowMs: () => number;
 }
 
@@ -119,6 +121,7 @@ function resolveDependencies(overrides: WatchPollDependencies): ResolvedWatchPol
     readDirectory: overrides.readDirectory ?? ((path) => readdirSync(path)),
     readText: overrides.readText ?? ((path) => readFileSync(path, 'utf-8')),
     isProcessAlive: overrides.isProcessAlive ?? processIsAlive,
+    artifactMtimeMs: overrides.artifactMtimeMs,
     nowMs: overrides.nowMs ?? Date.now,
   };
 }
@@ -404,7 +407,10 @@ export function pollWatch(
       continue;
     }
     stats.readableRuns += 1;
-    const mismatch = terminalArtifactStatusMismatch(state);
+    const mismatch = terminalArtifactStatusMismatch(state, {
+      runDir,
+      artifactMtimeMs: deps.artifactMtimeMs,
+    });
     if (mismatch) {
       const alert: WatchTerminalStatusAlert = {
         kind: 'terminal_status_mismatch',

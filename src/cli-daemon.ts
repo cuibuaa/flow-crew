@@ -190,7 +190,7 @@ export function mergeTaskWithRunState(
     };
     if (typeof state.status !== 'string' || !state.status) return { ...task };
     const verdict = runVerdict(state.verdict, state.realityGate);
-    const mismatch = terminalArtifactStatusMismatch(state);
+    const mismatch = terminalArtifactStatusMismatch(state, { runDir: runPath });
     return {
       ...task,
       status: state.status,

@@ -254,4 +254,29 @@ describe('configuration-driven project validation baseline', () => {
       description: expect.stringContaining('unresolved'),
     });
   });
+
+  it('treats exit 127 as a command that could not run, not as a usable red baseline', async () => {
+    const fs = memoryFs({
+      [`${root}/package.json`]: JSON.stringify({
+        scripts: { build: 'compile', test: 'check', lint: 'style' },
+      }),
+      [`${root}/package-lock.json`]: '{}',
+    });
+
+    const baseline = await runProjectValidationBaseline(root, {
+      fs,
+      runCommand: ({ role }) => ({
+        exitCode: 127,
+        stderr: `sh: ${role}-tool: command not found`,
+      }),
+    });
+
+    expect(baseline.results).toEqual([
+      expect.objectContaining({ role: 'build', state: 'launch_error', exitCode: 127 }),
+      expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127 }),
+      expect.objectContaining({ role: 'lint', state: 'launch_error', exitCode: 127 }),
+    ]);
+    expect(baseline.results.every((result) => result.reason?.includes('could not run'))).toBe(true);
+    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
+  });
 });
