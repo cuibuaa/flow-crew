@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
 import { RUN_STATUS } from './store.js';
 import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
+import {
+  extractBriefPathMentions,
+  extractDeclaredBriefInputPaths,
+  normalizeBriefInputPath,
+} from './ship-inputs.js';
 
 export interface CriterionLintWarning {
   line: number;
@@ -33,6 +38,11 @@ export interface BriefPreflightReport {
   contractReady: boolean;
   findings: BriefPreflightFinding[];
   requiresAcknowledgement: boolean;
+}
+
+export interface BriefPreflightContext {
+  /** Literal ignored files or directory prefixes, supplied by the project-aware caller. */
+  gitignoredPathPrefixes?: readonly string[];
 }
 
 export type BriefAdmissionAcknowledgement =
@@ -163,20 +173,59 @@ function resolveFloorStageGlob(entry: { paths: string[]; stageGlob?: string }): 
 
 /**
  * Nothing in the engine writes the files a stage-count floor counts — they exist only
- * when the brief itself tells a stage to write them. So a floor whose glob matches no
- * path the brief ever mentions can never be satisfied, and the run cannot reach that
- * terminal status at all. Asking whether the brief mentions such a path is the cheapest
- * check that distinguishes "declared and arranged for" from "declared and unreachable".
+ * when the brief itself tells a stage to write them. A fully arranged contract therefore
+ * needs both an explicit glob and an authored write instruction for matching evidence.
  */
-function briefMentionsFloorArtifact(brief: string, glob: string): boolean {
-  const pattern = glob
+const ARTIFACT_WRITE_DIRECTIVE = /\b(?:write|writes|create|creates|produce|produces|generate|generates|emit|emits|save|saves)\b/i;
+const ASSIGNED_PASSIVE_ARTIFACT_WRITE = /\b(?:(?:must|shall|should|will|needs?|is|are)\s+(?:to\s+)?be\s+(?:written|created|produced|generated|emitted|saved)|(?:written|created|produced|generated|emitted|saved)\s+by\s+(?:the\s+)?(?:[\w-]+\s+){0,3}(?:stage|phase|gate))\b/i;
+const ASSIGNED_ARTIFACT_NOUN = /^(?:\s*(?:(?:[-*+]|\d+[.)])\s+))?(?:(?:the\s+)?(?:[\w-]+\s+){0,3}(?:stage|phase|gate)(?:\s+[\w.-]+){0,2}(?:'s)?\s*(?::|[-–—])?\s*)?(?:the\s+)?(?:(?:final|required|expected)\s+)?(?:deliverables?|outputs?|artifacts?|files\s+written)\s*(?::|[-–—]|(?:is|are|must|shall|should|will|needs?)\s+(?:to\s+)?(?:be\s+)?)\s*/i;
+const NEGATED_ARTIFACT_WRITE = /\b(?:(?:do|does|must|shall|should|will)\s+not\s+(?:write|create|produce|generate|emit|save)|never\s+(?:write|create|produce|generate|emit|save)|no\s+(?:earlier|non-final|implementation|mid-pipeline)?\s*(?:stage|phase|gate)?\s*(?:may|must|should|will)?\s*(?:write|create|produce|generate|emit|save)|nothing\b.{0,24}\bwrites?\b|without\s+writing)\b/i;
+
+function assignsArtifactWrite(line: string): boolean {
+  return ARTIFACT_WRITE_DIRECTIVE.test(line)
+    || ASSIGNED_PASSIVE_ARTIFACT_WRITE.test(line)
+    || ASSIGNED_ARTIFACT_NOUN.test(line);
+}
+
+function artifactPattern(value: string): RegExp {
+  const pattern = value
     .split('*')
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('[^\\s`\'"()\\[\\]]*');
+  return new RegExp(`${pattern}(?=$|[\\s\`'"()\\[\\],.;:])`);
+}
+
+function linesRequireArtifactWrite(lines: string[], pattern: RegExp): boolean {
+  let listWritesArtifacts = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s/.test(trimmed)) listWritesArtifacts = false;
+    if (/^(?:deliverables?|outputs?|artifacts?|files\s+written)\s*:\s*$/i.test(trimmed)) {
+      listWritesArtifacts = true;
+      continue;
+    }
+    if (!trimmed) continue;
+    pattern.lastIndex = 0;
+    if (!pattern.test(line)) {
+      if (listWritesArtifacts && !/^[-*+]\s|^\d+[.)]\s/.test(trimmed)) listWritesArtifacts = false;
+      continue;
+    }
+    if (NEGATED_ARTIFACT_WRITE.test(line)) continue;
+    if (listWritesArtifacts || assignsArtifactWrite(line)) return true;
+  }
+  return false;
+}
+
+function briefRequiresFloorArtifact(brief: string, glob: string): boolean {
   // Search the instructions, not the frontmatter. A `stage_glob:` declaration matches its
   // own pattern, so including the frontmatter would make every explicitly configured floor
   // look arranged-for and leave the warn branch dead — caught by a reverse test, not review.
-  return new RegExp(pattern).test(briefBody(brief));
+  return linesRequireArtifactWrite(briefBody(brief).split(/\r\n|\n|\r/), artifactPattern(glob));
+}
+
+function bodyLineOffset(brief: string): number {
+  const body = briefBody(brief);
+  return brief.slice(0, brief.indexOf(body)).split(/\r\n|\n|\r/).length - 1;
 }
 
 /** The brief minus a leading YAML frontmatter block, if present. */
@@ -186,8 +235,141 @@ function briefBody(brief: string): string {
   return end === -1 ? brief : brief.slice(brief.indexOf('\n', end + 1) + 1);
 }
 
+const HEADLINE_USAGE = /\b(?:headline|quoted?|quotable)\b/i;
+const NUMERIC_RESULT = /\b(?:statistic|number|numeric|value|figure|estimate|metric|result|rate|percentage|percentile|basis points?|bps)\b/i;
+const DISTRIBUTION_LOCATION = /(?:^|[^A-Za-z0-9])(?:percentile|quantile|rank|location|position)(?:$|[^A-Za-z0-9])|\bwhere\b.{0,40}\bsits?\b/i;
+const PREREGISTRATION = /\b(?:pre[- ]?registr(?:ation|ations|er|ers|ered|ering)|preregistr(?:ation|ations|er|ers|ered|ering))\b/i;
+const RULE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\b/i;
+const RULE_FREEZE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b/i;
+const BEFORE_MEASUREMENT = /\bbefore\b.{0,80}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcome|outcomes|result|results)\b/i;
+const EXPECTED_QUALIFYING_COUNT = /(?:^|[^A-Za-z0-9])(?:expected[_ -]qualifying[_ -]member[_ -]count|expected\s+(?:(?:number|count)\s+of\s+)?(?:qualifying|eligible|selected)\s+(?:members?|names?|items?|observations?|candidates?)|expected[_ -](?:member|name|item|observation|candidate)[_ -]count)(?:$|[^A-Za-z0-9])/i;
+const STRUCTURAL_DERIVATION = /(?:^|[^A-Za-z0-9])structural[_ -](?:quantit(?:y|ies)|counts?|rates?|inputs?)(?:$|[^A-Za-z0-9])|\b(?:comput(?:e|es|ed|ing)|calculat(?:e|es|ed|ing)|deriv(?:e|es|ed|ing))\b.{0,120}\b(?:structural|universe|formation|eligible|base[_ ]count|selection[_ ]rate|probabilit)/i;
+const NUMERIC_FEASIBILITY_FLOOR = /(?:^|[^A-Za-z0-9])(?:(?:qualifying[_ -]member[_ -])?floor|minimum|min(?:imum)?[_ -]?(?:expected[_ -]?)?(?:member|name|item|count)?|at[_ ]least)(?:$|[^A-Za-z0-9])\s*(?::|=|of|is)?\s*\d+(?:\.\d+)?\b/i;
+const REVISION_VERB = /\b(?:revise|revises|revised|revision|adjust|adjusts|adjusted|replace|replaces|replaced|relax|relaxes|relaxed)\b/i;
+const OUTCOME_UNSEEN = /\bbefore\b.{0,80}\b(?:any\s+)?(?:outcome|outcomes|result|results|measurement|measurements)\b.{0,40}\b(?:is|are|was|were|has|have|being|been)?\s*(?:seen|observed|measured|inspected|opened|used)\b|\bbefore\s+(?:measuring|observing|inspecting|opening|using)\b.{0,40}\b(?:outcome|outcomes|result|results)\b/i;
+const NUMERIC_LITERAL = /(?:^|[^A-Za-z0-9_])[-+−]?\d[\d,.]*(?:\s*(?:%|bps?|basis\s+points?))?(?=$|[^A-Za-z0-9_])/i;
+const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|hand(?:s|ed)?|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
+const DECISION_ILLUSTRATIVE = /\b(?:for example|illustrative(?:ly)?|e\.g\.)\b|(?:例如|比如|举例|只是例子|并非判据|不是判据)/i;
+const NEGATED_REQUIREMENT = /\b(?:do\s+not|don't|must\s+not|shall\s+not|should\s+not|may\s+not|cannot|can't|never|forbid(?:s|den)?|prohibit(?:s|ed)?|exclude(?:s|d)?|omit(?:s|ted)?|without)\b/i;
+
+function decisionLintLines(brief: string): string[] {
+  const lines = briefBody(brief).split(/\r\n|\n|\r/);
+  let illustrativeList = false;
+  return lines.map((line) => {
+    const trimmed = line.trim();
+    if (DECISION_ILLUSTRATIVE.test(trimmed)) {
+      illustrativeList = /[:：]\s*$/.test(trimmed);
+      return '';
+    }
+    if (illustrativeList) {
+      if (!trimmed || /^[-*+]\s|^\d+[.)]\s/.test(trimmed)) return '';
+      illustrativeList = false;
+    }
+    return line;
+  });
+}
+
+/**
+ * Satisfaction is intentionally conservative: merely naming evidence, especially while
+ * prohibiting it, is not a requirement to produce it. False positives are safer here than
+ * accepting a plausible result whose decision-grade checks were explicitly omitted.
+ */
+function decisionRequirementLines(brief: string): string[] {
+  return decisionLintLines(brief).map((line) => NEGATED_REQUIREMENT.test(line) ? '' : line);
+}
+
+function decisionRequirementBody(brief: string): string {
+  return decisionRequirementLines(brief).join('\n');
+}
+
+function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; excerpt: string } | undefined {
+  const offset = bodyLineOffset(brief);
+  const lines = decisionRequirementLines(brief);
+  const index = lines.findIndex((line) => pattern.test(line));
+  return index < 0 ? undefined : { line: offset + index + 1, excerpt: lines[index].trim() };
+}
+
+/**
+ * Deliberately broad textual property: explicit “headline”/“quoted” language
+ * plus a numeric-result noun means the value is intended for prominent reuse.
+ */
+function headlineStatisticEvidence(brief: string): { line: number; excerpt: string } | undefined {
+  const body = decisionRequirementBody(brief);
+  if (!HEADLINE_USAGE.test(body) || !NUMERIC_RESULT.test(body)) return undefined;
+  return firstEvidenceLine(brief, HEADLINE_USAGE) ?? firstEvidenceLine(brief, NUMERIC_RESULT);
+}
+
+function hasHeadlineDistribution(brief: string): boolean {
+  const body = decisionRequirementBody(brief);
+  return /(?:^|[^A-Za-z0-9])mean(?:$|[^A-Za-z0-9])/i.test(body)
+    && /(?:^|[^A-Za-z0-9])median(?:$|[^A-Za-z0-9])/i.test(body)
+    && DISTRIBUTION_LOCATION.test(body);
+}
+
+function preregistrationEvidence(brief: string): { line: number; excerpt: string } | undefined {
+  const body = decisionRequirementBody(brief);
+  const explicit = PREREGISTRATION.test(body) && RULE_NOUN.test(body);
+  const frozenBeforeMeasurement = RULE_FREEZE.test(body) && RULE_NOUN.test(body) && BEFORE_MEASUREMENT.test(body);
+  if (!explicit && !frozenBeforeMeasurement) return undefined;
+  return firstEvidenceLine(brief, explicit ? PREREGISTRATION : RULE_FREEZE);
+}
+
+function hasPreregistrationFeasibility(brief: string): boolean {
+  const body = decisionRequirementBody(brief);
+  return EXPECTED_QUALIFYING_COUNT.test(body)
+    && STRUCTURAL_DERIVATION.test(body)
+    && NUMERIC_FEASIBILITY_FLOOR.test(body)
+    && REVISION_VERB.test(body)
+    && OUTCOME_UNSEEN.test(body);
+}
+
+function operatorFigureEvidence(brief: string): { line: number; excerpt: string } | undefined {
+  const offset = bodyLineOffset(brief);
+  const lines = decisionRequirementLines(brief);
+  for (let index = 0; index < lines.length; index += 1) {
+    const window = lines.slice(index, index + 2).join(' ');
+    if (OPERATOR_EXPECTATION.test(window) && NUMERIC_LITERAL.test(window)) {
+      return { line: offset + index + 1, excerpt: lines[index].trim() };
+    }
+  }
+  return undefined;
+}
+
+function normalizedIgnoredPrefix(raw: string): string | undefined {
+  const trimmed = raw.trim().replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  return normalizeBriefInputPath(trimmed) ?? normalizeBriefInputPath(`${trimmed}/`);
+}
+
+function pathCovers(declaration: string, path: string): boolean {
+  return declaration === path || path.startsWith(`${declaration}/`);
+}
+
+function namedStageAssignment(brief: string): { line: number; excerpt: string } | undefined {
+  const body = briefBody(brief);
+  const offset = bodyLineOffset(brief);
+  const lines = body.split(/\r\n|\n|\r/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+).*(?:\bstage\s+(?:\d+|[A-Za-z][\w-]*)|\b(?:implementation|verification|verify|qa|reality|final)\s+(?:stage|gate|phase))\b/i.test(trimmed)) {
+      return { line: offset + index + 1, excerpt: trimmed };
+    }
+  }
+  return undefined;
+}
+
+function declaresPerStageWritablePaths(brief: string): boolean {
+  const body = briefBody(brief);
+  return /\bwritable paths?\s*,?\s*by stage\b/i.test(body)
+    || /\bper-stage\s+(?:writable paths?|write scopes?)\b/i.test(body)
+    || /\b(?:stage|phase|gate)\s+[\w.-]+[^\n:]{0,40}\b(?:writable paths?|write scope)\s*:/i.test(body);
+}
+
 /** Inspect one exact brief string without reading or changing project state. */
-export function inspectBrief(brief: string): BriefPreflightReport {
+export function inspectBrief(
+  brief: string,
+  context: BriefPreflightContext = {},
+): BriefPreflightReport {
   const digest = sha256(brief);
   const inputKind = classifyInput(brief);
   const parsed = parseBriefFrontmatter(brief);
@@ -242,6 +424,68 @@ export function inspectBrief(brief: string): BriefPreflightReport {
       message: frontmatter.status === 'valid' ? 'Frontmatter parsed successfully' : 'No YAML frontmatter declared',
       acknowledgementRequired: false,
     });
+  }
+
+  const headline = headlineStatisticEvidence(brief);
+  if (headline && !hasHeadlineDistribution(brief)) {
+    add({
+      code: 'headline_distribution_missing',
+      level: 'fail',
+      message: 'A headline or quoted statistic must require the mean, median, and where the reported value sits in its own distribution.',
+      acknowledgementRequired: true,
+      ...headline,
+      risk: 'A plausible tail value can be reported as representative even when the distribution has a different center or sign.',
+      suggestion: 'Require the result to report its mean, median, and percentile, quantile, rank, or equivalent location in the same distribution.',
+    });
+  }
+
+  const preregistration = preregistrationEvidence(brief);
+  if (preregistration && !hasPreregistrationFeasibility(brief)) {
+    add({
+      code: 'preregistration_feasibility_missing',
+      level: 'fail',
+      message: 'A rule frozen before outcome measurement must carry an expected qualifying-member count derived from structural quantities, a numeric feasibility floor, and revision below that floor before outcomes are seen.',
+      acknowledgementRequired: true,
+      ...preregistration,
+      risk: 'A structurally empty rule can consume a full measurement round while correctly refusing outcome-driven tuning.',
+      suggestion: 'Compute the expected qualifying-member count from structural quantities, set a numeric minimum, and require the rule to be revised below that floor before any outcome is observed.',
+    });
+  }
+
+  const operatorFigure = operatorFigureEvidence(brief);
+  const requiredDecisionEvidence = decisionRequirementBody(brief);
+  if (operatorFigure
+      && (!/\bwithin_expected_range\b/.test(requiredDecisionEvidence)
+        || !/\bmethod_was_not_adjusted_to_match_expectation\b/.test(requiredDecisionEvidence))) {
+    add({
+      code: 'operator_figure_anti_anchoring_missing',
+      level: 'fail',
+      message: 'A supplied operator expectation must require both `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.',
+      acknowledgementRequired: true,
+      ...operatorFigure,
+      risk: 'Agreement with a supplied number is indistinguishable from a method adjusted to reproduce that number.',
+      suggestion: 'Add both exact anti-anchoring fields to the result contract and require independent computation before comparison.',
+    });
+  }
+
+  const ignoredPrefixes = (context.gitignoredPathPrefixes ?? [])
+    .map(normalizedIgnoredPrefix)
+    .filter((path): path is string => Boolean(path));
+  if (ignoredPrefixes.length > 0) {
+    const declared = extractDeclaredBriefInputPaths(brief);
+    for (const mention of extractBriefPathMentions(brief)) {
+      if (!ignoredPrefixes.some((prefix) => pathCovers(prefix, mention.path))) continue;
+      if (declared.some((path) => pathCovers(path, mention.path))) continue;
+      add({
+        code: 'gitignored_input_undeclared',
+        level: 'warn',
+        message: `Gitignored path \`${mention.path}\` is referenced but not declared in the leading frontmatter \`inputs:\` block.`,
+        acknowledgementRequired: true,
+        ...mention,
+        risk: 'Prose and table references do not make an ignored source reachable in a new worktree, so setup can report zero checked inputs.',
+        suggestion: `Declare \`${mention.path}\` under leading frontmatter \`inputs:\`; keep any explanatory prose in addition to that declaration.`,
+      });
+    }
   }
 
   if (hasRealityChecksHeading(brief)) {
@@ -325,6 +569,16 @@ export function inspectBrief(brief: string): BriefPreflightReport {
         message: `terminal ${status}: paths=[${entry.paths.join(', ')}]${floorParts.length ? ` floor(${floorParts.join(', ')})` : ''}`,
         acknowledgementRequired: false,
       });
+      if (entry.floor?.minWallMinutes !== undefined && entry.floor.minWallMinutes > 10) {
+        add({
+          code: `terminal_wall_floor_too_high_${status}`,
+          level: 'warn',
+          message: `Terminal ${status} sets min_wall_minutes=${entry.floor.minWallMinutes}. Wall time is a clock gate, not evidence that enough work happened, so reuse of existing machinery can finish correctly and still be forced to wait or miss the terminal.`,
+          acknowledgementRequired: true,
+          risk: 'A correct efficient run can be mislabeled or held solely because it completed faster than the author estimated.',
+          suggestion: 'Use at most 10 minutes as an anti-instant-quit guard and name the evidence that proves work coverage instead of encoding an expected duration.',
+        });
+      }
     }
     // A stage-count floor is only satisfiable if something writes the files it counts.
     // The previous reachability check below is gated on `stop.max_rounds`, which only a
@@ -338,16 +592,22 @@ export function inspectBrief(brief: string): BriefPreflightReport {
       // here would fail `examples/hello-research.brief.md`, the project's own showcase.
       if (status === RUN_STATUS.CEILING_HIT && rc) continue;
       const glob = resolveFloorStageGlob(entry);
-      if (!glob || briefMentionsFloorArtifact(brief, glob)) continue;
       const configured = entry.stageGlob !== undefined;
+      if (!glob || (configured && briefRequiresFloorArtifact(brief, glob))) continue;
+      const inferredButMentioned = !configured && briefRequiresFloorArtifact(brief, glob);
       add({
         code: `terminal_floor_uncountable_${status}`,
-        // An explicit `stage_glob` is the author taking responsibility for the pattern, so
-        // it warns; relying on the inferred pattern while never asking for those files is
-        // the actual defect signature, so it fails.
+        // An explicit `stage_glob` with no writer is an acknowledged but unreachable pattern,
+        // so it warns. Omitting the counted contract entirely is the stronger defect and fails.
         level: configured ? 'warn' : 'fail',
-        message: `terminal ${status} floor counts fresh files matching ${configured ? 'stage_glob' : 'the inferred stage_glob'} \`${glob}\`, but this brief never asks any stage to write such a file. Nothing in the engine writes them, so the count stays at 0 and \`${status}\` is unreachable. Either use \`min_wall_minutes\` alone — that is a hard gate on elapsed time — or require those files in the brief and set \`stage_glob\` explicitly.`,
+        message: configured
+          ? `terminal ${status} floor counts fresh files matching stage_glob \`${glob}\`, but this brief never asks any stage to write such a file. Nothing in the engine writes them, so the count stays at 0 and \`${status}\` is unreachable.`
+          : `terminal ${status} sets min_attempted_stages without an explicit stage_glob. The engine would infer \`${glob}\`${inferredButMentioned ? ', and the brief mentions a matching write' : ''}, but the counted evidence contract must be explicit and assigned to a stage so it cannot drift or remain unreachable.`,
         acknowledgementRequired: true,
+        risk: configured
+          ? 'The evidence count remains zero, so the declared terminal status cannot be reached even after the substantive work is complete.'
+          : 'An implicit counting pattern can diverge from the files stages actually own, making the terminal status miscount evidence or become unreachable.',
+        suggestion: `Set stage_glob explicitly to \`${glob}\` (or the intended pattern) and require a stage to write concrete matching evidence files; otherwise remove min_attempted_stages and gate on named evidence.`,
       });
     }
     const floor = terminalStates.ceiling_hit?.floor;
@@ -369,6 +629,19 @@ export function inspectBrief(brief: string): BriefPreflightReport {
         acknowledgementRequired: false,
       });
     }
+  }
+
+  const stageAssignment = namedStageAssignment(brief);
+  if (stageAssignment && !declaresPerStageWritablePaths(brief)) {
+    add({
+      code: 'stage_writable_paths_missing',
+      level: 'warn',
+      message: `Named implementation/gate stages are assigned, but the brief has no explicit per-stage writable-path mapping (first assignment at line ${stageAssignment.line}).`,
+      acknowledgementRequired: true,
+      ...stageAssignment,
+      risk: 'Without stage-specific write boundaries, an earlier stage can create a later or terminal artifact and silently skip required work.',
+      suggestion: 'Add an explicit “Writable paths, by stage” mapping; a generic statement that stages may write files is not a scope declaration.',
+    });
   }
 
   return {
@@ -408,8 +681,9 @@ export function createBriefAdmission(
 export function verifyBriefAdmission(
   brief: string,
   record: BriefAdmissionRecord | undefined,
+  context: BriefPreflightContext = {},
 ): BriefAdmissionVerification {
-  const report = inspectBrief(brief);
+  const report = inspectBrief(brief, context);
   return { report, status: admissionStatusForReport(record, report) };
 }
 
@@ -424,8 +698,21 @@ function admissionStatusForReport(
     && record.findingFingerprints.every((fingerprint) => typeof fingerprint === 'string')
     ? [...record.findingFingerprints].sort()
     : [];
-  const findingsMatch = expectedFingerprints.length === recordedFingerprints.length
-    && expectedFingerprints.every((fingerprint, index) => fingerprint === recordedFingerprints[index]);
+  // A project-aware caller can record contextual findings (for example, a path
+  // ignored in that exact repository) that a later scheduler-level verifier
+  // cannot re-derive without project context. Every finding visible to the
+  // current verifier must still be covered; an already acknowledged superset
+  // remains valid for project-agnostic replay of the same exact brief bytes.
+  const recordedCounts = new Map<string, number>();
+  for (const fingerprint of recordedFingerprints) {
+    recordedCounts.set(fingerprint, (recordedCounts.get(fingerprint) ?? 0) + 1);
+  }
+  const findingsMatch = expectedFingerprints.every((fingerprint) => {
+    const remaining = recordedCounts.get(fingerprint) ?? 0;
+    if (remaining === 0) return false;
+    recordedCounts.set(fingerprint, remaining - 1);
+    return true;
+  });
   if (!findingsMatch || !validAcknowledgement(record.acknowledgement, report.requiresAcknowledgement)) {
     return 'acknowledgement_missing';
   }

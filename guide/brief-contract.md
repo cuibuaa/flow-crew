@@ -19,7 +19,9 @@ These three are the ones that most often go wrong:
   neither allowed to write nor told it may ask.
 - **Declare terminal artifacts only on what the last stage writes.** Naming a path that some
   mid-pipeline stage produces lets the run reach a terminal state before the gates that were
-  supposed to guard it have run.
+  supposed to guard it have run. Keep earlier deliverables out of the terminal artifact's
+  directory as well: a planner can otherwise co-locate the files in one early stage even when
+  their basenames differ.
 
 ## Contract flow
 
@@ -291,6 +293,11 @@ declared scope is reverted to its pre-stage contents once the attempt ends — t
 what backs the "do not edit the project while a run is working in it" rule: your edit and
 the stage's are indistinguishable in the snapshot diff that scope enforcement reads.
 
+For an authored multi-stage brief, include an explicit writable-path mapping for every stage,
+including planning and gates. Brief preflight warns when the mapping is absent; it cannot
+choose the correct paths for the author. The planner still translates that contract into each
+generated stage's `scope`.
+
 Three states, not two:
 
 - **declared** — `scope` is present. Only those paths (and, once negotiated, any
@@ -390,7 +397,21 @@ run guidance.
 
 ## Validate before launch
 
-Run `flowcrew rehearse <brief.md>` before a live research launch. It validates
-the frontmatter and exercises the terminal, confirmation, floor, and round-file
-paths with a scripted adapter. It does not validate research quality; see
-[Zero-token rehearsal](rehearse.md).
+Inspect and rehearse the exact bytes before a live launch, then create the launch worktree:
+
+```bash
+flowcrew ship-preflight --brief <brief.md> [--campaign <name>]
+flowcrew rehearse <brief.md>
+flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name> [--project <source>]
+flowcrew watch --once
+```
+
+Preflight reports prior-run and campaign facts, verifies declared input claims, and records the
+configuration-discovered validation baseline as a delta contract. Rehearsal validates the
+frontmatter and exercises the terminal, confirmation, floor, and round-file paths with a
+scripted adapter. It does not validate research quality; see [Zero-token rehearsal](rehearse.md).
+
+Setup is the fail-closed boundary: it creates the declared worktree, links exact ignored inputs
+that Git omitted, verifies their assertions again through the target, and records the target's
+baseline only when everything is reachable. Use `flowcrew watch` after launch for a continuous
+heartbeat and edge-triggered stalls; `--once` performs one read-only pass.

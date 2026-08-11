@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+const COLD_START_READY_TIMEOUT_MS = 45_000;
+
 function waitForDashboard(child: ChildProcessWithoutNullStreams): Promise<number> {
   return new Promise((resolve, reject) => {
     let output = '';
     const timer = setTimeout(() => {
-      reject(new Error(`flowcrew start did not become ready within 10s: ${output.slice(-2_000)}`));
-    }, 10_000);
+      reject(new Error(`flowcrew start did not become ready within ${COLD_START_READY_TIMEOUT_MS}ms: ${output.slice(-2_000)}`));
+    }, COLD_START_READY_TIMEOUT_MS);
     const inspect = (chunk: Buffer) => {
       output += chunk.toString();
       const match = /Dashboard running at http:\/\/localhost:(\d+)\//.exec(output);
@@ -54,7 +56,7 @@ function portCanBind(port: number): Promise<boolean> {
 describe('flowcrew start signal lifecycle', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
     'exits zero and releases the port after the first %s',
-    { timeout: 20_000 },
+    { timeout: 60_000 },
     async (signal) => {
       const fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-e10-signal-'));
       const isolatedHome = join(fixtureRoot, 'home');

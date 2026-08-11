@@ -28,17 +28,17 @@ pasteable repair command.
 Invoke `/ship` in Claude Code. In Codex, invoke `$ship` or select `ship` from `/skills`.
 The same skill then turns the current conversation into a FlowCrew task:
 
-1. Summarizes the discussion into a structured brief and proposes settings such as
-   workflow, campaign, iteration limit, and timeout.
-2. Asks for confirmation, then writes the brief to `docs/task_brief.md`.
-3. **Rehearses the brief — required, never skipped.** `flowcrew rehearse` runs it
-   through the real scheduler for free before anything is launched. A failing contract
-   or a criterion-wording warning sends the skill back to fix the brief and rehearse
-   again; it does not launch a brief rehearsal flagged as broken.
-4. If rehearsal reports a consequential finding the brief still carries, asks a second,
-   separate confirmation naming that finding — the earlier "ship it" is not treated as
-   consent to findings that did not exist yet when it was given.
-5. Bootstraps the orchestrator daemon if needed, then submits the run as a background
+1. Runs source-project preflight, then writes the structured brief to `docs/task_brief.md`
+   with proposed workflow, campaign, iteration, timeout, and launch identity settings.
+2. **Rehearses the saved brief — required, never skipped.** It runs saved-brief preflight
+   and `flowcrew rehearse` against the exact file bytes, fixes any blocking finding, then
+   shows the resulting 64-hex digest.
+3. Asks the specified digest question only after rehearsal. The new answer authorizes the
+   exact bytes named by that digest; an earlier "ship it" cannot authorize bytes or findings
+   that did not exist yet.
+4. Runs `flowcrew ship-setup` only after that digest-bound confirmation, proving the target
+   identity and making declared ignored inputs reachable in the launch workspace.
+5. Bootstraps the orchestrator daemon if needed, then submits the unchanged brief as a background
    task with `flowcrew quick --background`. The daemon owns the run from there; the
    skill does not block on it.
 6. Reports the task and run id, and how to watch or steer it.

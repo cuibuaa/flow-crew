@@ -386,6 +386,9 @@ flowcrew doctor                   # is this install actually ready?
 flowcrew adapter                  # current choice, installed CLIs, and recommendation
 flowcrew adapter claude           # set an installed backend explicitly
 flowcrew rehearse <brief.md>      # replay a brief for free before spending anything
+flowcrew ship-preflight --brief <brief.md>  # inspect inputs, history, and validation baseline
+flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name>
+flowcrew watch                    # heartbeat plus edge-triggered live-run stall judgements
 flowcrew status                   # latest run for the current project
 flowcrew status --all             # latest run across all projects
 flowcrew status --project ../app  # inspect another project explicitly
@@ -396,9 +399,9 @@ flowcrew task cancel <id>         # stop a run
 `flowcrew init` picks a backend once and writes it into the project; change it later with
 `flowcrew adapter <name>`.
 
-All 20 commands — launching, steering, approvals, brief history, daemon and dashboard
-lifecycle, registry repair, reality audit — are documented with their options and exit
-codes in the **[CLI reference](guide/cli.md)**.
+All 25 commands — the existing 21 commands plus fail-closed launch setup, tested watching, safe
+landing, and report auditing — are documented with their options and exit codes in the
+**[CLI reference](guide/cli.md)**.
 
 ## Known issues
 
@@ -422,7 +425,7 @@ Defects reproduced on the current release. Fixes land in the [changelog](CHANGEL
 - [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
 - [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
 - [Agent Skills](guide/skills.md): Claude Code slash commands, Codex skills, and installation.
-- [CLI Reference](guide/cli.md): all 20 commands and their subcommands/options.
+- [CLI Reference](guide/cli.md): all 25 commands and their subcommands/options.
 - [Contributing](CONTRIBUTING.md): build, test, documentation, commit, and PR expectations.
 
 ## License

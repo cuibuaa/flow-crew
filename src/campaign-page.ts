@@ -31,7 +31,7 @@ import {
 } from './run-index.js';
 import type { PendingReviewEntry } from './campaign-review.js';
 import type { InboxItem } from './inbox.js';
-import type { TaskEntry } from './task-registry.js';
+import type { TaskShowEntry } from './orchestrator-rpc.js';
 
 export const CAMPAIGN_SOURCE_STATUS = {
   COMPLETE: 'complete',
@@ -300,7 +300,7 @@ export interface CampaignPageSources {
   readRunState(projectDir: string, runId: string): StoreState;
   readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[];
   readInbox(): Promise<CampaignInboxOverviewLike>;
-  readTasks(): Promise<TaskEntry[]>;
+  readTasks(): Promise<TaskShowEntry[]>;
   hasLiveWorker(projectDir: string, runId: string): boolean | null;
   now(): Date;
 }
@@ -346,7 +346,7 @@ interface RunEvidence {
   summaryIssue?: CampaignIssueSeed;
   confirm: Record<string, unknown> | null;
   confirmIssue?: CampaignIssueSeed;
-  tasks: TaskEntry[];
+  tasks: TaskShowEntry[];
   history: CampaignHistoryEntry[];
   commits: string[];
 }
@@ -359,7 +359,7 @@ interface LoadedCampaign {
   stateIssues: CampaignIssueSeed[];
   entries: CampaignHistoryEntry[];
   entriesIssue?: CampaignIssueSeed;
-  tasks: TaskEntry[];
+  tasks: TaskShowEntry[];
   taskIssue?: CampaignIssueSeed;
   inbox: CampaignInboxOverviewLike | null;
   inboxIssue?: CampaignIssueSeed;
@@ -404,7 +404,7 @@ function defaultInbox(): Promise<CampaignInboxOverviewLike> {
   return Promise.reject(new Error('campaign inbox reader is unavailable'));
 }
 
-function defaultTasks(): Promise<TaskEntry[]> {
+function defaultTasks(): Promise<TaskShowEntry[]> {
   return Promise.reject(new Error('task registry reader is unavailable'));
 }
 
@@ -851,7 +851,7 @@ function metricArtifacts(projectDir: string, state: StoreState): { values: Metri
   return { values, issues };
 }
 
-function structuredCommits(history: CampaignHistoryEntry[], tasks: TaskEntry[]): string[] {
+function structuredCommits(history: CampaignHistoryEntry[], tasks: TaskShowEntry[]): string[] {
   const commits = new Set<string>();
   for (const entry of history) {
     const raw = entry as unknown as Record<string, unknown>;
@@ -891,7 +891,7 @@ function createRunEvidence(
   projectDir: string,
   state: StoreState,
   entries: CampaignHistoryEntry[],
-  tasks: TaskEntry[],
+  tasks: TaskShowEntry[],
 ): RunEvidence {
   const runHistory = entries.filter((entry) => entry.runId === state.runId);
   const runTasks = tasks.filter((task) => task.run_id === state.runId);

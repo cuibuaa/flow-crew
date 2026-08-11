@@ -54,7 +54,7 @@ export interface RegisterRpcResponse {
 }
 
 export interface TaskListRpcResponse {
-  tasks: TaskEntry[];
+  tasks: TaskShowEntry[];
   registry_unreadable_records?: number;
 }
 
@@ -63,6 +63,11 @@ export interface TaskShowEntry extends Omit<TaskEntry, 'status'> {
   status: string;
   run_verdict?: string;
   failure_reason?: string;
+  terminal_status_mismatch?: {
+    lifecycle_status: string;
+    terminal_status: string;
+    terminal_artifact: string;
+  };
 }
 
 export interface TaskShowRpcResponse {

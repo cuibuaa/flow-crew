@@ -214,6 +214,11 @@ describe('daemon status local diagnosis', () => {
       completedAt: '2026-08-06T20:00:00.000Z',
       verdict: 'PASS',
       failureReason: 'retained diagnostic',
+      terminalArtifact: 'escalation_note.md',
+      terminalStates: {
+        complete: { paths: ['docs/parity_verification.md'] },
+        escalated: { paths: ['docs/front_end_parity/escalation_note.md'] },
+      },
     }), 'utf-8');
 
     const merged = mergeTaskWithRunState(task, runRoot);
@@ -224,6 +229,11 @@ describe('daemon status local diagnosis', () => {
       completed_at: '2026-08-06T20:00:00.000Z',
       run_verdict: 'PASS',
       failure_reason: 'retained diagnostic',
+      terminal_status_mismatch: {
+        lifecycle_status: 'complete',
+        terminal_status: 'escalated',
+        terminal_artifact: 'escalation_note.md',
+      },
     });
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
     expect(registry.get(task.id)?.completed_at).toBeUndefined();

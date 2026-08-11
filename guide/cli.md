@@ -2,7 +2,7 @@
 
 ## Top-level Commands
 
-The current `src/cli.ts` dispatcher exposes 20 commands:
+The current `src/cli.ts` dispatcher exposes 25 commands:
 
 | Command | Purpose |
 |---|---|
@@ -21,6 +21,11 @@ The current `src/cli.ts` dispatcher exposes 20 commands:
 | `task` | Inspect and control daemon tasks. |
 | `audit-reality` | Re-run deterministic checks against task history. |
 | `inbox` | Resolve approval requests that parked runs. |
+| `ship-preflight` | Gather prior-run, campaign, build, and declared-input facts before shipping. |
+| `ship-setup` | Create the declared launch worktree and fail closed on unreachable or invalid inputs. |
+| `land` | Audit terminal artifacts and unique worktree state; optionally remove a proven-safe linked worktree. |
+| `audit-report` | Re-derive supported numeric and path-bearing claims from a terminal report. |
+| `watch` | Report edge-triggered stall judgements for live runs. |
 | `rehearse` | Exercise a brief with the real scheduler and a scripted agent. |
 | `brief` | Inspect, diff, or roll back a versioned brief. |
 | `doctor` | Check the runtime, configuration, builds, and agent CLIs. |
@@ -47,12 +52,178 @@ flowcrew campaign-loop - --project <dir> --campaign <name>
 flowcrew task list
 flowcrew audit-reality
 flowcrew inbox list
+flowcrew ship-preflight --brief docs/task_brief.md
+flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
+flowcrew land --run <run-id>
+flowcrew audit-report --report docs/final.md --run-dir <run-dir>
+flowcrew watch --once
 flowcrew brief head <briefDir>
 flowcrew doctor
 flowcrew clean
 flowcrew export
 flowcrew version
 ```
+
+## `flowcrew ship-preflight`
+
+Gather the facts needed before authoring or launching a FlowCrew handoff:
+
+```bash
+flowcrew ship-preflight
+flowcrew ship-preflight --brief docs/task_brief.md --json
+flowcrew ship-preflight --campaign <name> --brief docs/task_brief.md
+```
+
+Campaign resolution follows launch precedence: explicit `--campaign`, parsed
+`config/defaults.yaml::campaign`, then the repository main-worktree basename. An uncertain
+resolution stays unknown; preflight never substitutes another campaign's hygiene. The report
+summarises readable and unreadable run entries rather than printing one error per entry.
+
+For a requested brief, preflight distinguishes inputs from outputs and checks every declared
+input for existence and readability. Mechanically bound row-count, date-span, recursive
+file-count, and SHA-256 claims are reported as confirmed, refuted, or not checkable. It also
+discovers the target's build, test, and lint scripts from checked-in configuration, executes
+that untouched baseline, and states later gate criteria as a delta from the observed result.
+The report separately records daemon→`dist` and `src`→`dist` freshness.
+
+Exit 0 means the facts were gathered, even when history is adverse, a baseline is red, a build
+is stale, or an input is missing; invalid arguments, an unreadable requested brief, or a
+collection failure exit non-zero. `--json` emits the same facts as one machine-readable object.
+
+## `flowcrew ship-setup`
+
+Create an exact launch worktree only after the brief's inputs can be proven usable:
+
+```bash
+flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]
+```
+
+`--brief`, `--target`, `--base`, and `--branch` are required. `--project` identifies the
+source repository and defaults to the current directory. The target must not already exist.
+Git receives the declared base and branch as argv, without a shell.
+
+Setup is fail-closed in two phases. Before creating a worktree, it verifies every source input
+and every bound row-count, date-span, file-count, or SHA-256 assertion. Missing, unreadable,
+refuted, and not-checkable inputs refuse the command before Git runs. After Git creates the
+worktree, each declared input absent from the target is linked from the source at that exact
+relative path. This makes ignored inputs such as `data/` and `node_modules/` reachable without
+copying or guessing sibling modules. Existing target entries are never overwritten, and the
+same assertions are evaluated again through the target path.
+
+Only a fully verified target advances to the configuration-discovered build, test, and lint
+baseline. A pre-existing red check is recorded honestly with a no-new-failure delta criterion;
+it is not rewritten as an impossible absolute-zero gate. Success exits 0 and atomically stores
+the JSON-ready record under the FlowCrew state root. Refusal exits non-zero and names every
+blocker. **No ready record is written** for a partial link, a target mismatch, a validation
+launch error, or a record-write failure; an already-created worktree may remain for diagnosis.
+
+## `flowcrew land`
+
+Inspect one explicitly selected run before reclaiming its linked worktree:
+
+```bash
+flowcrew land --run <run-id>
+flowcrew land --run <run-id> --json
+flowcrew land --run <run-id> --remove
+```
+
+The audit reports the run's recorded status and every artifact declared for that status. An
+artifact is present when either its project path or the scheduler's preserved run snapshot
+exists. It takes an unfiltered Git census of tracked modifications and deletions, every
+untracked and ignored path, and each commit after the recorded base that is absent from all
+remote refs. Grading happens only after that complete census: proven build outputs and installed
+dependencies are summarized by count, while source, data or state, symlinks, and anything not
+proven regenerable are named individually. A symlink is identified as a link and includes its
+exact target. A source-like file inside a build directory stays named; an inspection failure is
+an issue and an enumerated unknown, never a hidden count.
+
+There is no operator-supplied path exclusion or acknowledgement option. Archive, move, commit
+and push, or otherwise account for unique content outside the worktree, remove the local copy,
+and rerun the audit.
+
+Without `--remove`, inventory is read-only and unique items are reported without turning the
+audit itself into a removal attempt. With `--remove`, refusal uses the complete pre-grading set:
+summarized regenerable items still count as remaining inventory. Before a destructive Git call,
+any non-terminal status, absent declared artifact, incomplete Git inspection, or inventory item
+is a non-zero refusal. A clean request still has to prove that the target is a linked
+(not primary or bare) worktree with an attached local branch. Removal uses non-force worktree
+removal, pruning, and `branch -d`, stopping at the first failure.
+
+`land` does not decide whether a terminal result is good or whether its evidence answers the
+right question. The operator reads and independently judges the result before requesting
+removal; the command enforces only the mechanical preservation boundary.
+
+## `flowcrew audit-report`
+
+Check a report's own arithmetic and artifact attributions against one run and its project:
+
+```bash
+flowcrew audit-report --report <path> --run-dir <path>
+flowcrew audit-report --report <path> --run-dir <path> --json
+```
+
+The report itself and every named artifact must resolve within the run or project root.
+Relative artifact paths are checked against both; if the same path exists in both, use
+`project:<path>` or `run:<path>` to make the attribution unambiguous. Symlinks and `..` cannot
+escape those roots. Validation commands are tokenized into direct argv and run in the project
+without a shell; shell operators, environment-prefix assignments, launch failures, and
+unparseable commands remain visible as `not_checkable`.
+
+These sentence forms are checkable (punctuation around them is optional):
+
+```markdown
+`project:guide/cli.md`: 509 lines.
+`artifacts/evidence` contains 14 files.
+`project:guide/cli.md`: 20 sections.
+Validation command `npm test`: exit 0; 412 passed, 0 failed.
+`artifacts/result.json` field `metrics.percentile` = 97.
+`run:research_round_1.json` field `/series/0/mean` = -1.25.
+```
+
+Line counts use logical text lines, recursive file counts include regular files, and section
+counts include Markdown ATX headings outside fenced examples. JSON fields accept dotted paths
+or JSON Pointers and must resolve to a scalar. A command claim compares its direct exit code
+and every stated passed/failed/skipped/error tally. Other numeric sentences that name a path
+are retained as `not_checkable` instead of being silently ignored.
+
+Each claim is `confirmed`, `contradicted`, or `not_checkable`. Only a contradiction makes the
+command exit non-zero. Confirmation proves that the report repeated the measured value
+accurately; it deliberately does not prove that the chosen measurement or framing was sound.
+
+## `flowcrew watch`
+
+Watch all FlowCrew runs continuously, or perform one deterministic pass:
+
+```bash
+flowcrew watch
+flowcrew watch --once
+flowcrew watch --poll 15
+```
+
+The first pass always prints a heartbeat with entry, readable-run, live-run, and scan-time
+counts. Later output is edge-triggered: an unchanged condition is silent, and ordinary stage
+transitions are not reported. The heartbeat makes a quiet healthy scan distinguishable from a
+watcher too slow to finish its first pass. A run counts as live only when `run.json` says `running` and its
+`scheduler.pid` names a process that is alive. A stale status left by a crashed scheduler does
+not suppress the watcher.
+
+Three on-disk judgements alert, including when already present on the first pass: a terminal
+artifact unambiguously declares a status different from the persisted lifecycle status, a stage
+reaches its third attempt, or a gate has rejected the same metric against the same threshold
+twice without movement toward that threshold. Artifact disagreements are checked before the
+running-process branch, so terminal and live runs are both covered. Stable condition identities
+keep an unchanged disagreement, later attempts, and later rejections from repeating the same
+alert. One in-process scan handles the
+whole runs root: the discarded per-run process design took 5m12s for 7,594 entries, while the
+single pass measured 0.55s. The gate rule came from `failing_tests` remaining at 17 against a
+threshold of 0 through two attempts: both verdicts were already durable on disk, but ordinary
+transition messages never accumulated into a judgement worth interrupting for.
+
+`--poll` accepts 1 through 3600 seconds and defaults to 45. `--once` emits the initial heartbeat
+and any existing stalls, then exits. The command is read-only: it **does not write run or task status**,
+infer whether human wrap-up is complete, or depend on an operator home-directory layout. Run
+completion does not say whether human wrap-up is outstanding or done; three attempted inference
+rules failed differently, so the watcher deliberately leaves that state to the operator.
 
 ## `flowcrew rehearse`
 
@@ -288,6 +459,11 @@ flowcrew task show <id> [--summary-only]
 flowcrew task retry <id>
 flowcrew task tail <id> [--tail N] [--follow|-f]
 ```
+
+`task list` and `task show` keep the persisted lifecycle status intact. When the bound run's
+recorded terminal artifact maps unambiguously to a different declared terminal status, they
+display that artifact status beside the lifecycle status rather than silently presenting the
+contradiction as an ordinary completion.
 
 `task tail` reads the run's captured output. Where a systemd user journal exists, `--follow` streams it
 through `journalctl`; where it does not — macOS, or any Linux without a systemd session — it follows the

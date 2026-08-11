@@ -38,6 +38,10 @@ import {
   isLiveFlowcrewSchedulerForRun,
   parseSchedulerPidMarker,
 } from './run-lock.js';
+import {
+  formatTerminalArtifactStatusMismatch,
+  terminalArtifactStatusMismatch,
+} from './terminal-artifact-status.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -886,7 +890,9 @@ async function cmdQuick() {
     inspectBrief,
     verifyBriefAdmission,
   } = await import('./brief-preflight.js');
-  const preflight = inspectBrief(task);
+  const { projectBriefPreflightContext } = await import('./rehearse.js');
+  const preflightContext = projectBriefPreflightContext(projectDir, task);
+  const preflight = inspectBrief(task, preflightContext);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
 
   if (acknowledgementDigest !== undefined && acknowledgementDigest !== preflight.digest) {
@@ -897,10 +903,10 @@ async function cmdQuick() {
 
   const transportedExistingRun = Boolean(existingRunId && taskSupplied && transportedAdmission);
   const transportedVerification = transportedAdmission
-    ? verifyBriefAdmission(task, transportedAdmission)
+    ? verifyBriefAdmission(task, transportedAdmission, preflightContext)
     : undefined;
   const storedVerification = storedAdmission
-    ? verifyBriefAdmission(task, storedAdmission)
+    ? verifyBriefAdmission(task, storedAdmission, preflightContext)
     : undefined;
   const transportedContinuationIsBound = transportedExistingRun
     && transportedVerification?.status === 'valid'
@@ -919,7 +925,9 @@ async function cmdQuick() {
         ? transportedAdmission
         : (storedAdmission ?? (transportedVerification?.status === 'valid' ? transportedAdmission : undefined)))
     : (transportedAdmission ?? storedAdmission);
-  const priorVerification = priorAdmission ? verifyBriefAdmission(task, priorAdmission) : undefined;
+  const priorVerification = priorAdmission
+    ? verifyBriefAdmission(task, priorAdmission, preflightContext)
+    : undefined;
   let briefAdmission: BriefAdmissionRecord;
   if (priorVerification?.status === 'valid') {
     briefAdmission = priorAdmission!;
@@ -1204,6 +1212,8 @@ interface StatusRun {
     currentIteration?: number;
     maxIterations?: number;
     stages?: Record<string, { status?: string; duration_ms?: number }>;
+    terminalArtifact?: string;
+    terminalStates?: Record<string, { paths?: string[] }>;
   };
 }
 
@@ -1299,6 +1309,8 @@ function cmdStatus() {
     return;
   }
   const { id, directory: runDir, state } = selected;
+  const mismatch = terminalArtifactStatusMismatch(state);
+  if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
 
   // Show summary.md if generated (best overview of what was done)
   const summaryPath = join(runDir, 'summary.md');
@@ -1340,7 +1352,9 @@ function cmdList() {
   for (const runId of runs) {
     try {
       const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8'));
-      const status = state.status === RUN_STATUS.COMPLETE ? '✓ complete' : state.status === RUN_STATUS.FAILED ? '✗ failed  ' : state.status === RUN_STATUS.RUNNING ? '⟳ running ' : '· ' + state.status.padEnd(8);
+      const mismatch = terminalArtifactStatusMismatch(state);
+      const lifecycle = state.status === RUN_STATUS.COMPLETE ? '✓ complete' : state.status === RUN_STATUS.FAILED ? '✗ failed  ' : state.status === RUN_STATUS.RUNNING ? '⟳ running ' : '· ' + state.status.padEnd(8);
+      const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
       const startMs = new Date(state.startedAt).getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
       const duration = `${Math.round((endMs - startMs) / 1000)}s`.padEnd(8);
@@ -1793,6 +1807,11 @@ Commands:
   task      List and manage background tasks
   audit-reality  Run declared checks against task history
   inbox     Review and resolve approval requests that parked a run
+  ship-preflight  Gather prior-run, campaign, build, and brief-input facts before shipping
+  ship-setup  Create a launch worktree, link declared inputs, and baseline validation
+  land      Audit terminal artifacts and every unique worktree item before safe removal
+  audit-report  Re-derive supported numeric and path-bearing claims from a terminal report
+  watch     Report edge-triggered stall judgements for live runs
   rehearse  Wind-tunnel a research brief pre-launch: real scheduler + scripted fake agent, 0 tokens
   brief     Inspect, diff, or roll back versioned briefs
   doctor    Check system requirements; repair/compact the task registry (dry-run by default)
@@ -1819,6 +1838,11 @@ Examples:
   flowcrew guide --run <run-id> "try a different approach"
   flowcrew clean --keep 3
   flowcrew campaign run examples/example_campaign.yaml --dry-run
+  flowcrew ship-preflight --brief docs/task_brief.md
+  flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
+  flowcrew land --run <run-id>
+  flowcrew audit-report --report docs/final.md --run-dir <run-dir>
+  flowcrew watch --once
   flowcrew brief head docs/brief
 
 Options:
@@ -2061,6 +2085,31 @@ switch (command) {
     break;
   case 'inbox':
     import('./cli-inbox.js').then(({ cmdInbox }) => cmdInbox(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'ship-preflight':
+    import('./cli-ship-preflight.js').then(({ cmdShipPreflight }) => cmdShipPreflight(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'ship-setup':
+    import('./cli-ship-setup.js').then(({ cmdShipSetup }) => cmdShipSetup(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'land':
+    import('./cli-land.js').then(({ cmdLand }) => cmdLand(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'audit-report':
+    import('./cli-audit-report.js').then(({ cmdAuditReport }) => cmdAuditReport(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'watch':
+    import('./cli-watch.js').then(({ cmdWatch }) => cmdWatch(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
     break;
   case 'rehearse':
     import('./rehearse.js').then(({ cmdRehearse }) => cmdRehearse(args.slice(1))).catch((err) => { console.error(err); process.exit(1); });

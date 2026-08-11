@@ -153,6 +153,240 @@ describe('shared brief preflight', () => {
   });
 });
 
+describe('decision-grade brief requirements', () => {
+  it('fails a requested headline statistic that omits its distribution', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Result',
+      'Report the headline statistic as the quoted result in basis points.',
+    ].join('\n')));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'headline_distribution_missing',
+      level: 'fail',
+      message: expect.stringContaining('mean, median'),
+      suggestion: expect.stringContaining('percentile'),
+    }));
+    expect(report.contractReady).toBe(false);
+  });
+
+  it('accepts a headline statistic that requires center and distribution location', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Result',
+      'Report the headline statistic as the quoted result in basis points.',
+      'Also report the mean, median, and percentile where that value sits in its own distribution.',
+    ].join('\n')));
+
+    expect(report.findings.some((finding) => finding.code === 'headline_distribution_missing')).toBe(false);
+    expect(report.contractReady).toBe(true);
+  });
+
+  it('does not treat a prohibition as the required headline distribution', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Result',
+      'Report the headline statistic as the quoted result in basis points.',
+      'Do not report its mean, median, percentile, quantile, rank, or distribution location.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code)).toContain('headline_distribution_missing');
+  });
+
+  it('fails a frozen pre-registration that omits structural feasibility', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Measurement',
+      'Pre-register and freeze the selection rule before measuring any outcomes.',
+    ].join('\n')));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'preregistration_feasibility_missing',
+      level: 'fail',
+      message: expect.stringContaining('expected qualifying-member count'),
+      suggestion: expect.stringContaining('numeric minimum'),
+    }));
+    expect(report.contractReady).toBe(false);
+  });
+
+  it('accepts a pre-registration with a structural count, floor, and pre-outcome revision', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Measurement',
+      'Pre-register and freeze the selection rule before measuring any outcomes.',
+      'Compute the expected qualifying-member count from structural quantities: universe size times eligibility rates.',
+      'Set the feasibility floor: 10. Below that floor, revise the rule before any outcome is seen.',
+    ].join('\n')));
+
+    expect(report.findings.some((finding) => finding.code === 'preregistration_feasibility_missing')).toBe(false);
+    expect(report.contractReady).toBe(true);
+  });
+
+  it('does not treat prohibited feasibility work as a pre-registration feasibility figure', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Measurement',
+      'Pre-register and freeze the selection rule before measuring any outcomes.',
+      'Do not compute the expected qualifying-member count from structural quantities.',
+      'The feasibility floor is 10, but never revise the rule below it before any outcome is seen.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code)).toContain('preregistration_feasibility_missing');
+  });
+
+  it('fails an operator-supplied figure without both anti-anchoring fields', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Context',
+      'The operator supplied an expected result of -112.89 bps.',
+    ].join('\n')));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'operator_figure_anti_anchoring_missing',
+      level: 'fail',
+      message: expect.stringContaining('within_expected_range'),
+      suggestion: expect.stringContaining('both exact anti-anchoring fields'),
+    }));
+    expect(report.contractReady).toBe(false);
+  });
+
+  it('accepts an operator-supplied figure with both exact anti-anchoring fields', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Context',
+      'The operator supplied an expected result of -112.89 bps.',
+      'The result must include `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.',
+    ].join('\n')));
+
+    expect(report.findings.some((finding) => finding.code === 'operator_figure_anti_anchoring_missing')).toBe(false);
+    expect(report.contractReady).toBe(true);
+  });
+
+  it('does not treat forbidden anti-anchoring field names as required fields', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Context',
+      'The operator supplied an expected result of -112.89 bps.',
+      'Do not include `within_expected_range` or `method_was_not_adjusted_to_match_expectation`.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code)).toContain('operator_figure_anti_anchoring_missing');
+  });
+
+  it('does not promote illustrative examples, implementation counts, or unanchored numbers into these requirements', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Implementation',
+      'Create 3 files and run 103 checks.',
+      'For example, a brief might request a headline statistic of 226.69 bps.',
+      'Illustrative examples:',
+      '- Pre-register a selection rule before outcomes.',
+      '- An operator might provide an expected result of -112.89 bps.',
+      'The measured fixture contains -98.68 bps without a supplied expectation.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code)).not.toEqual(expect.arrayContaining([
+      'headline_distribution_missing',
+      'preregistration_feasibility_missing',
+      'operator_figure_anti_anchoring_missing',
+    ]));
+  });
+});
+
+describe('gitignored input declaration convention', () => {
+  const ignoredReferenceBrief = (declare: boolean): string => [
+    '---',
+    ...(declare ? ['inputs:', '  - private-data/prices.parquet'] : []),
+    'terminal_states:',
+    '  complete:',
+    '    paths: [docs/result.md]',
+    '---',
+    '# Constraints',
+    '| path | property |',
+    '| --- | --- |',
+    '| `private-data/prices.parquet` | frozen evidence |',
+  ].join('\n');
+
+  it('warns when a neutral table reference under an injected ignored directory is not declared', () => {
+    const report = inspectBrief(ignoredReferenceBrief(false), {
+      gitignoredPathPrefixes: ['private-data/'],
+    });
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'gitignored_input_undeclared',
+      level: 'warn',
+      message: expect.stringContaining('leading frontmatter `inputs:`'),
+      excerpt: '| `private-data/prices.parquet` | frozen evidence |',
+    }));
+  });
+
+  it('accepts the same ignored reference when leading frontmatter declares it', () => {
+    const report = inspectBrief(ignoredReferenceBrief(true), {
+      gitignoredPathPrefixes: ['private-data/'],
+    });
+
+    expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
+  });
+});
+
+describe('terminal wall-floor structure', () => {
+  it('warns above ten wall minutes with actionable risk and stays quiet at ten', () => {
+    const above = inspectBrief([
+      '---',
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/result.md]',
+      '    floor:',
+      '      min_wall_minutes: 11',
+      '---',
+      '# Goal',
+      'Ship the result.',
+    ].join('\n'));
+    expect(above.findings).toContainEqual(expect.objectContaining({
+      code: 'terminal_wall_floor_too_high_complete',
+      level: 'warn',
+      acknowledgementRequired: true,
+      message: expect.stringContaining('clock gate'),
+      risk: expect.stringContaining('efficient run'),
+      suggestion: expect.stringContaining('at most 10 minutes'),
+    }));
+
+    const boundary = inspectBrief([
+      '---',
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/result.md]',
+      '    floor:',
+      '      min_wall_minutes: 10',
+      '---',
+      '# Goal',
+      'Ship the result.',
+    ].join('\n'));
+    expect(boundary.findings.some((entry) => entry.code.startsWith('terminal_wall_floor_too_high'))).toBe(false);
+  });
+});
+
+describe('per-stage writable-path structure', () => {
+  it('warns for named stages with only a generic permission to write files', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Stage 1 — implementation',
+      'Implement the change. Stages may write files when needed.',
+      '# Stage 2 — QA gate',
+      'Verify the result.',
+    ].join('\n')));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'stage_writable_paths_missing',
+      level: 'warn',
+      message: expect.stringContaining('per-stage writable-path mapping'),
+    }));
+  });
+
+  it('accepts an explicit Writable paths, by stage mapping', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Stage 1 — implementation',
+      'Implement the change.',
+      '# Stage 2 — QA gate',
+      'Verify the result.',
+      '## Writable paths, by stage',
+      '- Stage 1: `src/**`, `spec/**`',
+      '- Stage 2: read-only',
+    ].join('\n')));
+
+    expect(report.findings.some((entry) => entry.code === 'stage_writable_paths_missing')).toBe(false);
+  });
+});
+
 describe('unsatisfiable stage-count floor', () => {
   const withFloor = (frontmatter: string, body: string): string =>
     `---\n${frontmatter}---\n${body}`;
@@ -166,9 +400,9 @@ describe('unsatisfiable stage-count floor', () => {
     expect(finding?.level).toBe('fail');
     // The message has to say what is counted, why it will not appear, and both ways out.
     expect(finding?.message).toContain('docs/stage_*_verdict.md');
-    expect(finding?.message).toContain('Nothing in the engine writes them');
-    expect(finding?.message).toContain('min_wall_minutes');
     expect(finding?.message).toContain('stage_glob');
+    expect(finding?.risk).toContain('implicit counting pattern');
+    expect(finding?.suggestion).toContain('Set stage_glob explicitly');
   });
 
   it('only warns when the author configured stage_glob explicitly', () => {
@@ -178,14 +412,62 @@ describe('unsatisfiable stage-count floor', () => {
     ));
     // A `stage_glob:` line matches its own pattern, so searching the whole brief would
     // leave this branch dead. The check reads the instructions only.
-    expect(report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_ceiling_hit')?.level).toBe('warn');
+    expect(report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_ceiling_hit')).toMatchObject({
+      level: 'warn',
+      risk: expect.stringContaining('count remains zero'),
+      suggestion: expect.stringContaining('matching evidence files'),
+    });
   });
 
-  it('stays silent when the instructions ask for the counted files', () => {
+  it('does not mistake a passive write check for an assigned stage writer', () => {
+    const report = inspectBrief(withFloor(
+      'terminal_states:\n  complete:\n    paths: [docs/result.md]\n    stage_glob: docs/stages/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
+      '# QA\nCheck whether `docs/stages/stage_1_verdict.md` was written; no stage owns that file.\n',
+    ));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'terminal_floor_uncountable_complete',
+      level: 'warn',
+    }));
+  });
+
+  it('does not mistake an existing output noun for a writer assignment', () => {
+    const report = inspectBrief(withFloor(
+      'terminal_states:\n  complete:\n    paths: [docs/result.md]\n    stage_glob: docs/stages/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
+      '# QA\nInspect the existing output `docs/stages/stage_1_verdict.md` for correctness.\n',
+    ));
+
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'terminal_floor_uncountable_complete',
+      level: 'warn',
+    }));
+  });
+
+  it('still rejects an inferred glob when the instructions happen to mention matching files', () => {
     const report = inspectBrief(withFloor(
       'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    floor:\n      min_attempted_stages: 2\n',
       '# Goal\nEach stage writes `docs/run/stage_1_verdict.md` when it settles.\n',
     ));
+    expect(report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_complete')).toMatchObject({
+      level: 'fail',
+      message: expect.stringContaining('brief mentions a matching write'),
+    });
+  });
+
+  it('stays silent only when stage_glob is explicit and a stage must write matching files', () => {
+    const report = inspectBrief(withFloor(
+      'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    stage_glob: docs/run/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 2\n',
+      '# Stage 1\nOutputs:\n\n- `docs/run/stage_1_verdict.md`\n',
+    ));
+    expect(report.findings.some((entry) => entry.code.startsWith('terminal_floor_uncountable'))).toBe(false);
+  });
+
+  it('recognizes an inline stage output assignment as a writer contract', () => {
+    const report = inspectBrief(withFloor(
+      'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    stage_glob: docs/run/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
+      '# Workflow\n- Stage 1 output: `docs/run/stage_1_verdict.md`\n',
+    ));
+
     expect(report.findings.some((entry) => entry.code.startsWith('terminal_floor_uncountable'))).toBe(false);
   });
 

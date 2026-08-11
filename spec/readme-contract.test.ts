@@ -191,7 +191,7 @@ constraints it derives from the goal. Nothing in the crew can lower it.`,
     ['ps -o lstart=', architecture],
     ['13 statuses', readme],
     ['0.815', readme],
-    ['20 commands', readme],
+    ['21 commands', readme],
   ])('preserves the concrete marker %s', (marker, document) => {
     expect(document).toContain(marker);
   });

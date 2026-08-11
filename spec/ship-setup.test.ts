@@ -1,0 +1,643 @@
+import { createHash } from 'node:crypto';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  cmdShipSetupWithDeps,
+  createGitWorktree,
+  nodeShipSetupFileSystem,
+  runShipSetup,
+  shipSetupReadyRecordPath,
+  type GitCommandRunner,
+  type GitWorktreeCreator,
+  type GitWorktreeRequest,
+  type ShipSetupDependencies,
+} from '../src/cli-ship-setup.js';
+import type { ValidationCommandRunner } from '../src/project-validation.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+
+class Capture {
+  value = '';
+  writer = { write: (chunk: string) => { this.value += chunk; } };
+}
+
+interface Fixture {
+  root: string;
+  project: string;
+  target: string;
+  state: string;
+  brief: string;
+}
+
+const IGNORED_MODULE_PATH = ['node_modules', 'revision-generator'].join('/');
+
+let previousGlobalDir: string;
+let fixture: Fixture;
+
+beforeAll(() => {
+  previousGlobalDir = fcGlobalDir();
+});
+
+beforeEach(() => {
+  const root = mkdtempSync(join(tmpdir(), 'flowcrew-ship-setup-'));
+  fixture = {
+    root,
+    project: join(root, 'source-project'),
+    target: join(root, 'target-worktree'),
+    state: join(root, 'fc-state'),
+    brief: join(root, 'source-project', 'brief.md'),
+  };
+  mkdirSync(fixture.project, { recursive: true });
+  writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
+    scripts: { build: 'compile', test: 'check', lint: 'style' },
+  }), 'utf-8');
+  writeFileSync(join(fixture.project, 'package-lock.json'), '{}', 'utf-8');
+  writeFileSync(join(fixture.project, '.gitignore'), 'data/\nnode_modules/\n', 'utf-8');
+  setFcGlobalDir(fixture.state);
+});
+
+afterEach(() => {
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
+afterAll(() => {
+  setFcGlobalDir(previousGlobalDir);
+});
+
+function writeBrief(lines: string[]): void {
+  writeFileSync(fixture.brief, lines.join('\n'), 'utf-8');
+}
+
+function setupArgs(extra: string[] = []): string[] {
+  return [
+    'ship-setup',
+    '--brief', 'brief.md',
+    '--project', fixture.project,
+    '--target', fixture.target,
+    '--base', 'release-base',
+    '--branch', 'autonomous-result',
+    ...extra,
+  ];
+}
+
+function copyTracked(request: GitWorktreeRequest): void {
+  mkdirSync(request.targetDir, { recursive: true });
+  copyFileSync(join(request.projectDir, 'package.json'), join(request.targetDir, 'package.json'));
+  copyFileSync(join(request.projectDir, 'package-lock.json'), join(request.targetDir, 'package-lock.json'));
+}
+
+function successfulGit(
+  afterCreate?: (request: GitWorktreeRequest) => void,
+): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
+  return vi.fn<GitWorktreeCreator>((request) => {
+    copyTracked(request);
+    afterCreate?.(request);
+    return { exitCode: 0 };
+  });
+}
+
+function validationRunner(testExit = 0): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
+  return vi.fn<ValidationCommandRunner>((request) => ({
+    exitCode: request.role === 'test' ? testExit : 0,
+    stdout: request.role === 'test' && testExit !== 0
+      ? 'FAIL spec/existing.test.ts\nTests 1 failed'
+      : `${request.role} passed`,
+    durationMs: 4,
+  }));
+}
+
+function noReadyRecord(): boolean {
+  return !existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state));
+}
+
+describe('ship-setup fail-closed worktree transaction', () => {
+  it('maps the exact declared base, branch, project, and target to one argv-safe Git command', async () => {
+    const runner = vi.fn<GitCommandRunner>(() => ({ exitCode: 0 }));
+
+    const response = await createGitWorktree({
+      projectDir: fixture.project,
+      targetDir: fixture.target,
+      base: 'refs/tags/release-base',
+      branch: 'autonomous-result',
+    }, runner);
+
+    expect(response).toEqual({ exitCode: 0 });
+    expect(runner).toHaveBeenCalledOnce();
+    expect(runner).toHaveBeenCalledWith({
+      command: 'git',
+      args: [
+        'worktree', 'add', '-b', 'autonomous-result', '--', fixture.target, 'refs/tags/release-base',
+      ],
+      cwd: fixture.project,
+    });
+  });
+
+  it('creates the exact base and branch, links only absent declared ignored inputs, rechecks them, and atomically records a delta baseline', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    const prices = 'timestamp,price\n2022-01-01,10\n2022-01-03,12\n';
+    writeFileSync(join(fixture.project, 'data', 'frozen.csv'), prices, 'utf-8');
+    mkdirSync(join(fixture.project, 'node_modules', 'revision-generator'), { recursive: true });
+    writeFileSync(join(fixture.project, 'node_modules', 'revision-generator', 'alpha.js'), 'export {};\n', 'utf-8');
+    writeFileSync(join(fixture.project, 'node_modules', 'revision-generator', 'beta.js'), 'export {};\n', 'utf-8');
+    const digest = createHash('sha256').update(prices).digest('hex');
+    writeBrief([
+      '# Inputs',
+      '- Read `package.json`.',
+      `- Read \`data/frozen.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
+      `- Consume \`${IGNORED_MODULE_PATH}/\`; it contains 2 files.`,
+      '# Deliverables',
+      '- Write `docs/result.md`.',
+    ]);
+    const git = successfulGit();
+    const runner = validationRunner(1);
+    const stdout = new Capture();
+    const stderr = new Capture();
+
+    const code = await cmdShipSetupWithDeps(setupArgs(['--json']), {
+      createWorktree: git,
+      runValidationCommand: runner,
+      timestamp: () => '2030-01-02T03:04:05.000Z',
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.value).toBe('');
+    expect(git).toHaveBeenCalledWith({
+      projectDir: fixture.project,
+      targetDir: fixture.target,
+      base: 'release-base',
+      branch: 'autonomous-result',
+    });
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner.mock.calls.map(([request]) => request)).toEqual([
+      expect.objectContaining({ role: 'build', command: 'npm', args: ['run', 'build'], cwd: fixture.target }),
+      expect.objectContaining({ role: 'test', command: 'npm', args: ['run', 'test'], cwd: fixture.target }),
+      expect.objectContaining({ role: 'lint', command: 'npm', args: ['run', 'lint'], cwd: fixture.target }),
+    ]);
+
+    const linkedFile = join(fixture.target, 'data', 'frozen.csv');
+    const linkedDirectory = join(fixture.target, 'node_modules', 'revision-generator');
+    expect(lstatSync(linkedFile).isSymbolicLink()).toBe(true);
+    expect(lstatSync(linkedDirectory).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(linkedFile)).toBe(join(fixture.project, 'data', 'frozen.csv'));
+    expect(readlinkSync(linkedDirectory)).toBe(join(fixture.project, 'node_modules', 'revision-generator'));
+    expect(lstatSync(join(fixture.target, 'package.json')).isSymbolicLink()).toBe(false);
+
+    const recordPath = shipSetupReadyRecordPath(fixture.target, fixture.state);
+    const record = JSON.parse(readFileSync(recordPath, 'utf-8')) as Record<string, any>;
+    expect(record).toEqual(JSON.parse(stdout.value));
+    expect(record).toMatchObject({
+      version: 1,
+      ready: true,
+      createdAt: '2030-01-02T03:04:05.000Z',
+      projectDir: fixture.project,
+      targetDir: fixture.target,
+      base: 'release-base',
+      branch: 'autonomous-result',
+      links: [
+        expect.objectContaining({ path: 'data/frozen.csv', type: 'file' }),
+        expect.objectContaining({ path: IGNORED_MODULE_PATH, type: 'directory' }),
+      ],
+    });
+    expect(record.sourceVerification.inputs).toHaveLength(3);
+    expect(record.targetVerification.inputs).toHaveLength(3);
+    expect(record.targetVerification.inputs.flatMap((input: any) => input.assertions)
+      .every((assertion: any) => assertion.state === 'confirmed')).toBe(true);
+    expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
+      role: 'test', state: 'failed', exitCode: 1, failureCount: 1,
+    }));
+    expect(record.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
+      role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 1,
+    }));
+  });
+
+  it('reaches READY for a Python worktree using pyproject-inferred validation argv', async () => {
+    const pyproject = [
+      '[build-system]',
+      'requires = ["setuptools"]',
+      'build-backend = "setuptools.build_meta"',
+      '[project]',
+      'dependencies = ["pytest", "ruff"]',
+      '[tool.pytest.ini_options]',
+      'testpaths = ["tests"]',
+      '[tool.ruff]',
+      'line-length = 100',
+    ].join('\n');
+    writeFileSync(join(fixture.project, 'pyproject.toml'), pyproject, 'utf-8');
+    writeBrief(['# Goal', 'Validate the Python project.']);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      copyFileSync(join(request.projectDir, 'pyproject.toml'), join(request.targetDir, 'pyproject.toml'));
+      return { exitCode: 0 };
+    });
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: runner,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      validationBaseline: { discovery: { state: 'configured', missingRoles: [] } },
+    });
+    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+      ['python', ['-m', 'build']],
+      ['python', ['-m', 'pytest']],
+      ['python', ['-m', 'ruff', 'check', '.']],
+    ]);
+    expect(existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state))).toBe(true);
+  });
+
+  it('refuses UNKNOWN validation before READY when no command can be inferred', async () => {
+    writeBrief(['# Goal', 'Validate the repository.']);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      return { exitCode: 0 };
+    });
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: runner,
+    });
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(report).toMatchObject({
+      state: 'refused',
+      validationBaseline: {
+        discovery: { state: 'unknown', commands: [] },
+        results: [
+          expect.objectContaining({ role: 'build', state: 'unresolved' }),
+          expect.objectContaining({ role: 'test', state: 'unresolved' }),
+          expect.objectContaining({ role: 'lint', state: 'unresolved' }),
+        ],
+      },
+      blockers: [expect.objectContaining({
+        phase: 'validation', reason: expect.stringContaining('Validation baseline is unknown'),
+      })],
+    });
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('defaults the source project to the injected current directory and reports human-readable delta criteria', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const git = successfulGit();
+    const stdout = new Capture();
+
+    const code = await cmdShipSetupWithDeps([
+      'ship-setup',
+      '--brief', 'brief.md',
+      '--target', '../target-worktree',
+      '--base', 'HEAD',
+      '--branch', 'default-project-result',
+    ], {
+      cwd: fixture.project,
+      createWorktree: git,
+      runValidationCommand: validationRunner(),
+      stdout: stdout.writer,
+      stderr: new Capture().writer,
+    });
+
+    expect(code).toBe(0);
+    expect(git).toHaveBeenCalledWith(expect.objectContaining({
+      projectDir: fixture.project,
+      targetDir: fixture.target,
+      base: 'HEAD',
+      branch: 'default-project-result',
+    }));
+    expect(stdout.value).toContain('Ship setup: READY');
+    expect(stdout.value).toContain('gate build: must_remain_green');
+    expect(stdout.value).toContain('gate test: must_remain_green');
+    expect(existsSync(shipSetupReadyRecordPath(fixture.target, fixture.state))).toBe(true);
+  });
+
+  it('refuses a missing declared source input before creating a worktree or running validation', async () => {
+    writeBrief(['# Inputs', '- Read `data/missing.csv`; it has 2 rows.']);
+    const git = vi.fn<GitWorktreeCreator>();
+    const runner = validationRunner();
+    const stderr = new Capture();
+
+    const code = await cmdShipSetupWithDeps(setupArgs(['--json']), {
+      createWorktree: git,
+      runValidationCommand: runner,
+      stdout: new Capture().writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(1);
+    expect(git).not.toHaveBeenCalled();
+    expect(runner).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+    const report = JSON.parse(stderr.value) as Record<string, any>;
+    expect(report).toMatchObject({
+      state: 'refused',
+      worktreeCreated: false,
+      blockers: expect.arrayContaining([
+        expect.objectContaining({ phase: 'source', input: 'data/missing.csv' }),
+      ]),
+    });
+  });
+
+  it('refuses a refuted source property before Git and accepts the same input when its property is true', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'rows.csv'), 'id\n1\n2\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/rows.csv`; it has 3 rows.']);
+    const git = successfulGit();
+
+    const refuted = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: validationRunner() });
+
+    expect(refuted).toMatchObject({
+      state: 'refused',
+      worktreeCreated: false,
+      blockers: [expect.objectContaining({
+        phase: 'source', input: 'data/rows.csv', assertion: 'row_count', reason: expect.stringContaining('refuted'),
+      })],
+    });
+    expect(git).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+
+    writeBrief(['# Inputs', '- Read `data/rows.csv`; it has 2 rows.']);
+    const acceptedGit = successfulGit();
+    const accepted = await runShipSetup(setupArgs(), {
+      createWorktree: acceptedGit,
+      runValidationCommand: validationRunner(),
+    });
+    expect(accepted.state).toBe('ready');
+    expect(acceptedGit).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an asserted property that is not mechanically checkable and does not reinterpret it as success', async () => {
+    writeFileSync(
+      join(fixture.project, 'ambiguous.csv'),
+      'start_date,end_date\n2022-01-01,2022-01-03\n',
+      'utf-8',
+    );
+    writeBrief(['# Inputs', '- Read `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-03.']);
+    const git = successfulGit();
+
+    const report = await runShipSetup(setupArgs(), { createWorktree: git });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({
+        phase: 'source',
+        input: 'ambiguous.csv',
+        assertion: 'time_span',
+        reason: expect.stringContaining('not_checkable'),
+      })],
+    });
+    expect(git).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses unreadable source evidence through the injected filesystem seam', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    const input = join(fixture.project, 'data', 'locked.csv');
+    writeFileSync(input, 'id\n1\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/locked.csv`.']);
+    const git = successfulGit();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      fs: {
+        ...nodeShipSetupFileSystem,
+        readable: (path) => path !== input && nodeShipSetupFileSystem.readable(path),
+      },
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({ phase: 'source', input: 'data/locked.csv', reason: expect.stringContaining('not readable') })],
+    });
+    expect(git).not.toHaveBeenCalled();
+  });
+
+  it('refuses when an ignored input cannot be linked, and never runs or records the baseline', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+      fs: {
+        ...nodeShipSetupFileSystem,
+        createLink: () => { throw new Error('link denied by fixture'); },
+      },
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      worktreeCreated: true,
+      blockers: [expect.objectContaining({
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('link denied by fixture'),
+      })],
+    });
+    expect(runner).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('re-verifies properties through the target and refuses a changed linked input', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n2\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 2 rows.']);
+    const createLink = vi.fn((_: string, target: string) => {
+      writeFileSync(target, 'id\n1\n', 'utf-8');
+    });
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: validationRunner(),
+      fs: { ...nodeShipSetupFileSystem, createLink },
+    });
+
+    expect(createLink).toHaveBeenCalledTimes(1);
+    expect(report).toMatchObject({
+      state: 'refused',
+      worktreeCreated: true,
+      blockers: [expect.objectContaining({
+        phase: 'target', input: 'data/frozen.csv', assertion: 'row_count', reason: expect.stringContaining('refuted'),
+      })],
+    });
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('does not overwrite an existing target or an existing tracked input', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    mkdirSync(fixture.target, { recursive: true });
+    const sentinel = join(fixture.target, 'keep.txt');
+    writeFileSync(sentinel, 'preserve me', 'utf-8');
+    const git = successfulGit();
+
+    const collision = await runShipSetup(setupArgs(), { createWorktree: git });
+
+    expect(collision).toMatchObject({
+      state: 'refused',
+      worktreeCreated: false,
+      blockers: [expect.objectContaining({ phase: 'worktree', reason: expect.stringContaining('already exists') })],
+    });
+    expect(git).not.toHaveBeenCalled();
+    expect(readFileSync(sentinel, 'utf-8')).toBe('preserve me');
+    rmSync(fixture.target, { recursive: true, force: true });
+
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'tracked.csv'), 'id\n1\n2\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/tracked.csv`; it has 2 rows.']);
+    const createLink = vi.fn(nodeShipSetupFileSystem.createLink);
+    const trackedGit = successfulGit((request) => {
+      mkdirSync(join(request.targetDir, 'data'), { recursive: true });
+      writeFileSync(join(request.targetDir, 'data', 'tracked.csv'), 'id\n1\n', 'utf-8');
+    });
+    const tracked = await runShipSetup(setupArgs(), {
+      createWorktree: trackedGit,
+      fs: { ...nodeShipSetupFileSystem, createLink },
+    });
+
+    expect(tracked.state).toBe('refused');
+    expect(createLink).not.toHaveBeenCalled();
+    expect(readFileSync(join(fixture.target, 'data', 'tracked.csv'), 'utf-8')).toBe('id\n1\n');
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses Git failure and a false Git success without leaving a ready record', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const failedGit = vi.fn<GitWorktreeCreator>(() => ({ exitCode: 128, stderr: 'unknown base' }));
+
+    const failed = await runShipSetup(setupArgs(), { createWorktree: failedGit });
+
+    expect(failed).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({ phase: 'worktree', reason: expect.stringContaining('unknown base') })],
+    });
+    expect(noReadyRecord()).toBe(true);
+
+    const falseSuccess = vi.fn<GitWorktreeCreator>(() => ({ exitCode: 0 }));
+    const absent = await runShipSetup(setupArgs(), { createWorktree: falseSuccess });
+    expect(absent).toMatchObject({
+      state: 'refused',
+      worktreeCreated: true,
+      blockers: [expect.objectContaining({ phase: 'worktree', reason: expect.stringContaining('not reachable') })],
+    });
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('blocks a target parent that canonicalizes outside the worktree', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
+    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
+    const outside = join(fixture.root, 'outside');
+    mkdirSync(outside, { recursive: true });
+    const git = successfulGit((request) => {
+      symlinkSync(outside, join(request.targetDir, 'data'), 'dir');
+    });
+
+    const report = await runShipSetup(setupArgs(), { createWorktree: git });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('outside the worktree'),
+      })],
+    });
+    expect(existsSync(join(outside, 'frozen.csv'))).toBe(false);
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses an atomic ready-record failure after baseline capture', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const runner = validationRunner();
+    const writeAtomic = vi.fn(() => { throw new Error('state volume unavailable'); });
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, writeAtomic },
+    });
+
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(writeAtomic).toHaveBeenCalledTimes(1);
+    expect(report).toMatchObject({
+      state: 'refused',
+      validationBaseline: { version: 1 },
+      blockers: [expect.objectContaining({ phase: 'record', reason: expect.stringContaining('state volume unavailable') })],
+    });
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses validation launch errors after capture without writing a ready record', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({
+      exitCode: null,
+      error: 'validation runner unavailable',
+    }));
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(report).toMatchObject({
+      state: 'refused',
+      validationBaseline: {
+        results: expect.arrayContaining([
+          expect.objectContaining({ role: 'build', state: 'launch_error' }),
+          expect.objectContaining({ role: 'test', state: 'launch_error' }),
+          expect.objectContaining({ role: 'lint', state: 'launch_error' }),
+        ]),
+      },
+      blockers: [
+        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('build baseline') }),
+        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('test baseline') }),
+        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('lint baseline') }),
+      ],
+    });
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('validates required and duplicate CLI options while help remains non-mutating', async () => {
+    const git = vi.fn<GitWorktreeCreator>();
+    const helpOut = new Capture();
+    const helpErr = new Capture();
+    const help = await cmdShipSetupWithDeps(['ship-setup', '--help'], {
+      createWorktree: git,
+      stdout: helpOut.writer,
+      stderr: helpErr.writer,
+    });
+    expect(help).toBe(0);
+    expect(helpOut.value).toContain('Usage: flowcrew ship-setup');
+    expect(helpErr.value).toBe('');
+
+    const missingErr = new Capture();
+    const missing = await cmdShipSetupWithDeps(['ship-setup', '--brief', 'brief.md'], {
+      createWorktree: git,
+      stderr: missingErr.writer,
+    });
+    expect(missing).toBe(1);
+    expect(missingErr.value).toContain('--target is required');
+
+    const duplicateErr = new Capture();
+    const duplicate = await cmdShipSetupWithDeps([...setupArgs(), '--base', 'other'], {
+      createWorktree: git,
+      stderr: duplicateErr.writer,
+    });
+    expect(duplicate).toBe(1);
+    expect(duplicateErr.value).toContain('--base may be specified only once');
+    expect(git).not.toHaveBeenCalled();
+  });
+});
