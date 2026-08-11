@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.7.0] - 2026-08-11
+
+### Changed — the launch path is composed of tested commands instead of remembered steps
+
+- **`ship-preflight`, `ship-setup`, `watch`, `land`, and `audit-report` replace steps an
+  operator used to carry in their head.** The `ship` skill drops from 995 lines to 300, not by
+  cutting content but by moving each rule to the layer that has ground truth: what a command
+  can check, it checks; what the planner owns, the planner states; only judgement stays as
+  prose. Both front ends now derive the same procedure from the same file — verified by
+  running the real `claude` and `codex` CLIs against one brief and comparing their rehearsal
+  digests, which had silently diverged: one front end was executing an older contract because
+  it inferred execution order from heading order.
+
+### Fixed — guards that refused for the wrong reason, or never refused at all
+
+- **`land --remove` could not succeed on any repository that gitignores its build output.** It
+  graded regenerable paths for display and then refused on the raw count, so fail-closed had
+  become fail-always, and an operator who cannot use a guard removes worktrees by hand. Hand
+  removal is what lost a 2,379-line generator. Removal now takes
+  `--acknowledge-regenerable=<count>` matching the audited figure, re-derived at removal time
+  so a stale number refuses; anything the grader could not prove regenerable still refuses
+  unconditionally and cannot be acknowledged away. An injected probe found the complementary
+  hole: ignored source directly beneath a dependency root graded as an installed dependency,
+  so a correct acknowledgement authorised deleting it. It now grades as source.
+
+- **`ship-setup` recorded the validation baseline before dependencies existed and printed
+  `READY`.** All three roles exited 127, every gate degraded to "failed with an unparseable
+  identity", and the headline said the workspace was ready. A guard that never fires is worse
+  than one that always does, because nothing about the run looks wrong. A target that cannot
+  run the project's own commands now refuses and writes no ready record.
+
+- **Explicitly declared brief inputs could vanish without a message.** The heuristic that
+  keeps prose scanning from treating ordinary words as paths was also applied to the explicit
+  declaration list, where the key already states that the value is a path. A bare directory
+  name was discarded silently. Declarations are now taken at their word, and an unresolvable
+  one is reported as unresolved rather than dropped.
+
+- **Ready records are keyed by what the brief says, not only where it lives.** Five
+  consecutive invocations with different briefs produced a byte-identical record path, so
+  nothing downstream could verify that the brief being launched was the brief that was
+  baselined.
+
+- **Terminal evaluation was inside `if (!failed)`, and an unmatched terminal persisted no
+  conclusion at quiescence.** A settled batch could therefore leave no decision at all.
+  Evaluation is now unconditional and records an explicit `incomplete` rather than silence: a
+  run that cannot decide must say so. Both directions of status mismatch are surfaced without
+  changing what the persisted lifecycle status means.
+
+- **A launch target silently ran a smaller suite than its baseline was measured on.** Version
+  control cannot populate an ignored directory in a fresh worktree, so a target held 150 of
+  the source's 193 discoverable test files and every "full suite green" claim covered that
+  smaller set. This is the same root cause 0.6.2 named and could not act on — a contract test
+  living in `tests/`, gitignored, never running. Setup now completes the target and refuses,
+  before recording a baseline, when it cannot.
+
+- **A gate whose brief supplied no metric could reject a passing verdict indefinitely.** The
+  implementation had nothing left to change while the repair loop kept running. The contract
+  is stated at the planner layer and checked mechanically. Adversarial verification then found
+  the guard could be bypassed outright: raw JSON `1e400` parses to `Infinity`, which satisfied
+  a finite threshold. The candidate search filters on `Number.isFinite` before selecting a
+  value, which closes all four sources — the original defect was a guard present on one path
+  and absent from another, so the shared selector was the place to fix it.
+
+### Changed — the test suite verifies properties instead of fastening onto values
+
+- **An audit of every collected test module found 35 weak verification sites**: 20 overfit a
+  fixture value, 8 guarded source text where behaviour was claimed, 5 policed style, and 2
+  could not fail under any input. The proportions are the finding. Tautologies are the shape
+  that is easy to grep for and they were rarest; the common defect is a well-formed assertion
+  aimed at the wrong thing, which goes red when a fixture changes legitimately and stays green
+  when the logic breaks in a way that preserves the number. Finding those required tracing a
+  value's provenance across functions — the one that motivated the audit had its literal and
+  its assertion 23 lines apart, in different functions, and no same-line search finds it.
+
+  31 sites became relational or structural checks derived from what they test, each proved
+  capable of failing through a transcribed red-then-green mutation. Exact values that are
+  genuine contracts stayed exact rather than being loosened into range checks, which would
+  have widened what passes. The 4 assertions removed without replacement are listed with the
+  property now unguarded and why that is acceptable.
+
+- **Documentation describes the surface instead of tallying it.** Counts of commands and
+  statuses helped no reader decide anything and needed editing in three places on every
+  addition. The CLI reference is now checked against the dispatcher's own command list, which
+  cannot go stale and fails when a command goes undocumented.
+
 ## [0.6.2] - 2026-08-09
 
 ### Fixed — three defects found while running research tasks through the engine
