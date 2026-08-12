@@ -70,7 +70,7 @@ export function parseWatchArgs(args: string[]): ParsedWatchArgs {
 export function watchUsage(): string {
   return [
     'Usage: flowcrew watch [--once] [--poll <seconds>]',
-    'Reports a first-pass heartbeat and edge-triggered stall judgements for live runs, plus status contradictions for readable runs.',
+    'Reports a first-pass heartbeat and edge-triggered stall judgements, evidence gaps, and status contradictions.',
     `Poll interval must be between ${MIN_WATCH_POLL_MS / 1_000} and ${MAX_WATCH_POLL_MS / 1_000} seconds (default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
   ].join('\n');
 }
@@ -80,17 +80,62 @@ function oneLine(value: string): string {
   return compact.length <= 120 ? compact : `${compact.slice(0, 117)}...`;
 }
 
+function minutes(milliseconds: number): string {
+  const value = milliseconds / 60_000;
+  return Number.isInteger(value) ? `${value}m` : `${value.toFixed(1)}m`;
+}
+
+function evidenceGapLine(alert: Extract<WatchAlert, { kind: 'evidence_gap' }>): string {
+  const run = alert.runId ? oneLine(alert.runId) : undefined;
+  if (alert.evidence === 'runs_root') {
+    return '[EVIDENCE GAP] runs root unavailable; no runs were judged';
+  }
+  if (alert.evidence === 'run_state') {
+    return `[EVIDENCE GAP] ${alert.count} run entr${alert.count === 1 ? 'y is' : 'ies are'} unreadable; `
+      + `${alert.count === 1 ? 'it was' : 'they were'} not judged`;
+  }
+  if (alert.evidence === 'run_liveness') {
+    return `[EVIDENCE GAP] scheduler liveness unavailable for ${alert.count} running run${alert.count === 1 ? '' : 's'}; `
+      + `${alert.count === 1 ? 'it was' : 'they were'} not judged`;
+  }
+  if (alert.evidence === 'gate_archive') {
+    return `[EVIDENCE GAP] ${alert.runId ? `${oneLine(alert.runId)}: ` : ''}${alert.count} gate archive record${alert.count === 1 ? '' : 's'} unreadable or invalid; `
+      + 'affected gate history was not judged';
+  }
+  if (alert.evidence === 'terminal_shape') {
+    return `[EVIDENCE GAP] ${run}: terminal contract or stage state is malformed; terminal indecision was not judged`;
+  }
+  if (alert.evidence === 'terminal_activity') {
+    return `[EVIDENCE GAP] ${run}: terminal activity clock is ${alert.reason}; terminal indecision was not judged`;
+  }
+  const reason = alert.reason === 'metric_changed'
+    ? 'metric changed'
+    : alert.reason === 'threshold_changed'
+      ? 'threshold changed'
+      : alert.reason === 'threshold_missing'
+        ? 'numeric threshold missing'
+        : alert.reason === 'direction_changed'
+          ? 'metric direction changed'
+          : alert.reason === 'rejection_contradiction'
+            ? 'rejected score is on the declared passing side'
+            : 'scores reached or crossed the threshold';
+  return `[EVIDENCE GAP] ${run} gate ${oneLine(alert.gateId ?? 'unknown')}: latest rejected verdicts cannot be compared (${reason})`;
+}
+
 function alertLine(alert: WatchAlert): string {
+  if (alert.kind === 'evidence_gap') return evidenceGapLine(alert);
   const run = oneLine(alert.runId);
   if (alert.kind === 'terminal_status_mismatch') {
     return `[STATUS MISMATCH] ${run}: lifecycle status ${oneLine(alert.lifecycleStatus)}; `
       + `terminal artifact ${JSON.stringify(oneLine(alert.terminalArtifact))} declares ${oneLine(alert.terminalStatus)}`;
   }
-  if (alert.kind === 'stage_attempts') {
-    return `[STALL] ${run} stage ${oneLine(alert.stageId)} reached attempt ${alert.attempts}`;
+  if (alert.kind === 'terminal_indecision') {
+    return `[STALL] ${run}: terminal decision absent after ${minutes(alert.quietForMs)} without a scheduler-owned write `
+      + `(${minutes(alert.graceMs)} grace; ${alert.pendingStages} pending stage${alert.pendingStages === 1 ? '' : 's'} treated as quiescent)`;
   }
+  const movement = alert.movement === 'plateau' ? 'plateau' : 'moving away';
   return `[STALL] ${run} gate ${oneLine(alert.gateId)} rejected ${alert.rejections}x on ${oneLine(alert.metric)}, `
-    + `${alert.previousScore} -> ${alert.latestScore} against threshold ${alert.threshold} -- not converging`;
+    + `${alert.previousScore} -> ${alert.latestScore} against threshold ${alert.threshold} -- ${movement}`;
 }
 
 export function formatWatchPoll(result: WatchPollResult): string[] {

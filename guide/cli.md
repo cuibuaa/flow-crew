@@ -216,27 +216,48 @@ flowcrew watch --poll 15
 The first pass always prints a heartbeat with entry, readable-run, live-run, and scan-time
 counts. Later output is edge-triggered: an unchanged condition is silent, and ordinary stage
 transitions are not reported. The heartbeat makes a quiet healthy scan distinguishable from a
-watcher too slow to finish its first pass. A run counts as live only when `run.json` says `running` and its
-`scheduler.pid` names a process that is alive. A stale status left by a crashed scheduler does
-not suppress the watcher.
+watcher too slow to finish its first pass. A run counts as live only when `run.json` says `running`
+and its `scheduler.pid` names a process that is alive. A known-dead scheduler suppresses live-run
+stall judgements; an unreadable marker produces an evidence-gap diagnostic instead.
 
-Three on-disk judgements alert, including when already present on the first pass: a terminal
-artifact unambiguously declares a status different from the persisted lifecycle status, a stage
-reaches its third attempt, or a gate has rejected the same metric against the same threshold
-twice without movement toward that threshold. Artifact disagreements are checked before the
-running-process branch, so terminal and live runs are both covered. Stable condition identities
-keep an unchanged disagreement, later attempts, and later rejections from repeating the same
-alert. One in-process scan handles the
-whole runs root: the discarded per-run process design took 5m12s for 7,594 entries, while the
-single pass measured 0.55s. The gate rule came from `failing_tests` remaining at 17 against a
-threshold of 0 through two attempts: both verdicts were already durable on disk, but ordinary
-transition messages never accumulated into a judgement worth interrupting for.
+The watch command makes these judgements, including when already present on the first pass:
 
-`--poll` accepts 1 through 3600 seconds and defaults to 45. `--once` emits the initial heartbeat
-and any existing stalls, then exits. The command is read-only: it **does not write run or task status**,
-infer whether human wrap-up is complete, or depend on an operator home-directory layout. Run
-completion does not say whether human wrap-up is outstanding or done; three attempted inference
-rules failed differently, so the watcher deliberately leaves that state to the operator.
+- **Terminal indecision:** a live run has a valid declared terminal contract, no recorded terminal
+  artifact or completion timestamp, at least one complete/failed/skipped stage, and no running
+  stage. A pending stage is quiescent here, because an unused repair stage can remain pending after
+  its gate passes. The condition fires only after nine minutes without a scheduler-owned write.
+  The activity clock is the newest mtime among `run.json`, existing event/progress/supervisor
+  records, and existing stage status, live-log, and output files. The bounded scan does not follow
+  symlinks. A fresh write, a running stage, an all-pending DAG, a terminal result, a missing
+  terminal contract, a dead scheduler, or a run still within grace does not fire this condition.
+- **Gate direction:** the latest two durable rejected verdicts in canonical iteration/round order
+  must name the same gate, metric, numeric threshold, declared direction (when present), and
+  nonzero side of that threshold. Current archives carry the numeric observation in the matching
+  `metric_<gate>.json`; legacy verdict-embedded metrics remain readable. Equal absolute distance is
+  a plateau; greater distance is a regression; movement toward the threshold is silent. Canonical
+  iteration evidence takes precedence over legacy round-only archives. One verdict, an unscored
+  rejection, a changed or missing threshold/metric/direction, a score at the threshold, or a
+  threshold crossing is not called a stall.
+- **Evidence gaps:** unavailable roots, unreadable run or scheduler records, malformed or
+  unreadable gate archives, unjudgeable terminal clocks/contracts/stages, and incomparable latest
+  gate verdicts emit `[EVIDENCE GAP]`. This means **not judged**, not healthy and not stalled.
+  Diagnostics are bounded, edge-triggered, clear on recovery, and re-arm if the gap recurs.
+- **Status disagreement:** when a terminal artifact unambiguously declares a status different from
+  the persisted lifecycle status, the command emits `[STATUS MISMATCH]`; terminal and live runs are
+  both covered.
+
+Nine minutes rounds the independently re-derived current-contract terminal-lag tail up to the
+45-second polling cadence; the final verification report records the population, full distribution,
+and sensitivity strata. A future healthy run quiet beyond that historical tail will alert once even
+if it later terminates normally. Attempt count is deliberately not a stall judgement: attempts three
+and four can still be converging, while a plateau or regression can be visible after only two
+comparable gate rounds.
+
+`--poll` accepts 1 through 3600 seconds and defaults to 45. `--once` emits the initial heartbeat,
+existing stalls, status mismatches, and evidence gaps, then exits. The command is read-only: it
+**does not write run or task status**, decide whether wrap-up is complete, accept a terminal status,
+or depend on an operator home-directory layout. A judgement only reports durable evidence; it never
+changes that evidence.
 
 ## `flowcrew rehearse`
 
