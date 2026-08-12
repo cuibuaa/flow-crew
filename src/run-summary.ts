@@ -179,7 +179,8 @@ function renderTestsSection(stageOutputs: string[]): string {
 
 function renderStagesSection(state: StoreState): string {
   const ids = Object.keys(state.stages);
-  if (ids.length === 0 && !state.supervisor) return '';
+  const historical = state.stageEvidence ?? [];
+  if (ids.length === 0 && historical.length === 0 && !state.supervisor) return '';
   const lines = ids.map((id) => {
     const st = state.stages[id];
     const attempts = st?.attempts?.length ?? 0;
@@ -189,6 +190,14 @@ function renderStagesSection(state: StoreState): string {
       : (st?.duration_ms ? ` (${dur}s)` : '');
     return `- ${id}: ${st?.status ?? 'unknown'}${history}`;
   });
+  for (const evidence of historical) {
+    const attempts = evidence.status.attempts?.length ?? 0;
+    const dur = Math.round((evidence.status.duration_ms ?? 0) / 1000);
+    const history = attempts > 0
+      ? ` — ran ${attempts} ${attempts === 1 ? 'time' : 'times'}, ${dur}s cumulative`
+      : (evidence.status.duration_ms ? ` (${dur}s)` : '');
+    lines.push(`- ${evidence.stageId} [iteration ${evidence.iteration}, archived]: ${evidence.status.status}${history}`);
+  }
   if (state.supervisor) {
     const tokensTotal = state.supervisor.tokens_in + state.supervisor.tokens_out;
     lines.push(`- _supervisor: ${state.supervisor.calls} calls, ${Math.round(state.supervisor.duration_ms / 1000)}s cumulative, ${tokensTotal} tokens total (${state.supervisor.tokens_in} in + ${state.supervisor.tokens_out} out)`);
@@ -311,16 +320,36 @@ function collectStageOutputs(runDir: string, state: StoreState): { joined: strin
   const blocks: string[] = [];
   const raw: string[] = [];
   const stagesDir = join(runDir, 'stages');
-  if (existsSync(stagesDir)) {
+  const appendOutput = (outputPath: string, heading: string, status: string, durationMs?: number): void => {
+    if (!existsSync(outputPath)) return;
+    let output = readFileSync(outputPath, 'utf-8');
+    raw.push(output);
+    if (output.length > 3000) output = output.slice(0, 1500) + '\n...(truncated)...\n' + output.slice(-1500);
+    const duration = durationMs ? `${Math.round(durationMs / 1000)}s` : '';
+    blocks.push(`## ${heading} (${status}${duration ? ', ' + duration : ''})\n${output}`);
+  };
+
+  if (state.stageEvidence?.length) {
+    for (const evidence of state.stageEvidence) {
+      if (!evidence.outputPath) continue;
+      appendOutput(
+        join(runDir, evidence.outputPath),
+        `Stage: ${evidence.stageId} [iteration ${evidence.iteration}, archived]`,
+        evidence.status.status,
+        evidence.status.duration_ms,
+      );
+    }
+    for (const [stageId, status] of Object.entries(state.stages)) {
+      appendOutput(join(stagesDir, stageId, 'output.md'), `Stage: ${stageId}`, status.status, status.duration_ms);
+    }
+  } else if (existsSync(stagesDir)) {
+    // Legacy runs have no iteration-addressed ledger. Preserve their historical
+    // directory scan so summaries remain backward compatible.
     for (const stageId of readdirSync(stagesDir)) {
       const outputPath = join(stagesDir, stageId, 'output.md');
       if (!existsSync(outputPath)) continue;
-      let output = readFileSync(outputPath, 'utf-8');
-      raw.push(output);
-      if (output.length > 3000) output = output.slice(0, 1500) + '\n...(truncated)...\n' + output.slice(-1500);
       const status = state.stages[stageId]?.status ?? 'unknown';
-      const duration = state.stages[stageId]?.duration_ms ? `${Math.round(state.stages[stageId].duration_ms! / 1000)}s` : '';
-      blocks.push(`## Stage: ${stageId} (${status}${duration ? ', ' + duration : ''})\n${output}`);
+      appendOutput(outputPath, `Stage: ${stageId}`, status, state.stages[stageId]?.duration_ms);
     }
   }
   return { joined: blocks.join('\n\n'), raw };

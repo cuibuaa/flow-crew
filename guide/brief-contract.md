@@ -210,6 +210,7 @@ artifacts remain in the selected project.
 | `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; live evidence for the current attempt. A retry or later planner iteration may replace it. |
 | `stages/<stageId>/metric.json` | Scheduler, then optionally the gate stage | Scheduler | Seeded before every gate attempt as `hasMetric:false`; the gate replaces it only when that attempt has a trustworthy numeric metric. |
 | Rejected gate evidence | Scheduler | Repairs, reports, operator | `<runDir>/gate_reevaluation/iteration_<n>/round_<n>/`; durable copies of the rejected verdict, evaluated metric, gate output, and engine-effective verdict. |
+| Re-plan stage evidence | Scheduler | Summary, dashboard, campaign accounting, operator | `run.json.stageEvidence` keys each retired dynamic stage by iteration and stage ID and points to immutable status, output, attempt-output, and optional verdict copies under `<runDir>/stage_evidence/iteration_<n>/`. |
 | Round result | Measurement stage | Research advance gate | Path from `research.result_file`; one fresh JSON object per round. After ingestion it is moved to `<runDir>/research_round_<N>_consumed.json` and journaled. |
 | `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
 | `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
@@ -218,6 +219,20 @@ artifacts remain in the selected project.
 | Guidance | Supervisor, scheduler, or operator path | Later workers/planner | Run-level `supervisor_guidance.md` plus optional `stages/<stageId>/guidance.md`; snapshotted for each consuming stage and archived by iteration. |
 | Terminal artifact | Agent, or the research engine when it owns the decision | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; snapshotted as `<runDir>/terminal_<basename>` when detected. |
 | Stage output | Every stage attempt | Retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest attempt. A retry that needs to read what an *earlier* attempt actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered attempt — `output.md` alone was overwritten by each new attempt, so a passing attempt's output could be destroyed by a later one that failed in seconds. |
+
+The `stages` map and `stages/<stageId>/` files are live aliases for the active
+DAG. At an outer re-plan boundary, the scheduler first materializes the
+iteration-qualified stage-evidence files and then publishes those references in
+the same atomic `run.json` replacement that removes the old dynamic stages.
+Reusing a stage ID starts a fresh live attempt ledger; it cannot redirect the
+older record or inherit its completed status. Campaign costs and summaries read
+the archived status through `stageEvidence`, with `retiredStageUsage` retained
+only as a compatibility fallback for older runs.
+
+A blocking planner-check preflight retry is narrower: it removes the refused
+proposal's `dispatch.yaml` and `reality_checks.md` and re-pends only the planner
+before downstream injection. It neither retires the active DAG nor mutates
+already archived stage evidence.
 
 ### `approval_request.json`
 

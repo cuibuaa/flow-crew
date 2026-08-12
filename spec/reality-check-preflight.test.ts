@@ -434,6 +434,63 @@ describe('historical planner syntax regressions', () => {
       .toContain('presentation_proxy_heading_literal');
   });
 
+  it('flags the historical blog check that hardens a suggested title into an exact H1', () => {
+    const brief = [
+      '# Writing contract',
+      'Suggested title: **Building something that tells me the truth when I\'m not watching**',
+      '(You may propose a better title, but the thesis must not change.)',
+      'All six chapters, the starting point, and the close must exist in the supplied order.',
+    ].join('\n');
+    const script = [
+      'const failures = [];',
+      'const expectedTitle = "# Building something that tells me the truth when I\'m not watching";',
+      'if (text.split(/\\r?\\n/u)[0] !== expectedTitle) {',
+      "  failures.push('the planned H1 title is missing or changed');",
+      '}',
+      'if (failures.length) process.exit(1);',
+    ].join('\n');
+    expect(findingCodes({
+      name: 'Article structure, length, numbers, and forbidden literals',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, brief)).toContain('presentation_proxy_heading_literal');
+  });
+
+  it('accepts the same exact-H1 check when the brief makes that heading literal contractual', () => {
+    const script = [
+      'const failures = [];',
+      'const expectedTitle = "# Contracted title";',
+      'if (text.split(/\\r?\\n/u)[0] !== expectedTitle) {',
+      "  failures.push('the contracted H1 is missing');",
+      '}',
+      'if (failures.length) process.exit(1);',
+    ].join('\n');
+    expect(findingCodes({
+      name: 'contracted title remains exact',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, '# Contract\nThe exact Markdown heading `# Contracted title` is required.'))
+      .not.toContain('presentation_proxy_heading_literal');
+  });
+
+  it('flags the historical E9 check that uses a heading as a commit-hash locator', () => {
+    const brief = [
+      '# E9 contract',
+      '`docs/task_summary.md` records the implementation commit\'s 40-character hash.',
+    ].join('\n');
+    const script = [
+      "const heading = [...summary.matchAll(/^#{1,3}\\s+E9\\b.*$/gmi)].at(-1);",
+      "if (!heading || heading.index === undefined) throw new Error('docs/task_summary.md has no E9 section');",
+      'const section = summary.slice(heading.index);',
+      "if (!/\\b[0-9a-f]{40}\\b/.test(section)) throw new Error('E9 section has no implementation SHA');",
+    ].join('\n');
+    expect(findingCodes({
+      name: 'e9-tracked-commit-integrity',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, brief)).toContain('presentation_proxy_heading_literal');
+  });
+
   it.each([
     {
       label: 'a file buffer compared with git-show output',
@@ -479,6 +536,83 @@ describe('historical planner syntax regressions', () => {
     ].join('\n');
     expect(findingCodes({
       name: 'published files omit the private area',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, brief)).toContain('contract_exception_conflict');
+  });
+
+  it('accepts an enumerated scan that excludes every location allowed by the brief', () => {
+    const brief = [
+      '# Contract',
+      'Published files must not name `private-area/`.',
+      'Configuration has an explicit exception: the ignore file may retain its exact `private-area/` rule.',
+      'The final report may explain that private area.',
+    ].join('\n');
+    const script = [
+      "const listed = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8' });",
+      "const allowedReport = 'docs/final-report.md';",
+      'const bad = [];',
+      "for (const file of listed.stdout.split('\\0').filter(Boolean)) {",
+      '  if (file === allowedReport) continue;',
+      "  const lines = readFileSync(file, 'utf8').split(/\\r?\\n/);",
+      '  lines.forEach((line, index) => {',
+      "    const allowedIgnore = file === '.gitignore' && line.trim() === 'private-area/';",
+      "    const forbidden = line.includes('private-area/');",
+      '    if (forbidden && !allowedIgnore) bad.push(`${file}:${index + 1}`);',
+      '  });',
+      '}',
+      "if (bad.length) throw new Error(bad.join('\\n'));",
+    ].join('\n');
+    expect(findingCodes({
+      name: 'published files omit the private area except at contracted locations',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, brief)).toEqual([]);
+  });
+
+  it('does not treat an instruction to delete an exception as permission', () => {
+    const brief = [
+      '# Contract',
+      'Published files must not name `private-area/`.',
+      'Configuration currently carves an exception for `private-area/`. Delete the exception.',
+    ].join('\n');
+    const script = [
+      'const bad = [];',
+      "for (const file of listed.stdout.split('\\0').filter(Boolean)) {",
+      "  for (const line of readFileSync(file, 'utf8').split(/\\r?\\n/)) {",
+      "    const forbidden = line.includes('private-area/');",
+      '    if (forbidden) bad.push(file);',
+      '  }',
+      '}',
+      "if (bad.length) throw new Error(bad.join('\\n'));",
+    ].join('\n');
+    expect(findingCodes({
+      name: 'published files omit the private area',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }, brief)).toEqual([]);
+  });
+
+  it('still flags an enumerated scan whose allowance does not cover the preserved location', () => {
+    const brief = [
+      '# Contract',
+      'Historical entries in `CHANGELOG.md` containing `private-area/` must be preserved.',
+    ].join('\n');
+    const script = [
+      "const listed = spawnSync('git', ['ls-files', '-z'], { encoding: 'utf8' });",
+      'const bad = [];',
+      "for (const file of listed.stdout.split('\\0').filter(Boolean)) {",
+      "  const lines = readFileSync(file, 'utf8').split(/\\r?\\n/);",
+      '  lines.forEach((line, index) => {',
+      "    const allowedIgnore = file === '.gitignore' && line.trim() === 'private-area/';",
+      "    const forbidden = line.includes('private-area/');",
+      '    if (!allowedIgnore && forbidden) bad.push(`${file}:${index + 1}`);',
+      '  });',
+      '}',
+      "if (bad.length) throw new Error(bad.join('\\n'));",
+    ].join('\n');
+    expect(findingCodes({
+      name: 'published files omit the private area except in ignore configuration',
       type: 'exec-script-exit-zero',
       params: { script },
     }, brief)).toContain('contract_exception_conflict');

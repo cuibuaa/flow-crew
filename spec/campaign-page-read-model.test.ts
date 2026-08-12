@@ -321,6 +321,33 @@ describe('research trend admission', () => {
 });
 
 describe('cost, canonical states, title, and proof of work', () => {
+  it('accounts iteration evidence once when the legacy retired-usage mirror is also present', () => {
+    const historicalStatus = {
+      status: STAGE_STATUS.COMPLETE,
+      retries: 0,
+      tokens_in: 5,
+      tokens_out: 7,
+    } as const;
+    const state = runState('iteration-evidence-cost', {
+      stageEvidence: [{
+        iteration: 1,
+        stageId: 'retired_work',
+        status: historicalStatus,
+        statusPath: 'stage_evidence/iteration_1/evidence/status.json',
+        outputPath: 'stage_evidence/iteration_1/evidence/output.md',
+        attemptOutputPaths: [],
+      }],
+      retiredStageUsage: [{ iteration: 1, stageId: 'retired_work', status: historicalStatus }],
+    });
+
+    expect(deriveRunTokenCost(state)).toEqual({
+      tokens: 27,
+      supervisorTokens: 0,
+      complete: true,
+      attemptEvidence: { known: 3, recordedUnknown: 0, unrecorded: 0 },
+    });
+  });
+
   it('adds independent supervisor tokens once and never adds supervisor duration to run wall clock', () => {
     const state = runState('cost-proof', {
       supervise: true,

@@ -23,6 +23,8 @@ import {
   readStageStatus,
   completeStageAttempt,
   attachStageConstraintAudit,
+  captureStageEvidence,
+  resetStageLiveAttemptAliases,
   rependStageStatus,
   runDir,
   stageDir,
@@ -3526,14 +3528,21 @@ function injectDispatchedStages(
     }
   }
 
-  // Create stage directories and add to state (preserve existing status for reruns)
+  // Create stage directories and add to state (preserve existing status for
+  // same-iteration reruns). A same-ID stage from an outer replacement is new
+  // active work: its old live aliases were archived at the iteration boundary
+  // and must not seed or suppress this execution.
   let isReinjection = false;
   for (const s of dispatched) {
     mkdirSync(stageDir(projectDir, runId, s.id), { recursive: true });
     if (state.stages[s.id]) {
       isReinjection = true;
     } else {
-      state.stages[s.id] = { status: STAGE_STATUS.PENDING, retries: 0 };
+      const pending: StageStatus = { status: STAGE_STATUS.PENDING, retries: 0 };
+      if (state.stageEvidence?.some((entry) => entry.stageId === s.id)) {
+        resetStageLiveAttemptAliases(projectDir, runId, s.id, pending);
+      }
+      state.stages[s.id] = pending;
     }
   }
 
@@ -5219,19 +5228,35 @@ export async function runWorkflow(
         Math.max(1, iteration - 1),
         runDirPath,
       );
-      // Remove old dispatched stage entries from state
+      // Materialize immutable evidence for every old dynamic stage before the
+      // single run.json write that replaces the active DAG. The archive files
+      // exist first; the atomic state write below then publishes their paths and
+      // the deletion together, so no persisted state can point at missing proof.
       const baseIds = new Set(baseStages.map(s => s.id));
-      for (const sid of Object.keys(state.stages)) {
-        if (!baseIds.has(sid)) {
-          const retired = state.stages[sid];
-          state.retiredStageUsage ??= [];
-          state.retiredStageUsage.push({
-            stageId: sid,
-            iteration: Math.max(1, iteration - 1),
-            status: retired,
-          });
-          delete state.stages[sid];
+      const retiringStageIds = Object.keys(state.stages).filter((sid) => !baseIds.has(sid));
+      const retiredIteration = Math.max(1, iteration - 1);
+      const capturedEvidence = retiringStageIds.map((sid) => captureStageEvidence(
+        projectDir,
+        runId,
+        retiredIteration,
+        sid,
+        state.stages[sid],
+      ));
+      state.stageEvidence ??= [];
+      state.retiredStageUsage ??= [];
+      for (const evidence of capturedEvidence) {
+        if (!state.stageEvidence.some((entry) =>
+          entry.iteration === evidence.iteration && entry.stageId === evidence.stageId)) {
+          state.stageEvidence.push(evidence);
         }
+        state.retiredStageUsage.push({
+          stageId: evidence.stageId,
+          iteration: evidence.iteration,
+          status: evidence.status,
+        });
+      }
+      for (const sid of retiringStageIds) {
+        delete state.stages[sid];
       }
       for (const s of baseStages) {
         state.stages[s.id] = rependStageStatus(state.stages[s.id], 0);

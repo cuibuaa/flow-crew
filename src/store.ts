@@ -130,6 +130,26 @@ export interface RetiredStageUsage {
 }
 
 /**
+ * Immutable evidence from a dynamic stage retired at an outer re-plan boundary.
+ * The live `stages/<id>` files remain aliases for the active DAG, so every path
+ * here points into an iteration-qualified archive that later same-ID work cannot
+ * redirect or overwrite.
+ */
+export interface StageEvidenceRecord {
+  stageId: string;
+  iteration: number;
+  status: StageStatus;
+  /** Run-directory-relative immutable status snapshot. */
+  statusPath: string;
+  /** Run-directory-relative immutable latest-output snapshot, when one existed. */
+  outputPath?: string;
+  /** Attempt-indexed immutable outputs that existed at retirement time. */
+  attemptOutputPaths: Array<{ attemptIndex: number; path: string }>;
+  /** Run-directory-relative immutable gate verdict, when one existed. */
+  verdictPath?: string;
+}
+
+/**
  * A required dynamic stage that was still pending/running when a plan could
  * otherwise be replaced or the run could otherwise complete. The scheduler,
  * not a later planner, owns this ledger so omitting the ID from a replacement
@@ -482,6 +502,8 @@ export interface StoreState {
   stages: Record<string, StageStatus>;
   /** Append-only cost ledger for dynamic stages replaced by later outer plans. */
   retiredStageUsage?: RetiredStageUsage[];
+  /** Append-only, iteration-addressed status/output/verdict evidence for replaced dynamic stages. */
+  stageEvidence?: StageEvidenceRecord[];
   /** Required dynamic stages that a later plan must not silently forget. */
   unresolvedStageObligations?: UnresolvedStageObligation[];
   /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */
@@ -1305,6 +1327,106 @@ export function attachStageConstraintAudit(
   };
   writeStageStatus(projectDir, runId, stageId, updated);
   return updated;
+}
+
+function stageEvidenceArchiveRoot(iteration: number, stageId: string): {
+  relativePath: string;
+  directoryName: string;
+} {
+  if (!Number.isSafeInteger(iteration) || iteration < 1) {
+    throw new Error(`Stage evidence iteration must be a positive integer, got ${iteration}`);
+  }
+  const directoryName = Buffer.from(stageId, 'utf-8').toString('base64url') || '_';
+  return {
+    relativePath: join('stage_evidence', `iteration_${iteration}`, directoryName),
+    directoryName,
+  };
+}
+
+function materializeImmutableStageEvidenceFile(source: string, destination: string): boolean {
+  if (existsSync(destination)) return true;
+  if (!existsSync(source)) return false;
+  atomicWrite(destination, readFileSync(source, 'utf-8'));
+  return true;
+}
+
+/**
+ * Materialize the files referenced by one retired-stage record before that
+ * record is made reachable from the next atomic run.json write. Existing
+ * archive files are never overwritten, making retries after an interrupted
+ * boundary idempotent.
+ */
+export function captureStageEvidence(
+  projectDir: string,
+  runId: string,
+  iteration: number,
+  stageId: string,
+  status: StageStatus,
+): StageEvidenceRecord {
+  const runDirPath = runDir(projectDir, runId);
+  const liveStageDir = stageDir(projectDir, runId, stageId);
+  const archive = stageEvidenceArchiveRoot(iteration, stageId);
+  const archiveDir = join(runDirPath, archive.relativePath);
+  mkdirSync(archiveDir, { recursive: true });
+
+  const statusPath = join(archive.relativePath, 'status.json');
+  const absoluteStatusPath = join(runDirPath, statusPath);
+  if (!existsSync(absoluteStatusPath)) {
+    atomicWrite(absoluteStatusPath, `${JSON.stringify(status, null, 2)}\n`);
+  }
+  const persistedStatus = JSON.parse(readFileSync(absoluteStatusPath, 'utf-8')) as StageStatus;
+
+  const outputPath = join(archive.relativePath, 'output.md');
+  const hasOutput = materializeImmutableStageEvidenceFile(
+    join(liveStageDir, 'output.md'),
+    join(runDirPath, outputPath),
+  );
+
+  const attemptOutputPaths: Array<{ attemptIndex: number; path: string }> = [];
+  for (const attempt of persistedStatus.attempts ?? []) {
+    const filename = `output_attempt_${attempt.index}.md`;
+    const path = join(archive.relativePath, filename);
+    if (materializeImmutableStageEvidenceFile(join(liveStageDir, filename), join(runDirPath, path))) {
+      attemptOutputPaths.push({ attemptIndex: attempt.index, path });
+    }
+  }
+
+  const verdictPath = join(archive.relativePath, 'verdict.json');
+  const hasVerdict = materializeImmutableStageEvidenceFile(
+    join(runDirPath, `verdict_${stageId}.json`),
+    join(runDirPath, verdictPath),
+  );
+
+  return {
+    stageId,
+    iteration,
+    status: persistedStatus,
+    statusPath,
+    ...(hasOutput ? { outputPath } : {}),
+    attemptOutputPaths,
+    ...(hasVerdict ? { verdictPath } : {}),
+  };
+}
+
+/**
+ * Start a later same-ID stage with live aliases that describe only the new DAG.
+ * The previous aliases are removed only after captureStageEvidence has created
+ * immutable iteration-qualified copies.
+ */
+export function resetStageLiveAttemptAliases(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  status: StageStatus,
+): void {
+  const dir = stageDir(projectDir, runId, stageId);
+  mkdirSync(dir, { recursive: true });
+  atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
+  for (const filename of readdirSync(dir)) {
+    if (filename === 'output.md' || /^output_attempt_\d+\.md$/.test(filename)) {
+      try { unlinkSync(join(dir, filename)); } catch { /* already absent */ }
+    }
+  }
 }
 
 /** Re-pend a stage while retaining its immutable attempt ledger and aggregates. */

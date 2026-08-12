@@ -94,4 +94,66 @@ describe('Reality-Gate advisory summary', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('renders archived iteration stages and supplies their immutable output to the narrative', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'flowcrew-summary-stage-evidence-'));
+    const previousFcGlobalDir = fcGlobalDir();
+    try {
+      setFcGlobalDir(join(root, 'fc-home'));
+      const projectDir = join(root, 'project');
+      mkdirSync(projectDir);
+      const created = createRun(projectDir, 'test', 'name: test', ['active_work']);
+      const state = readRunState(projectDir, created.runId);
+      state.status = 'complete';
+      state.completedAt = new Date().toISOString();
+      state.supervise = false;
+      state.stages.active_work = { status: 'complete', retries: 0, duration_ms: 2_000 };
+      const evidenceRoot = 'stage_evidence/iteration_1/retired';
+      state.stageEvidence = [{
+        iteration: 1,
+        stageId: 'retired_work',
+        status: {
+          status: 'complete',
+          retries: 0,
+          duration_ms: 1_000,
+          attempts: [{
+            index: 1,
+            startedAt: '2026-08-12T00:00:00.000Z',
+            completedAt: '2026-08-12T00:00:01.000Z',
+            status: 'complete',
+            duration_ms: 1_000,
+            exitCode: 0,
+          }],
+        },
+        statusPath: `${evidenceRoot}/status.json`,
+        outputPath: `${evidenceRoot}/output.md`,
+        attemptOutputPaths: [{ attemptIndex: 1, path: `${evidenceRoot}/output_attempt_1.md` }],
+      }];
+      writeRunState(projectDir, created.runId, state);
+      const evidenceDir = join(runDir(projectDir, created.runId), evidenceRoot);
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, 'output.md'), 'historical output remains reachable', 'utf-8');
+      writeFileSync(join(runDir(projectDir, created.runId), 'stages', 'active_work', 'output.md'), 'active output', 'utf-8');
+      let narrativePrompt = '';
+      const adapter: Adapter = {
+        run: async (prompt) => {
+          narrativePrompt = prompt;
+          return {
+            output: '## What was done\n- summarized active and historical evidence',
+            exitCode: 0,
+            duration_ms: 1,
+          };
+        },
+      };
+
+      const summary = await generateRunSummary(projectDir, created.runId, adapter);
+
+      expect(summary).toContain('retired_work [iteration 1, archived]: complete');
+      expect(narrativePrompt).toContain('## Stage: retired_work [iteration 1, archived] (complete, 1s)');
+      expect(narrativePrompt).toContain('historical output remains reachable');
+    } finally {
+      setFcGlobalDir(previousFcGlobalDir);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

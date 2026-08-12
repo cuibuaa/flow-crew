@@ -95,6 +95,7 @@ import type { KGNodeType, KGEdgeType } from './knowledge-graph.js';
 import { computeBuildFingerprint, type DaemonBuildFingerprint } from './daemon-identity.js';
 import {
   CampaignNotFoundError,
+  deriveRunTokenCost,
   readCampaignOperatorIndex,
   readCampaignOperatorView,
   readCampaignRunPage,
@@ -679,6 +680,7 @@ interface RunApiShape {
   status: string;
   startedAt: string;
   stages: { id: string; role: string; status: string; duration_ms?: number; retries: number; reruns?: number; attempts?: StageAttempt[] | SupervisorAttempt[]; dependsOn: string[] }[];
+  stageEvidence?: StoreState['stageEvidence'];
 }
 
 function stateToApi(state: StoreState, projectDir: string): RunApiShape {
@@ -688,6 +690,7 @@ function stateToApi(state: StoreState, projectDir: string): RunApiShape {
     workflowName: state.workflowName,
     status: state.status,
     startedAt: state.startedAt,
+    ...(state.stageEvidence ? { stageEvidence: state.stageEvidence } : {}),
     stages: [
       ...Object.entries(state.stages).map(([id, s]) => ({
       id,
@@ -743,6 +746,7 @@ interface TaskShape {
   budget?: StoreState['budget'];
   attemptSummaryRefresh?: ReturnType<typeof readAttemptSummaryRefreshState>;
   supervisor?: StoreState['supervisor'];
+  stageEvidence?: StoreState['stageEvidence'];
 }
 
 type MetricFormat = 'currency_usd' | 'rating_0_to_10' | 'pct' | 'count' | 'duration_min' | 'raw';
@@ -865,9 +869,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     : state.completedAt
       ? Math.max(0, Date.parse(state.completedAt) - Date.parse(state.startedAt)) || 0
       : stages.reduce((sum, s) => sum + (s.duration_ms ?? 0), 0);
-  const finiteOr0 = (n?: number) => (typeof n === 'number' && Number.isFinite(n) ? n : 0);
-  const stageTokens = Object.values(state.stages).reduce((sum, s) => sum + finiteOr0(s.tokens_in) + finiteOr0(s.tokens_out), 0);
-  const totalTokens = stageTokens + finiteOr0(state.supervisor?.tokens_in) + finiteOr0(state.supervisor?.tokens_out);
+  const totalTokens = deriveRunTokenCost(state).tokens;
   const { bestScore, metricName } = readBestScore(projectDir, state.runId);
   const task: TaskShape = {
     id: state.runId,
@@ -902,6 +904,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     budget: state.budget,
     attemptSummaryRefresh: readAttemptSummaryRefreshState(projectDir, state.runId),
     supervisor: state.supervisor,
+    ...(state.stageEvidence ? { stageEvidence: state.stageEvidence } : {}),
   };
   if (state.dispatchedStages) task.dispatchedStages = state.dispatchedStages;
   if (opts?.includeIterationLog) {
@@ -1273,7 +1276,10 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
   }
   const stageIds = new Set<string>([
     ...Object.keys(state.stages),
-    ...Object.keys(roles),
+    ...Object.keys(roles).filter((id) =>
+      state.stages[id] !== undefined
+      || dispatched.has(id)
+      || !state.stageEvidence?.some((entry) => entry.stageId === id)),
     ...dispatched.keys(),
   ]);
   const stages = [...stageIds].map((id) => {
@@ -1345,6 +1351,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     realityGate: state.realityGate,
     supervisor: state.supervisor,
     stages,
+    stageEvidence: state.stageEvidence ?? [],
     kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
     events: readRunEvents(state.runId),
     stage_outputs: readStageOutputPreviews(state.runId),

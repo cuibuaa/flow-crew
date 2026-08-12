@@ -69,6 +69,7 @@ const FIGURE_OUTPUT_HEADING = /^(?:fig(?:ure)?|图)\s*\d+\b/i;
 const OUTPUT_ASSIGNMENT = /^(?:[-*+]\s*)?(?:result_file|output_file|report_file|report_path|report_dir|writable_paths)\s*:/i;
 const OBLIGATION_LIST_INTRO = /\b(?:required|deliverables?|outputs?|artifacts?|files?\s+to\s+(?:write|create|produce))\b.{0,80}(?::|\bfollow(?:s|ing)\b)|(?:交付物|产出|输出|验收文件|必须生成|必须写入|须写入).{0,50}[：:]?$/i;
 const EXCEPTION_DIRECTIVE = /\b(?:must|shall|required(?:\s+to)?)\s+(?:be\s+)?(?:preserved|retained|kept|left unchanged)|\b(?:must|shall)\s+not\s+(?:be\s+)?(?:removed|deleted|edited|changed|rewritten)|\b(?:explicit(?:ly)?\s+)?(?:except|exception|exempt|allowed|permitted)\b|\bpreserve\b.{0,50}\b(?:history|historical|existing|legacy)\b/i;
+const REVOKED_EXCEPTION_DIRECTIVE = /\b(?:delete|remove|eliminate|drop|retire)\b.{0,80}\b(?:exception|exemption|allowance|permission)\b|\b(?:exception|exemption|allowance|permission)\b.{0,80}\b(?:must|shall|should|will)\s+(?:be\s+)?(?:deleted|removed|eliminated|dropped|retired)\b/i;
 const BYTE_EQUIVALENCE_CONTRACT = /\b(?:must|shall|required)\b.{0,120}\b(?:byte[- ](?:equal|equality|identical)|bytes?\s+(?:unchanged|preserved|identical)|bit[- ]for[- ]bit|exact byte (?:copy|identity))\b|\b(?:byte[- ](?:equal|equality|identical)|bytes?\s+(?:unchanged|preserved|identical)|preserve(?:d)?\s+bytes?|bit[- ]for[- ]bit|exact byte (?:copy|identity))\b.{0,120}\b(?:must|shall|required|contract)\b/i;
 const EXACT_HEADING_CONTRACT = /\b(?:must|shall|required)\b.{0,100}\bexact\b.{0,60}\b(?:markdown\s+)?heading\b|\bexact\b.{0,60}\b(?:markdown\s+)?heading\b.{0,100}\b(?:must|shall|required|violat(?:e|es|ion))\b/i;
 const CEILING_DELIVERABLE = /\b(?:ceiling|rigorous\s+negative)\b.{0,140}\b(?:valid|real|accepted|acceptable)\s+(?:terminal\s+)?deliverable\b|\b(?:valid|real|accepted|acceptable)\s+(?:terminal\s+)?deliverable\b.{0,140}\b(?:ceiling|rigorous\s+negative)\b/i;
@@ -313,7 +314,9 @@ function exceptionStatements(body: string, bodyLineOffset: number): ExceptionSta
   const flush = () => {
     if (paragraph.length === 0) return;
     const text = paragraph.join(' ').trim();
-    if (EXCEPTION_DIRECTIVE.test(text) && !ILLUSTRATIVE_DIRECTIVE.test(text)) {
+    if (EXCEPTION_DIRECTIVE.test(text)
+        && !REVOKED_EXCEPTION_DIRECTIVE.test(text)
+        && !ILLUSTRATIVE_DIRECTIVE.test(text)) {
       const contextualText = headingContext ? `${headingContext} ${text}` : text;
       statements.push({
         line: bodyLineOffset + paragraphStart + 1,
@@ -480,6 +483,30 @@ function exactHeadingProxy(script: string): HeadingProxy | undefined {
     if (literal) return { evidence: pythonList[0], literal: normalizeHeadingLiteral(literal[2]) };
   }
 
+  const exactFirstLine = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:"(#{1,6}[ \t]+[^"\r\n]+)"|'(#{1,6}[ \t]+[^'\r\n]+)')\s*;/g;
+  for (const assignment of script.matchAll(exactFirstLine)) {
+    if (assignment.index === undefined) continue;
+    const tail = script.slice(assignment.index + assignment[0].length);
+    const comparison = new RegExp(
+      `\\bif\\s*\\(\\s*[A-Za-z_$][\\w$]*\\.split\\s*\\([^;\\r\\n]{1,180}\\)\\s*\\[\\s*0\\s*\\]\\s*!={1,2}\\s*${assignment[1]}\\s*\\)\\s*\\{?[\\s\\S]{0,300}?\\b([A-Za-z_$][\\w$]*)\\.push\\s*\\(`,
+    ).exec(tail);
+    if (!comparison) continue;
+    const failure = new RegExp(
+      `\\bif\\s*\\(\\s*${comparison[1]}\\.length\\s*\\)\\s*(?:\\{[\\s\\S]{0,240})?process\\.exit\\s*\\(\\s*[1-9]`,
+    ).test(tail.slice(comparison.index + comparison[0].length));
+    if (failure) {
+      return {
+        evidence: `${assignment[0]} ${comparison[0]}`,
+        literal: normalizeHeadingLiteral(assignment[2] ?? assignment[3]),
+      };
+    }
+  }
+
+  const nodeMatchAll = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]*\.matchAll\s*\(\s*\/(\^#{1,6}[^/\r\n]+)\/[a-z]*\s*\)[^;\r\n]*;[\s\S]{0,300}\bif\s*\(\s*!\s*\1\b[^)]*\)\s*(?:\{[\s\S]{0,180})?(?:throw\b|process\.exit\s*\(\s*[1-9])/i.exec(script);
+  if (nodeMatchAll) {
+    return { evidence: nodeMatchAll[0], literal: normalizeHeadingLiteral(nodeMatchAll[2]) };
+  }
+
   const nodeSearch = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]*\.search\s*\(\s*\/(\^#{1,6}[^/\r\n]+)\/[a-z]*\s*\)\s*;?[\s\S]{0,220}\bif\s*\([^)]*\b\1\s*<\s*0[^)]*\)\s*(?:\{[\s\S]{0,180})?(?:throw\b|process\.exit\s*\(\s*[1-9])/i.exec(script);
   if (nodeSearch) {
     return { evidence: nodeSearch[0], literal: normalizeHeadingLiteral(nodeSearch[2]) };
@@ -638,11 +665,50 @@ function scopeCoversStatement(scope: string, statement: ExceptionStatement): boo
 interface ForbiddenSearch {
   patterns: string[];
   scopes: string[];
+  allowanceScopes?: string[];
 }
 
 function forbiddenSearch(command: string, scopes: string[] = extractPathTokens(command)): ForbiddenSearch {
   const quoted = [...command.matchAll(/(['"])([^'"\r\n]{3,})\1/g)].map((match) => match[2]);
   return { patterns: quoted, scopes };
+}
+
+function explicitAllowanceScopes(
+  script: string,
+  flow: string,
+  hitVariable: string,
+  patterns: readonly string[],
+): string[] {
+  // Recognize only the narrow, auditable shape where a negated allowance is
+  // conjoined with the hit and its assignment names the exact searched literal.
+  // More general JavaScript control-flow semantics remain outside this lint.
+  const hitIndex = flow.indexOf(hitVariable);
+  if (hitIndex < 0) return [];
+  const beforeHit = flow.slice(0, hitIndex);
+  const afterHit = flow.slice(hitIndex + hitVariable.length);
+  const allowanceVariable = /!\s*([A-Za-z_$][\w$]*)\s*&&[\s(]*$/.exec(beforeHit)?.[1]
+    ?? /^[\s)]*&&\s*!\s*([A-Za-z_$][\w$]*)\b/.exec(afterHit)?.[1];
+  if (!allowanceVariable) return [];
+
+  for (const assignment of script.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+)\s*;/g)) {
+    if (assignment[1] !== allowanceVariable) continue;
+    const literals = [...assignment[2].matchAll(/(['"])([^'"\r\n]{3,})\1/g)]
+      .map((match) => match[2]);
+    if (!patterns.some((pattern) => literals.includes(pattern))) return [];
+    return [...new Set(literals
+      .filter((literal) => !patterns.includes(literal))
+      .map((literal) => normalizeArtifactPath(literal)
+        ?? (/^\.[A-Za-z0-9_.-]+$/.test(literal) ? literal : undefined))
+      .filter((scope): scope is string => scope !== undefined))];
+  }
+  return [];
+}
+
+function allowanceCoversStatement(scopes: readonly string[], statement: ExceptionStatement): boolean {
+  return scopes.some((scope) =>
+    scopeCoversStatement(scope, statement)
+    || statement.text.includes(`\`${scope}\``)
+    || (scope === '.gitignore' && /\b(?:gitignore|ignore file|ignore configuration)\b/i.test(statement.text)));
 }
 
 function forbiddenSearches(script: string): ForbiddenSearch[] {
@@ -675,7 +741,17 @@ function forbiddenSearches(script: string): ForbiddenSearch[] {
     const push = new RegExp(`\\b${match[1]}\\b[\\s\\S]{0,180}\\b([A-Za-z_$][\\w$]*)\\.push\\s*\\(`).exec(tail);
     if (!push) continue;
     const failure = new RegExp(`\\bif\\s*\\(\\s*${push[1]}\\.length\\s*\\)[\\s\\S]{0,220}(?:throw\\b|process\\.exit\\s*\\(\\s*[1-9])`).test(tail);
-    if (failure) searches.push({ patterns: [match[3]], scopes: [] });
+    if (failure) {
+      const prefix = tail.slice(Math.max(0, push.index - 300), push.index);
+      const guardStarts = [...prefix.matchAll(/\bif\s*\(/g)];
+      const guardStart = guardStarts.at(-1)?.index;
+      const flow = guardStart === undefined ? push[0] : prefix.slice(guardStart) + push[0];
+      searches.push({
+        patterns: [match[3]],
+        scopes: [],
+        allowanceScopes: explicitAllowanceScopes(script, flow, match[1], [match[3]]),
+      });
+    }
   }
 
   return searches;
@@ -696,7 +772,8 @@ function exceptionConflict(declaration: Exclude<CheckDecl, { kind: 'invalid' }>,
     const fragments = search.patterns.flatMap(literalFragments);
     const conflict = contract.exceptions.find((statement) =>
       fragments.some((fragment) => statement.text.includes(fragment))
-      && (search.scopes.length === 0 || search.scopes.some((scope) => scopeCoversStatement(scope, statement))));
+      && (search.scopes.length === 0 || search.scopes.some((scope) => scopeCoversStatement(scope, statement)))
+      && !allowanceCoversStatement(search.allowanceScopes ?? [], statement));
     if (conflict) return conflict;
   }
   return undefined;

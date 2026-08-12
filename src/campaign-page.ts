@@ -1468,9 +1468,15 @@ export function deriveRunTokenCost(state: StoreState): RunTokenCost {
   let tokens = 0;
   let complete = true;
   const attemptEvidence = { ...EMPTY_ATTEMPT_TOKEN_EVIDENCE };
+  // New runs expose retired dynamic work through the complete evidence ledger.
+  // `retiredStageUsage` remains a compatibility fallback, but contains the same
+  // statuses and must not be added a second time when evidence records exist.
+  const historicalStages: Array<[string, StageStatus]> = state.stageEvidence?.length
+    ? state.stageEvidence.map((entry): [string, StageStatus] => [entry.stageId, entry.status])
+    : (state.retiredStageUsage ?? []).map((entry): [string, StageStatus] => [entry.stageId, entry.status]);
   const stageLedgers: Array<[string, StageStatus]> = [
     ...Object.entries(state.stages),
-    ...(state.retiredStageUsage ?? []).map((entry): [string, StageStatus] => [entry.stageId, entry.status]),
+    ...historicalStages,
   ];
   for (const [stageId, stage] of stageLedgers) {
     if (stageId === '_supervisor') continue;
