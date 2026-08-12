@@ -7,6 +7,11 @@ import {
   extractDeclaredBriefInputPaths,
   normalizeBriefInputPath,
 } from './ship-inputs.js';
+import { isNegatedRequirementLine } from './brief-negation.js';
+import {
+  evaluateResearchFeasibility,
+  type ResearchFeasibilityEvaluation,
+} from './research-feasibility.js';
 
 export interface CriterionLintWarning {
   line: number;
@@ -36,6 +41,7 @@ export interface BriefPreflightReport {
     error?: string;
   };
   contractReady: boolean;
+  researchFeasibility?: ResearchFeasibilityEvaluation[];
   findings: BriefPreflightFinding[];
   requiresAcknowledgement: boolean;
 }
@@ -242,15 +248,9 @@ const PREREGISTRATION = /\b(?:pre[- ]?registr(?:ation|ations|er|ers|ered|ering)|
 const RULE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\b/i;
 const RULE_FREEZE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b/i;
 const BEFORE_MEASUREMENT = /\bbefore\b.{0,80}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcome|outcomes|result|results)\b/i;
-const EXPECTED_QUALIFYING_COUNT = /(?:^|[^A-Za-z0-9])(?:expected[_ -]qualifying[_ -]member[_ -]count|expected\s+(?:(?:number|count)\s+of\s+)?(?:qualifying|eligible|selected)\s+(?:members?|names?|items?|observations?|candidates?)|expected[_ -](?:member|name|item|observation|candidate)[_ -]count)(?:$|[^A-Za-z0-9])/i;
-const STRUCTURAL_DERIVATION = /(?:^|[^A-Za-z0-9])structural[_ -](?:quantit(?:y|ies)|counts?|rates?|inputs?)(?:$|[^A-Za-z0-9])|\b(?:comput(?:e|es|ed|ing)|calculat(?:e|es|ed|ing)|deriv(?:e|es|ed|ing))\b.{0,120}\b(?:structural|universe|formation|eligible|base[_ ]count|selection[_ ]rate|probabilit)/i;
-const NUMERIC_FEASIBILITY_FLOOR = /(?:^|[^A-Za-z0-9])(?:(?:qualifying[_ -]member[_ -])?floor|minimum|min(?:imum)?[_ -]?(?:expected[_ -]?)?(?:member|name|item|count)?|at[_ ]least)(?:$|[^A-Za-z0-9])\s*(?::|=|of|is)?\s*\d+(?:\.\d+)?\b/i;
-const REVISION_VERB = /\b(?:revise|revises|revised|revision|adjust|adjusts|adjusted|replace|replaces|replaced|relax|relaxes|relaxed)\b/i;
-const OUTCOME_UNSEEN = /\bbefore\b.{0,80}\b(?:any\s+)?(?:outcome|outcomes|result|results|measurement|measurements)\b.{0,40}\b(?:is|are|was|were|has|have|being|been)?\s*(?:seen|observed|measured|inspected|opened|used)\b|\bbefore\s+(?:measuring|observing|inspecting|opening|using)\b.{0,40}\b(?:outcome|outcomes|result|results)\b/i;
 const NUMERIC_LITERAL = /(?:^|[^A-Za-z0-9_])[-+−]?\d[\d,.]*(?:\s*(?:%|bps?|basis\s+points?))?(?=$|[^A-Za-z0-9_])/i;
 const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|hand(?:s|ed)?|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
 const DECISION_ILLUSTRATIVE = /\b(?:for example|illustrative(?:ly)?|e\.g\.)\b|(?:例如|比如|举例|只是例子|并非判据|不是判据)/i;
-const NEGATED_REQUIREMENT = /\b(?:do\s+not|don't|must\s+not|shall\s+not|should\s+not|may\s+not|cannot|can't|never|forbid(?:s|den)?|prohibit(?:s|ed)?|exclude(?:s|d)?|omit(?:s|ted)?|without)\b/i;
 
 function decisionLintLines(brief: string): string[] {
   const lines = briefBody(brief).split(/\r\n|\n|\r/);
@@ -275,7 +275,7 @@ function decisionLintLines(brief: string): string[] {
  * accepting a plausible result whose decision-grade checks were explicitly omitted.
  */
 function decisionRequirementLines(brief: string): string[] {
-  return decisionLintLines(brief).map((line) => NEGATED_REQUIREMENT.test(line) ? '' : line);
+  return decisionLintLines(brief).map((line) => isNegatedRequirementLine(line) ? '' : line);
 }
 
 function decisionRequirementBody(brief: string): string {
@@ -312,15 +312,6 @@ function preregistrationEvidence(brief: string): { line: number; excerpt: string
   const frozenBeforeMeasurement = RULE_FREEZE.test(body) && RULE_NOUN.test(body) && BEFORE_MEASUREMENT.test(body);
   if (!explicit && !frozenBeforeMeasurement) return undefined;
   return firstEvidenceLine(brief, explicit ? PREREGISTRATION : RULE_FREEZE);
-}
-
-function hasPreregistrationFeasibility(brief: string): boolean {
-  const body = decisionRequirementBody(brief);
-  return EXPECTED_QUALIFYING_COUNT.test(body)
-    && STRUCTURAL_DERIVATION.test(body)
-    && NUMERIC_FEASIBILITY_FLOOR.test(body)
-    && REVISION_VERB.test(body)
-    && OUTCOME_UNSEEN.test(body);
 }
 
 function operatorFigureEvidence(brief: string): { line: number; excerpt: string } | undefined {
@@ -363,6 +354,13 @@ function declaresPerStageWritablePaths(brief: string): boolean {
   return /\bwritable paths?\s*,?\s*by stage\b/i.test(body)
     || /\bper-stage\s+(?:writable paths?|write scopes?)\b/i.test(body)
     || /\b(?:stage|phase|gate)\s+[\w.-]+[^\n:]{0,40}\b(?:writable paths?|write scope)\s*:/i.test(body);
+}
+
+function feasibilityDistributionText(evaluation: ResearchFeasibilityEvaluation): string {
+  const summary = evaluation.distribution;
+  if (!summary) return '';
+  const location = summary.location;
+  return ` Structural distribution: n=${summary.sampleSize}, mean=${summary.mean}, median=${summary.median}, spread=${summary.spread}, selected ${summary.selectedStatistic}=${summary.selectedValue}, rank=${location.lowerRank}-${location.upperRank}/${location.of}, midrank percentile=${location.percentile}.`;
 }
 
 /** Inspect one exact brief string without reading or changing project state. */
@@ -439,16 +437,72 @@ export function inspectBrief(
     });
   }
 
+  const rc = parsed.research;
   const preregistration = preregistrationEvidence(brief);
-  if (preregistration && !hasPreregistrationFeasibility(brief)) {
+  let researchFeasibility: ResearchFeasibilityEvaluation[] | undefined;
+  if (rc?.feasibilityError) {
+    add({
+      code: 'research_feasibility_invalid',
+      level: 'fail',
+      message: `The declared research.feasibility contract is invalid: ${rc.feasibilityError}`,
+      acknowledgementRequired: true,
+      ...(preregistration ?? {}),
+      risk: 'A malformed structural model cannot support a pre-run feasibility decision and must not be silently ignored.',
+      suggestion: 'Use one documented research.feasibility model with finite structural inputs, a positive hard_floor, and unique labelled rules.',
+    });
+  } else if (rc?.feasibility) {
+    researchFeasibility = evaluateResearchFeasibility(rc.feasibility);
+    for (const evaluation of researchFeasibility) {
+      const distribution = feasibilityDistributionText(evaluation);
+      if (evaluation.decision === 'not_computable') {
+        add({
+          code: 'research_feasibility_not_computable',
+          level: 'warn',
+          message: `Research feasibility “${evaluation.label}” cannot be computed from pre-run structural quantities: ${evaluation.reason} No qualifying-member count was synthesized.`,
+          acknowledgementRequired: true,
+          ...(preregistration ?? {}),
+          risk: 'The run may still discover that the rule is empty, but inventing an expectation would be less honest than carrying the uncertainty explicitly.',
+          suggestion: 'Measure the named structural distribution before a later run, then replace not_computable with a computable model.',
+        });
+      } else if (evaluation.decision === 'fail') {
+        add({
+          code: 'research_feasibility_below_floor',
+          level: 'fail',
+          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, below hard_floor=${evaluation.hardFloor}.${distribution}`,
+          acknowledgementRequired: true,
+          ...(preregistration ?? {}),
+          risk: 'The pre-registered selection rule is structurally infeasible before any outcome is measured.',
+          suggestion: 'Revise or drop the rule before opening outcomes; do not tune it after measurement starts.',
+        });
+      } else if (evaluation.decision === 'warn') {
+        add({
+          code: 'research_feasibility_tight',
+          level: 'warn',
+          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}: it meets hard_floor=${evaluation.hardFloor} but is below warn_below=${evaluation.warnBelow}.${distribution}`,
+          acknowledgementRequired: true,
+          ...(preregistration ?? {}),
+          risk: 'The rule is feasible on its declared hard floor but has little structural margin.',
+          suggestion: 'Proceed only if the tight rule is intentional; otherwise revise it before outcomes are opened.',
+        });
+      } else {
+        add({
+          code: 'research_feasibility_ok',
+          level: 'ok',
+          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, meeting hard_floor=${evaluation.hardFloor}${evaluation.warnBelow === undefined ? '' : ` and warn_below=${evaluation.warnBelow}`}.${distribution}`,
+          acknowledgementRequired: false,
+          ...(preregistration ?? {}),
+        });
+      }
+    }
+  } else if (preregistration) {
     add({
       code: 'preregistration_feasibility_missing',
       level: 'fail',
-      message: 'A rule frozen before outcome measurement must carry an expected qualifying-member count derived from structural quantities, a numeric feasibility floor, and revision below that floor before outcomes are seen.',
+      message: 'A rule frozen before outcome measurement must declare a machine-readable research.feasibility model that computes its expected qualifying-member count or explicitly states why the structural quantity is not computable.',
       acknowledgementRequired: true,
       ...preregistration,
-      risk: 'A structurally empty rule can consume a full measurement round while correctly refusing outcome-driven tuning.',
-      suggestion: 'Compute the expected qualifying-member count from structural quantities, set a numeric minimum, and require the rule to be revised below that floor before any outcome is observed.',
+      risk: 'A prose promise to calculate later can let a structurally empty rule consume a full measurement round.',
+      suggestion: 'Declare research.feasibility with a numeric minimum in positive hard_floor and labelled rules using a computable structural model or an honest not_computable reason.',
     });
   }
 
@@ -501,7 +555,6 @@ export function inspectBrief(
     }
   }
 
-  const rc = parsed.research;
   if (!rc) {
     add({
       code: 'research_absent',
@@ -650,6 +703,7 @@ export function inspectBrief(
     inputKind,
     frontmatter,
     contractReady: !findings.some((finding) => finding.level === 'fail'),
+    ...(researchFeasibility === undefined ? {} : { researchFeasibility }),
     findings,
     requiresAcknowledgement: findings.some((finding) => finding.acknowledgementRequired),
   };

@@ -205,7 +205,7 @@ describe('decision-grade brief requirements', () => {
     expect(report.contractReady).toBe(false);
   });
 
-  it('accepts a pre-registration with a structural count, floor, and pre-outcome revision', () => {
+  it('does not mistake a prose promise of future arithmetic for a feasibility calculation', () => {
     const report = inspectBrief(structuredBrief([
       '# Measurement',
       'Pre-register and freeze the selection rule before measuring any outcomes.',
@@ -213,8 +213,12 @@ describe('decision-grade brief requirements', () => {
       'Set the feasibility floor: 10. Below that floor, revise the rule before any outcome is seen.',
     ].join('\n')));
 
-    expect(report.findings.some((finding) => finding.code === 'preregistration_feasibility_missing')).toBe(false);
-    expect(report.contractReady).toBe(true);
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'preregistration_feasibility_missing',
+      level: 'fail',
+      message: expect.stringContaining('machine-readable research.feasibility'),
+    }));
+    expect(report.contractReady).toBe(false);
   });
 
   it('does not treat prohibited feasibility work as a pre-registration feasibility figure', () => {
@@ -316,6 +320,70 @@ describe('gitignored input declaration convention', () => {
     });
 
     expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
+  });
+
+  it('does not report the exact subject-position prohibition as an undeclared input', () => {
+    const brief = [
+      '---',
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/result.md]',
+      '---',
+      '# Constraints',
+      'Nothing under `tests/` may be added to version control.',
+    ].join('\n');
+
+    const report = inspectBrief(brief, { gitignoredPathPrefixes: ['tests/'] });
+
+    expect(brief.endsWith('Nothing under `tests/` may be added to version control.')).toBe(true);
+    expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
+
+    const variant = inspectBrief(structuredBrief(
+      '# Constraints\n**Nothing within `tests/` shall be published at any time**.',
+    ), { gitignoredPathPrefixes: ['tests/'] });
+    expect(variant.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
+  });
+
+  it('retains auxiliary prohibitions while keeping positive nothing-lines visible', () => {
+    const prohibited = [
+      'Do not read `tests/` as an input.',
+      'Never commit anything under `tests/`.',
+    ];
+    for (const line of prohibited) {
+      const report = inspectBrief(structuredBrief(`# Constraints\n${line}`), {
+        gitignoredPathPrefixes: ['tests/'],
+      });
+      expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
+    }
+
+    const genuineRequirements = [
+      'Nothing prevents this task from reading `tests/` as an input.',
+      'Nothing under `tests/` is optional; use the directory as an input.',
+      'Nothing under `tests/` may prevent this task from reading the directory as an input.',
+      'Nothing under `tests/` may be added to version control — audit that directory as an input.',
+      'Read everything under `tests/` as a required input.',
+    ];
+    for (const line of genuineRequirements) {
+      const report = inspectBrief(structuredBrief(`# Inputs\n${line}`), {
+        gitignoredPathPrefixes: ['tests/'],
+      });
+      expect(report.findings).toContainEqual(expect.objectContaining({
+        code: 'gitignored_input_undeclared',
+        excerpt: line,
+      }));
+    }
+  });
+
+  it('suppresses only the governed path token when a line names another real input', () => {
+    const line = 'Read `private-data/source.csv` as an input. **Nothing under `tests/` may be added to version control.**';
+    const report = inspectBrief(structuredBrief(`# Inputs\n${line}`), {
+      gitignoredPathPrefixes: ['private-data/', 'tests/'],
+    });
+    const findings = report.findings.filter((finding) => finding.code === 'gitignored_input_undeclared');
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].message).toContain('private-data/source.csv');
+    expect(findings[0].message).not.toContain('`tests`');
   });
 });
 

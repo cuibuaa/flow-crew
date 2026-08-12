@@ -8,6 +8,7 @@ import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
+import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 
 /** Exact run lifecycle vocabulary. Semantic groups and guards below derive from it. */
 export const RUN_STATUS = {
@@ -365,6 +366,10 @@ export interface ResearchConfig {
   stop?: ResearchStopConditions;
   /** Per-round integrity gates (brief-declared; engine stays domain-agnostic). */
   integrity?: ResearchIntegrityConfig;
+  /** Structurally computable pre-run selection feasibility, parsed from the brief. */
+  feasibility?: ResearchFeasibilityConfig;
+  /** Present when a declared feasibility block was rejected instead of silently dropped. */
+  feasibilityError?: string;
   /**
    * OPAQUE JSON Schema for the round_result file (single source of the output contract).
    * The engine never interprets the fields — it only (a) injects it into the planner as

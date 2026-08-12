@@ -53,6 +53,15 @@ research:
   baseline: 0.72
   policy: greedy_stack
   higher_is_better: true
+  feasibility:
+    hard_floor: 10
+    warn_below: 20
+    rules:
+      - label: eligible across the full window
+        model: independent_repeated_conjunction
+        population: 500
+        per_period_rate: 0.8
+        periods: 12
   result_file: artifacts/evaluation/round_result.json
   report_dir: artifacts/evaluation
   result_schema:
@@ -153,6 +162,7 @@ the `research:` spelling; pass `--workflow research` explicitly when using the
 | `result_schema` | JSON Schema subset used both in planner context and at round ingestion. |
 | `context_roots` | Project-relative roots inventoried for a dynamic planner. Default: `data`. |
 | `directions` | Opaque portfolio labels an outer campaign should cover before accepting a frontier. |
+| `feasibility` | Pre-run structural feasibility contract for pre-registered selection rules; see below. |
 | `integrity.noop` | Reject baseline-equivalent results unless explicitly false. |
 | `integrity.max_std_ratio` | Maximum accepted `result_std / abs(result)`; default 0.30 when `result_std` exists. |
 | `integrity.outlier_factor` | Directional implausible-improvement cap relative to a nonzero baseline; default 5. |
@@ -172,6 +182,41 @@ The agent measures; the engine owns the decision. A confirmation failure marks
 that candidate unconfirmed, removes it from policy consideration, and then lets
 the remaining stop budget decide whether to continue or finish with an honest
 ceiling.
+
+### `research.feasibility`
+
+A pre-registered selection rule must not defer arithmetic that can be done from
+outcome-independent counts, rates, universe sizes, or window lengths. Put that
+arithmetic in `research.feasibility`; a prose promise to calculate it during the
+run is not a substitute.
+
+`hard_floor` is a positive qualifying-member minimum shared by the labelled
+rules. `warn_below`, when present, must be at least the hard floor. A computable
+count below `hard_floor` is a failing preflight finding. A count at or above the
+floor but below `warn_below` is a warning, so a feasible but tight rule remains a
+deliberate author decision. A count at or above both thresholds is OK.
+
+The supported models are deliberately structural and discriminated:
+
+| Model | Required fields | Computation |
+|---|---|---|
+| `independent_repeated_conjunction` | `population` (positive integer), `per_period_rate` (0 through 1), `periods` (positive integer) | `population × per_period_rate^periods`, evaluated in log space. Use this only when the repeated-rate and independence assumptions are justified before outcomes are opened. |
+| `formation_count_distribution` | Non-empty `counts` list of non-negative integers | Uses the minimum formation count as the rule's qualifying-member count. The counts must be structural and outcome-independent. |
+| `not_computable` | Non-empty `reason` | Emits an explicit warning and no numeric estimate. The reason should name the unavailable structural distribution or quantity. |
+
+Every computable evaluation also reports the structural sample size, mean,
+median, spread, selected value, rank interval, and midrank percentile. A repeated
+scalar rate is a distribution of `periods` tied observations, so its spread is
+reported as zero rather than omitted. Unknown fields, duplicate labels,
+non-finite values, out-of-range rates, fractional counts, and fields from a
+different model make the feasibility declaration invalid instead of being
+silently ignored.
+
+When feasibility depends on a distribution that does not yet exist, use
+`not_computable` honestly. Preflight must not invent a rate merely to produce a
+number; once the missing structural distribution has been measured without
+opening outcomes, a later brief can replace the declaration with a computable
+model.
 
 ## `program`
 

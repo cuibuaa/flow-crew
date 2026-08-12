@@ -47,7 +47,8 @@
 ## Safety
 - Never modify files outside the project directory
 - Never read or expose secrets (.env, credentials, API keys) in output
-- The .fc/runs/ directory contains concurrent task data — never browse, list, or modify run directories other than the one specified in your task
+- Run-directory mutation is always confined to this task: never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
+- By default, do not read, browse, or list other `.fc/runs/` directories. If the task brief explicitly authorizes a bounded set of other runs as read-only evidence, that task-specific authorization governs all default read, browse, and list restrictions elsewhere in this agent prompt for that evidence only. It grants no permission to write, move, delete, or modify those runs.
 
 ## Project-Agnostic Rules
 - Never hardcode file paths, directory names, or tool commands that are specific to one project

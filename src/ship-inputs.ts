@@ -10,6 +10,9 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import {
+  isNegatedPathMention,
+} from './brief-negation.js';
 
 export type BriefInputAssertionKind = 'row_count' | 'time_span' | 'file_count' | 'sha256';
 export type BriefInputAssertionState = 'confirmed' | 'refuted' | 'not_checkable';
@@ -541,8 +544,6 @@ export function extractBriefPathMentions(brief: string): BriefPathMention[] {
       section = inputHeading === outputHeading ? 'neutral' : inputHeading ? 'input' : 'output';
       return;
     }
-    if (/\b(?:do not|does not|must not|should not|shall not|never)\b/i.test(line)) return;
-
     const codeSpans: Array<{ start: number; end: number }> = [];
     const candidates: PathToken[] = [];
     for (const match of line.matchAll(/`([^`\n]+)`/g)) {
@@ -556,6 +557,7 @@ export function extractBriefPathMentions(brief: string): BriefPathMention[] {
     }
 
     for (const token of candidates) {
+      if (isNegatedPathMention(line, token.index, token.endIndex)) continue;
       const role = referenceRoleAt(line, token.index, token.endIndex, section);
       if (role === 'output' || role === 'excluded') continue;
       if (!mentions.has(token.path)) {

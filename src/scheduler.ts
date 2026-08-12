@@ -61,6 +61,7 @@ import {
 import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
 import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
+import { parseResearchFeasibility } from './research-feasibility.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
@@ -206,6 +207,11 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
       }
       if (typeof r.result_file === 'string') research.resultFile = r.result_file;
       if (typeof r.report_dir === 'string') research.reportDir = r.report_dir;
+      if (r.feasibility !== undefined) {
+        const feasibility = parseResearchFeasibility(r.feasibility);
+        if (feasibility.status === 'valid') research.feasibility = feasibility.value;
+        else research.feasibilityError = feasibility.error;
+      }
       // Per-round integrity gates — brief-declared so the engine carries no domain
       // field/threshold knowledge. snake_case in YAML → camelCase in config.
       if (r.integrity && typeof r.integrity === 'object') {
