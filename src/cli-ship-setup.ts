@@ -16,13 +16,17 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
   discoverProjectValidation,
+  reconcileProjectValidation,
   runValidationCommand,
   runProjectValidationBaseline,
+  type BriefValidationCommand,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
+  type ValidationRole,
   type ValidationRunRequest,
   type ValidationRunResponse,
 } from './project-validation.js';
@@ -436,6 +440,119 @@ function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; d
   }
 }
 
+export interface BriefValidationParseResult {
+  commands: BriefValidationCommand[];
+  error?: string;
+}
+
+const VALIDATION_ROLES: readonly ValidationRole[] = ['build', 'test', 'lint'];
+
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.codePointAt(0) as number;
+    return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+  });
+}
+
+function validationDeclarationError(briefPath: string, reason: string): BriefValidationParseResult {
+  return {
+    commands: [],
+    error: `Invalid brief validation declaration at ${briefPath}#validation: ${reason}`,
+  };
+}
+
+/** Parse only a leading frontmatter validation block into shell-free argv declarations. */
+export function parseBriefValidationCommands(brief: string, briefPath: string): BriefValidationParseResult {
+  const withoutBom = brief.startsWith('\uFEFF') ? brief.slice(1) : brief;
+  const openingLength = withoutBom.startsWith('---\r\n') ? 5 : withoutBom.startsWith('---\n') ? 4 : 0;
+  if (openingLength === 0) return { commands: [] };
+  const afterOpening = withoutBom.slice(openingLength);
+  const emptyFrontmatter = afterOpening === '---'
+    || afterOpening.startsWith('---\n')
+    || afterOpening.startsWith('---\r\n');
+  const closingFence = emptyFrontmatter ? undefined : /\r?\n---(?:\r?\n|$)/.exec(afterOpening);
+  if (!emptyFrontmatter && !closingFence) {
+    return validationDeclarationError(
+      briefPath,
+      'leading YAML frontmatter fence was opened but never closed',
+    );
+  }
+  const frontmatter = emptyFrontmatter ? '' : afterOpening.slice(0, closingFence?.index);
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(frontmatter) as unknown;
+  } catch (error) {
+    return validationDeclarationError(briefPath, `YAML could not be parsed: ${errorMessage(error)}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { commands: [] };
+  const validation = (parsed as Record<string, unknown>).validation;
+  if (validation === undefined) return { commands: [] };
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) {
+    return validationDeclarationError(briefPath, '`validation` must be a mapping with a `commands` field');
+  }
+  const validationRecord = validation as Record<string, unknown>;
+  const validationFields = Object.keys(validationRecord);
+  const unknownValidationField = validationFields.find((field) => field !== 'commands');
+  if (unknownValidationField) {
+    return validationDeclarationError(
+      briefPath,
+      `unknown field ${JSON.stringify(unknownValidationField)} under \`validation\``,
+    );
+  }
+  const commands = validationRecord.commands;
+  if (!commands || typeof commands !== 'object' || Array.isArray(commands)) {
+    return validationDeclarationError(briefPath, '`validation.commands` must be a non-empty role mapping');
+  }
+  const commandsRecord = commands as Record<string, unknown>;
+  const roleNames = Object.keys(commandsRecord);
+  if (roleNames.length === 0) {
+    return validationDeclarationError(briefPath, '`validation.commands` must declare at least one role');
+  }
+  const unknownRole = roleNames.find((role) => !VALIDATION_ROLES.includes(role as ValidationRole));
+  if (unknownRole) {
+    return validationDeclarationError(briefPath, `unknown role ${JSON.stringify(unknownRole)} under \`validation.commands\``);
+  }
+
+  const declarations: BriefValidationCommand[] = [];
+  for (const role of VALIDATION_ROLES) {
+    if (!Object.hasOwn(commandsRecord, role)) continue;
+    const value = commandsRecord[role];
+    const evidencePath = `${briefPath}#validation.commands.${role}`;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return validationDeclarationError(briefPath, `${evidencePath} must be a mapping with \`command\` and \`args\``);
+    }
+    const commandRecord = value as Record<string, unknown>;
+    const unknownField = Object.keys(commandRecord).find((field) => field !== 'command' && field !== 'args');
+    if (unknownField) {
+      return validationDeclarationError(
+        briefPath,
+        `unknown field ${JSON.stringify(unknownField)} at ${evidencePath}`,
+      );
+    }
+    if (typeof commandRecord.command !== 'string' || commandRecord.command.trim().length === 0) {
+      return validationDeclarationError(briefPath, `${evidencePath}.command must be a non-empty string`);
+    }
+    if (containsControlCharacter(commandRecord.command)) {
+      return validationDeclarationError(briefPath, `${evidencePath}.command must not contain a control character`);
+    }
+    if (!Array.isArray(commandRecord.args) || !commandRecord.args.every((argument) => typeof argument === 'string')) {
+      return validationDeclarationError(briefPath, `${evidencePath}.args must be an array containing only strings`);
+    }
+    const controlArgument = commandRecord.args.find((argument: string) => containsControlCharacter(argument));
+    if (controlArgument !== undefined) {
+      return validationDeclarationError(briefPath, `${evidencePath}.args must not contain a control character`);
+    }
+    declarations.push({
+      role,
+      command: commandRecord.command,
+      args: [...commandRecord.args] as string[],
+      evidencePath,
+    });
+  }
+  return { commands: declarations };
+}
+
 function canonicalProject(path: string, fs: ShipSetupFileSystem): string {
   if (!fs.exists(path)) throw new Error(`source project does not exist: ${path}`);
   if (!fs.readable(path)) throw new Error(`source project is not readable: ${path}`);
@@ -692,11 +809,18 @@ function normalizedPopulationIdentity(projectDir: string, value: string): string
   return identity;
 }
 
+function isPythonExecutable(command: string): boolean {
+  return /^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$/i.test(basename(command));
+}
+
 function discoverTestPopulationMethod(
   projectDir: string,
   fs: ShipSetupFileSystem,
+  declaredCommands: readonly BriefValidationCommand[],
 ): { method?: TestPopulationMethod; reason?: string; hasConfiguredTests: boolean; validationUnknown: boolean } {
-  const validation = discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText });
+  const validation = declaredCommands.length === 0
+    ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
+    : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
   const testCommand = validation.commands.find((command) => command.role === 'test');
   if (!testCommand) {
     return {
@@ -772,20 +896,21 @@ function discoverTestPopulationMethod(
     }
   }
 
-  if (testCommand.command === 'python'
+  if (isPythonExecutable(testCommand.command)
       && testCommand.args[0] === '-m'
       && testCommand.args[1] === 'pytest') {
+    const collectorArgs = [...testCommand.args, '--collect-only', '-q'];
     return {
       hasConfiguredTests: true,
       validationUnknown: false,
       method: {
         tool: 'pytest',
-        display: 'python -m pytest --collect-only -q',
+        display: [testCommand.command, ...collectorArgs].join(' '),
         evidencePath: testCommand.evidencePath ?? join(projectDir, 'pyproject.toml'),
         request: {
           ...testCommand,
-          args: [...testCommand.args, '--collect-only', '-q'],
-          display: 'python -m pytest --collect-only -q',
+          args: collectorArgs,
+          display: [testCommand.command, ...collectorArgs].join(' '),
           cwd: projectDir,
         },
       },
@@ -870,9 +995,10 @@ async function compareTestPopulations(
   targetDir: string,
   fs: ShipSetupFileSystem,
   runner: ValidationCommandRunner,
+  declaredCommands: readonly BriefValidationCommand[],
 ): Promise<TestPopulationParity | undefined> {
-  const sourceDiscovery = discoverTestPopulationMethod(sourceDir, fs);
-  const targetDiscovery = discoverTestPopulationMethod(targetDir, fs);
+  const sourceDiscovery = discoverTestPopulationMethod(sourceDir, fs, declaredCommands);
+  const targetDiscovery = discoverTestPopulationMethod(targetDir, fs, declaredCommands);
   if (!sourceDiscovery.hasConfiguredTests && !targetDiscovery.hasConfiguredTests) return undefined;
   if (targetDiscovery.validationUnknown) return undefined;
   if (!sourceDiscovery.method || !targetDiscovery.method) {
@@ -924,7 +1050,7 @@ async function compareTestPopulations(
       },
       missingFromTarget: [],
       extraInTarget: [],
-      reason: `Cannot collect exact source/target test populations: ${errorMessage(error)}`,
+      reason: `Cannot collect exact source/target test populations using ${sourceDiscovery.method.evidencePath}: ${errorMessage(error)}`,
     };
   }
 }
@@ -945,6 +1071,7 @@ export async function runShipSetup(
     : join(projectDir, parsed.brief as string));
   const measuredBrief = safeReadBrief(briefPath, deps.fs);
   const brief = measuredBrief.text;
+  const declaredValidation = parseBriefValidationCommands(brief, briefPath);
   const sourceVerification = verifyBriefInputs(brief, projectDir, deps.fs);
   let facts = setupFacts(
     projectDir,
@@ -954,6 +1081,9 @@ export async function runShipSetup(
     parsed,
     sourceVerification,
   );
+  if (declaredValidation.error) {
+    return refused(facts, [{ phase: 'validation', reason: declaredValidation.error }]);
+  }
   const sourceBlockers = verificationBlockers('source', sourceVerification);
   if (sourceBlockers.length > 0) return refused(facts, sourceBlockers);
   if (deps.fs.entryExists(targetDir)) {
@@ -1021,6 +1151,7 @@ export async function runShipSetup(
     targetDir,
     deps.fs,
     deps.runTestCollectionCommand,
+    declaredValidation.commands,
   );
   if (testPopulation) facts = { ...facts, testPopulation };
   if (testPopulation?.state === 'unavailable') {
@@ -1045,6 +1176,7 @@ export async function runShipSetup(
   const validationBaseline = await runProjectValidationBaseline(targetDir, {
     fs: { exists: deps.fs.exists, readText: deps.fs.readText },
     ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+    declaredCommands: declaredValidation.commands,
   });
   facts = { ...facts, validationBaseline };
   const validationBlockers: ShipSetupBlocker[] = validationBaseline.discovery.state === 'unknown'
@@ -1055,10 +1187,16 @@ export async function runShipSetup(
     : [];
   validationBlockers.push(...validationBaseline.results
     .filter((result) => result.state === 'launch_error')
-    .map((result): ShipSetupBlocker => ({
-      phase: 'validation',
-      reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
-    })));
+    .map((result): ShipSetupBlocker => {
+      const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
+      const declaration = command?.provenance?.source === 'brief'
+        ? ` declared at ${command.provenance.evidencePath}`
+        : '';
+      return {
+        phase: 'validation',
+        reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${declaration}: ${result.reason ?? 'command ended without an exit code'}`,
+      };
+    }));
   if (validationBlockers.length > 0) return refused(facts, validationBlockers);
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,

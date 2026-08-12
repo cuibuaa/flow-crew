@@ -316,6 +316,305 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(existsSync(report.readyRecordPath)).toBe(true);
   });
 
+  it('measures a brief-declared pytest command, records provenance, and persists regression gates', async () => {
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
+    const declaredPython = '/opt/research-environment/bin/python';
+    writeBrief([
+      '---',
+      'validation:',
+      '  commands:',
+      '    test:',
+      `      command: ${declaredPython}`,
+      '      args: [-m, pytest, --label, "literal; $(must-not-run)"]',
+      '---',
+      '# Goal',
+      'Validate the research project without changing its configuration.',
+    ]);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      return { exitCode: 0 };
+    });
+    const baseline = validationRunner();
+    const population = vi.fn<ValidationCommandRunner>(() => ({
+      exitCode: 0,
+      stdout: 'checks/test_research.py::test_population\n',
+      durationMs: 3,
+    }));
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: baseline,
+      runTestCollectionCommand: population,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      testPopulation: {
+        state: 'matched',
+        method: {
+          tool: 'pytest',
+          evidencePath: `${fixture.brief}#validation.commands.test`,
+        },
+        source: { count: 1 },
+        target: { count: 1 },
+      },
+      validationBaseline: {
+        discovery: {
+          state: 'partial',
+          missingRoles: ['build', 'lint'],
+          commands: [expect.objectContaining({
+            role: 'test',
+            command: declaredPython,
+            args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
+            evidencePath: `${fixture.brief}#validation.commands.test`,
+            provenance: {
+              source: 'brief',
+              evidencePath: `${fixture.brief}#validation.commands.test`,
+            },
+          })],
+        },
+        results: [
+          expect.objectContaining({ role: 'build', state: 'not_configured' }),
+          expect.objectContaining({ role: 'test', state: 'passed' }),
+          expect.objectContaining({ role: 'lint', state: 'not_configured' }),
+        ],
+        gateCriteria: expect.arrayContaining([
+          expect.objectContaining({ role: 'test', rule: 'must_remain_green' }),
+        ]),
+      },
+    });
+    expect(population.mock.calls.map(([request]) => [request.command, request.args, request.cwd])).toEqual([
+      [declaredPython, ['-m', 'pytest', '--label', 'literal; $(must-not-run)', '--collect-only', '-q'], fixture.project],
+      [declaredPython, ['-m', 'pytest', '--label', 'literal; $(must-not-run)', '--collect-only', '-q'], fixture.target],
+    ]);
+    expect(baseline).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      command: declaredPython,
+      args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
+      cwd: fixture.target,
+    }));
+    if (report.state !== 'ready') throw new Error('declared-validation setup unexpectedly refused');
+    const record = JSON.parse(readFileSync(report.readyRecordPath, 'utf-8')) as Record<string, any>;
+    expect(record.validationBaseline.discovery.commands[0].provenance).toEqual({
+      source: 'brief',
+      evidencePath: `${fixture.brief}#validation.commands.test`,
+    });
+  });
+
+  it('treats valid empty frontmatter as no validation declaration for a configured project', async () => {
+    writeBrief(['---', '---', '# Goal', 'Validate the configured project.']);
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      validationBaseline: {
+        discovery: { state: 'configured', missingRoles: [] },
+      },
+    });
+    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+      ['npm', ['run', 'build']],
+      ['npm', ['run', 'test']],
+      ['npm', ['run', 'lint']],
+    ]);
+  });
+
+  it('refuses malformed and structurally invalid validation declarations before creating a worktree', async () => {
+    const cases = [
+      {
+        name: 'malformed YAML',
+        lines: ['---', 'validation: [', '---', '# Goal'],
+        diagnostic: 'YAML',
+      },
+      {
+        name: 'empty command map',
+        lines: ['---', 'validation:', '  commands: {}', '---', '# Goal'],
+        diagnostic: 'must declare at least one',
+      },
+      {
+        name: 'unknown role',
+        lines: ['---', 'validation:', '  commands:', '    deploy:', '      command: release', '      args: []', '---', '# Goal'],
+        diagnostic: 'unknown role',
+      },
+      {
+        name: 'unknown command field',
+        lines: ['---', 'validation:', '  commands:', '    test:', '      command: check', '      args: []', '      shell: true', '---', '# Goal'],
+        diagnostic: 'unknown field',
+      },
+      {
+        name: 'missing argv array',
+        lines: ['---', 'validation:', '  commands:', '    test:', '      command: check', '---', '# Goal'],
+        diagnostic: 'args',
+      },
+      {
+        name: 'control character',
+        lines: ['---', 'validation:', '  commands:', '    test:', '      command: "check\\nother"', '      args: []', '---', '# Goal'],
+        diagnostic: 'control character',
+      },
+      {
+        name: 'C1 next-line control character',
+        lines: ['---', 'validation:', '  commands:', '    test:', '      command: "check\\u0085other"', '      args: []', '---', '# Goal'],
+        diagnostic: 'control character',
+      },
+    ];
+
+    for (const scenario of cases) {
+      writeBrief(scenario.lines);
+      const git = successfulGit();
+      const runner = validationRunner();
+      const report = await runShipSetup(setupArgs(), {
+        createWorktree: git,
+        runValidationCommand: runner,
+      });
+
+      expect(report, scenario.name).toMatchObject({
+        state: 'refused',
+        worktreeCreated: false,
+        blockers: [expect.objectContaining({
+          phase: 'validation',
+          reason: expect.stringContaining(scenario.diagnostic),
+        })],
+      });
+      expect(git, scenario.name).not.toHaveBeenCalled();
+      expect(runner, scenario.name).not.toHaveBeenCalled();
+      expect(noReadyRecord(), scenario.name).toBe(true);
+    }
+  });
+
+  it('names a missing brief-declared command in its launch refusal and writes no ready record', async () => {
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
+    writeBrief([
+      '---',
+      'validation:',
+      '  commands:',
+      '    build:',
+      '      command: executable-that-does-not-exist',
+      '      args: [--verify]',
+      '---',
+      '# Goal',
+      'Measure the declared build.',
+    ]);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      return { exitCode: 0 };
+    });
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: null, error: 'spawn ENOENT' }));
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: runner,
+    });
+
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'], cwd: fixture.target,
+    }));
+    expect(report).toMatchObject({
+      state: 'refused',
+      validationBaseline: {
+        discovery: {
+          state: 'partial',
+          commands: [expect.objectContaining({
+            provenance: {
+              source: 'brief',
+              evidencePath: `${fixture.brief}#validation.commands.build`,
+            },
+          })],
+        },
+      },
+      blockers: [expect.objectContaining({
+        phase: 'validation',
+        reason: expect.stringContaining(`${fixture.brief}#validation.commands.build`),
+      })],
+    });
+    expect(report.blockers[0].reason).toContain('executable-that-does-not-exist --verify');
+    expect(report.blockers[0].reason).toContain('spawn ENOENT');
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('refuses disagreement between project and brief commands without measuring either baseline', async () => {
+    writeBrief([
+      '---',
+      'validation:',
+      '  commands:',
+      '    test:',
+      '      command: /opt/project-environment/bin/python',
+      '      args: [-m, pytest]',
+      '---',
+      '# Goal',
+      'Validate the project.',
+    ]);
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(report).toMatchObject({
+      state: 'refused',
+      validationBaseline: { discovery: { state: 'unknown', commands: [] } },
+      blockers: [expect.objectContaining({
+        phase: 'validation',
+        reason: expect.stringContaining('conflict'),
+      })],
+    });
+    expect(report.blockers[0].reason).toContain(join(fixture.target, 'package.json'));
+    expect(report.blockers[0].reason).toContain(`${fixture.brief}#validation.commands.test`);
+    expect(noReadyRecord()).toBe(true);
+  });
+
+  it('records exact project/brief agreement as corroboration without changing the project-governed baseline', async () => {
+    writeBrief([
+      '---',
+      'validation:',
+      '  commands:',
+      '    test:',
+      '      command: npm',
+      '      args: [run, test]',
+      '---',
+      '# Goal',
+      'Validate the project.',
+    ]);
+    const runner = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      validationBaseline: {
+        discovery: {
+          state: 'configured',
+          commands: expect.arrayContaining([expect.objectContaining({
+            role: 'test',
+            command: 'npm',
+            args: ['run', 'test'],
+            evidencePath: join(fixture.target, 'package.json'),
+            provenance: {
+              source: 'project',
+              evidencePath: join(fixture.target, 'package.json'),
+              corroboratedBy: [`${fixture.brief}#validation.commands.test`],
+            },
+          })]),
+        },
+      },
+    });
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+      ['npm', ['run', 'build']],
+      ['npm', ['run', 'test']],
+      ['npm', ['run', 'lint']],
+    ]);
+  });
+
   it('refuses UNKNOWN validation before READY when no command can be inferred', async () => {
     writeBrief(['# Goal', 'Validate the repository.']);
     const git = vi.fn<GitWorktreeCreator>((request) => {

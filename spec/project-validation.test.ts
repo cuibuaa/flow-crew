@@ -44,6 +44,7 @@ describe('configuration-driven project validation baseline', () => {
       runnerEvidence: 'package-lock.json',
       missingRoles: [],
     });
+    expect(baseline.discovery.commands.every((command) => command.provenance === undefined)).toBe(true);
     expect(runner.mock.calls.map(([request]) => request)).toEqual([
       expect.objectContaining({ role: 'build', command: 'npm', args: ['run', 'build'], cwd: root }),
       expect.objectContaining({ role: 'test', command: 'npm', args: ['run', 'test'], cwd: root }),
@@ -156,6 +157,184 @@ describe('configuration-driven project validation baseline', () => {
     expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
   });
 
+  it('uses a brief declaration as an argv-literal fallback when project discovery is unknown', async () => {
+    const evidencePath = `${root}/task.md#validation.commands.test`;
+    const runner = vi.fn(() => ({ exitCode: 0, stdout: '151 passed', durationMs: 5 }));
+
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({}),
+      runCommand: runner,
+      declaredCommands: [{
+        role: 'test',
+        command: '/opt/project-venv/bin/python',
+        args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
+        evidencePath,
+      }],
+    });
+
+    expect(baseline.discovery).toMatchObject({
+      state: 'partial',
+      missingRoles: ['build', 'lint'],
+      commands: [{
+        role: 'test',
+        command: '/opt/project-venv/bin/python',
+        args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
+        evidencePath,
+        provenance: { source: 'brief', evidencePath },
+      }],
+    });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      role: 'test',
+      command: '/opt/project-venv/bin/python',
+      args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
+      cwd: root,
+    }));
+    expect(baseline.results).toEqual([
+      expect.objectContaining({ role: 'build', state: 'not_configured' }),
+      expect.objectContaining({ role: 'test', state: 'passed' }),
+      expect.objectContaining({ role: 'lint', state: 'not_configured' }),
+    ]);
+    expect(baseline.gateCriteria).toContainEqual(expect.objectContaining({
+      role: 'test', rule: 'must_remain_green', baselineFailureIdentifiers: [],
+    }));
+  });
+
+  it('merges missing roles from the brief while project configuration governs declared roles', async () => {
+    const packagePath = `${root}/package.json`;
+    const briefPath = `${root}/task.md`;
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({
+        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
+        [`${root}/package-lock.json`]: '{}',
+      }),
+      runCommand: runner,
+      declaredCommands: [
+        { role: 'build', command: 'custom-build', args: ['--frozen'], evidencePath: `${briefPath}#validation.commands.build` },
+        { role: 'lint', command: 'custom-lint', args: ['--strict'], evidencePath: `${briefPath}#validation.commands.lint` },
+      ],
+    });
+
+    expect(baseline.discovery).toMatchObject({ state: 'configured', missingRoles: [] });
+    expect(baseline.discovery.commands.map((command) => [
+      command.role,
+      command.command,
+      command.args,
+      command.provenance?.source,
+    ])).toEqual([
+      ['build', 'custom-build', ['--frozen'], 'brief'],
+      ['test', 'npm', ['run', 'test'], undefined],
+      ['lint', 'custom-lint', ['--strict'], 'brief'],
+    ]);
+  });
+
+  it('accepts exact overlap as corroboration and executes the project command once', async () => {
+    const packagePath = `${root}/package.json`;
+    const evidencePath = `${root}/task.md#validation.commands.test`;
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({
+        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
+        [`${root}/package-lock.json`]: '{}',
+      }),
+      runCommand: runner,
+      declaredCommands: [{ role: 'test', command: 'npm', args: ['run', 'test'], evidencePath }],
+    });
+
+    expect(runner).toHaveBeenCalledOnce();
+    expect(baseline.discovery.commands).toEqual([
+      expect.objectContaining({
+        role: 'test',
+        command: 'npm',
+        args: ['run', 'test'],
+        evidencePath: packagePath,
+        provenance: {
+          source: 'project',
+          evidencePath: packagePath,
+          corroboratedBy: [evidencePath],
+        },
+      }),
+    ]);
+  });
+
+  it('refuses conflicting project and brief declarations without executing either command', async () => {
+    const packagePath = `${root}/package.json`;
+    const evidencePath = `${root}/task.md#validation.commands.test`;
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({
+        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
+        [`${root}/package-lock.json`]: '{}',
+      }),
+      runCommand: runner,
+      declaredCommands: [{
+        role: 'test', command: '/opt/project-venv/bin/python', args: ['-m', 'pytest'], evidencePath,
+      }],
+    });
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(baseline.discovery).toMatchObject({
+      state: 'unknown',
+      commands: [],
+      missingRoles: ['build', 'test', 'lint'],
+      reason: expect.stringContaining(packagePath),
+    });
+    expect(baseline.discovery.reason).toContain(evidencePath);
+    expect(baseline.discovery.reason).toContain('["npm","run","test"]');
+    expect(baseline.discovery.reason).toContain('["/opt/project-venv/bin/python","-m","pytest"]');
+    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
+  });
+
+  it('does not let a brief replace a package script whose package runner is ambiguous', async () => {
+    const packagePath = `${root}/package.json`;
+    const evidencePath = `${root}/task.md#validation.commands.build`;
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({
+        [packagePath]: JSON.stringify({ scripts: { build: 'compile' } }),
+        [`${root}/package-lock.json`]: '{}',
+        [`${root}/yarn.lock`]: '',
+      }),
+      runCommand: runner,
+      declaredCommands: [{ role: 'build', command: 'operator-build', args: [], evidencePath }],
+    });
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(baseline.discovery).toMatchObject({
+      state: 'unknown',
+      commands: [],
+      missingRoles: ['build', 'test', 'lint'],
+    });
+    expect(baseline.discovery.reason).toContain('Package-manager lockfiles disagree');
+    expect(baseline.discovery.reason).toContain(packagePath);
+    expect(baseline.discovery.reason).toContain(evidencePath);
+    expect(baseline.discovery.reason).toContain('cannot replace');
+    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
+  });
+
+  it('keeps launch errors and exit 127 from brief commands unresolved with their provenance', async () => {
+    const briefPath = `${root}/task.md`;
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({}),
+      runCommand: ({ role }) => role === 'build'
+        ? { exitCode: null, error: 'spawn ENOENT' }
+        : { exitCode: 127, stderr: 'dependency not found' },
+      declaredCommands: [
+        { role: 'build', command: 'missing-build', args: [], evidencePath: `${briefPath}#validation.commands.build` },
+        { role: 'test', command: 'missing-test', args: [], evidencePath: `${briefPath}#validation.commands.test` },
+      ],
+    });
+
+    expect(baseline.results).toEqual([
+      expect.objectContaining({ role: 'build', state: 'launch_error', reason: 'spawn ENOENT' }),
+      expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127, reason: expect.stringContaining('could not run') }),
+      expect.objectContaining({ role: 'lint', state: 'not_configured' }),
+    ]);
+    expect(baseline.discovery.commands.map((command) => command.provenance?.source)).toEqual(['brief', 'brief']);
+    expect(baseline.gateCriteria.filter((criterion) => criterion.role !== 'lint')
+      .every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
+  });
+
   it('reports missing scripts and uncertain package runners instead of inventing commands', async () => {
     const partialFs = memoryFs({
       [`${root}/package.json`]: JSON.stringify({ scripts: { test: 'vitest run' } }),
@@ -252,6 +431,35 @@ describe('configuration-driven project validation baseline', () => {
     expect(baseline.gateCriteria.find((entry) => entry.role === 'test')).toMatchObject({
       rule: 'no_regression_from_baseline',
       description: expect.stringContaining('unresolved'),
+    });
+  });
+
+  it('uses the terminal pytest summary instead of an incidental earlier failure-like count', async () => {
+    const fs = memoryFs({
+      [`${root}/package.json`]: JSON.stringify({ scripts: { test: 'pytest' } }),
+      [`${root}/package-lock.json`]: '{}',
+    });
+    const baseline = await runProjectValidationBaseline(root, {
+      fs,
+      runCommand: () => ({
+        exitCode: 1,
+        stdout: [
+          '1 Failed download while arranging a fixture',
+          'FAILED checks/test_alpha.py::test_alpha - AssertionError',
+          'FAILED checks/test_beta.py::test_beta - AssertionError',
+          '================ 2 failed, 3 passed in 1.25s ================',
+        ].join('\n'),
+      }),
+    });
+
+    expect(baseline.results.find((result) => result.role === 'test')).toMatchObject({
+      state: 'failed',
+      failureCount: 2,
+      failureIdentity: 'known',
+    });
+    expect(baseline.gateCriteria.find((criterion) => criterion.role === 'test')).toMatchObject({
+      rule: 'no_regression_from_baseline',
+      baselineFailureCount: 2,
     });
   });
 

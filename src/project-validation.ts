@@ -10,12 +10,26 @@ export interface ValidationFileSystem {
   readText(path: string): string;
 }
 
+export interface ValidationCommandProvenance {
+  source: 'project' | 'brief';
+  evidencePath: string;
+  corroboratedBy?: string[];
+}
+
 export interface ValidationCommand {
   role: ValidationRole;
   command: string;
   args: string[];
   display: string;
   evidencePath?: string;
+  provenance?: ValidationCommandProvenance;
+}
+
+export interface BriefValidationCommand {
+  role: ValidationRole;
+  command: string;
+  args: string[];
+  evidencePath: string;
 }
 
 export interface ValidationDiscovery {
@@ -77,6 +91,7 @@ export interface ProjectValidationBaseline {
 export interface ProjectValidationDependencies {
   fs?: ValidationFileSystem;
   runCommand?: ValidationCommandRunner;
+  declaredCommands?: readonly BriefValidationCommand[];
   now?: () => number;
   maxOutputBytes?: number;
 }
@@ -273,17 +288,22 @@ function declaresPythonDependency(sections: Map<string, string[]>, packageName: 
   return false;
 }
 
-/** Discover validation commands from the repository's Node, Make, and Python declarations. */
-export function discoverProjectValidation(
+interface ValidationDiscoveryDetails {
+  discovery: ValidationDiscovery;
+  unresolvedProjectRoles: ValidationRole[];
+}
+
+function discoverProjectValidationDetails(
   projectDir: string,
   fs: ValidationFileSystem = nodeValidationFs,
-): ValidationDiscovery {
+): ValidationDiscoveryDetails {
   const root = resolve(projectDir);
   const packagePath = join(root, 'package.json');
   const makefilePath = join(root, 'Makefile');
   const pyprojectPath = join(root, 'pyproject.toml');
   const configPaths = [packagePath, makefilePath, pyprojectPath].filter((path) => fs.exists(path));
   const commands = new Map<ValidationRole, ValidationCommand>();
+  const unresolvedProjectRoles = new Set<ValidationRole>();
   const diagnostics: string[] = [];
   let runner: PackageRunner | undefined;
   let runnerEvidence: string | undefined;
@@ -293,6 +313,10 @@ export function discoverProjectValidation(
       const parsed = JSON.parse(fs.readText(packagePath)) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('root value is not an object');
       const manifest = parsed as Record<string, unknown>;
+      const scripts = manifest.scripts && typeof manifest.scripts === 'object' && !Array.isArray(manifest.scripts)
+        ? manifest.scripts as Record<string, unknown>
+        : {};
+      const scriptRoles = ROLES.filter((role) => typeof scripts[role] === 'string' && Boolean((scripts[role] as string).trim()));
       const declaredRunner = packageRunnerFromField(manifest.packageManager);
       const locks = lockfileEvidence(root, fs);
       const lockRunners = [...new Set(locks.map((entry) => entry.runner))];
@@ -308,13 +332,11 @@ export function discoverProjectValidation(
           : 'No packageManager field or recognized lockfile identifies the package runner');
       }
       if (runner) {
-        const scripts = manifest.scripts && typeof manifest.scripts === 'object' && !Array.isArray(manifest.scripts)
-          ? manifest.scripts as Record<string, unknown>
-          : {};
-        for (const role of ROLES) {
-          if (typeof scripts[role] !== 'string' || !(scripts[role] as string).trim()) continue;
+        for (const role of scriptRoles) {
           commands.set(role, { ...commandFor(role, runner), evidencePath: packagePath });
         }
+      } else {
+        scriptRoles.forEach((role) => unresolvedProjectRoles.add(role));
       }
     } catch (error) {
       diagnostics.push(`Cannot parse package.json: ${errorMessage(error)}`);
@@ -359,6 +381,7 @@ export function discoverProjectValidation(
     const command = commands.get(role);
     return command ? [command] : [];
   });
+  const unresolvedRoles = ROLES.filter((role) => unresolvedProjectRoles.has(role));
   const missingRoles = ROLES.filter((role) => !commands.has(role));
   const state: ValidationDiscovery['state'] = discoveredCommands.length === 0
     ? 'unknown'
@@ -367,15 +390,143 @@ export function discoverProjectValidation(
     ? 'No recognized package.json, Makefile, or pyproject.toml validation declarations were found'
     : 'Recognized project configuration declares no inferable build, test, or lint command';
   return {
-    state,
-    configPath: configPaths[0] ?? packagePath,
-    configPaths,
-    ...(runner ? { runner } : {}),
-    ...(runnerEvidence ? { runnerEvidence } : {}),
-    commands: discoveredCommands,
-    missingRoles,
-    ...(state === 'unknown' ? { reason: [...diagnostics, defaultReason].join('; ') } : {}),
+    discovery: {
+      state,
+      configPath: configPaths[0] ?? packagePath,
+      configPaths,
+      ...(runner ? { runner } : {}),
+      ...(runnerEvidence ? { runnerEvidence } : {}),
+      commands: discoveredCommands,
+      missingRoles,
+      ...(state === 'unknown' ? { reason: [...diagnostics, defaultReason].join('; ') } : {}),
+    },
+    unresolvedProjectRoles: unresolvedRoles,
   };
+}
+
+/** Discover validation commands from the repository's Node, Make, and Python declarations. */
+export function discoverProjectValidation(
+  projectDir: string,
+  fs: ValidationFileSystem = nodeValidationFs,
+): ValidationDiscovery {
+  return discoverProjectValidationDetails(projectDir, fs).discovery;
+}
+
+function argv(command: Pick<ValidationCommand, 'command' | 'args'>): string[] {
+  return [command.command, ...command.args];
+}
+
+function sameArgv(
+  left: Pick<ValidationCommand, 'command' | 'args'>,
+  right: Pick<ValidationCommand, 'command' | 'args'>,
+): boolean {
+  return left.command === right.command
+    && left.args.length === right.args.length
+    && left.args.every((value, index) => value === right.args[index]);
+}
+
+function unknownReconciliation(discovery: ValidationDiscovery, reason: string): ValidationDiscovery {
+  return {
+    ...discovery,
+    state: 'unknown',
+    commands: [],
+    missingRoles: [...ROLES],
+    reason,
+  };
+}
+
+/**
+ * Reconcile operator knowledge with target-owned configuration role by role.
+ * Project commands govern; brief commands fill gaps, exact overlap corroborates,
+ * and disagreement makes the whole baseline unknown before anything executes.
+ */
+export function reconcileProjectValidation(
+  projectDir: string,
+  declaredCommands: readonly BriefValidationCommand[],
+  fs: ValidationFileSystem = nodeValidationFs,
+): ValidationDiscovery {
+  const details = discoverProjectValidationDetails(projectDir, fs);
+  const discovery = details.discovery;
+  if (declaredCommands.length === 0) return discovery;
+
+  const declaredByRole = new Map<ValidationRole, BriefValidationCommand>();
+  for (const declaration of declaredCommands) {
+    if (!ROLES.includes(declaration.role)) {
+      return unknownReconciliation(
+        discovery,
+        `Brief validation declaration has unknown role ${JSON.stringify(declaration.role)}`,
+      );
+    }
+    if (declaredByRole.has(declaration.role)) {
+      return unknownReconciliation(
+        discovery,
+        `Brief validation declaration repeats role ${JSON.stringify(declaration.role)}`,
+      );
+    }
+    declaredByRole.set(declaration.role, declaration);
+  }
+
+  if (details.unresolvedProjectRoles.length > 0) {
+    const roles = details.unresolvedProjectRoles.join(', ');
+    const briefEvidence = declaredCommands.map((declaration) => declaration.evidencePath).join(', ');
+    return unknownReconciliation(
+      discovery,
+      `Project validation declaration at ${discovery.configPath} has an unresolved command for ${roles}: ${discovery.reason ?? 'the project command cannot be determined'}. Brief validation at ${briefEvidence} cannot replace an unresolved target-owned declaration.`,
+    );
+  }
+
+  const projectByRole = new Map(discovery.commands.map((command) => [command.role, command]));
+  const commands: ValidationCommand[] = [];
+  for (const role of ROLES) {
+    const projectCommand = projectByRole.get(role);
+    const declaration = declaredByRole.get(role);
+    if (projectCommand && declaration) {
+      if (!sameArgv(projectCommand, declaration)) {
+        const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
+        return unknownReconciliation(
+          discovery,
+          `Validation command conflict for ${role}: project declaration at ${projectEvidence} specifies ${JSON.stringify(argv(projectCommand))}, but brief declaration at ${declaration.evidencePath} specifies ${JSON.stringify(argv(declaration))}. Project configuration governs; remove the overlapping brief declaration or make its argv exactly agree.`,
+        );
+      }
+      const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
+      commands.push({
+        ...projectCommand,
+        provenance: {
+          source: 'project',
+          evidencePath: projectEvidence,
+          corroboratedBy: [declaration.evidencePath],
+        },
+      });
+      continue;
+    }
+    if (projectCommand) {
+      commands.push(projectCommand);
+      continue;
+    }
+    if (declaration) {
+      commands.push({
+        role,
+        command: declaration.command,
+        args: [...declaration.args],
+        display: argv(declaration).join(' '),
+        evidencePath: declaration.evidencePath,
+        provenance: {
+          source: 'brief',
+          evidencePath: declaration.evidencePath,
+        },
+      });
+    }
+  }
+
+  const missingRoles = ROLES.filter((role) => !commands.some((command) => command.role === role));
+  const resolved: ValidationDiscovery = {
+    ...discovery,
+    state: missingRoles.length === 0 ? 'configured' : 'partial',
+    commands,
+    missingRoles,
+  };
+  delete resolved.reason;
+  return resolved;
 }
 
 function boundedOutput(value: string, maxBytes: number): string {
@@ -391,30 +542,40 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
     env: process.env,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 15 * 60 * 1000,
   });
   let stdout = '';
   let stderr = '';
-  let launchError: string | undefined;
   let settled = false;
+  let timedOut = false;
+  const timeoutMs = 15 * 60 * 1000;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.kill();
+  }, timeoutMs);
+  timeout.unref();
+  const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    resolveResult({
+      exitCode,
+      stdout,
+      stderr,
+      durationMs: Date.now() - started,
+      ...(error ? { error } : {}),
+      ...(!error && timedOut ? { error: `Validation command timed out after ${timeoutMs}ms` } : {}),
+      ...(!error && !timedOut && signal ? { error: `Validation process ended by signal ${signal}` } : {}),
+    });
+  };
   child.stdout?.on('data', (chunk: Buffer | string) => {
     stdout = boundedOutput(stdout + chunk.toString(), 256 * 1024);
   });
   child.stderr?.on('data', (chunk: Buffer | string) => {
     stderr = boundedOutput(stderr + chunk.toString(), 256 * 1024);
   });
-  child.once('error', (error) => { launchError = error.message; });
+  child.once('error', (error) => { settle(null, null, error.message); });
   child.once('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    resolveResult({
-      exitCode: code,
-      stdout,
-      stderr,
-      durationMs: Date.now() - started,
-      ...(launchError ? { error: launchError } : {}),
-      ...(!launchError && signal ? { error: `Validation process ended by signal ${signal}` } : {}),
-    });
+    settle(code, signal);
   });
 });
 
@@ -431,16 +592,22 @@ function failureFacts(output: string): { count?: number; identifiers: string[] }
     if (match) identifiers.add(`${match[1]}${match[2] ? ` ${match[2]}` : ''}`);
     if (identifiers.size >= 100) break;
   }
+  const terminalPytestCount = [...lines].reverse().flatMap((raw) => {
+    const line = raw.trim();
+    if (!/\bin\s+\d+(?:\.\d+)?s(?:\s|=|$)/i.test(line)) return [];
+    const match = /\b(\d+)\s+failed\b/i.exec(line);
+    return match ? [Number(match[1])] : [];
+  }).find((value) => Number.isSafeInteger(value) && value > 0);
   const countPatterns = [
     /\bTests?\s+(\d+)\s+failed\b/i,
     /\b(\d+)\s+fail(?:ed|ing|ures?)\b/i,
     /\b(\d+)\s+errors?\b/i,
   ];
-  const counts = countPatterns.flatMap((pattern) => {
-    const match = pattern.exec(output);
+  const lastReportedCount = [...lines].reverse().flatMap((line) => countPatterns.flatMap((pattern) => {
+    const match = pattern.exec(line);
     return match ? [Number(match[1])] : [];
-  }).filter((value) => Number.isSafeInteger(value) && value > 0);
-  const count = counts.length > 0 ? Math.max(...counts) : identifiers.size > 0 ? identifiers.size : undefined;
+  })).find((value) => Number.isSafeInteger(value) && value > 0);
+  const count = terminalPytestCount ?? lastReportedCount ?? (identifiers.size > 0 ? identifiers.size : undefined);
   return { count, identifiers: [...identifiers].sort() };
 }
 
@@ -482,7 +649,10 @@ export async function runProjectValidationBaseline(
   const runner = dependencies.runCommand ?? runValidationCommand;
   const now = dependencies.now ?? Date.now;
   const maxOutputBytes = dependencies.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-  const discovery = discoverProjectValidation(root, fs);
+  const declaredCommands = dependencies.declaredCommands;
+  const discovery = declaredCommands === undefined
+    ? discoverProjectValidation(root, fs)
+    : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
 
   for (const role of ROLES) {
@@ -497,7 +667,9 @@ export async function runProjectValidationBaseline(
         failureIdentity: discovery.state === 'unknown' ? 'unknown' : 'none',
         reason: discovery.state === 'unknown'
           ? discovery.reason ?? 'Validation baseline is unknown'
-          : `No ${role} command was inferred from the recognized project configuration`,
+          : declaredCommands && declaredCommands.length > 0
+            ? `No ${role} command was declared by project configuration or the brief`
+            : `No ${role} command was inferred from the recognized project configuration`,
       });
       continue;
     }

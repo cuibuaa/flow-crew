@@ -104,6 +104,65 @@ flowcrew quick --task "$(cat path/to/task.brief.md)"
 When `quick` sees a valid `research` block and no explicit `--workflow`, it
 selects the research workflow automatically.
 
+## `validation.commands`
+
+`ship-setup` normally discovers build, test, and lint commands from the target
+worktree's `package.json`, `Makefile`, or `pyproject.toml`. When a project cannot
+state the correct command there—for example, when only the operator knows which
+environment has the test dependencies—the brief may supply an argv-shaped
+fallback in its leading frontmatter:
+
+```yaml
+validation:
+  commands:
+    test:
+      command: /path/to/the/project-environment/bin/python
+      args: [-m, pytest]
+```
+
+`build`, `test`, and `lint` are the only role names. Each role must contain
+exactly a non-empty string `command` and a required `args` array of strings;
+use `args: []` when the executable takes no arguments. The commands map must
+not be empty. Unknown roles or fields, malformed YAML, and control characters
+make setup refuse before it creates a worktree. The evidence locator stored for
+each accepted role is `<brief path>#validation.commands.<role>`.
+An otherwise empty leading frontmatter block is valid and behaves as though no
+brief validation command were declared. Control characters include both the
+ASCII C0/DEL set and the Unicode C1 range (U+0080 through U+009F).
+
+Resolution is role-by-role and fail-closed:
+
+- A command declared by the target's project configuration governs that role.
+- A brief command fills a role that project configuration does not declare.
+- Exact command-and-ordered-argument agreement is accepted once and recorded
+  as project-governed validation corroborated by the brief.
+- Any other overlap is a conflict. Setup names both evidence locations and both
+  argv values, executes no baseline command, and refuses instead of choosing
+  silently.
+- A target-owned role whose executable cannot be resolved—for example, a
+  package script with conflicting package-manager lockfiles—is not a missing
+  role. Setup refuses; a brief command cannot replace that ambiguous project
+  declaration.
+
+For baseline execution, setup passes `command` and `args` unchanged to the
+process runner, fixes the working directory to the target, inherits the setup
+environment, and never enables a shell. Shell punctuation inside an argument
+is data. This shape makes the executed argv reviewable and prevents setup from
+reinterpreting an operator-supplied shell line.
+
+A declaration supplies a command; it does not waive measurement or make an
+unrunnable environment ready. The command goes through the same baseline result
+parser and regression-gate construction as a discovered command. A launch
+error or exit 127 refuses setup and names the failed declaration, while roles
+with no command remain `not_configured` once at least one role is measurable.
+There is no validation-bypass flag.
+
+For a resolved test argv beginning with a Python executable followed by `-m
+pytest`, setup derives the population probe by appending `--collect-only -q` to
+that same argv and compares source and target identities before capturing the
+baseline. Other custom test commands still require an exact supported
+population method; a command declaration does not weaken the population gate.
+
 ## `terminal_states`
 
 `terminal_states` maps a terminal run status to one or more project-relative
