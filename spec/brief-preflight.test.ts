@@ -233,6 +233,120 @@ describe('decision-grade brief requirements', () => {
     expect(report.findings.map((finding) => finding.code)).toContain('preregistration_feasibility_missing');
   });
 
+  it('catches the minimal base-form pre-register commitment with its directive as evidence', () => {
+    const report = inspectBrief(structuredBrief([
+      '# D1 — Pre-register the matching rule, before computing any return',
+      'It must establish: that the pre-registration preceded any performance computation; the matched',
+      'percentile and trial counts.',
+    ].join('\n')));
+
+    expect(report.findings.find((finding) => finding.code === 'preregistration_feasibility_missing'))
+      .toMatchObject({
+        code: 'preregistration_feasibility_missing',
+        level: 'fail',
+        acknowledgementRequired: true,
+        excerpt: 'D1 — Pre-register the matching rule, before computing any return',
+      });
+  });
+
+  it('recognizes compact action/object paraphrases independent of headings and surrounding text', () => {
+    const variants = [
+      '# Protocol\nPreregister the eligibility threshold before observing results.',
+      '# Selection\nPre-register one screening criterion before loading prices.',
+      '# Selection\nPre-register the final auditable matched-control-rule before loading prices.',
+      [
+        '# Context',
+        'Use only structural inputs during setup.',
+        'Before opening outcomes, this phase must preregister the final cutoff.',
+        'Record the decision in the ordinary run log.',
+      ].join('\n'),
+      [
+        '# Measurement',
+        'The analyst must pre-register the chosen',
+        'filter before evaluation begins.',
+      ].join('\n'),
+    ];
+
+    for (const body of variants) {
+      const finding = inspectBrief(structuredBrief(body)).findings
+        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
+      expect({ body, finding }).toEqual({
+        body,
+        finding: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
+      });
+    }
+  });
+
+  it('does not connect a seed-list action to an unrelated CI rule in the same unit', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Engineering work',
+      'Pre-register the reproducibility seed list and leave the CI evaluation rule unchanged.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code))
+      .not.toContain('preregistration_feasibility_missing');
+  });
+
+  it('scans the complete direct-object phrase without making modifier count a bypass', () => {
+    const body = [
+      '# Measurement',
+      'Pre-register the final auditable point-in-time matched-control selection rule before computing returns.',
+    ].join('\n');
+    const finding = inspectBrief(structuredBrief(body)).findings
+      .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
+
+    expect({ condition: 'complete direct-object phrase', body, observed: finding }).toEqual({
+      condition: 'complete direct-object phrase',
+      body,
+      observed: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
+    });
+  });
+
+  it('requires the selection-procedure noun to be the object head, not its modifier', () => {
+    const descriptions = [
+      'Pre-register the selection rule documentation before computing returns.',
+      "Pre-register the selection rule's documentation before computing returns.",
+      'Pre-register the threshold review notes before observing results.',
+      'Pre-register and document the selection rule before computing returns.',
+    ];
+
+    for (const description of descriptions) {
+      const observed = inspectBrief(structuredBrief(`# Engineering work\n${description}`)).findings
+        .some((finding) => finding.code === 'preregistration_feasibility_missing');
+      expect({ condition: 'procedure noun is only a modifier', description, expected: false, observed })
+        .toEqual({ condition: 'procedure noun is only a modifier', description, expected: false, observed: false });
+    }
+  });
+
+  it('treats neither-nor as negation without suppressing a later positive action', () => {
+    const disclaimer = 'Pre-register neither rule nor threshold before computing returns.';
+    const disclaimers = [
+      disclaimer,
+      'This task must pre-register neither rule nor threshold before computing returns.',
+      'Pre-register neither rule nor threshold and do not freeze any selection before computing returns.',
+    ];
+    for (const body of disclaimers) {
+      const observed = inspectBrief(structuredBrief(`# Measurement\n${body}`)).findings
+        .some((finding) => finding.code === 'preregistration_feasibility_missing');
+      expect({ condition: 'neither-nor disclaimer', body, expected: false, observed })
+        .toEqual({ condition: 'neither-nor disclaimer', body, expected: false, observed: false });
+    }
+
+    const finding = inspectBrief(structuredBrief([
+      '# Measurement',
+      disclaimer,
+      'Pre-register the final threshold before opening outcomes.',
+    ].join('\n'))).findings.find((candidate) => candidate.code === 'preregistration_feasibility_missing');
+    expect({ condition: 'later positive action survives disclaimer', observed: finding }).toEqual({
+      condition: 'later positive action survives disclaimer',
+      observed: expect.objectContaining({
+        level: 'fail',
+        acknowledgementRequired: true,
+        excerpt: 'Pre-register the final threshold before opening outcomes.',
+      }),
+    });
+  });
+
   it('recognizes positive task-owned commitments through directives, owners, and assigned artifacts', () => {
     const commitments = [
       'Create the pre-registration artifact for the selection rule before measuring any outcomes.',
@@ -348,6 +462,7 @@ describe('decision-grade brief requirements', () => {
       `${disclaimer}; ${directive}`,
       `This task does not pre-register anything, but freeze the selection rule before measuring outcomes.`,
       `${disclaimer}\nThe researcher must freeze the selection rule before opening outcomes.`,
+      `${disclaimer}\nPre-register the eligibility threshold before opening outcomes.`,
       `> ${directive}`,
       ['```text', directive, '```'].join('\n'),
       [

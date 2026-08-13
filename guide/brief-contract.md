@@ -260,6 +260,18 @@ pre-registration artifact assigned to be written before outcomes are accessed.
 Generic detector or guide prose, a post-mortem about an earlier round, and an
 attributed quotation merely describe the act and do not create that commitment.
 
+The base-form actions `pre-register` and `preregister` also count when the same
+normalized instruction is already a positive task-owned commitment and the
+action takes a selection procedure as its direct object. The detector consumes
+the complete initial object phrase up to punctuation, a conjunction, or a
+preposition, regardless of its modifier count, and requires the phrase's final
+token (its head) to be a procedure noun. A procedure noun that only modifies
+`documentation`, or one in a later clause, does not count. The object negators
+`no`, `not`, `none`, `zero`, `nothing`, and `neither` do not create positive
+evidence. This relationship only adds positive evidence and supplies the
+finding's excerpt; it never suppresses evidence, so asserting it cannot create
+an opt-out.
+
 Quotation attribution is structural and unit-local: a Markdown quotation beside
 prose identifying its prior or documentary source is descriptive, while an
 unattributed quoted directive remains an instruction. Attribution never cancels

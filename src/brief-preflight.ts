@@ -250,11 +250,16 @@ const RULE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutof
 const RULE_FREEZE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b/i;
 const BEFORE_MEASUREMENT = /\bbefore\b.{0,80}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcome|outcomes|result|results)\b/i;
 const SELECTION_PROCEDURE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections|protocol|protocols|signal|signals|grid|grids|parameter|parameters|construction|constructions)\b/i;
+const PREREGISTRATION_ACTION = /\b(?:pre[- ]?register|preregister)\b/gi;
+const DIRECT_OBJECT_DETERMINER = /^(?:the|a|an|this|that|these|those|each|every|any|our|your|its|their|my)\b\s*/i;
+const DIRECT_OBJECT_NEGATOR = /^(?:no|not|none|zero|nothing|neither)$/i;
+const DIRECT_OBJECT_TOKEN = /^[\p{L}\p{N}_-]+(?:['’]s)?/iu;
+const DIRECT_OBJECT_BOUNDARY_WORD = /^(?:and|or|but|nor|yet|so|because|although|though|while|whereas|if|unless|until|when|where|which|who|whom|whose|that|to|for|from|with|without|about|against|after|before|by|during|into|of|on|onto|over|through|under|via|as|than|then|the|a|an|this|these|those)$/i;
 const BEFORE_OUTCOME_ACCESS = /\bbefore\b.{0,100}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcomes?|results?|returns?|performance|prices?|evaluat(?:e|es|ed|ion|ions|ing)|tests?|testing|gold|comput(?:e|es|ed|ation|ing)|load(?:s|ed|ing)?|open(?:s|ed|ing)?)\b/i;
 const FREEZE_THEN_MEASURE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b.{0,100}\b(?:measur(?:e|es|ed|ing)|observ(?:e|es|ed|ing)|evaluat(?:e|es|ed|ing)|test(?:s|ed|ing)?|comput(?:e|es|ed|ing)|load(?:s|ed|ing)?|open(?:s|ed|ing)?)\b/i;
-const DIRECT_RULE_COMMITMENT = /^(?:(?:d\d+|step\s+\d+|phase\s+\d+|signal|measurement|protocol|selection)\s*[\u2013\u2014:-]\s*)?(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:first|next|then)\s*,?\s+)?(?:please\s*,?\s+)?(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|zero|nothing)\b)/i;
+const DIRECT_RULE_COMMITMENT = /^(?:(?:d\d+|step\s+\d+|phase\s+\d+|signal|measurement|protocol|selection)\s*[\u2013\u2014:-]\s*)?(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:first|next|then)\s*,?\s+)?(?:please\s*,?\s+)?(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|not|none|zero|nothing|neither)\b)/i;
 const LABELED_FROZEN_RULE_COMMITMENT = /^(?:frozen|locked)\s+(?:(?:selection|screening|decision|eligibility|inclusion|exclusion)\s+)?(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\s*:/i;
-const TASK_OWNER_RULE_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:this|the)\s+(?:task|run|round|stage|phase)|we|you|(?:the\s+)?(?:(?:lead|assigned|responsible|implementing|measuring|validation)\s+)*(?:researcher|analyst|investigator|operator|agent|worker|team|author)|(?:the\s+)?(?:[\w-]+\s+){1,3}(?:stage|phase|gate))\s+(?:must|shall|will|needs?\s+to|(?:is|are)\s+(?:required\s+)?to)\s+(?:(?:first|then|also|directly|explicitly)\s+)*(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|zero|nothing)\b)/i;
+const TASK_OWNER_RULE_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:this|the)\s+(?:task|run|round|stage|phase)|we|you|(?:the\s+)?(?:(?:lead|assigned|responsible|implementing|measuring|validation)\s+)*(?:researcher|analyst|investigator|operator|agent|worker|team|author)|(?:the\s+)?(?:[\w-]+\s+){1,3}(?:stage|phase|gate))\s+(?:must|shall|will|needs?\s+to|(?:is|are)\s+(?:required\s+)?to)\s+(?:(?:first|then|also|directly|explicitly)\s+)*(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|not|none|zero|nothing|neither)\b)/i;
 const PASSIVE_RULE_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:the|this|each|every|a|an)\s+)?(?:(?:final|chosen|declared|specified|candidate)\s+)*(?:(?:selection|screening|decision|eligibility|inclusion|exclusion)\s+)?(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\s+(?:(?:must|shall|will|needs?\s+to)\s+be|(?:is|are)\s+(?:required\s+to\s+be|to\s+be))\s+(?:pre[- ]?registered|preregistered|frozen|locked|chosen|selected|set|defined|declared|adopted)\b/i;
 const DIRECT_ARTIFACT_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:please\s*,?\s+)?(?:write|create|record|produce|declare)\s+(?:(?:the|this|a|an|your|our|its)\s+)?(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|pre[- ]?registration\b(?!\s+(?:detector|check|lint|guide|documentation|test|fixture)\b))/i;
 const TASK_OWNER_ARTIFACT_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:this|the)\s+(?:task|run|round|stage|phase)|we|you|(?:the\s+)?(?:(?:lead|assigned|responsible|implementing|measuring|validation)\s+)*(?:researcher|analyst|investigator|operator|agent|worker|team|author)|(?:the\s+)?(?:[\w-]+\s+){1,3}(?:stage|phase|gate))\s+(?:must|shall|will|needs?\s+to|(?:is|are)\s+(?:required\s+)?to)\s+(?:(?:first|then|also|directly|explicitly)\s+)*(?:write|create|record|produce|declare)\s+(?:(?:the|this|a|an|your|our|its)\s+)?(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|pre[- ]?registration\b(?!\s+(?:detector|check|lint|guide|documentation|test|fixture)\b))/i;
@@ -419,6 +424,39 @@ function isPositiveRuleCommitment(unit: DecisionCommitmentUnit): boolean {
       || LABELED_FROZEN_RULE_COMMITMENT.test(unit.excerpt));
 }
 
+/**
+ * Recognize the otherwise-uncovered base-form action only through a local
+ * direct-object-head check. The noun phrase starts immediately
+ * after the action; punctuation, prepositions, and conjunctions stop it, and its
+ * final token must be the procedure noun. That keeps an unrelated later clause or
+ * a procedure noun modifying another object from satisfying this property.
+ */
+function isDirectPreregistrationCommitment(unit: DecisionCommitmentUnit): boolean {
+  if (!isPositiveRuleCommitment(unit)) return false;
+
+  for (const action of unit.excerpt.matchAll(PREREGISTRATION_ACTION)) {
+    let remainder = unit.excerpt.slice((action.index ?? 0) + action[0].length).trimStart();
+    remainder = remainder.replace(DIRECT_OBJECT_DETERMINER, '');
+
+    let head: string | undefined;
+    while (remainder) {
+      const token = DIRECT_OBJECT_TOKEN.exec(remainder)?.[0];
+      if (!token || DIRECT_OBJECT_BOUNDARY_WORD.test(token)) break;
+      if (DIRECT_OBJECT_NEGATOR.test(token)) {
+        head = undefined;
+        break;
+      }
+      head = token;
+      remainder = remainder.slice(token.length).trimStart();
+    }
+
+    const headWord = head?.replace(/['’]s$/i, '').split('-').at(-1);
+    const procedureHead = headWord ? SELECTION_PROCEDURE_NOUN.exec(headWord)?.[0] : undefined;
+    if (headWord && procedureHead?.length === headWord.length) return true;
+  }
+  return false;
+}
+
 function isAssignedPreregistrationArtifact(unit: DecisionCommitmentUnit): boolean {
   if (unit.attributedQuote
       || !PREREGISTRATION_ARTIFACT.test(unit.excerpt)
@@ -433,13 +471,16 @@ function isAssignedPreregistrationArtifact(unit: DecisionCommitmentUnit): boolea
 function preregistrationEvidence(brief: string): { line: number; excerpt: string } | undefined {
   const units = decisionCommitmentUnits(brief);
   const body = units.map((unit) => unit.excerpt).join('\n');
-  const explicit = PREREGISTRATION.test(body) && RULE_NOUN.test(body);
+  const directPreregistration = units.find(isDirectPreregistrationCommitment);
+  const explicit = (PREREGISTRATION.test(body) && RULE_NOUN.test(body))
+    || directPreregistration !== undefined;
   const frozenBeforeMeasurement = RULE_FREEZE.test(body)
     && RULE_NOUN.test(body)
     && (BEFORE_MEASUREMENT.test(body) || BEFORE_OUTCOME_ACCESS.test(body) || FREEZE_THEN_MEASURE.test(body));
   if (!explicit && !frozenBeforeMeasurement) return undefined;
 
   const evidence = units.find((unit) => {
+    if (unit === directPreregistration) return true;
     if (explicit && isAssignedPreregistrationArtifact(unit)) return true;
     if (explicit
         && PREREGISTRATION.test(unit.excerpt)
