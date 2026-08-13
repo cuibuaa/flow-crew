@@ -351,9 +351,13 @@ function deriveBriefContract(brief: string): BriefContractModel {
   let researchReportDir: string | undefined;
   if (frontmatter.parsed) {
     rawArtifacts.push(...terminalPaths(frontmatter.parsed.terminal_states));
-    collectOutputValues(frontmatter.parsed, undefined, rawArtifacts);
     const research = record(frontmatter.parsed.research ?? frontmatter.parsed.objective);
-    if (research) {
+    const researchLoopActive = typeof research?.baseline === 'number';
+    for (const [key, value] of Object.entries(frontmatter.parsed)) {
+      if (!researchLoopActive && (key === 'research' || key === 'objective')) continue;
+      collectOutputValues(value, key, rawArtifacts);
+    }
+    if (researchLoopActive) {
       rawArtifacts.push(typeof research.result_file === 'string' ? research.result_file : 'docs/research_round_result.json');
       researchReportDir = typeof research.report_dir === 'string'
         ? normalizeArtifactPath(research.report_dir)

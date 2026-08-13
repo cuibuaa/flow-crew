@@ -61,7 +61,7 @@ import {
 import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
 import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
-import { parseResearchFeasibility } from './research-feasibility.js';
+import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
@@ -163,7 +163,20 @@ function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig 
  * see internal config) plus the parsed config. Briefs without frontmatter,
  * with malformed YAML, or with unknown shapes are passed through unchanged.
  */
-export function parseBriefFrontmatter(brief: string): { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string; frontmatterError?: string } {
+export interface ParsedBriefFrontmatter {
+  terminalStates?: TerminalStatesConfig;
+  program?: ProgramConfig;
+  /** Metric-loop config. A numeric baseline is the sole activator. */
+  research?: ResearchConfig;
+  /** Static preflight contract, independently reachable without activating a metric loop. */
+  researchFeasibility?: ResearchFeasibilityConfig;
+  /** Strict-parser error retained even when no metric-loop config is created. */
+  researchFeasibilityError?: string;
+  stripped: string;
+  frontmatterError?: string;
+}
+
+export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return { stripped: brief };
   const open = brief.indexOf('\n', 3) + 1;
   const closeIdx = brief.indexOf('\n---', open);
@@ -180,15 +193,18 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
   // then fail loud / record an event rather than silently falling back to plain dispatch.
   try { parsed = parseYaml(fm); } catch (err) { return { stripped: brief, frontmatterError: `frontmatter YAML parse error: ${err instanceof Error ? err.message : String(err)}` }; }
   if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
-  const out: { terminalStates?: TerminalStatesConfig; program?: ProgramConfig; research?: ResearchConfig; stripped: string; frontmatterError?: string } = { stripped };
+  const out: ParsedBriefFrontmatter = { stripped };
 
-  // Parse the optional `research:` (alias: `objective:`) block — drives the native loop
-  // (propose → execute → measure → decide). Requires baseline + policy. `objective:` is the
-  // unified primitive name; metric-kind is identical to `research:`, acceptance-kind uses the
-  // pass-ratio convention (result = fraction of acceptance checks passed, target 1.0).
+  // `research:` and `objective:` are exact aliases. Static feasibility is parsed
+  // independently; only a numeric baseline creates the native metric-loop config.
   const resRaw = (parsed as Record<string, unknown>).research ?? (parsed as Record<string, unknown>).objective;
   if (resRaw && typeof resRaw === 'object') {
     const r = resRaw as Record<string, unknown>;
+    if (r.feasibility !== undefined) {
+      const feasibility = parseResearchFeasibility(r.feasibility);
+      if (feasibility.status === 'valid') out.researchFeasibility = feasibility.value;
+      else out.researchFeasibilityError = feasibility.error;
+    }
     if (typeof r.baseline === 'number') {
       const policy = (typeof r.policy === 'string' && RESEARCH_POLICY_IDS.includes(r.policy))
         ? r.policy as ResearchConfig['policy'] : 'greedy_stack';
@@ -207,11 +223,8 @@ export function parseBriefFrontmatter(brief: string): { terminalStates?: Termina
       }
       if (typeof r.result_file === 'string') research.resultFile = r.result_file;
       if (typeof r.report_dir === 'string') research.reportDir = r.report_dir;
-      if (r.feasibility !== undefined) {
-        const feasibility = parseResearchFeasibility(r.feasibility);
-        if (feasibility.status === 'valid') research.feasibility = feasibility.value;
-        else research.feasibilityError = feasibility.error;
-      }
+      if (out.researchFeasibility !== undefined) research.feasibility = out.researchFeasibility;
+      if (out.researchFeasibilityError !== undefined) research.feasibilityError = out.researchFeasibilityError;
       // Per-round integrity gates — brief-declared so the engine carries no domain
       // field/threshold knowledge. snake_case in YAML → camelCase in config.
       if (r.integrity && typeof r.integrity === 'object') {

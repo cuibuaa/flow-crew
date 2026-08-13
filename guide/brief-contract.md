@@ -205,15 +205,17 @@ does not end the run.
 
 ## `research` (or `objective`)
 
-`objective` is accepted as an alias for `research`. A numeric `baseline` is the
-field that activates parsing. An omitted or unknown `policy` defaults to
-`greedy_stack`. The `quick` command's automatic workflow selection recognizes
-the `research:` spelling; pass `--workflow research` explicitly when using the
-`objective:` alias.
+`objective` is accepted as an exact alias for `research`. A numeric `baseline`
+is the field that activates the native metric loop; an omitted or unknown
+`policy` then defaults to `greedy_stack`. The one independently parsed field is
+`feasibility`: static preflight accepts it without a baseline, and doing so does
+not create a metric-loop configuration. The `quick` command's automatic
+workflow selection recognizes the `research:` spelling; pass `--workflow
+research` explicitly when using the `objective:` alias for a metric loop.
 
 | Key | Contract |
 |---|---|
-| `baseline` | Required number: the running-best value at entry. |
+| `baseline` | Required number for a metric loop: the running-best value at entry. Omit it for a feasibility-only static declaration. |
 | `policy` | `greedy_stack`, `best_of_n`, or `replace_if_better`. |
 | `higher_is_better` | Direction of improvement; defaults to true. Boolean strings `"true"` and `"false"` are coerced. |
 | `result_file` | Project-relative latest-round JSON. Default: `docs/research_round_result.json`. |
@@ -221,7 +223,7 @@ the `research:` spelling; pass `--workflow research` explicitly when using the
 | `result_schema` | JSON Schema subset used both in planner context and at round ingestion. |
 | `context_roots` | Project-relative roots inventoried for a dynamic planner. Default: `data`. |
 | `directions` | Opaque portfolio labels an outer campaign should cover before accepting a frontier. |
-| `feasibility` | Pre-run structural feasibility contract for pre-registered selection rules; see below. |
+| `feasibility` | Independently parsed pre-run structural feasibility contract for pre-registered selection rules; see below. It does not activate a metric loop. |
 | `integrity.noop` | Reject baseline-equivalent results unless explicitly false. |
 | `integrity.max_std_ratio` | Maximum accepted `result_std / abs(result)`; default 0.30 when `result_std` exists. |
 | `integrity.outlier_factor` | Directional implausible-improvement cap relative to a nonzero baseline; default 5. |
@@ -248,6 +250,11 @@ A pre-registered selection rule must not defer arithmetic that can be done from
 outcome-independent counts, rates, universe sizes, or window lengths. Put that
 arithmetic in `research.feasibility`; a prose promise to calculate it during the
 run is not a substitute.
+
+A diagnostic or engineering brief with no metric to beat may declare only this
+field under `research` (or `objective`). Preflight evaluates the declaration,
+but the scheduler still treats the brief as an engineering run: it proposes no
+research candidates, expects no round-result file, and applies no stop policy.
 
 `hard_floor` is a positive qualifying-member minimum shared by the labelled
 rules. `warn_below`, when present, must be at least the hard floor. A computable

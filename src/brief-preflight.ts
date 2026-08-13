@@ -440,18 +440,18 @@ export function inspectBrief(
   const rc = parsed.research;
   const preregistration = preregistrationEvidence(brief);
   let researchFeasibility: ResearchFeasibilityEvaluation[] | undefined;
-  if (rc?.feasibilityError) {
+  if (parsed.researchFeasibilityError) {
     add({
       code: 'research_feasibility_invalid',
       level: 'fail',
-      message: `The declared research.feasibility contract is invalid: ${rc.feasibilityError}`,
+      message: `The declared research.feasibility contract is invalid: ${parsed.researchFeasibilityError}`,
       acknowledgementRequired: true,
       ...(preregistration ?? {}),
       risk: 'A malformed structural model cannot support a pre-run feasibility decision and must not be silently ignored.',
       suggestion: 'Use one documented research.feasibility model with finite structural inputs, a positive hard_floor, and unique labelled rules.',
     });
-  } else if (rc?.feasibility) {
-    researchFeasibility = evaluateResearchFeasibility(rc.feasibility);
+  } else if (parsed.researchFeasibility) {
+    researchFeasibility = evaluateResearchFeasibility(parsed.researchFeasibility);
     for (const evaluation of researchFeasibility) {
       const distribution = feasibilityDistributionText(evaluation);
       if (evaluation.decision === 'not_computable') {

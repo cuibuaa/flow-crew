@@ -142,6 +142,35 @@ describe('planner Reality-Gate check preflight', () => {
     expect(findingCodes(check)).toEqual([]);
   });
 
+  it.each([
+    { alias: 'research', resultFile: undefined },
+    { alias: 'research', resultFile: 'docs/custom-round-result.json' },
+    { alias: 'objective', resultFile: undefined },
+    { alias: 'objective', resultFile: 'docs/custom-round-result.json' },
+  ])('requires a numeric baseline before $alias authorizes $resultFile', ({ alias, resultFile }) => {
+    const mapping = [
+      `${alias}:`,
+      ...(resultFile ? [`  result_file: ${resultFile}`] : []),
+      '  feasibility:',
+      '    hard_floor: 10',
+      '    rules:',
+      '      - label: structural count',
+      '        model: formation_count_distribution',
+      '        counts: [20]',
+    ];
+    const brief = ['---', ...mapping, '---', '# Contract'].join('\n');
+    const path = resultFile ?? 'docs/research_round_result.json';
+    const check: CheckFixture = {
+      name: 'round result exists',
+      type: 'file-exists-nonempty',
+      params: { paths: [path] },
+    };
+
+    expect(findingCodes(check, brief)).toEqual(['undeclared_artifact_existence']);
+    expect(findingCodes(check, brief.replace(`${alias}:\n`, `${alias}:\n  baseline: 0\n`)))
+      .toEqual([]);
+  });
+
   it.each(BAD_CHECKS)('assigns $label to the $tier tier', ({ check, code, tier }) => {
     expect(tierCodes(check)).toEqual({
       blocking: tier === 'blocking' ? [code] : [],
