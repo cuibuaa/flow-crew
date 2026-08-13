@@ -251,6 +251,26 @@ outcome-independent counts, rates, universe sizes, or window lengths. Put that
 arithmetic in `research.feasibility`; a prose promise to calculate it during the
 run is not a substitute.
 
+The missing-feasibility preflight applies only when a local instruction carries
+positive evidence that this task owns the commitment. Recognized forms include a
+direct imperative to freeze a selection procedure, a mandatory or future action
+assigned to this task, run, round, stage, a named task-performing role, `we`, or
+`you`, a mandatory passive requirement on the rule itself, and a
+pre-registration artifact assigned to be written before outcomes are accessed.
+Generic detector or guide prose, a post-mortem about an earlier round, and an
+attributed quotation merely describe the act and do not create that commitment.
+
+Quotation attribution is structural and unit-local: a Markdown quotation beside
+prose identifying its prior or documentary source is descriptive, while an
+unattributed quoted directive remains an instruction. Attribution never cancels
+a positive directive elsewhere in the brief.
+
+A disclaimer is not an exemption and never cancels positive evidence elsewhere.
+For example, saying that the task does not pre-register anything contributes no
+commitment evidence; if the brief also directs a stage to freeze a selection rule,
+the missing-feasibility finding still applies. Silence is earned by the absence of
+a task-owned positive commitment, not by an asserted opt-out sentence.
+
 A diagnostic or engineering brief with no metric to beat may declare only this
 field under `research` (or `objective`). Preflight evaluates the declaration,
 but the scheduler still treats the brief as an engineering run: it proposes no

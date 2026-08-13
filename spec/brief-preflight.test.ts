@@ -233,6 +233,148 @@ describe('decision-grade brief requirements', () => {
     expect(report.findings.map((finding) => finding.code)).toContain('preregistration_feasibility_missing');
   });
 
+  it('recognizes positive task-owned commitments through directives, owners, and assigned artifacts', () => {
+    const commitments = [
+      'Create the pre-registration artifact for the selection rule before measuring any outcomes.',
+      'Freeze the threshold before evaluating the gold outcomes.',
+      'This stage must lock the cutoff before opening results.',
+      'We will create the pre-registration for the selection signal protocol before computing returns.',
+      'The researcher must freeze the selection rule before opening outcomes.',
+      'Before measuring outcomes, freeze the selection rule.',
+      'The selection threshold must be frozen before outcomes are measured.',
+      'Please freeze the selection rule before evaluation.',
+      [
+        'The stage must write its pre-registration artifact before loading prices.',
+        'The selection rule is recorded in that artifact.',
+      ].join(' '),
+    ];
+
+    for (const commitment of commitments) {
+      const report = inspectBrief(structuredBrief(`# Measurement\n${commitment}`));
+      expect(report.findings).toContainEqual(expect.objectContaining({
+        code: 'preregistration_feasibility_missing',
+        level: 'fail',
+        acknowledgementRequired: true,
+      }));
+      expect(report.findings.find((finding) => finding.code === 'preregistration_feasibility_missing'))
+        .not.toHaveProperty('attributedQuote');
+    }
+  });
+
+  it('stays silent for detector, guide, post-mortem, and plain-language disclaimer descriptions', () => {
+    const descriptions = [
+      'This task performs no pre-registration and adopts no selection rule.',
+      'Update the detector so it recognizes when a brief says “Pre-register the selection rule before measuring outcomes.”',
+      'Explain in the guide that a brief which freezes a threshold before evaluation requires research.feasibility.',
+      'The prior round pre-registered its selection rule before outcomes and selected no names.',
+      'This stage must write a guide explaining pre-registration selection rules before testing the detector.',
+      'This task must explain why the prior round froze its threshold before measuring outcomes.',
+      'Update the guide to explain why you must freeze a selection rule before opening outcomes.',
+      'Frozen thresholds are discussed in this guide before evaluation.',
+    ];
+
+    for (const description of descriptions) {
+      const report = inspectBrief(structuredBrief(`# Engineering work\n${description}`));
+      expect(report.findings.map((finding) => finding.code))
+        .not.toContain('preregistration_feasibility_missing');
+    }
+  });
+
+  it('treats a structurally attributed quotation as description, not as a task directive', () => {
+    const report = inspectBrief(structuredBrief([
+      '# Engineering work',
+      'The following quoted legacy instruction is documentation, not an instruction for this task:',
+      '',
+      '> Pre-register and freeze the selection rule before outcomes.',
+    ].join('\n')));
+
+    expect(report.findings.map((finding) => finding.code))
+      .not.toContain('preregistration_feasibility_missing');
+  });
+
+  it('keeps the historical committing snippets positive', () => {
+    const historicalSnippets = [
+      {
+        caseName: 'frozen threshold on validation before one gold evaluation',
+        text: [
+          '# HARD guardrails',
+          '1. NEVER train on / tune thresholds on FaithBench or TofuEval. Train only on RAGTruth-train; freeze threshold on RAGTruth-test.',
+          '2. FROZEN threshold: choose on the val split, FREEZE, evaluate ONCE on gold.',
+          '3. MULTI-SEED 42/43/44 before any kept result.',
+        ].join('\n'),
+      },
+      {
+        caseName: 'assigned signal pre-registration artifact',
+        text: [
+          '## Signal — pre-register before computing anything',
+          'Build the selection signal from the revision history.',
+          'Write your pre-registration to `research/revision_signal/d1/pre_registration.json` before loading the price panel.',
+        ].join('\n'),
+      },
+      {
+        caseName: 'assigned matched-control pre-registration artifact',
+        text: [
+          '## D1 — Pre-register the matching rule, before computing any return',
+          '`research/sector_null/d1/pre_registration.json`, written before any performance series is loaded.',
+          'The final report must establish that the pre-registration preceded any performance computation.',
+        ].join('\n'),
+      },
+      {
+        caseName: 'assigned construction pre-registration artifact',
+        text: [
+          '## Pre-registration, and the feasibility check that two rounds died without',
+          '`research/construction_search/d1/pre_registration.json`, written before any return series is loaded.',
+          'Declare every construction you will measure and its selection protocol.',
+        ].join('\n'),
+      },
+    ];
+
+    for (const snippet of historicalSnippets) {
+      const finding = inspectBrief(structuredBrief(snippet.text)).findings
+        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
+      expect({ caseName: snippet.caseName, finding }).toEqual({
+        caseName: snippet.caseName,
+        finding: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
+      });
+    }
+  });
+
+  it('does not let a disclaimer suppress a qualifying directive before, after, or beside it', () => {
+    const disclaimer = 'This task does not pre-register anything and adopts no selection rule.';
+    const directive = 'Pre-register and freeze the selection rule before measuring outcomes.';
+    const adversarialBriefs = [
+      `${disclaimer}\n${directive}`,
+      `${directive}\n${disclaimer}`,
+      `${disclaimer}; ${directive}`,
+      `This task does not pre-register anything, but freeze the selection rule before measuring outcomes.`,
+      `${disclaimer}\nThe researcher must freeze the selection rule before opening outcomes.`,
+      `> ${directive}`,
+      ['```text', directive, '```'].join('\n'),
+      [
+        'The following quoted legacy instruction is documentation:',
+        '',
+        `> ${directive}`,
+        directive,
+      ].join('\n'),
+      [
+        'The following quoted instruction is not for this task:',
+        '',
+        `> ${directive}`,
+      ].join('\n'),
+    ];
+
+    for (const body of adversarialBriefs) {
+      const finding = inspectBrief(structuredBrief(`# Measurement\n${body}`)).findings
+        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
+      expect(finding).toMatchObject({
+        level: 'fail',
+        acknowledgementRequired: true,
+        excerpt: expect.stringMatching(/(?:Pre-register|freeze the selection rule)/i),
+      });
+      expect(finding?.excerpt).not.toMatch(/does not pre-register/i);
+    }
+  });
+
   it('fails an operator-supplied figure without both anti-anchoring fields', () => {
     const report = inspectBrief(structuredBrief([
       '# Context',

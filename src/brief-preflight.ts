@@ -245,9 +245,21 @@ const HEADLINE_USAGE = /\b(?:headline|quoted?|quotable)\b/i;
 const NUMERIC_RESULT = /\b(?:statistic|number|numeric|value|figure|estimate|metric|result|rate|percentage|percentile|basis points?|bps)\b/i;
 const DISTRIBUTION_LOCATION = /(?:^|[^A-Za-z0-9])(?:percentile|quantile|rank|location|position)(?:$|[^A-Za-z0-9])|\bwhere\b.{0,40}\bsits?\b/i;
 const PREREGISTRATION = /\b(?:pre[- ]?registr(?:ation|ations|er|ers|ered|ering)|preregistr(?:ation|ations|er|ers|ered|ering))\b/i;
+const PREREGISTRATION_ARTIFACT = /\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b/i;
 const RULE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\b/i;
 const RULE_FREEZE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b/i;
 const BEFORE_MEASUREMENT = /\bbefore\b.{0,80}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcome|outcomes|result|results)\b/i;
+const SELECTION_PROCEDURE_NOUN = /\b(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections|protocol|protocols|signal|signals|grid|grids|parameter|parameters|construction|constructions)\b/i;
+const BEFORE_OUTCOME_ACCESS = /\bbefore\b.{0,100}\b(?:measur(?:e|es|ed|ement|ements|ing)|observ(?:e|es|ed|ation|ations|ing)|outcomes?|results?|returns?|performance|prices?|evaluat(?:e|es|ed|ion|ions|ing)|tests?|testing|gold|comput(?:e|es|ed|ation|ing)|load(?:s|ed|ing)?|open(?:s|ed|ing)?)\b/i;
+const FREEZE_THEN_MEASURE = /\b(?:freeze|freezes|freezing|frozen|lock|locks|locking|locked)\b.{0,100}\b(?:measur(?:e|es|ed|ing)|observ(?:e|es|ed|ing)|evaluat(?:e|es|ed|ing)|test(?:s|ed|ing)?|comput(?:e|es|ed|ing)|load(?:s|ed|ing)?|open(?:s|ed|ing)?)\b/i;
+const DIRECT_RULE_COMMITMENT = /^(?:(?:d\d+|step\s+\d+|phase\s+\d+|signal|measurement|protocol|selection)\s*[\u2013\u2014:-]\s*)?(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:first|next|then)\s*,?\s+)?(?:please\s*,?\s+)?(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|zero|nothing)\b)/i;
+const LABELED_FROZEN_RULE_COMMITMENT = /^(?:frozen|locked)\s+(?:(?:selection|screening|decision|eligibility|inclusion|exclusion)\s+)?(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\s*:/i;
+const TASK_OWNER_RULE_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:this|the)\s+(?:task|run|round|stage|phase)|we|you|(?:the\s+)?(?:(?:lead|assigned|responsible|implementing|measuring|validation)\s+)*(?:researcher|analyst|investigator|operator|agent|worker|team|author)|(?:the\s+)?(?:[\w-]+\s+){1,3}(?:stage|phase|gate))\s+(?:must|shall|will|needs?\s+to|(?:is|are)\s+(?:required\s+)?to)\s+(?:(?:first|then|also|directly|explicitly)\s+)*(?:pre[- ]?register|preregister|freeze|lock|choose|select|set|define|declare|adopt)\b(?!\s+(?:no|zero|nothing)\b)/i;
+const PASSIVE_RULE_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:the|this|each|every|a|an)\s+)?(?:(?:final|chosen|declared|specified|candidate)\s+)*(?:(?:selection|screening|decision|eligibility|inclusion|exclusion)\s+)?(?:rule|rules|threshold|thresholds|criterion|criteria|cutoff|cutoffs|filter|filters|screen|screens|selection|selections)\s+(?:(?:must|shall|will|needs?\s+to)\s+be|(?:is|are)\s+(?:required\s+to\s+be|to\s+be))\s+(?:pre[- ]?registered|preregistered|frozen|locked|chosen|selected|set|defined|declared|adopted)\b/i;
+const DIRECT_ARTIFACT_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:please\s*,?\s+)?(?:write|create|record|produce|declare)\s+(?:(?:the|this|a|an|your|our|its)\s+)?(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|pre[- ]?registration\b(?!\s+(?:detector|check|lint|guide|documentation|test|fixture)\b))/i;
+const TASK_OWNER_ARTIFACT_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},\s*)?(?:(?:this|the)\s+(?:task|run|round|stage|phase)|we|you|(?:the\s+)?(?:(?:lead|assigned|responsible|implementing|measuring|validation)\s+)*(?:researcher|analyst|investigator|operator|agent|worker|team|author)|(?:the\s+)?(?:[\w-]+\s+){1,3}(?:stage|phase|gate))\s+(?:must|shall|will|needs?\s+to|(?:is|are)\s+(?:required\s+)?to)\s+(?:(?:first|then|also|directly|explicitly)\s+)*(?:write|create|record|produce|declare)\s+(?:(?:the|this|a|an|your|our|its)\s+)?(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|pre[- ]?registration\b(?!\s+(?:detector|check|lint|guide|documentation|test|fixture)\b))/i;
+const ASSIGNED_PREREGISTRATION_ARTIFACT = /^(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|(?:the\s+|this\s+|your\s+|our\s+)?pre[- ]?registration(?:\s+(?:artifact|file|protocol))?)\s*,?\s+(?:to\s+be\s+)?(?:written|created|recorded|produced|fixed|locked)\b/i;
+const QUOTED_SOURCE_ATTRIBUTION = /\b(?:legacy|prior|earlier|historical)\b.{0,60}\b(?:instruction|directive|requirement|passage|text|documentation)\b|\b(?:instruction|directive|requirement|passage|text|documentation)\b.{0,60}\b(?:legacy|prior|earlier|historical)\b|\b(?:quoted?|excerpt(?:ed)?)\b.{0,60}\b(?:from|according\s+to)\b|\b(?:from|according\s+to)\b.{0,60}\b(?:guide|brief|run|round|stage|source|document(?:ation)?)\b/i;
 const NUMERIC_LITERAL = /(?:^|[^A-Za-z0-9_])[-+−]?\d[\d,.]*(?:\s*(?:%|bps?|basis\s+points?))?(?=$|[^A-Za-z0-9_])/i;
 const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|hand(?:s|ed)?|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
 const DECISION_ILLUSTRATIVE = /\b(?:for example|illustrative(?:ly)?|e\.g\.)\b|(?:例如|比如|举例|只是例子|并非判据|不是判据)/i;
@@ -306,12 +318,140 @@ function hasHeadlineDistribution(brief: string): boolean {
     && DISTRIBUTION_LOCATION.test(body);
 }
 
+interface DecisionCommitmentUnit {
+  line: number;
+  excerpt: string;
+  attributedQuote: boolean;
+}
+
+interface DecisionCommitmentBlock extends DecisionCommitmentUnit {
+  endLine: number;
+  quoted: boolean;
+}
+
+function decisionCommitmentBlocks(brief: string): DecisionCommitmentBlock[] {
+  const offset = bodyLineOffset(brief);
+  const lines = decisionLintLines(brief);
+  const blocks: DecisionCommitmentBlock[] = [];
+  let current: DecisionCommitmentBlock | undefined;
+
+  const flush = () => {
+    if (current) blocks.push(current);
+    current = undefined;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (/^(?:```|~~~)/.test(trimmed)) {
+      flush();
+      continue;
+    }
+    const quoted = /^(?:>\s*)+/.test(trimmed);
+    const content = trimmed.replace(/^(?:>\s*)+/, '').trim();
+    if (!content) {
+      flush();
+      continue;
+    }
+
+    const line = offset + index + 1;
+    if (quoted) {
+      if (!current?.quoted) {
+        flush();
+        const previous = blocks.at(-1);
+        current = {
+          line,
+          endLine: line,
+          excerpt: content,
+          quoted: true,
+          attributedQuote: Boolean(previous
+            && line - previous.endLine <= 2
+            && ((!previous.quoted && QUOTED_SOURCE_ATTRIBUTION.test(previous.excerpt))
+              || (previous.quoted && previous.attributedQuote))),
+        };
+      } else {
+        current.excerpt += ` ${content}`;
+        current.endLine = line;
+      }
+      continue;
+    }
+    if (current?.quoted) flush();
+    if (/^#{1,6}\s+/.test(content) || /^\|/.test(content)) {
+      flush();
+      blocks.push({ line, endLine: line, excerpt: content, quoted: false, attributedQuote: false });
+      continue;
+    }
+    if (/^(?:[-*+]\s+|\d+[.)]\s+)/.test(content)) {
+      flush();
+      current = { line, endLine: line, excerpt: content, quoted: false, attributedQuote: false };
+      continue;
+    }
+    if (current) {
+      current.excerpt += ` ${content}`;
+      current.endLine = line;
+    } else {
+      current = { line, endLine: line, excerpt: content, quoted: false, attributedQuote: false };
+    }
+  }
+  flush();
+  return blocks;
+}
+
+function decisionCommitmentUnits(brief: string): DecisionCommitmentUnit[] {
+  return decisionCommitmentBlocks(brief).flatMap((block) => {
+    const normalized = block.excerpt
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, '')
+      .replace(/\*\*|__/g, '')
+      .trim();
+    return normalized
+      .split(/(?:[;；]+|(?<=[.!?])\s+|\s+(?:but|however)\s+)/i)
+      .map((excerpt) => excerpt.trim())
+      .filter(Boolean)
+      .map((excerpt) => ({ line: block.line, excerpt, attributedQuote: block.attributedQuote }));
+  });
+}
+
+function isPositiveRuleCommitment(unit: DecisionCommitmentUnit): boolean {
+  return !unit.attributedQuote
+    && (DIRECT_RULE_COMMITMENT.test(unit.excerpt)
+      || TASK_OWNER_RULE_COMMITMENT.test(unit.excerpt)
+      || PASSIVE_RULE_COMMITMENT.test(unit.excerpt)
+      || LABELED_FROZEN_RULE_COMMITMENT.test(unit.excerpt));
+}
+
+function isAssignedPreregistrationArtifact(unit: DecisionCommitmentUnit): boolean {
+  if (unit.attributedQuote
+      || !PREREGISTRATION_ARTIFACT.test(unit.excerpt)
+      || !BEFORE_OUTCOME_ACCESS.test(unit.excerpt)) {
+    return false;
+  }
+  return ASSIGNED_PREREGISTRATION_ARTIFACT.test(unit.excerpt)
+    || DIRECT_ARTIFACT_COMMITMENT.test(unit.excerpt)
+    || TASK_OWNER_ARTIFACT_COMMITMENT.test(unit.excerpt);
+}
+
 function preregistrationEvidence(brief: string): { line: number; excerpt: string } | undefined {
-  const body = decisionRequirementBody(brief);
+  const units = decisionCommitmentUnits(brief);
+  const body = units.map((unit) => unit.excerpt).join('\n');
   const explicit = PREREGISTRATION.test(body) && RULE_NOUN.test(body);
-  const frozenBeforeMeasurement = RULE_FREEZE.test(body) && RULE_NOUN.test(body) && BEFORE_MEASUREMENT.test(body);
+  const frozenBeforeMeasurement = RULE_FREEZE.test(body)
+    && RULE_NOUN.test(body)
+    && (BEFORE_MEASUREMENT.test(body) || BEFORE_OUTCOME_ACCESS.test(body) || FREEZE_THEN_MEASURE.test(body));
   if (!explicit && !frozenBeforeMeasurement) return undefined;
-  return firstEvidenceLine(brief, explicit ? PREREGISTRATION : RULE_FREEZE);
+
+  const evidence = units.find((unit) => {
+    if (explicit && isAssignedPreregistrationArtifact(unit)) return true;
+    if (explicit
+        && PREREGISTRATION.test(unit.excerpt)
+        && SELECTION_PROCEDURE_NOUN.test(unit.excerpt)
+        && isPositiveRuleCommitment(unit)) return true;
+    return frozenBeforeMeasurement
+      && RULE_FREEZE.test(unit.excerpt)
+      && RULE_NOUN.test(unit.excerpt)
+      && (BEFORE_OUTCOME_ACCESS.test(unit.excerpt) || FREEZE_THEN_MEASURE.test(unit.excerpt))
+      && isPositiveRuleCommitment(unit);
+  });
+  return evidence ? { line: evidence.line, excerpt: evidence.excerpt } : undefined;
 }
 
 function operatorFigureEvidence(brief: string): { line: number; excerpt: string } | undefined {
