@@ -708,7 +708,7 @@ function isRealityGatedTerminal(status: string): boolean {
 }
 
 const SETTLED_STAGE_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED] as const;
-const SATISFIED_STAGE_DEPENDENCY_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.SKIPPED] as const;
+const SATISFIED_STAGE_DEPENDENCY_STATUSES = [STAGE_STATUS.COMPLETE] as const;
 
 export function isRunningStageStatus(status: string): boolean {
   return status === STAGE_STATUS.RUNNING;
@@ -723,7 +723,7 @@ export function isSettledStageStatus(status: string): boolean {
   return (SETTLED_STAGE_STATUSES as readonly string[]).includes(status);
 }
 
-/** Complete or skipped: downstream DAG dependencies may proceed. */
+/** Only successful completion can release a downstream DAG dependency. */
 export function isSatisfiedStageDependencyStatus(status: string): boolean {
   return (SATISFIED_STAGE_DEPENDENCY_STATUSES as readonly string[]).includes(status);
 }

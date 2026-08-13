@@ -440,6 +440,30 @@ accepted as a compatibility alias. Optional fields are `depends_on`,
 skipped; an entirely unusable dispatch triggers a bounded re-plan or an
 actionable escalation.
 
+`depends_on` is a production edge, not merely an ordering hint. A dependency
+releases an ordinary dependent only after its stage status is `complete`.
+`skipped`, `failed`, `pending`, and `running` do not release it. A gate dependency
+has the additional requirement that its stage-specific
+`verdict_<stageId>.json` is valid and says `pass: true`. Consequently, a skipped
+measurement cannot release a report stage: the DAG remains unresolved and ends
+`incomplete` if no later iteration repairs it.
+
+`condition` is a typed comparison of one producer fact, for example
+`audit_freeze.pass == true` or `build.status == complete`. Status fields are read
+first from `stages/<stageId>/status.json`; fields absent there are read only from
+that producer's `verdict_<stageId>.json`. A shared or sibling verdict is never a
+substitute. A missing, malformed, or wrong-typed fact makes the condition false
+and the conditional stage is recorded `skipped`. Dynamically dispatched
+conditions are also persisted in `workflow.yaml`, so the recorded DAG matches
+the one the scheduler evaluated.
+
+The generic stage schema has no list of arbitrary project artifacts promised in
+prose. For an ordinary stage, `complete` therefore proves successful process
+completion, not that every prose-named file exists. When downstream safety
+depends on a machine-checkable output, express it through an existing typed
+contract (a gate verdict, research result, or terminal artifact) instead of
+relying only on prose.
+
 ### `scope`: the paths a stage may write
 
 ```yaml
@@ -487,7 +511,9 @@ scheduled only with a strictly larger budget than the timed-out attempt.
 Every `retry_to` target is normalized to a gate and added to the repair stage's
 dependencies. Only a completed, validated `pass:false` verdict makes that
 repair eligible; a pending or never-run gate blocks terminal success but does
-not dispatch its repair.
+not dispatch its repair. Conversely, a completed `pass:true` gate makes only
+its `retry_to` repair unnecessary. That repair receives a terminal `skipped`
+disposition; ordinary dependents of the same gate remain eligible.
 
 ### Gate verdicts
 

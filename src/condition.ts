@@ -1,5 +1,7 @@
 // Condition evaluation module
-import { readStageStatus } from './store.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { readStageStatus, runDir } from './store.js';
 import { createLogger } from './logging.js';
 
 const log = createLogger({ name: 'condition' });
@@ -58,9 +60,12 @@ export function parseCondition(expr: string): Parsed {
 
 function compare(actual: unknown, op: typeof OPS[number], expected: string | number | boolean): boolean {
   if (actual === undefined || actual === null) return false;
+  // Conditions are typed fact comparisons. In particular, a malformed gate
+  // verdict containing `"pass": "true"` must not satisfy `pass == true`.
+  if (typeof actual !== typeof expected) return false;
   switch (op) {
-    case '==': return String(actual) === String(expected);
-    case '!=': return String(actual) !== String(expected);
+    case '==': return actual === expected;
+    case '!=': return actual !== expected;
     case '>': case '<': case '>=': case '<=': {
       // Numeric comparators: if either operand isn't a finite number, a Number()
       // coercion yields NaN and every comparison is silently false (a misleading
@@ -77,8 +82,37 @@ function compare(actual: unknown, op: typeof OPS[number], expected: string | num
   }
 }
 
+function hasOwnField(record: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, field);
+}
+
 /**
- * Evaluates a condition expression against stored stage status, returning true if the condition is met.
+ * Resolve a condition fact from the producing stage's own evidence. Process
+ * fields (status, retries, exitCode, and so on) live in status.json. Gate facts
+ * such as pass, score, metric, and threshold live in verdict_<stageId>.json.
+ * The stage-specific verdict is the only fallback; a shared or sibling verdict
+ * must never supply a fact for this stage.
+ */
+function readConditionFact(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  field: string,
+): unknown {
+  const status = readStageStatus(projectDir, runId, stageId) as unknown as Record<string, unknown>;
+  if (hasOwnField(status, field)) return status[field];
+
+  const verdictPath = join(runDir(projectDir, runId), `verdict_${stageId}.json`);
+  const parsed = JSON.parse(readFileSync(verdictPath, 'utf-8')) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const verdict = parsed as Record<string, unknown>;
+  return hasOwnField(verdict, field) ? verdict[field] : undefined;
+}
+
+/**
+ * Evaluates a condition expression against the producing stage's stored facts,
+ * returning true if the condition is met. Status fields take precedence; a
+ * missing status field falls back to that stage's specific gate verdict.
  *
  * @param expr - The condition string to evaluate (e.g. `"build.status == success"`).
  * @param projectDir - Absolute path to the project directory used to locate stage status files.
@@ -89,8 +123,7 @@ export function evaluateCondition(expr: string, projectDir: string, runId: strin
   log.debug({ expr }, 'evaluating condition');
   try {
     const { stageId, field, op, value } = parseCondition(expr);
-    const status = readStageStatus(projectDir, runId, stageId);
-    const actual = (status as unknown as Record<string, unknown>)[field];
+    const actual = readConditionFact(projectDir, runId, stageId, field);
     return compare(actual, op, value);
   } catch (err) {
     log.warn({ expr, err }, 'condition evaluation failed');

@@ -2325,7 +2325,7 @@ export function findAllReady(stages: StageConfig[], state: StoreState): StageCon
         `verdict_${d}.json`,
       ));
       const verdict = hasRunLocation && (dependency?.is_gate === true || hasSpecificVerdict)
-        ? readGateVerdict(state.projectDir, d, state.runId, contract)
+        ? readGateVerdict(state.projectDir, d, state.runId, contract, false)
         : undefined;
       // A negative verdict is authoritative even if an older/static workflow
       // forgot to mark the producing stage as a gate. Stage status describes
@@ -2347,10 +2347,9 @@ export function findAllReady(stages: StageConfig[], state: StoreState): StageCon
       // loop, so within one iteration the cycle had no bound of its own.
       if (s.retry_to?.includes(d)) return false;
       if (dependency?.is_gate !== true) return true;
-      // A conditionally skipped gate keeps its historical compatibility
-      // semantics unless an explicit negative verdict exists. A completed gate,
-      // however, is not a satisfied dependency until it has said `pass: true`.
-      if (ds.status === STAGE_STATUS.SKIPPED) return true;
+      // A completed gate is not a satisfied dependency until it has said
+      // `pass: true`. Skipped gates were rejected by the dependency-status
+      // check above and cannot release ordinary downstream work.
       return verdict?.pass === true;
     });
     if (depsReady) ready.push(s);
@@ -3144,7 +3143,9 @@ export function writeRepairRoundDiffArtifact(input: {
 
 function allDone(state: StoreState): boolean {
   return Object.values(state.stages).every(
-    (s) => isSatisfiedStageDependencyStatus(s.status),
+    // A skip is a terminal disposition for whole-DAG settlement, but it is not
+    // successful production and therefore cannot satisfy a dependency.
+    (s) => s.status === STAGE_STATUS.COMPLETE || s.status === STAGE_STATUS.SKIPPED,
   );
 }
 
@@ -3589,6 +3590,7 @@ function injectDispatchedStages(
       scope: s.scope,
       depends_on: s.depends_on,
       dependency_reasons: s.dependency_reasons,
+      condition: s.condition,
       prompt_template: s.prompt_template,
       timeout_ms: s.timeout_ms,
       timeout_total_ms: s.timeout_total_ms,
@@ -4156,12 +4158,17 @@ function writeTerminalStudyCompletionArtifacts(projectDir: string, runId: string
   }
 }
 
-/** Read verdict for a specific gate stage from run dir verdict_<stageId>.json, falling back to verdict.json */
+/**
+ * Read a gate verdict. Legacy callers may fall back to the shared verdict.json;
+ * dependency readiness disables that fallback because only the producer's own
+ * declared output can satisfy its edge.
+ */
 export function readGateVerdict(
   projectDir: string,
   stageId: string,
   runId?: string,
   contract?: GateContract | null,
+  allowSharedFallback = true,
 ): { pass: boolean; reason?: string } | null {
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   let v: Record<string, unknown> | null = null;
@@ -4170,14 +4177,14 @@ export function readGateVerdict(
     const parsed = JSON.parse(readFileSync(perGate, 'utf-8'));
     if (typeof parsed.pass === 'boolean') v = parsed;
   } catch { /* not found */ }
-  if (!v) {
+  if (!v && allowSharedFallback) {
     const shared = join(base, 'verdict.json');
     try {
       const parsed = JSON.parse(readFileSync(shared, 'utf-8'));
       if (typeof parsed.pass === 'boolean') v = parsed;
     } catch { /* not found */ }
   }
-  if (!v && runId) {
+  if (!v && runId && allowSharedFallback) {
     const terminalEvidence = readTerminalStudyCompletionEvidence(projectDir, runId, stageId);
     if (terminalEvidence) {
       writeTerminalStudyCompletionArtifacts(projectDir, runId, stageId, terminalEvidence);

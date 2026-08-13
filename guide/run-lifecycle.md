@@ -27,6 +27,21 @@ CLI exits successfully for all three. A foreground command also exits zero when
 `parked` so a service manager does not mistake a deliberate suspension for a
 crash, but `parked` is neither terminal nor successful.
 
+## Stage readiness and settlement
+
+Stage status answers two different questions. For dispatch readiness, only a
+successfully `complete` dependency is satisfied; `skipped` and `failed` stages
+never release their dependents. A completed gate must additionally have a valid
+stage-specific verdict with `pass: true`. This fail-closed rule keeps a missing
+measurement from turning into a downstream report.
+
+For whole-DAG settlement, `skipped` is still a final disposition. This is what
+allows a passing gate to leave its `retry_to` repair branch intentionally
+skipped without keeping an otherwise valid run alive. The distinction is
+deliberate: terminal does not mean productive. If an ordinary dependent remains
+behind skipped or failed work, the run stays unresolved and ultimately records
+`incomplete` rather than executing the dependent or claiming plain completion.
+
 ## The distinctions that carry meaning
 
 ### `ceiling_hit` is a successful honest negative
