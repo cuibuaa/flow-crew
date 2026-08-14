@@ -1251,7 +1251,13 @@ function parseTapPopulation(
     const extra = extraOrdinals.length > 0 ? ` extra ${extraOrdinals.join(', ')}` : '';
     return { reason: `TAP records do not match the top-level plan${missing}${extra}` };
   }
-  const identities = expectedOrdinals.map((ordinal) => `${ordinal}:${records.get(ordinal) ?? ''}`);
+  const occurrences = new Map<string, number>();
+  const identities = expectedOrdinals.map((ordinal) => {
+    const name = records.get(ordinal) ?? '';
+    const occurrence = (occurrences.get(name) ?? 0) + 1;
+    occurrences.set(name, occurrence);
+    return `${occurrence}:${name}`;
+  });
   return {
     observation: {
       projectDir,
@@ -1280,9 +1286,10 @@ function derivePopulationFromBaselineOutput(
       .filter((identity) => !targetSet.has(identity));
     const extraInTarget = targetParsed.observation.identities
       .filter((identity) => !sourceSet.has(identity));
+    const sourcePlusAdditions = missingFromTarget.length === 0 && extraInTarget.length > 0;
     return {
       version: 1,
-      state: missingFromTarget.length === 0 && extraInTarget.length === 0 ? 'matched' : 'mismatched',
+      state: missingFromTarget.length === 0 ? 'matched' : 'mismatched',
       ...(initial.runner ? { runner: initial.runner } : {}),
       method: {
         source: 'baseline_output',
@@ -1294,7 +1301,9 @@ function derivePopulationFromBaselineOutput(
       target: targetParsed.observation,
       missingFromTarget,
       extraInTarget,
-      reason: `Exact collection was unavailable (${collectorReason}); population parity was derived from complete TAP emitted by the source run and target baseline.`,
+      reason: sourcePlusAdditions
+        ? `Exact collection was unavailable (${collectorReason}); SOURCE-PLUS-ADDITIONS: complete target TAP covers every source identity, with additions recorded in extraInTarget.`
+        : `Exact collection was unavailable (${collectorReason}); population parity was derived from complete TAP emitted by the source run and target baseline.`,
     };
   }
   const runner = initial.runner?.source.display ?? initial.runner?.source.command ?? 'configured test command';
@@ -1562,6 +1571,10 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
     }
     if (report.testPopulation.method) {
       writer.write(`${'tool' in report.testPopulation.method ? '  collector' : '  evidence'}: ${report.testPopulation.method.display}\n`);
+    }
+    if (report.testPopulation.state === 'matched' && report.testPopulation.extraInTarget.length > 0) {
+      writer.write('  relation: SOURCE-PLUS-ADDITIONS\n');
+      writer.write(`  extra in target: ${report.testPopulation.extraInTarget.join(', ')}\n`);
     }
     if (report.testPopulation.reason) writer.write(`  reason: ${report.testPopulation.reason}\n`);
   }

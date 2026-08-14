@@ -128,14 +128,27 @@ directly beneath its refusal.
 Test-population evidence has its own three-way result. Setup first prefers an exact Vitest, pytest,
 or explicitly declared-file collector. If that knowledge is unavailable, it runs the source test
 suite once and compares complete top-level TAP identities with the output observed from the target
-test baseline. Every population record must carry a non-empty test name; ordinals alone prove only
-a count. This generic fallback is not free: it uses two full suite executions (source and target),
-whereas the collector path uses one target suite execution plus two cheap collections. An identity
-mismatch refuses. Output that cannot establish complete named TAP parity reaches ready as
-`UNVERIFIED`; human output and the ready record name the configured runner and the reason. In that
-state the operator retains the executable target baseline and all its unchanged gates, but loses
-the assurance that source and target test populations match. A target command that cannot launch,
-including exit 127, remains a refusal regardless of population state.
+test baseline. A generic identity is the normalized test name paired with its occurrence number
+among records having that same name (`1:name`, `2:name`, and so on), not its position in the run.
+Unrelated insertions therefore leave existing identities stable, while duplicate names remain
+distinct and dropping one duplicate is observable. Every population record must still carry a
+non-empty test name; ordinals alone prove only a count.
+
+The generic fallback protects source coverage. Equal TAP populations render `MATCHED`. If the
+target covers every source identity and reports additional tests, setup reaches ready and renders
+`SOURCE-PLUS-ADDITIONS` plus the exact additions: extra target tests do not reduce source coverage.
+A missing source identity still refuses, and a rename refuses with the old identity missing and the
+new identity extra. This source-coverage policy does not change the exact collectors' strict identity
+parity. Name-local identities cannot prove execution order, distinguish same-named test bodies, or
+identify which body among interchangeable duplicates changed.
+
+The generic fallback uses two full suite executions (source and target), whereas the collector path
+uses one target suite execution plus two cheap collections. Output that cannot establish complete
+named TAP evidence reaches ready as `UNVERIFIED`; human output and the ready record name the
+configured runner and the reason. In that state the operator retains the executable target baseline
+and all its unchanged gates, but loses the assurance that the target covers the source population.
+A target command that cannot launch, including exit 127, remains a refusal regardless of population
+state.
 
 ## `flowcrew land`
 

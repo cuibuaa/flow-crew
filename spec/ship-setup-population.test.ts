@@ -48,7 +48,7 @@ function writeRunnerProject(testScript: string): string {
   return briefPath;
 }
 
-function tap(names: string[], failing = new Set<number>()): string {
+function tap(names: readonly string[], failing = new Set<number>()): string {
   return [
     'TAP version 13',
     ...names.flatMap((name, index) => [
@@ -75,6 +75,24 @@ function copyManifest(targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
   copyFileSync(join(projectDir, 'package.json'), join(targetDir, 'package.json'));
   copyFileSync(join(projectDir, 'package-lock.json'), join(targetDir, 'package-lock.json'));
+}
+
+function genericTapRunner(
+  sourceNames: readonly string[],
+  targetNames: readonly string[],
+): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
+  return vi.fn<ValidationCommandRunner>((request) => ({
+    exitCode: 0,
+    stdout: tap(request.cwd === projectDir ? sourceNames : targetNames),
+    durationMs: 7,
+  }));
+}
+
+function genericTapWorktree(): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
+  return vi.fn<GitWorktreeCreator>((request) => {
+    copyManifest(request.targetDir);
+    return { exitCode: 0 };
+  });
 }
 
 const collectTests: ValidationCommandRunner = (request) => {
@@ -236,8 +254,8 @@ describe('ship-setup test population integrity', () => {
           target: { display: testScript, command: 'npm run test' },
         },
         method: { source: 'baseline_output', format: 'tap' },
-        source: { count: 2, identities: ['1:alpha', '2:beta'] },
-        target: { count: 2, identities: ['1:alpha', '2:beta'] },
+        source: { count: 2, identities: ['1:alpha', '1:beta'] },
+        target: { count: 2, identities: ['1:alpha', '1:beta'] },
         missingFromTarget: [],
         extraInTarget: [],
         reason: expect.stringContaining('Exact collection was unavailable'),
@@ -245,6 +263,146 @@ describe('ship-setup test population integrity', () => {
     });
     expect(runner).toHaveBeenCalledTimes(2);
     expect(runner.mock.calls.map(([request]) => request.cwd)).toEqual([projectDir, targetDir]);
+  });
+
+  it('treats an unrelated TAP insertion as source-plus-additions and names only the addition', async () => {
+    const briefPath = writeRunnerProject('node --test');
+    const targetDir = join(root, 'target-with-insertion');
+    const stdout = new Capture();
+    const stderr = new Capture();
+    const runner = genericTapRunner(
+      ['alpha', 'stable'],
+      ['inserted', 'alpha', 'stable'],
+    );
+
+    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
+      createWorktree: genericTapWorktree(),
+      runValidationCommand: runner,
+      globalDir: () => join(root, 'state'),
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.value).toBe('');
+    expect(stdout.value).toContain('Ship setup: READY');
+    expect(stdout.value).toContain('Test population: MATCHED source=2 target=3');
+    expect(stdout.value).toContain('  relation: SOURCE-PLUS-ADDITIONS');
+    expect(stdout.value).toContain('  extra in target: 1:inserted');
+    expect(stdout.value).not.toContain('missing from target');
+    const records = readdirSync(join(root, 'state', 'ship-setups'));
+    expect(records).toHaveLength(1);
+    const record = JSON.parse(readFileSync(join(root, 'state', 'ship-setups', records[0]), 'utf-8'));
+    expect(record).toMatchObject({
+      state: 'ready',
+      testPopulation: {
+        state: 'matched',
+        source: { identities: ['1:alpha', '1:stable'] },
+        target: { identities: ['1:inserted', '1:alpha', '1:stable'] },
+        missingFromTarget: [],
+        extraInTarget: ['1:inserted'],
+        reason: expect.stringContaining('SOURCE-PLUS-ADDITIONS'),
+      },
+    });
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      label: 'a missing test',
+      targetName: 'target-missing-tap-test',
+      sourceNames: ['kept', 'dropped'],
+      targetNames: ['kept'],
+      missing: '1:dropped',
+      extra: undefined,
+    },
+    {
+      label: 'a renamed test',
+      targetName: 'target-renamed-tap-test',
+      sourceNames: ['kept', 'old name'],
+      targetNames: ['kept', 'new name'],
+      missing: '1:old name',
+      extra: '1:new name',
+    },
+  ])('still refuses $label and renders its exact TAP difference', async ({
+    targetName,
+    sourceNames,
+    targetNames,
+    missing,
+    extra,
+  }) => {
+    const briefPath = writeRunnerProject('node --test');
+    const targetDir = join(root, targetName);
+    const stdout = new Capture();
+    const stderr = new Capture();
+
+    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
+      createWorktree: genericTapWorktree(),
+      runValidationCommand: genericTapRunner(sourceNames, targetNames),
+      globalDir: () => join(root, 'state'),
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(1);
+    expect(stdout.value).toBe('');
+    expect(stderr.value).toContain('Ship setup: REFUSED');
+    expect(stderr.value).toContain('Test population: MISMATCHED');
+    expect(stderr.value).toContain(`missing from target: ${missing}`);
+    if (extra) expect(stderr.value).toContain(`extra in target: ${extra}`);
+    else expect(stderr.value).not.toContain('extra in target:');
+    expect(existsSync(join(root, 'state', 'ship-setups'))).toBe(false);
+  });
+
+  it('uses name-local occurrences to preserve duplicate TAP multiplicity', async () => {
+    const briefPath = writeRunnerProject('node --test');
+    const sourceNames = ['same name', 'same name'];
+    const withInsertion = await runShipSetup(
+      setupArgs(briefPath, join(root, 'target-duplicate-insertion')),
+      {
+        createWorktree: genericTapWorktree(),
+        runValidationCommand: genericTapRunner(
+          sourceNames,
+          ['unrelated insertion', 'same name', 'same name'],
+        ),
+        globalDir: () => join(root, 'state'),
+      },
+    );
+
+    expect(withInsertion).toMatchObject({
+      state: 'ready',
+      testPopulation: {
+        state: 'matched',
+        source: { identities: ['1:same name', '2:same name'] },
+        target: { identities: ['1:unrelated insertion', '1:same name', '2:same name'] },
+        missingFromTarget: [],
+        extraInTarget: ['1:unrelated insertion'],
+      },
+    });
+    expect(new Set(withInsertion.testPopulation?.source?.identities).size).toBe(2);
+
+    const withDroppedDuplicate = await runShipSetup(
+      setupArgs(briefPath, join(root, 'target-dropped-duplicate')),
+      {
+        createWorktree: genericTapWorktree(),
+        runValidationCommand: genericTapRunner(sourceNames, ['same name']),
+        globalDir: () => join(root, 'state'),
+      },
+    );
+
+    expect(withDroppedDuplicate).toMatchObject({
+      state: 'refused',
+      testPopulation: {
+        state: 'mismatched',
+        source: { identities: ['1:same name', '2:same name'] },
+        target: { identities: ['1:same name'] },
+        missingFromTarget: ['2:same name'],
+        extraInTarget: [],
+      },
+      blockers: [expect.objectContaining({
+        reason: expect.stringContaining('missing from target: 2:same name'),
+      })],
+    });
   });
 
   it.each([

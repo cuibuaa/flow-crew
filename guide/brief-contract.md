@@ -161,9 +161,12 @@ For a resolved test argv beginning with a Python executable followed by `-m
 pytest`, setup derives the population probe by appending `--collect-only -q` to
 that same argv and compares source and target identities before capturing the
 baseline. Other custom test commands use the generic baseline-output fallback:
-complete named top-level TAP identities are compared, while output that cannot
-establish identities is recorded as reason-bearing `unverified`. A command
-declaration never weakens the validation baseline or its gates.
+complete named top-level TAP records are compared by normalized name plus
+name-local occurrence. A target that covers all source identities and adds tests
+is recorded as matched `SOURCE-PLUS-ADDITIONS`; missing or renamed source tests
+still refuse. Output that cannot establish identities is recorded as
+reason-bearing `unverified`. A command declaration never weakens the validation
+baseline or its gates.
 
 ## `terminal_states`
 
@@ -660,12 +663,22 @@ directory, so a smaller launch suite cannot silently become the baseline.
 Missing collector knowledge is recorded separately from a broken target. When no exact collector
 is available, setup runs the configured source test command once and observes the test response
 already used to construct the target baseline. If both executions emit complete top-level TAP,
-their ordinal/name identities are compared generically. A TAP mismatch still refuses. Truncated,
-ambiguous, bailed-out, non-TAP output, or records without names instead produce a ready record with
-test-population state `unverified`, the configured runner, and the reason complete parity could not
-be established. This is the same modelling choice as `research.feasibility: not_computable`: an
-underivable assurance is first-class and reason-bearing, not silently converted into either success
-or failure.
+each identity joins the normalized name to its occurrence number among records with that same name.
+Thus an unrelated insertion does not rename later tests, while `1:duplicate` and `2:duplicate`
+preserve the multiplicity of legal duplicate names. If the target contains every source identity,
+an equal population is `matched`; a strict superset is also ready and is rendered as
+`SOURCE-PLUS-ADDITIONS` with the exact additions. This is a source-coverage decision: extra target
+tests do not create the guarded risk of silently running fewer tests. A missing source identity
+still refuses, and a rename reports the old identity as missing and the new one as extra. Exact
+collector identity and strict-parity behavior are unchanged.
+
+Name-local identity cannot prove execution order or detect a name-preserving body change. For
+duplicates it can prove multiplicity, but it cannot identify which same-named body was added,
+removed, or changed. Truncated, ambiguous, bailed-out, non-TAP output, or records without names
+instead produce a ready record with test-population state `unverified`, the configured runner, and
+the reason source coverage could not be established. This is the same modelling choice as
+`research.feasibility: not_computable`: an underivable assurance is first-class and reason-bearing,
+not silently converted into either success or failure.
 
 The costs and assurances differ by state:
 
@@ -673,8 +686,9 @@ The costs and assurances differ by state:
   the collector's normalized identities agree, but cannot prove tests outside the configured
   command or explicit declaration exist.
 - TAP-matched uses two full suite executions: one source run and the governing target baseline run.
-  It proves their complete reported top-level TAP identities agree, but has no runner-specific
-  discovery assurance for tests the command never reports.
+  It proves every complete reported source identity occurs in the target. The visible
+  `SOURCE-PLUS-ADDITIONS` relation distinguishes a strict target superset from equality, but neither
+  relation has runner-specific discovery assurance for tests the command never reports.
 - `unverified` still proves the target validation command ran and records its unchanged baseline
   and gates. It does not prove source/target population parity; the runner and missing evidence are
   visible in both JSON and human output.
