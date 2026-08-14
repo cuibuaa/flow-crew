@@ -289,7 +289,7 @@ describe('public gate and launch-workspace contract', () => {
     expect(guide).toMatch(/omission fails the run at that first gate\s+evaluation[\s\S]*before any product repair\s+or outer re-plan is dispatched/);
     expect(guide).toMatch(/Gate prompts\s+receive the exact durable path where a rejection will be archived/);
     expect(guide).toMatch(/setup walks the source directory, materializes missing subdirectories, and\s+copies their files into the target/);
-    expect(guide).toMatch(/compares the normalized source and target\s+identity sets—not just their counts—and refuses setup/);
+    expect(guide).toMatch(/compares the normalized source and target\s+identity sets—not\s+just their counts—and refuses setup/);
     expect(guide).toMatch(/whether or not the brief remembered to declare the ignored test\s+directory/);
   });
 });

@@ -125,6 +125,18 @@ Every structured blocker includes `phase`, `reason`, and `repair` (plus the
 offending input/assertion when available); human output prints the repair
 directly beneath its refusal.
 
+Test-population evidence has its own three-way result. Setup first prefers an exact Vitest, pytest,
+or explicitly declared-file collector. If that knowledge is unavailable, it runs the source test
+suite once and compares complete top-level TAP identities with the output observed from the target
+test baseline. Every population record must carry a non-empty test name; ordinals alone prove only
+a count. This generic fallback is not free: it uses two full suite executions (source and target),
+whereas the collector path uses one target suite execution plus two cheap collections. An identity
+mismatch refuses. Output that cannot establish complete named TAP parity reaches ready as
+`UNVERIFIED`; human output and the ready record name the configured runner and the reason. In that
+state the operator retains the executable target baseline and all its unchanged gates, but loses
+the assurance that source and target test populations match. A target command that cannot launch,
+including exit 127, remains a refusal regardless of population state.
+
 ## `flowcrew land`
 
 Inspect one explicitly selected run before reclaiming its linked worktree:

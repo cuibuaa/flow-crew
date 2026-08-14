@@ -25,6 +25,7 @@ import {
   runProjectValidationBaseline,
   type BriefValidationCommand,
   type ProjectValidationBaseline,
+  type ValidationCommand,
   type ValidationCommandRunner,
   type ValidationRole,
   type ValidationRunRequest,
@@ -241,14 +242,31 @@ export interface TestPopulationObservation {
   durationMs: number;
 }
 
+export interface TestPopulationRunner {
+  display: string;
+  command: string;
+  evidencePath?: string;
+}
+
+export type TestPopulationEvidenceMethod = {
+  tool: 'vitest' | 'pytest' | 'declared-files';
+  display: string;
+  evidencePath: string;
+} | {
+  source: 'baseline_output';
+  format: 'tap';
+  display: string;
+  evidencePath: 'source and target test command output';
+};
+
 export interface TestPopulationParity {
   version: 1;
-  state: 'matched' | 'mismatched' | 'unavailable';
-  method?: {
-    tool: 'vitest' | 'pytest' | 'declared-files';
-    display: string;
-    evidencePath: string;
+  state: 'matched' | 'mismatched' | 'unverified';
+  runner?: {
+    source: TestPopulationRunner;
+    target: TestPopulationRunner;
   };
+  method?: TestPopulationEvidenceMethod;
   source?: TestPopulationObservation;
   target?: TestPopulationObservation;
   missingFromTarget: string[];
@@ -370,7 +388,7 @@ export function parseShipSetupArgs(args: string[]): ParsedShipSetupArgs {
 export function shipSetupUsage(): string {
   return [
     'Usage: flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]',
-    'Creates the exact worktree, overlays missing declared-input descendants, proves test-population parity, rechecks assertions, and records the validation baseline.',
+    'Creates the exact worktree, overlays missing declared-input descendants, records available test-population evidence, rechecks assertions, and records the validation baseline.',
   ].join('\n');
 }
 
@@ -816,6 +834,21 @@ interface TestPopulationMethod {
   declaredIdentities?: string[];
 }
 
+interface TestPopulationDiscovery {
+  method?: TestPopulationMethod;
+  reason?: string;
+  hasConfiguredTests: boolean;
+  validationUnknown: boolean;
+  testCommand?: ValidationCommand;
+  runner?: TestPopulationRunner;
+}
+
+interface TestPopulationComparison {
+  population?: TestPopulationParity;
+  sourceDiscovery: TestPopulationDiscovery;
+  targetDiscovery: TestPopulationDiscovery;
+}
+
 function normalizedPopulationIdentity(projectDir: string, value: string): string {
   const absolute = resolve(projectDir, value);
   if (!within(projectDir, absolute)) throw new Error(`collector returned a path outside the project: ${value}`);
@@ -832,7 +865,7 @@ function discoverTestPopulationMethod(
   projectDir: string,
   fs: ShipSetupFileSystem,
   declaredCommands: readonly BriefValidationCommand[],
-): { method?: TestPopulationMethod; reason?: string; hasConfiguredTests: boolean; validationUnknown: boolean } {
+): TestPopulationDiscovery {
   const validation = declaredCommands.length === 0
     ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
     : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
@@ -845,10 +878,27 @@ function discoverTestPopulationMethod(
     };
   }
 
+  let runner: TestPopulationRunner = {
+    display: testCommand.display,
+    command: testCommand.display,
+    ...(testCommand.evidencePath ? { evidencePath: testCommand.evidencePath } : {}),
+  };
+
   const packagePath = join(projectDir, 'package.json');
   if (fs.exists(packagePath)) {
     try {
       const manifest = JSON.parse(fs.readText(packagePath)) as Record<string, unknown>;
+      const scripts = manifest.scripts && typeof manifest.scripts === 'object'
+        ? manifest.scripts as Record<string, unknown>
+        : undefined;
+      const testScript = typeof scripts?.test === 'string' ? scripts.test : '';
+      if (testScript.trim()) {
+        runner = {
+          display: testScript.trim(),
+          command: testCommand.display,
+          evidencePath: `${packagePath}#scripts.test`,
+        };
+      }
       const flowcrew = manifest.flowcrew && typeof manifest.flowcrew === 'object'
         ? manifest.flowcrew as Record<string, unknown>
         : undefined;
@@ -870,6 +920,8 @@ function discoverTestPopulationMethod(
         return {
           hasConfiguredTests: true,
           validationUnknown: false,
+          testCommand,
+          runner,
           method: {
             tool: 'declared-files',
             display: 'package.json flowcrew.testPopulation.files',
@@ -878,15 +930,13 @@ function discoverTestPopulationMethod(
           },
         };
       }
-      const scripts = manifest.scripts && typeof manifest.scripts === 'object'
-        ? manifest.scripts as Record<string, unknown>
-        : undefined;
-      const testScript = typeof scripts?.test === 'string' ? scripts.test : '';
       if (/(?:^|[\s;&|()])vitest(?:[\s;&|()]|$)/.test(testScript)) {
         const executable = join(projectDir, 'node_modules', 'vitest', 'vitest.mjs');
         return {
           hasConfiguredTests: true,
           validationUnknown: false,
+          testCommand,
+          runner,
           method: {
             tool: 'vitest',
             display: 'vitest list --filesOnly --json --passWithNoTests',
@@ -906,6 +956,8 @@ function discoverTestPopulationMethod(
       return {
         hasConfiguredTests: true,
         validationUnknown: false,
+        testCommand,
+        runner,
         reason: `Cannot derive test population from package.json: ${errorMessage(error)}`,
       };
     }
@@ -918,6 +970,8 @@ function discoverTestPopulationMethod(
     return {
       hasConfiguredTests: true,
       validationUnknown: false,
+      testCommand,
+      runner,
       method: {
         tool: 'pytest',
         display: [testCommand.command, ...collectorArgs].join(' '),
@@ -935,7 +989,9 @@ function discoverTestPopulationMethod(
   return {
     hasConfiguredTests: true,
     validationUnknown: false,
-    reason: `Configured test command "${testCommand.display}" has no exact population collector`,
+    testCommand,
+    runner,
+    reason: `Configured test runner "${runner.display}" (validation command "${runner.command}") has no exact population collector`,
   };
 }
 
@@ -1011,27 +1067,56 @@ async function compareTestPopulations(
   fs: ShipSetupFileSystem,
   runner: ValidationCommandRunner,
   declaredCommands: readonly BriefValidationCommand[],
-): Promise<TestPopulationParity | undefined> {
+): Promise<TestPopulationComparison> {
   const sourceDiscovery = discoverTestPopulationMethod(sourceDir, fs, declaredCommands);
   const targetDiscovery = discoverTestPopulationMethod(targetDir, fs, declaredCommands);
-  if (!sourceDiscovery.hasConfiguredTests && !targetDiscovery.hasConfiguredTests) return undefined;
-  if (targetDiscovery.validationUnknown) return undefined;
-  if (!sourceDiscovery.method || !targetDiscovery.method) {
+  const discoveries = { sourceDiscovery, targetDiscovery };
+  if (!sourceDiscovery.hasConfiguredTests && !targetDiscovery.hasConfiguredTests) return discoveries;
+  if (targetDiscovery.validationUnknown) return discoveries;
+  if (sourceDiscovery.hasConfiguredTests !== targetDiscovery.hasConfiguredTests) {
     return {
-      version: 1,
-      state: 'unavailable',
-      missingFromTarget: [],
-      extraInTarget: [],
-      reason: [sourceDiscovery.reason, targetDiscovery.reason].filter(Boolean).join('; '),
+      ...discoveries,
+      population: {
+        version: 1,
+        state: 'mismatched',
+        missingFromTarget: [],
+        extraInTarget: [],
+        reason: sourceDiscovery.hasConfiguredTests
+          ? 'The source has a configured test command, but the target does not'
+          : 'The target has a configured test command, but the source does not',
+      },
+    };
+  }
+  const populationRunner = sourceDiscovery.runner && targetDiscovery.runner
+    ? { source: sourceDiscovery.runner, target: targetDiscovery.runner }
+    : undefined;
+  if (!sourceDiscovery.method || !targetDiscovery.method) {
+    const reasons = [...new Set([sourceDiscovery.reason, targetDiscovery.reason].filter(
+      (reason): reason is string => Boolean(reason),
+    ))];
+    return {
+      ...discoveries,
+      population: {
+        version: 1,
+        state: 'unverified',
+        ...(populationRunner ? { runner: populationRunner } : {}),
+        missingFromTarget: [],
+        extraInTarget: [],
+        reason: reasons.join('; '),
+      },
     };
   }
   if (sourceDiscovery.method.tool !== targetDiscovery.method.tool) {
     return {
-      version: 1,
-      state: 'unavailable',
-      missingFromTarget: [],
-      extraInTarget: [],
-      reason: `Source collector ${sourceDiscovery.method.tool} differs from target collector ${targetDiscovery.method.tool}`,
+      ...discoveries,
+      population: {
+        version: 1,
+        state: 'unverified',
+        ...(populationRunner ? { runner: populationRunner } : {}),
+        missingFromTarget: [],
+        extraInTarget: [],
+        reason: `Source collector ${sourceDiscovery.method.tool} differs from target collector ${targetDiscovery.method.tool}`,
+      },
     };
   }
   try {
@@ -1042,32 +1127,187 @@ async function compareTestPopulations(
     const missingFromTarget = source.identities.filter((identity) => !targetSet.has(identity));
     const extraInTarget = target.identities.filter((identity) => !sourceSet.has(identity));
     return {
-      version: 1,
-      state: missingFromTarget.length === 0 && extraInTarget.length === 0 ? 'matched' : 'mismatched',
-      method: {
-        tool: sourceDiscovery.method.tool,
-        display: sourceDiscovery.method.display,
-        evidencePath: sourceDiscovery.method.evidencePath,
+      ...discoveries,
+      population: {
+        version: 1,
+        state: missingFromTarget.length === 0 && extraInTarget.length === 0 ? 'matched' : 'mismatched',
+        method: {
+          tool: sourceDiscovery.method.tool,
+          display: sourceDiscovery.method.display,
+          evidencePath: sourceDiscovery.method.evidencePath,
+        },
+        source,
+        target,
+        missingFromTarget,
+        extraInTarget,
       },
-      source,
-      target,
-      missingFromTarget,
-      extraInTarget,
     };
   } catch (error) {
     return {
-      version: 1,
-      state: 'unavailable',
-      method: {
-        tool: sourceDiscovery.method.tool,
-        display: sourceDiscovery.method.display,
-        evidencePath: sourceDiscovery.method.evidencePath,
+      ...discoveries,
+      population: {
+        version: 1,
+        state: 'unverified',
+        ...(populationRunner ? { runner: populationRunner } : {}),
+        method: {
+          tool: sourceDiscovery.method.tool,
+          display: sourceDiscovery.method.display,
+          evidencePath: sourceDiscovery.method.evidencePath,
+        },
+        missingFromTarget: [],
+        extraInTarget: [],
+        reason: `Cannot collect exact source/target test populations using ${sourceDiscovery.method.evidencePath}: ${errorMessage(error)}`,
       },
-      missingFromTarget: [],
-      extraInTarget: [],
-      reason: `Cannot collect exact source/target test populations using ${sourceDiscovery.method.evidencePath}: ${errorMessage(error)}`,
     };
   }
+}
+
+interface ObservedValidationRun {
+  response: ValidationRunResponse;
+  durationMs: number;
+}
+
+async function observeValidationRun(
+  request: ValidationRunRequest,
+  runner: ValidationCommandRunner,
+): Promise<ObservedValidationRun> {
+  const started = Date.now();
+  try {
+    const response = await runner(request);
+    return {
+      response,
+      durationMs: response.durationMs ?? Math.max(0, Date.now() - started),
+    };
+  } catch (error) {
+    return {
+      response: { exitCode: null, error: errorMessage(error) },
+      durationMs: Math.max(0, Date.now() - started),
+    };
+  }
+}
+
+interface TapPopulationParse {
+  observation?: TestPopulationObservation;
+  reason?: string;
+}
+
+function parseTapPopulation(
+  projectDir: string,
+  observed: ObservedValidationRun | undefined,
+): TapPopulationParse {
+  if (!observed) return { reason: 'the test command was not observed' };
+  const { response, durationMs } = observed;
+  if (response.error || response.exitCode === null) {
+    return { reason: response.error ?? 'the test command ended without an exit code' };
+  }
+  const output = [response.stdout, response.stderr]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join('\n');
+  if (/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/m.test(output)) {
+    return { reason: 'TAP output was truncated before population parsing' };
+  }
+  const lines = output.split(/\r?\n/);
+  if (lines.some((line) => /^\s*Bail out!/i.test(line))) {
+    return { reason: 'TAP output contains a bailout' };
+  }
+  const versions = lines.filter((line) => /^TAP version \d+\s*$/i.test(line));
+  if (versions.length !== 1) {
+    return { reason: versions.length === 0 ? 'output is not complete TAP (version line missing)' : 'TAP output has ambiguous version lines' };
+  }
+  const plans = lines.flatMap((line) => {
+    const match = /^(\d+)\.\.(\d+)(?:\s+#.*)?\s*$/.exec(line);
+    return match ? [{ start: Number(match[1]), end: Number(match[2]) }] : [];
+  });
+  if (plans.length !== 1) {
+    return { reason: plans.length === 0 ? 'TAP output has no top-level plan' : 'TAP output has multiple top-level plans' };
+  }
+  const records = new Map<number, string>();
+  for (const line of lines) {
+    const match = /^(?:not ok|ok)\s+(\d+)(?:\s*-\s*(.*?))?\s*$/i.exec(line);
+    if (!match) continue;
+    const ordinal = Number(match[1]);
+    if (!Number.isSafeInteger(ordinal) || records.has(ordinal)) {
+      return { reason: `TAP output has a duplicate or invalid top-level ordinal: ${match[1]}` };
+    }
+    const name = (match[2] ?? '').replace(/(?:^|\s+)#\s+(?:SKIP|TODO)\b.*$/i, '').trim();
+    if (!name) {
+      return { reason: `TAP top-level record ${match[1]} has no test name, so identity parity cannot be established` };
+    }
+    records.set(ordinal, name);
+  }
+  const [plan] = plans;
+  if (plan.start !== 1 || !Number.isSafeInteger(plan.end)) {
+    return { reason: `TAP output has an unsupported top-level plan ${plan.start}..${plan.end}` };
+  }
+  const expectedCount = plan.end === 0 ? 0 : plan.end;
+  if (records.size !== expectedCount) {
+    return { reason: `TAP records do not match the top-level plan: expected ${expectedCount}, observed ${records.size}` };
+  }
+  const expectedOrdinals = Array.from({ length: expectedCount }, (_, index) => index + 1);
+  const missingOrdinals = expectedOrdinals.filter((ordinal) => !records.has(ordinal));
+  const extraOrdinals = [...records.keys()].filter((ordinal) => ordinal < 1 || ordinal > plan.end);
+  if (missingOrdinals.length > 0 || extraOrdinals.length > 0) {
+    const missing = missingOrdinals.length > 0 ? ` missing ${missingOrdinals.join(', ')}` : '';
+    const extra = extraOrdinals.length > 0 ? ` extra ${extraOrdinals.join(', ')}` : '';
+    return { reason: `TAP records do not match the top-level plan${missing}${extra}` };
+  }
+  const identities = expectedOrdinals.map((ordinal) => `${ordinal}:${records.get(ordinal) ?? ''}`);
+  return {
+    observation: {
+      projectDir,
+      count: identities.length,
+      identities,
+      digest: createHash('sha256').update(identities.join('\0')).digest('hex'),
+      durationMs,
+    },
+  };
+}
+
+function derivePopulationFromBaselineOutput(
+  initial: TestPopulationParity,
+  sourceDir: string,
+  targetDir: string,
+  sourceRun: ObservedValidationRun | undefined,
+  targetRun: ObservedValidationRun | undefined,
+): TestPopulationParity {
+  const sourceParsed = parseTapPopulation(sourceDir, sourceRun);
+  const targetParsed = parseTapPopulation(targetDir, targetRun);
+  const collectorReason = initial.reason ?? 'an exact collector was unavailable';
+  if (sourceParsed.observation && targetParsed.observation) {
+    const sourceSet = new Set(sourceParsed.observation.identities);
+    const targetSet = new Set(targetParsed.observation.identities);
+    const missingFromTarget = sourceParsed.observation.identities
+      .filter((identity) => !targetSet.has(identity));
+    const extraInTarget = targetParsed.observation.identities
+      .filter((identity) => !sourceSet.has(identity));
+    return {
+      version: 1,
+      state: missingFromTarget.length === 0 && extraInTarget.length === 0 ? 'matched' : 'mismatched',
+      ...(initial.runner ? { runner: initial.runner } : {}),
+      method: {
+        source: 'baseline_output',
+        format: 'tap',
+        display: 'complete top-level TAP from source and target test executions',
+        evidencePath: 'source and target test command output',
+      },
+      source: sourceParsed.observation,
+      target: targetParsed.observation,
+      missingFromTarget,
+      extraInTarget,
+      reason: `Exact collection was unavailable (${collectorReason}); population parity was derived from complete TAP emitted by the source run and target baseline.`,
+    };
+  }
+  const runner = initial.runner?.source.display ?? initial.runner?.source.command ?? 'configured test command';
+  return {
+    version: 1,
+    state: 'unverified',
+    ...(initial.runner ? { runner: initial.runner } : {}),
+    ...(sourceParsed.observation ? { source: sourceParsed.observation } : {}),
+    ...(targetParsed.observation ? { target: targetParsed.observation } : {}),
+    missingFromTarget: [],
+    extraInTarget: [],
+    reason: `Population parity for runner "${runner}" is unverified: exact collection was unavailable (${collectorReason}); source output: ${sourceParsed.reason ?? 'complete TAP parsed'}; target baseline output: ${targetParsed.reason ?? 'complete TAP parsed'}.`,
+  };
 }
 
 /** Execute setup without rendering; operational refusals are returned as structured facts. */
@@ -1161,20 +1401,15 @@ export async function runShipSetup(
   const targetBlockers = verificationBlockers('target', targetVerification);
   if (targetBlockers.length > 0) return refused(facts, targetBlockers);
 
-  const testPopulation = await compareTestPopulations(
+  const populationComparison = await compareTestPopulations(
     projectDir,
     targetDir,
     deps.fs,
     deps.runTestCollectionCommand,
     declaredValidation.commands,
   );
+  let testPopulation = populationComparison.population;
   if (testPopulation) facts = { ...facts, testPopulation };
-  if (testPopulation?.state === 'unavailable') {
-    return refused(facts, [{
-      phase: 'validation',
-      reason: `Test population parity is unavailable before baseline: ${testPopulation.reason ?? 'exact collection failed'}`,
-    }]);
-  }
   if (testPopulation?.state === 'mismatched') {
     const missing = testPopulation.missingFromTarget.length > 0
       ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
@@ -1182,18 +1417,48 @@ export async function runShipSetup(
     const extra = testPopulation.extraInTarget.length > 0
       ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
       : '';
+    const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
     return refused(facts, [{
       phase: 'validation',
-      reason: `Test population mismatch before baseline: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}`,
+      reason: `Test population mismatch before baseline: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
     }]);
   }
 
+  const needsOutputFallback = testPopulation?.state === 'unverified';
+  const baselineRunner = deps.runValidationCommand ?? runValidationCommand;
+  let sourceTestRun: ObservedValidationRun | undefined;
+  if (needsOutputFallback && populationComparison.sourceDiscovery.testCommand) {
+    sourceTestRun = await observeValidationRun({
+      ...populationComparison.sourceDiscovery.testCommand,
+      cwd: projectDir,
+    }, baselineRunner);
+  }
+  let targetTestRun: ObservedValidationRun | undefined;
+  const observingBaselineRunner: ValidationCommandRunner = (request) => {
+    if (request.role !== 'test') return baselineRunner(request);
+    return observeValidationRun(request, baselineRunner).then((observed) => {
+      targetTestRun = observed;
+      return observed.response;
+    });
+  };
   const validationBaseline = await runProjectValidationBaseline(targetDir, {
     fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-    ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+    ...(needsOutputFallback
+      ? { runCommand: observingBaselineRunner }
+      : deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
     declaredCommands: declaredValidation.commands,
   });
   facts = { ...facts, validationBaseline };
+  if (needsOutputFallback && testPopulation) {
+    testPopulation = derivePopulationFromBaselineOutput(
+      testPopulation,
+      projectDir,
+      targetDir,
+      sourceTestRun,
+      targetTestRun,
+    );
+    facts = { ...facts, testPopulation };
+  }
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
     ? [{
         phase: 'validation',
@@ -1213,6 +1478,19 @@ export async function runShipSetup(
       };
     }));
   if (validationBlockers.length > 0) return refused(facts, validationBlockers);
+  if (testPopulation?.state === 'mismatched') {
+    const missing = testPopulation.missingFromTarget.length > 0
+      ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
+      : '';
+    const extra = testPopulation.extraInTarget.length > 0
+      ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
+      : '';
+    const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
+    return refused(facts, [{
+      phase: 'validation',
+      reason: `Test population mismatch from baseline output: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
+    }]);
+  }
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,
     measuredBrief.digest,
@@ -1275,9 +1553,17 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
       + `${report.testPopulation.source ? ` source=${report.testPopulation.source.count}` : ''}`
       + `${report.testPopulation.target ? ` target=${report.testPopulation.target.count}` : ''}\n`,
     );
-    if (report.testPopulation.method) {
-      writer.write(`  collector: ${report.testPopulation.method.display}\n`);
+    if (report.testPopulation.runner) {
+      const { source, target } = report.testPopulation.runner;
+      writer.write(`  runner: ${source.display}${source.command === source.display ? '' : ` (invoked as ${source.command})`}\n`);
+      if (target.display !== source.display || target.command !== source.command) {
+        writer.write(`  target runner: ${target.display}${target.command === target.display ? '' : ` (invoked as ${target.command})`}\n`);
+      }
     }
+    if (report.testPopulation.method) {
+      writer.write(`${'tool' in report.testPopulation.method ? '  collector' : '  evidence'}: ${report.testPopulation.method.display}\n`);
+    }
+    if (report.testPopulation.reason) writer.write(`  reason: ${report.testPopulation.reason}\n`);
   }
   if (report.state === 'ready') {
     writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);

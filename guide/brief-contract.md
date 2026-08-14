@@ -160,8 +160,10 @@ There is no validation-bypass flag.
 For a resolved test argv beginning with a Python executable followed by `-m
 pytest`, setup derives the population probe by appending `--collect-only -q` to
 that same argv and compares source and target identities before capturing the
-baseline. Other custom test commands still require an exact supported
-population method; a command declaration does not weaken the population gate.
+baseline. Other custom test commands use the generic baseline-output fallback:
+complete named top-level TAP identities are compared, while output that cannot
+establish identities is recorded as reason-bearing `unverified`. A command
+declaration never weakens the validation baseline or its gates.
 
 ## `terminal_states`
 
@@ -646,12 +648,39 @@ edits; they also keep test-module paths rooted in the target instead of resolvin
 symlink to the source checkout. Existing target files are never overwritten: a type or content
 collision is a blocker. Setup then verifies the input assertions again through the target.
 
-Before recording the target baseline, setup also derives an exact test-file collector from the
-project's configured test command (Vitest and pytest are supported), or uses an explicit
-`package.json` `flowcrew.testPopulation.files` list. It compares the normalized source and target
-identity sets—not just their counts—and refuses setup when collection is unavailable or either
-set differs. This check runs whether or not the brief remembered to declare the ignored test
-directory, so a smaller launch suite cannot silently become the baseline. Only after population
-parity and executable validation are established does setup write its ready record, keyed by the
-exact brief digest plus the canonical target. Use `flowcrew watch` after launch for a continuous
-heartbeat and edge-triggered stalls; `--once` performs one read-only pass.
+Before recording the target baseline, setup prefers an exact test-file collector derived from the
+configured command (Vitest and pytest are supported), or an explicit `package.json`
+`flowcrew.testPopulation.files` list. It compares the normalized source and target identity sets—not
+just their counts—and refuses setup when those identities differ. This collector check runs
+whether or not the brief remembered to declare the ignored test
+directory, so a smaller launch suite cannot silently become the baseline.
+
+Missing collector knowledge is recorded separately from a broken target. When no exact collector
+is available, setup runs the configured source test command once and observes the test response
+already used to construct the target baseline. If both executions emit complete top-level TAP,
+their ordinal/name identities are compared generically. A TAP mismatch still refuses. Truncated,
+ambiguous, bailed-out, non-TAP output, or records without names instead produce a ready record with
+test-population state `unverified`, the configured runner, and the reason complete parity could not
+be established. This is the same modelling choice as `research.feasibility: not_computable`: an
+underivable assurance is first-class and reason-bearing, not silently converted into either success
+or failure.
+
+The costs and assurances differ by state:
+
+- Collector-matched uses two cheap collections plus the one governing target suite run. It proves
+  the collector's normalized identities agree, but cannot prove tests outside the configured
+  command or explicit declaration exist.
+- TAP-matched uses two full suite executions: one source run and the governing target baseline run.
+  It proves their complete reported top-level TAP identities agree, but has no runner-specific
+  discovery assurance for tests the command never reports.
+- `unverified` still proves the target validation command ran and records its unchanged baseline
+  and gates. It does not prove source/target population parity; the runner and missing evidence are
+  visible in both JSON and human output.
+- `mismatched` proves configured test availability or the observed populations differ and refuses
+  without a ready record.
+
+Population evidence never relaxes validation. Target launch failures, including exit 127, still
+refuse, and ordinary red baselines keep the same `no_regression_from_baseline` criterion in every
+population state. A ready record remains keyed by the exact brief digest plus the canonical target.
+Use `flowcrew watch` after launch for a continuous heartbeat and edge-triggered stalls; `--once`
+performs one read-only pass.
