@@ -277,6 +277,14 @@ prose identifying its prior or documentary source is descriptive, while an
 unattributed quoted directive remains an instruction. Attribution never cancels
 a positive directive elsewhere in the brief.
 
+The four prose recognizers that span words—headline distribution, exact-method
+criterion exceptions, assigned stage-floor writers, and per-stage writable-path
+mappings—treat an ordinary Markdown soft wrap inside one paragraph or list item
+as presentation, not semantics. They keep blank-separated paragraphs, headings,
+distinct list items, tables, quotations, and fenced blocks separate, so moving a
+line break cannot make a correct requirement appear absent or join two
+independent fragments into a new requirement.
+
 A disclaimer is not an exemption and never cancels positive evidence elsewhere.
 For example, saying that the task does not pre-register anything contributes no
 commitment evidence; if the brief also directs a stage to freeze a selection rule,
@@ -586,6 +594,12 @@ checks:
 
 Only a `checks:` list inside a `## Reality checks` section is parsed. See
 [Reality-Gate](reality-gate.md) for available check types.
+
+Planner-authored hard checks may not make their verdict the unprocessed exit
+status of a project build, test, or lint command. The ship-setup ready record is
+bound to the canonical target and exact brief bytes; when it records a red
+`no_regression_from_baseline` criterion, compare current failure identities with
+that record or omit the redundant validation check.
 
 ### Guidance
 

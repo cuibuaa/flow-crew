@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { stringify } from 'yaml';
@@ -10,9 +10,14 @@ import {
   inspectRealityChecks,
   type RealityCheckPreflightCode,
 } from '../src/reality-check-preflight.js';
+import type { ProjectValidationBaseline } from '../src/project-validation.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import {
+  shipSetupBriefDigest,
+  shipSetupReadyRecordPath,
+} from '../src/ship-setup-record.js';
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 const AGENTS_DIR = join(PROJECT_ROOT, 'config', 'agents');
@@ -53,6 +58,41 @@ function tierCodes(check: CheckFixture, brief = CONTRACT_BRIEF): {
   return {
     blocking: report.blockingTierFindings.map(({ code }) => code),
     advisory: report.advisoryFindings.map(({ code }) => code),
+  };
+}
+
+function failingValidationBaseline(
+  display = 'python -m pytest tests',
+  failureIdentifiers = Array.from({ length: 9 }, (_, index) => `tests/test_gate.py::test_known_${index + 1}`),
+): ProjectValidationBaseline {
+  const [command, ...args] = display.split(' ');
+  return {
+    version: 1,
+    projectDir: '/project',
+    discovery: {
+      state: 'partial',
+      configPath: '/project/pyproject.toml',
+      commands: [{ role: 'test', command, args, display }],
+      missingRoles: ['build', 'lint'],
+    },
+    results: [{
+      role: 'test',
+      display,
+      state: 'failed',
+      exitCode: 1,
+      durationMs: 10,
+      output: '',
+      failureCount: failureIdentifiers.length,
+      failureIdentifiers,
+      failureIdentity: 'known',
+    }],
+    gateCriteria: [{
+      role: 'test',
+      rule: 'no_regression_from_baseline',
+      baselineFailureCount: failureIdentifiers.length,
+      baselineFailureIdentifiers: failureIdentifiers,
+      description: 'test may improve but may not add a failing identity',
+    }],
   };
 }
 
@@ -184,6 +224,201 @@ describe('planner Reality-Gate check preflight', () => {
       type: 'exec-script-exit-zero',
       params: { script: 'true' },
     })).toEqual({ blocking: ['hard_check_cannot_fail'], advisory: [] });
+  });
+
+  it.each([
+    {
+      label: 'the final command in the script',
+      script: 'printf "checking recorded suite\\n"\npython -m pytest tests',
+    },
+    {
+      label: 'the final command in one terminal branch while the other returns success',
+      script: [
+        'if test -s docs/final.md; then',
+        '  printf "fresh artifact\\n"',
+        '  python -m pytest tests',
+        'else',
+        '  exit 0',
+        'fi',
+      ].join('\n'),
+    },
+  ])('blocks a red-baseline validation command used as $label', ({ script }) => {
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation remains acceptable',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }), { validationBaseline: failingValidationBaseline() });
+
+    expect(report.blockingTierFindings).toContainEqual(expect.objectContaining({
+      code: 'hard_check_cannot_pass',
+      message: expect.stringContaining('python -m pytest tests'),
+      evidence: expect.stringContaining('tests/test_gate.py::test_known_1'),
+    }));
+    expect(report.blockingTierFindings[0].message).toMatch(/compare .*fail|omit .*validation/i);
+  });
+
+  it.each([
+    {
+      label: 'an exact final command',
+      script: 'printf "checking recorded suite\\n"\nvalidator verify --all',
+    },
+    {
+      label: 'a final command with output redirections',
+      script: 'validator verify --all >"$TMPDIR/validation.log" 2>&1',
+    },
+    {
+      label: 'a final command with quoted argv',
+      script: '"validator" \'verify\' "--all"',
+    },
+    {
+      label: 'a final command behind the command builtin',
+      script: 'command "validator" verify --all',
+    },
+    {
+      label: 'a final command behind the exec builtin',
+      script: 'exec validator verify --all',
+    },
+    {
+      label: 'a final command behind env options and assignments',
+      script: 'env -i VALIDATION_MODE=strict validator verify --all',
+    },
+    {
+      label: 'a captured status immediately re-exited',
+      script: 'validator verify --all\nvalidation_status=$?\nexit "$validation_status"',
+    },
+    {
+      label: 'a redirected command in a terminal branch',
+      script: [
+        'if test -s docs/final.md; then',
+        '  validator verify --all >"$TMPDIR/validation.log" 2>&1',
+        'else',
+        '  :',
+        'fi',
+      ].join('\n'),
+    },
+  ])('blocks a generic red-baseline validator used as $label', ({ script }) => {
+    const baseline = failingValidationBaseline('validator verify --all', ['suite/case::known_failure']);
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation remains acceptable',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }), { validationBaseline: baseline });
+
+    expect(report.blockingTierFindings).toContainEqual(expect.objectContaining({
+      code: 'hard_check_cannot_pass',
+      message: expect.stringContaining('validator verify --all'),
+      evidence: expect.stringContaining('suite/case::known_failure'),
+    }));
+  });
+
+  it('accepts a baseline-aware red-suite check that compares recorded failure identities', () => {
+    const script = [
+      'set +e',
+      'output="$(python -m pytest tests 2>&1)"',
+      'status=$?',
+      'set -e',
+      'node scripts/compare-validation-failures.mjs "$status" "$output" docs/recorded-baseline.json',
+    ].join('\n');
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation has no regression from baseline',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }), { validationBaseline: failingValidationBaseline() });
+
+    expect(report.findings.map(({ code }) => code)).not.toContain('hard_check_cannot_pass');
+  });
+
+  it('accepts a captured validation status that is processed instead of re-exited', () => {
+    const script = [
+      'validator verify --all',
+      'validation_status=$?',
+      'test "$validation_status" -le 1',
+    ].join('\n');
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation status is interpreted',
+      type: 'exec-script-exit-zero',
+      params: { script },
+    }), { validationBaseline: failingValidationBaseline('validator verify --all') });
+
+    expect(report.findings.map(({ code }) => code)).not.toContain('hard_check_cannot_pass');
+  });
+
+  it.each([
+    { label: 'no baseline context', context: undefined },
+    {
+      label: 'a green recorded baseline',
+      context: {
+        validationBaseline: {
+          ...failingValidationBaseline(),
+          results: [{
+            role: 'test' as const,
+            display: 'python -m pytest tests',
+            state: 'passed' as const,
+            exitCode: 0,
+            durationMs: 10,
+            output: '',
+            failureCount: 0,
+            failureIdentifiers: [],
+            failureIdentity: 'none' as const,
+          }],
+          gateCriteria: [{
+            role: 'test' as const,
+            rule: 'must_remain_green' as const,
+            baselineFailureIdentifiers: [],
+            description: 'test passed and must remain green',
+          }],
+        },
+      },
+    },
+    {
+      label: 'an unresolved recorded baseline',
+      context: {
+        validationBaseline: {
+          ...failingValidationBaseline(),
+          discovery: {
+            ...failingValidationBaseline().discovery,
+            state: 'unknown' as const,
+            reason: 'validation command could not be resolved',
+          },
+          results: [{
+            role: 'test' as const,
+            display: 'python -m pytest tests',
+            state: 'unresolved' as const,
+            durationMs: 0,
+            output: '',
+            failureIdentifiers: [],
+            failureIdentity: 'unknown' as const,
+          }],
+          gateCriteria: [{
+            role: 'test' as const,
+            rule: 'baseline_unresolved' as const,
+            baselineFailureIdentifiers: [],
+            description: 'baseline could not be resolved',
+          }],
+        },
+      },
+    },
+  ])('does not invent a cannot-pass finding for $label', ({ context }) => {
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation passes',
+      type: 'exec-script-exit-zero',
+      params: { script: 'python -m pytest tests' },
+    }), context);
+    expect(report.findings.map(({ code }) => code)).not.toContain('hard_check_cannot_pass');
+  });
+
+  it('gives every preflight finding an element-specific repair action', () => {
+    const invalid = ['## Reality checks', '```yaml', 'checks:', '  - nope', '```'].join('\n');
+    const reports = [
+      ...BAD_CHECKS.map(({ check }) => inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown(check))),
+      inspectRealityChecks(CONTRACT_BRIEF, BLOCKING_BAD_CHECK_MARKDOWN),
+      inspectRealityChecks(CONTRACT_BRIEF, invalid),
+    ];
+    const messages = reports.flatMap(({ findings }) => findings.map(({ message }) => message));
+    expect(messages).toHaveLength(6);
+    for (const message of messages) {
+      expect(message).toMatch(/replace|change|declare|narrow|remove|make|fix|mark/i);
+    }
   });
 
   it('rewrites only intent-dependent findings as runtime-advisory declarations', () => {
@@ -707,6 +942,11 @@ const BLOCKING_BAD_CHECK_MARKDOWN = checksMarkdown({
   params: { script: 'true' },
 });
 const GOOD_CHECK_MARKDOWN = checksMarkdown(GOOD_CHECKS[0].check);
+const RAW_RED_BASELINE_CHECK_MARKDOWN = checksMarkdown({
+  name: 'project validation remains acceptable',
+  type: 'exec-script-exit-zero',
+  params: { script: 'python -m pytest tests' },
+});
 
 describe('planner check admission boundary', () => {
   let originalFcHome: string;
@@ -803,6 +1043,57 @@ describe('planner check admission boundary', () => {
       .toContain('hard_check_cannot_fail');
     expect(adapter.calls.filter(({ stageId }) => stageId === 'plan')[1].prompt)
       .toContain('reality_check_preflight.json');
+    expect(final.status).not.toBe('failed');
+  });
+
+  it('passes only the exact target-and-brief ready baseline into pre-dispatch lint', async () => {
+    const briefDigest = shipSetupBriefDigest(CONTRACT_BRIEF);
+    const recordPath = shipSetupReadyRecordPath(projectDir, briefDigest, isolatedFcHome);
+    const validationBaseline = {
+      ...failingValidationBaseline(),
+      projectDir,
+      discovery: {
+        ...failingValidationBaseline().discovery,
+        configPath: join(projectDir, 'pyproject.toml'),
+      },
+    };
+    mkdirSync(join(isolatedFcHome, 'ship-setups'), { recursive: true });
+    writeFileSync(recordPath, JSON.stringify({
+      version: 1,
+      state: 'ready',
+      ready: true,
+      targetCanonicalDir: projectDir,
+      briefDigest,
+      readyRecordPath: recordPath,
+      validationBaseline,
+    }), 'utf-8');
+    const adapter = new ScriptedAdapter({
+      plan: [
+        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': RAW_RED_BASELINE_CHECK_MARKDOWN } },
+        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': GOOD_CHECK_MARKDOWN } },
+      ],
+      work: { projectFiles: { 'docs/final.md': '# Final\n\nEvidence is present.\n' } },
+      _summary: { output: '# Summary\n' },
+    });
+    const fixture = workflow();
+
+    const final = await runWorkflow(
+      fixture.config,
+      fixture.yaml,
+      projectDir,
+      adapter,
+      new Map(),
+      undefined,
+      AGENTS_DIR,
+      undefined,
+      CONTRACT_BRIEF,
+      true,
+    );
+
+    expect(adapter.calls.map(({ stageId }) => stageId).filter((id) => id === 'plan' || id === 'work'))
+      .toEqual(['plan', 'plan', 'work']);
+    expect(adapter.calls.filter(({ stageId }) => stageId === 'plan')[1].prompt)
+      .toContain('hard_check_cannot_pass');
     expect(final.status).not.toBe('failed');
   });
 

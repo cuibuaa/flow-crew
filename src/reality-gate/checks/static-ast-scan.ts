@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { CheckContext, RealityCheck } from '../types.js';
 import { resolvePath, result } from './_utils.js';
 
@@ -13,9 +13,9 @@ export default class StaticAstScanCheck implements RealityCheck {
   static meta = { description: 'Scan files matching a glob for a forbidden pattern; fail if any match is found.', params: 'glob: string, language: string, forbid_pattern: string' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
-    if (typeof params.glob !== 'string') return result(false, 'glob must be provided');
-    if (typeof params.forbid_pattern !== 'string') return result(false, 'forbid_pattern must be provided');
-    if (typeof params.language !== 'string') return result(false, 'language must be provided');
+    if (typeof params.glob !== 'string') return result(false, '`params.glob` must be provided; declare the files to scan and rerun the check.');
+    if (typeof params.forbid_pattern !== 'string') return result(false, '`params.forbid_pattern` must be provided; declare the forbidden pattern and rerun the check.');
+    if (typeof params.language !== 'string') return result(false, '`params.language` must be provided; declare the source language and rerun the check.');
     const files = expandGlob(params.glob, context);
     const pattern = new RegExp(params.forbid_pattern, 'gm');
     const findings: Array<{ file: string; line: number; match: string }> = [];
@@ -26,7 +26,16 @@ export default class StaticAstScanCheck implements RealityCheck {
         findings.push({ file, line: text.slice(0, index).split(/\r?\n/).length, match: match[0].slice(0, 160) });
       }
     }
-    return result(findings.length === 0, findings.length === 0 ? `${files.length} file(s) clean` : `${findings.length} forbidden pattern match(es)`, { filesScanned: files.length, findings });
+    const summary = findings.slice(0, 10).map((item) =>
+      `${relative(context.projectDir, item.file).replaceAll('\\', '/').slice(0, 200)}:${item.line}`).join(', ');
+    const omitted = findings.length - Math.min(findings.length, 10);
+    return result(
+      findings.length === 0,
+      findings.length === 0
+        ? `${files.length} file(s) clean`
+        : `${findings.length} forbidden pattern match(es): ${summary}${omitted > 0 ? ` (+${omitted} more)` : ''}. Remove or change each named match, or narrow the glob/pattern only when the contract permits it.`,
+      { filesScanned: files.length, findings },
+    );
   }
 }
 

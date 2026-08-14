@@ -12,6 +12,15 @@ function safetySection(): string {
 }
 
 describe('agent run-directory safety contract', () => {
+  it('keeps the project boundary reachable for explicitly authorized run records and OS-temporary evidence', () => {
+    const safety = safetySection();
+
+    expect(safety).toMatch(/Never modify files outside the project directory except/i);
+    expect(safety).toMatch(/explicitly authorized task-local run paths/i);
+    expect(safety).toMatch(/operating system temporary root/i);
+    expect(safety).toMatch(/All other external paths remain read-only/i);
+  });
+
   it('absolutely prohibits mutation outside this task\'s own run directory', () => {
     const safety = safetySection();
 

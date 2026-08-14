@@ -89,6 +89,90 @@ const EXACT_MEANS_MARKER = /(?:该手段本身.{0,8}(?:是|作为).{0,8}判据|�
 const OBSERVABLE_PLACEMENT = /(?:显示|展示|呈现|出现在).{0,16}`\/[A-Za-z0-9_/-]+`/;
 const STRUCTURAL_LINE = /^(?:---(?:\s|$)|#{1,6}(?:\s|$)|>|[-*+]\s|\d+[.)]\s|```|~~~|\*\*|__)/;
 
+type LogicalProseKind = 'prose' | 'heading' | 'list' | 'quote' | 'table' | 'boundary';
+
+interface LogicalProseUnit {
+  line: number;
+  text: string;
+  kind: LogicalProseKind;
+}
+
+/**
+ * Fold Markdown soft wraps while retaining source lines and semantic
+ * boundaries. Distinct paragraphs, headings, list items, quotes, tables, and
+ * fenced/indented code never become one requirement merely because they are
+ * adjacent in the source.
+ */
+function logicalProseUnits(lines: readonly string[]): LogicalProseUnit[] {
+  const units: LogicalProseUnit[] = [];
+  let current: LogicalProseUnit | undefined;
+  let fence: { marker: '`' | '~'; length: number } | undefined;
+  const flush = () => {
+    if (current) units.push(current);
+    current = undefined;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    const fenceRun = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
+    if (!fence && fenceRun) {
+      flush();
+      fence = { marker: fenceRun[1][0] as '`' | '~', length: fenceRun[1].length };
+      continue;
+    }
+    if (fence) {
+      if (fenceRun
+          && fenceRun[1][0] === fence.marker
+          && fenceRun[1].length >= fence.length
+          && fenceRun[2].trim().length === 0) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (!trimmed) {
+      flush();
+      continue;
+    }
+
+    const kind: LogicalProseKind = /^#{1,6}(?:\s|$)/.test(trimmed)
+      ? 'heading'
+      : /^(?:[-*+]\s+|\d+[.)]\s+)/.test(trimmed)
+        ? 'list'
+        : /^>/.test(trimmed)
+          ? 'quote'
+          : /^\|.*\|$/.test(trimmed)
+            ? 'table'
+            : /^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed) || /^(?: {4}|\t)/.test(lines[index])
+              ? 'boundary'
+              : 'prose';
+
+    if (kind === 'heading' || kind === 'table' || kind === 'boundary') {
+      flush();
+      units.push({ line: index + 1, text: trimmed, kind });
+      continue;
+    }
+    if (kind === 'list') {
+      flush();
+      current = { line: index + 1, text: trimmed, kind };
+      continue;
+    }
+    if (kind === 'quote') {
+      if (current?.kind !== 'quote') flush();
+      if (current) current.text += ` ${trimmed}`;
+      else current = { line: index + 1, text: trimmed, kind };
+      continue;
+    }
+    if (current && (current.kind === 'prose' || current.kind === 'list')) {
+      current.text += ` ${trimmed}`;
+    } else {
+      flush();
+      current = { line: index + 1, text: trimmed, kind: 'prose' };
+    }
+  }
+  flush();
+  return units;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -98,25 +182,17 @@ function sha256(value: string): string {
  * instrument. It deliberately favors low noise over recall.
  */
 export function lintInstrumentCriteria(text: string): CriterionLintWarning[] {
-  const lines = text.split(/\r\n|\n|\r/);
   const warnings: CriterionLintWarning[] = [];
-  let inFence = false;
   let illustrativeList = false;
 
-  for (let index = 0; index < lines.length; index++) {
-    const original = lines[index];
-    const trimmed = original.trim();
-    if (/^```|^~~~/.test(trimmed)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+  for (const unit of logicalProseUnits(text.split(/\r\n|\n|\r/))) {
+    const trimmed = unit.text;
     if (ILLUSTRATIVE_MARKER.test(trimmed) && /[:：]\s*$/.test(trimmed)) {
       illustrativeList = true;
       continue;
     }
     if (illustrativeList) {
-      if (!trimmed || /^[-*+]\s|^\d+[.)]\s/.test(trimmed)) continue;
+      if (unit.kind === 'list') continue;
       illustrativeList = false;
     }
     if (!trimmed || /^>/.test(trimmed) || /^["“].*["”](?:\s*[-—(（]|\s*$)/.test(trimmed)) continue;
@@ -133,7 +209,7 @@ export function lintInstrumentCriteria(text: string): CriterionLintWarning[] {
     ) continue;
 
     warnings.push({
-      line: index + 1,
+      line: unit.line,
       excerpt: trimmed,
       risk: 'This wording makes a specific implementation instrument mandatory, so an acceptance gate may promote it into a hard assertion unrelated to the target property.',
       suggestion: 'State the observable property to prove. If the method is only illustrative, label it as an example rather than a criterion. If alternatives are forbidden, explicitly say that the exact method itself is the criterion.',
@@ -203,7 +279,8 @@ function artifactPattern(value: string): RegExp {
 
 function linesRequireArtifactWrite(lines: string[], pattern: RegExp): boolean {
   let listWritesArtifacts = false;
-  for (const line of lines) {
+  for (const unit of logicalProseUnits(lines)) {
+    const line = unit.text;
     const trimmed = line.trim();
     if (/^#{1,6}\s/.test(trimmed)) listWritesArtifacts = false;
     if (/^(?:deliverables?|outputs?|artifacts?|files\s+written)\s*:\s*$/i.test(trimmed)) {
@@ -291,6 +368,16 @@ function decisionLintLines(brief: string): string[] {
  * prohibiting it, is not a requirement to produce it. False positives are safer here than
  * accepting a plausible result whose decision-grade checks were explicitly omitted.
  */
+function foldedDecisionRequirementUnits(brief: string): Array<{ line: number; text: string }> {
+  const offset = bodyLineOffset(brief);
+  return logicalProseUnits(decisionLintLines(brief)).flatMap((unit) =>
+    unit.text
+      .split(/(?:[;；]+|(?<=[.!?])\s+)/)
+      .map((text) => text.trim())
+      .filter((text) => text.length > 0 && !isNegatedRequirementLine(text))
+      .map((text) => ({ line: offset + unit.line, text })));
+}
+
 function decisionRequirementLines(brief: string): string[] {
   return decisionLintLines(brief).map((line) => isNegatedRequirementLine(line) ? '' : line);
 }
@@ -300,10 +387,8 @@ function decisionRequirementBody(brief: string): string {
 }
 
 function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; excerpt: string } | undefined {
-  const offset = bodyLineOffset(brief);
-  const lines = decisionRequirementLines(brief);
-  const index = lines.findIndex((line) => pattern.test(line));
-  return index < 0 ? undefined : { line: offset + index + 1, excerpt: lines[index].trim() };
+  const unit = foldedDecisionRequirementUnits(brief).find(({ text }) => pattern.test(text));
+  return unit ? { line: unit.line, excerpt: unit.text.trim() } : undefined;
 }
 
 /**
@@ -311,13 +396,13 @@ function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; exce
  * plus a numeric-result noun means the value is intended for prominent reuse.
  */
 function headlineStatisticEvidence(brief: string): { line: number; excerpt: string } | undefined {
-  const body = decisionRequirementBody(brief);
+  const body = foldedDecisionRequirementUnits(brief).map(({ text }) => text).join('\n');
   if (!HEADLINE_USAGE.test(body) || !NUMERIC_RESULT.test(body)) return undefined;
   return firstEvidenceLine(brief, HEADLINE_USAGE) ?? firstEvidenceLine(brief, NUMERIC_RESULT);
 }
 
 function hasHeadlineDistribution(brief: string): boolean {
-  const body = decisionRequirementBody(brief);
+  const body = foldedDecisionRequirementUnits(brief).map(({ text }) => text).join('\n');
   return /(?:^|[^A-Za-z0-9])mean(?:$|[^A-Za-z0-9])/i.test(body)
     && /(?:^|[^A-Za-z0-9])median(?:$|[^A-Za-z0-9])/i.test(body)
     && DISTRIBUTION_LOCATION.test(body);
@@ -531,7 +616,9 @@ function namedStageAssignment(brief: string): { line: number; excerpt: string } 
 }
 
 function declaresPerStageWritablePaths(brief: string): boolean {
-  const body = briefBody(brief);
+  const body = logicalProseUnits(briefBody(brief).split(/\r\n|\n|\r/))
+    .map(({ text }) => text)
+    .join('\n');
   return /\bwritable paths?\s*,?\s*by stage\b/i.test(body)
     || /\bper-stage\s+(?:writable paths?|write scopes?)\b/i.test(body)
     || /\b(?:stage|phase|gate)\s+[\w.-]+[^\n:]{0,40}\b(?:writable paths?|write scope)\s*:/i.test(body);
@@ -595,6 +682,8 @@ export function inspectBrief(
       level: 'fail',
       message: `Frontmatter parsing failed: ${frontmatter.error}`,
       acknowledgementRequired: true,
+      risk: 'Malformed frontmatter leaves machine-enforced inputs, validation, and terminal contracts unavailable.',
+      suggestion: 'Fix the reported YAML syntax and rerun brief preflight before launch.',
     });
   } else {
     add({
@@ -732,6 +821,8 @@ export function inspectBrief(
         level: 'fail',
         message: `A \`## Reality checks\` section was declared but produced no valid checks${parserDiagnostic ? `: ${parserDiagnostic}` : '. Declare at least one valid check under `checks:`.'}`,
         acknowledgementRequired: true,
+        risk: 'A declared but empty or malformed check block provides no deterministic evidence at the terminal gate.',
+        suggestion: 'Fix the reported YAML declaration and add at least one valid item under `checks:`, or remove the section if no deterministic check is warranted.',
       });
     }
   }
@@ -742,6 +833,7 @@ export function inspectBrief(
       level: 'warn',
       message: 'No `research:` block (engineering brief) — static contract checks only; the research loop was not simulated',
       acknowledgementRequired: false,
+      suggestion: 'Add a numeric-baseline `research:` block only when this task needs the metric loop; otherwise keep the engineering brief and rely on its static contract checks.',
     });
   } else {
     add({
@@ -756,6 +848,8 @@ export function inspectBrief(
         level: 'warn',
         message: 'No `research.confirm` declared — a ship decision would be accepted without a data check',
         acknowledgementRequired: true,
+        risk: 'A metric improvement could be shipped without an independent data-level confirmation.',
+        suggestion: 'Declare `research.confirm.command` and its required evidence, or remove research shipping as an allowed outcome.',
       });
     } else {
       add({
@@ -771,6 +865,8 @@ export function inspectBrief(
         level: 'warn',
         message: 'No `stop.beat` declared — a ship decision will never be proposed (ceiling-only exploration)',
         acknowledgementRequired: true,
+        risk: 'The loop can explore and terminate at its ceiling but has no numeric target that authorizes shipping.',
+        suggestion: 'Declare a finite `research.stop.beat` target, or explicitly choose a ceiling-only exploration contract.',
       });
     }
     if (rc.stop?.maxRounds === undefined && rc.stop?.maxWallHours === undefined && rc.stop?.haltAfterNoImprovement === undefined) {
@@ -779,6 +875,8 @@ export function inspectBrief(
         level: 'warn',
         message: 'No stop rule declared — the loop is limited only by `max_iterations`',
         acknowledgementRequired: true,
+        risk: 'The research loop has no task-owned round, wall-time, or stagnation boundary.',
+        suggestion: 'Add at least one of `stop.max_rounds`, `stop.max_wall_hours`, or `stop.halt_after_no_improvement`.',
       });
     }
   }
@@ -790,6 +888,8 @@ export function inspectBrief(
       level: 'warn',
       message: 'No `terminal_states` declared — terminal artifact paths have no contract',
       acknowledgementRequired: true,
+      risk: 'The scheduler cannot tie a successful terminal status to a named, inspectable artifact.',
+      suggestion: 'Declare each allowed status under `terminal_states` with one or more project-relative artifact paths.',
     });
   } else {
     for (const [status, entry] of Object.entries(terminalStates)) {
@@ -852,6 +952,8 @@ export function inspectBrief(
         level: 'fail',
         message: `Ceiling floor is unreachable: it requires at least ${floor.minAttemptedStages} rounds, but stop.max_rounds=${rc.stop.maxRounds}; termination could only force a floor-unmet submission`,
         acknowledgementRequired: true,
+        risk: 'No execution can both obey the maximum round count and satisfy the declared ceiling floor.',
+        suggestion: 'Lower `terminal_states.ceiling_hit.floor.min_attempted_stages`, raise `research.stop.max_rounds`, or remove the conflicting floor.',
       });
     }
     if (floor?.minAttemptedStages !== undefined && rc?.stop?.haltAfterNoImprovement !== undefined

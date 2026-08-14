@@ -178,6 +178,9 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(report.refusalReasons).toEqual(expect.arrayContaining([
       '1 tracked worktree change remains',
     ]));
+    expect(report.refusalRepairs).toEqual(expect.arrayContaining([
+      expect.stringMatching(/commit|preserve|revert/i),
+    ]));
     expect(runner.mock.calls.map(([request]) => request.args)).toEqual([
       ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
       ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
@@ -213,6 +216,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(stderr.value).toContain('IGNORED DATA_OR_STATE FILE "evidence/frozen.parquet"');
     expect(stderr.value).toContain('REFUSED 1 untracked ungraded path remains');
     expect(stderr.value).toContain('REFUSED 1 ignored ungraded path remains');
+    expect(stderr.value).toContain('REPAIR');
     expect(destructiveOperations(runner)).toEqual([]);
   });
 
@@ -324,6 +328,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
       removalAcknowledgement: { expectedRegenerableCount: 1, matches: false },
     });
     expect(absent.refusalReasons).toContain('regenerable-path acknowledgement is required: expected 1');
+    expect(absent.refusalRepairs.join('\n')).toContain('--acknowledge-regenerable=1');
     expect(destructiveOperations(absentRunner)).toEqual([]);
 
     const wrongRunner = gitRunner(responses);
@@ -504,6 +509,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
 
     expect(report.state).toBe('refused');
     expect(report.refusalReasons).toContain('declared terminal artifacts are absent: docs/result.md');
+    expect(report.refusalRepairs.join('\n')).toMatch(/restore|produce|preserve/i);
     expect(destructiveOperations(runner)).toEqual([]);
   });
 
@@ -586,7 +592,12 @@ describe('flowcrew land inventory and refusal boundary', () => {
 
     expect(report.state).toBe('removal_failed');
     expect(report.removalSteps).toEqual([
-      expect.objectContaining({ operation: 'remove_worktree', exitCode: 1, error: expect.stringContaining('still locked') }),
+      expect.objectContaining({
+        operation: 'remove_worktree',
+        exitCode: 1,
+        error: expect.stringContaining('still locked'),
+        repair: expect.stringMatching(/inspect.*Git.*preserve.*retry/i),
+      }),
     ]);
     expect(destructiveOperations(runner)).toEqual(['remove_worktree']);
   });

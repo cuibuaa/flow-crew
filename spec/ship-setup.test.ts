@@ -477,6 +477,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
         blockers: [expect.objectContaining({
           phase: 'validation',
           reason: expect.stringContaining(scenario.diagnostic),
+          repair: expect.stringMatching(/fix|correct|remove|declare/i),
         })],
       });
       expect(git, scenario.name).not.toHaveBeenCalled();
@@ -529,6 +530,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       blockers: [expect.objectContaining({
         phase: 'validation',
         reason: expect.stringContaining(`${fixture.brief}#validation.commands.build`),
+        repair: expect.stringMatching(/install|correct|declare|run/i),
       })],
     });
     expect(report.blockers[0].reason).toContain('executable-that-does-not-exist --verify');
@@ -930,6 +932,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       blockers: [expect.objectContaining({ phase: 'record', reason: expect.stringContaining('state volume unavailable') })],
     });
     expect(noReadyRecord()).toBe(true);
+    expect(report.blockers[0].repair).toMatch(/restore|choose|retry|writable/i);
   });
 
   it('refuses validation launch errors after capture without writing a ready record', async () => {
@@ -1145,6 +1148,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       },
       blockers: [expect.objectContaining({
         phase: 'source', input: '../outside-cache', reason: expect.stringContaining('Unresolved explicit input'),
+        repair: expect.stringMatching(/declare|remove|correct/i),
       })],
     });
     expect(git).not.toHaveBeenCalled();

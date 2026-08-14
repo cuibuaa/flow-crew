@@ -109,6 +109,7 @@ import {
   type RealityCheckPreflightFinding,
   type RealityCheckPreflightReport,
 } from './reality-check-preflight.js';
+import { readShipSetupReadyValidationBaseline } from './ship-setup-record.js';
 
 const log = createLogger({ name: 'scheduler' });
 const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
@@ -3381,6 +3382,16 @@ export function findDownstream(stageId: string, stages: StageConfig[]): string[]
   return [...collectTransitiveDependents(stageId, stages)];
 }
 
+/** Preserve bounded Zod paths and a repair action in planner-facing schema refusals. */
+export function formatDispatchStageSchemaFailure(error: unknown): string {
+  const issues = error instanceof z.ZodError
+    ? error.issues.slice(0, 8).map((issue) =>
+        `${issue.path.length > 0 ? issue.path.join('.') : '(stage root)'}: ${issue.message}`)
+    : [error instanceof Error ? error.message : String(error)];
+  const omitted = error instanceof z.ZodError ? error.issues.length - issues.length : 0;
+  return `invalid schema at ${issues.join('; ')}${omitted > 0 ? ` (+${omitted} more)` : ''}; fix the named fields and regenerate dispatch.yaml`;
+}
+
 /**
  * Read dispatch.yaml from the run directory (or project docs/), parse it,
  * validate stage configs, resolve dependencies, inject into the running workflow,
@@ -3424,12 +3435,12 @@ function injectDispatchedStages(
     if (!item || typeof item !== 'object') continue;
     if (!item.id) item.id = `dispatch_${i}`;
     if (seenIds.has(item.id as string)) {
-      skippedReasons.push(`${item.id}: duplicate stage ID`);
+      skippedReasons.push(`${item.id}: duplicate stage ID; rename this stage to a unique ID and update its dependency references`);
       log.warn({ id: item.id }, 'Duplicate stage ID in dispatch.yaml, skipping');
       continue;
     }
     if (!roleRegistry.has(item.role as string)) {
-      skippedReasons.push(`${item.id}: unknown role "${item.role}"`);
+      skippedReasons.push(`${item.id}: unknown role "${item.role}"; replace it with one of the available configured roles`);
       log.warn({ role: item.role, id: item.id }, 'Unknown role in dispatch.yaml, skipping');
       continue;
     }
@@ -3441,9 +3452,10 @@ function injectDispatchedStages(
     try {
       dispatched.push(StageConfigSchema.parse(item));
       seenIds.add(item.id as string);
-    } catch (e) {
-      skippedReasons.push(`${item.id}: invalid schema`);
-      log.warn({ id: item.id }, 'Invalid stage in dispatch.yaml, skipping');
+    } catch (error) {
+      const diagnostic = formatDispatchStageSchemaFailure(error);
+      skippedReasons.push(`${item.id}: ${diagnostic}`);
+      log.warn({ id: item.id, diagnostic }, 'Invalid stage in dispatch.yaml, skipping; fix the named fields and regenerate the plan');
     }
   }
   if (dispatched.length === 0) {
@@ -7346,7 +7358,8 @@ async function executeIteration(
           const plannerChecks = existsSync(plannerChecksPath)
             ? readFileSync(plannerChecksPath, 'utf-8')
             : '';
-          const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks);
+          const validationBaseline = readShipSetupReadyValidationBaseline(projectDir, exactTaskBrief);
+          const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, { validationBaseline });
           if (preflight.refusingFindings.length > 0) {
             writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
             const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));

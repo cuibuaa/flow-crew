@@ -148,7 +148,7 @@ describe('failure evidence transport', () => {
       name: 'deleted-private-log-failure',
       type: 'exec-script-exit-zero',
       pass: false,
-      details: 'script exited 23',
+      details: expect.stringMatching(/script exited 23.*Rerun.*project root/i),
     });
     expect(replayedFailure.evidence).toMatchObject({
       command: expect.stringContaining('rm -f "$private_root/check.log"'),

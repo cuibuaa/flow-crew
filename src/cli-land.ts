@@ -140,6 +140,7 @@ export interface LandRemovalStep {
   operation: 'remove_worktree' | 'prune_worktrees' | 'delete_branch';
   exitCode: number | null;
   error?: string;
+  repair?: string;
 }
 
 export interface LandReport {
@@ -157,6 +158,7 @@ export interface LandReport {
   removalAcknowledgement: LandRemovalAcknowledgement;
   readyForRemoval: boolean;
   refusalReasons: string[];
+  refusalRepairs: string[];
   branch?: string;
   primaryWorktree?: string;
   removalSteps?: LandRemovalStep[];
@@ -920,6 +922,48 @@ function refusalReasons(
   return reasons;
 }
 
+function repairsForRefusals(
+  reasons: readonly string[],
+  acknowledgement: LandRemovalAcknowledgement,
+): string[] {
+  return reasons.map((reason) => {
+    if (reason === 'run has not reached a terminal status') {
+      return 'Let the run reach a declared terminal state, verify its verdict, then rerun the land audit.';
+    }
+    if (reason.startsWith('declared terminal artifacts are absent:')) {
+      return `Restore or produce the named terminal artifact from preserved run evidence before requesting removal (${reason.slice(reason.indexOf(':') + 1).trim()}).`;
+    }
+    if (reason.includes('inspection is incomplete')) {
+      return 'Resolve every listed UNKNOWN inspection issue and rerun the read-only land audit before requesting removal.';
+    }
+    if (reason.includes('tracked worktree change')) {
+      return 'Review each TRACKED path; commit or otherwise preserve intended work, or intentionally revert it outside land, then rerun the audit.';
+    }
+    if (/\b(?:untracked|ignored) ungraded path/.test(reason)) {
+      return 'Review every listed ungraded path and preserve unique source/data/state outside the disposable worktree; only remove proven regenerable material, then rerun the audit.';
+    }
+    if (reason.includes('no ref that would survive')) {
+      return 'Preserve each AT_RISK commit on a surviving branch or remote ref, then rerun the audit.';
+    }
+    if (reason.startsWith('regenerable-path acknowledgement')) {
+      return `After reviewing the regenerable inventory, rerun with --remove --acknowledge-regenerable=${acknowledgement.expectedRegenerableCount}.`;
+    }
+    if (reason.includes('primary or bare worktree')) {
+      return 'Keep the primary/bare worktree; run land only for a proven secondary task worktree.';
+    }
+    if (reason.includes('branch could not be proven') || reason.includes('branch disagreement')) {
+      return 'Resolve the checked-out branch identity and rerun the audit from the recorded task worktree.';
+    }
+    if (reason.includes('primary worktree could not be proven') || reason.includes('worktree')) {
+      return 'Repair or refresh Git worktree metadata, confirm the recorded task and primary worktrees, then rerun the audit.';
+    }
+    if (reason.includes('Git reports worktree root')) {
+      return 'Use the run whose canonical project directory matches the Git worktree root, then rerun the audit.';
+    }
+    return `Resolve the named refusal (${reason}) and rerun the read-only land audit before removal.`;
+  });
+}
+
 function projectDirectory(state: StoreState, fs: LandFileSystem): string {
   const requested = resolve(state.projectDir);
   if (!fs.exists(requested)) throw new Error(`run project directory does not exist: ${requested}`);
@@ -1003,9 +1047,20 @@ async function destructiveStep(
       operation: request.operation as LandRemovalStep['operation'],
       exitCode: response.exitCode,
       ...(error ? { error } : {}),
+      ...(error ? { repair: landRemovalStepRepair(request.operation) } : {}),
     },
     passed: !error,
   };
+}
+
+function landRemovalStepRepair(operation: LandGitRequest['operation']): string {
+  if (operation === 'remove_worktree') {
+    return 'Inspect the reported Git worktree-removal error, preserve all remaining unique data, and retry land; no branch deletion was attempted.';
+  }
+  if (operation === 'prune_worktrees') {
+    return 'Inspect and repair Git worktree metadata before retrying prune; verify the removed worktree and surviving branch first.';
+  }
+  return 'Inspect the reported branch-deletion error and surviving refs; preserve the branch until Git can prove a safe non-force deletion.';
 }
 
 /**
@@ -1065,6 +1120,7 @@ export async function runLand(
     removalAcknowledgement,
     readyForRemoval: reasons.length === 0,
     refusalReasons: reasons,
+    refusalRepairs: repairsForRefusals(reasons, removalAcknowledgement),
     ...(inspected.branch ? { branch: inspected.branch } : {}),
   };
   if (!parsed.remove) return baseReport;
@@ -1081,6 +1137,7 @@ export async function runLand(
     inspectionIssues,
     readyForRemoval: reasons.length === 0,
     refusalReasons: reasons,
+    refusalRepairs: repairsForRefusals(reasons, removalAcknowledgement),
     ...(context.branch ? { branch: context.branch } : {}),
     ...(context.primaryWorktree ? { primaryWorktree: context.primaryWorktree } : {}),
   };
@@ -1159,9 +1216,14 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
   for (const hash of report.inventory.unpushedCommits) writer.write(`  UNPUSHED ${hash}\n`);
   for (const hash of report.inventory.atRiskCommits) writer.write(`  AT_RISK ${hash}\n`);
   for (const issue of report.inspectionIssues) writer.write(`  UNKNOWN [${issue.operation}] ${issue.reason}\n`);
-  for (const reason of report.refusalReasons) writer.write(`  REFUSED ${reason}\n`);
+  report.refusalReasons.forEach((reason, index) => {
+    writer.write(`  REFUSED ${reason}\n`);
+    const repair = report.refusalRepairs[index];
+    if (repair) writer.write(`    REPAIR ${repair}\n`);
+  });
   for (const step of report.removalSteps ?? []) {
     writer.write(`  ${step.error ? 'FAILED' : 'DONE'} ${step.operation}${step.error ? `: ${step.error}` : ''}\n`);
+    if (step.repair) writer.write(`    REPAIR [${step.operation}]: ${step.repair}\n`);
   }
   if (!report.removalRequested) {
     writer.write(report.readyForRemoval

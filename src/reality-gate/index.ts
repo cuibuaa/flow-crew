@@ -99,21 +99,23 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
   const results: RealityGateCheckReport[] = [];
   for (const decl of decls) {
     if (decl.kind === 'invalid') {
+      const diagnostic = boundedInline(decl.diagnostic, 320);
       results.push({
         name: decl.name,
         type: decl.type,
         pass: false,
-        details: decl.diagnostic,
+        details: `${diagnostic}. Fix the named declaration and its YAML fields, then rerun Reality-Gate.`,
       });
       continue;
     }
     const handler = handlers.get(decl.type);
     if (!handler) {
+      const unknownType = boundedInline(decl.type, 120);
       results.push({
         name: decl.name,
         type: decl.type,
         pass: false,
-        details: `unknown check type: ${decl.type}`,
+        details: `Unknown check type: ${unknownType}. Replace it with a type from the Reality-Gate check catalog, then rerun the gate.`,
         ...(decl.advisory === true ? { advisory: true } : {}),
       });
       continue;
@@ -132,7 +134,7 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
         name: decl.name,
         type: decl.type,
         pass: false,
-        details: message.length <= 500 ? message : `${message.slice(0, 497)}...`,
+        details: actionableHandlerError(decl.type, decl.params, message),
         ...(decl.advisory === true ? { advisory: true } : {}),
       });
     }
@@ -143,6 +145,24 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
     checksRun: results.length,
     results,
   };
+}
+
+function actionableHandlerError(type: string, params: object, message: string): string {
+  const item = params as Record<string, unknown>;
+  const subject = typeof item.file === 'string'
+    ? ` for file ${JSON.stringify(boundedInline(item.file, 180))}`
+    : typeof item.glob === 'string'
+      ? ` for glob ${JSON.stringify(boundedInline(item.glob, 180))}`
+      : typeof item.url === 'string'
+        ? ` for URL ${JSON.stringify(boundedInline(item.url, 180))}`
+        : '';
+  const bounded = boundedInline(message, 220);
+  return `Check handler ${JSON.stringify(boundedInline(type, 120))} failed${subject}: ${bounded}. Check the named input and declaration, fix the handler error, then rerun Reality-Gate.`;
+}
+
+function boundedInline(value: string, maximum: number): string {
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  return oneLine.length <= maximum ? oneLine : `${oneLine.slice(0, maximum - 3)}...`;
 }
 
 /**

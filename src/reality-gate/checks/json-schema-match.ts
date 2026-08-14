@@ -27,12 +27,18 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
   static meta = { description: 'Validate a JSON file against a declared schema (type/required/properties/items/enum/minimum/maximum).', params: 'file: string, schema: {...} | { file: string }' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
-    if (typeof params.file !== 'string') return result(false, 'file must be provided');
+    if (typeof params.file !== 'string') return result(false, '`params.file` must be provided; name the JSON input file and rerun the check.');
     const schema = this.schema(params, context);
-    if (!schema) return result(false, 'schema must be provided');
+    if (!schema) return result(false, '`params.schema` must be provided; add an inline schema or a schema file and rerun the check.');
     const data = readJsonFile(params.file, context);
     const errors = validate(data, schema, '$');
-    return result(errors.length === 0, errors.length === 0 ? 'JSON matches schema' : errors.slice(0, 5).join('; '), { errors });
+    return result(
+      errors.length === 0,
+      errors.length === 0
+        ? 'JSON matches schema'
+        : `${JSON.stringify(params.file.slice(0, 200))}: ${errors.slice(0, 5).map((error) => error.slice(0, 200)).join('; ')}${errors.length > 5 ? ` (+${errors.length - 5} more)` : ''}. Add or fix the named JSON values, or update the schema only if the contract is wrong.`,
+      { errors },
+    );
   }
 
   private schema(params: Params, context: CheckContext): Schema | undefined {

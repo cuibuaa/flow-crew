@@ -75,10 +75,11 @@ async function expectMalformedAdmission(
       name: expectedName,
       type: '__invalid-reality-check-declaration__',
       pass: false,
-      details: expectedDiagnostic,
+      details: expect.stringContaining(expectedDiagnostic),
     }],
   });
   expect(gate.report?.results[0].advisory).not.toBe(true);
+  expect(gate.report?.results[0].details).toMatch(/Fix the named declaration.*rerun Reality-Gate/i);
 
   const persisted = readRunState(projectDir, created.runId);
   expect(persisted.status).toBe('reality_gate_failed');
@@ -88,7 +89,7 @@ async function expectMalformedAdmission(
     name: expectedName,
     pass: false,
     advisory: false,
-    details: expectedDiagnostic,
+    details: expect.stringContaining(expectedDiagnostic),
   });
 
   const artifact = JSON.parse(readFileSync(
@@ -96,7 +97,8 @@ async function expectMalformedAdmission(
     'utf-8',
   )) as { pass: boolean; checksRun: number; results: Array<{ details: string }> };
   expect(artifact).toMatchObject({ pass: false, checksRun: 1 });
-  expect(artifact.results[0].details).toBe(expectedDiagnostic);
+  expect(artifact.results[0].details).toContain(expectedDiagnostic);
+  expect(artifact.results[0].details).toMatch(/Fix the named declaration.*rerun Reality-Gate/i);
   expect(readFileSync(join(created.runDirPath, '.reality-gate.failures.md'), 'utf-8'))
     .toContain(expectedDiagnostic);
 }

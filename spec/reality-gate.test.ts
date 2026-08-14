@@ -67,6 +67,9 @@ describe('reality gate check types', () => {
       const fail = await runAllChecks([{ name: 'bad', type: 'http-reachability', params: { url: server.url, status: 200 } }], context());
       expect(pass.pass).toBe(true);
       expect(fail.pass).toBe(false);
+      expect(fail.results[0].details).toContain(server.url);
+      expect(fail.results[0].details).toMatch(/expected 200|return 200/i);
+      expect(fail.results[0].details).toMatch(/fix|check|update/i);
     } finally {
       await server.close();
     }
@@ -78,6 +81,8 @@ describe('reality gate check types', () => {
     const fail = await runAllChecks([{ name: 'files', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
+    expect(fail.results[0].details).toContain('missing.txt');
+    expect(fail.results[0].details).toMatch(/create|write|remove/i);
   });
 
   it('checks JSON schema positive and negative cases', async () => {
@@ -87,6 +92,8 @@ describe('reality gate check types', () => {
     const fail = await runAllChecks([{ name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema: { ...schema, required: ['missing'] } } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
+    expect(fail.results[0].details).toContain('$.missing');
+    expect(fail.results[0].details).toMatch(/add|fix|update/i);
   });
 
   it('accepts every member of a union type and still rejects non-members', async () => {
@@ -122,6 +129,9 @@ describe('reality gate check types', () => {
     const fail = await runAllChecks([{ name: 'variance', type: 'variance-floor', params: { file: 'flat.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
+    expect(fail.results[0].details).toContain('flat.json');
+    expect(fail.results[0].details).toContain('rows[*].score');
+    expect(fail.results[0].details).toMatch(/raise|vary|lower|fix/i);
   });
 
   it('checks static scan positive and negative cases', async () => {
@@ -131,6 +141,8 @@ describe('reality gate check types', () => {
     const fail = await runAllChecks([{ name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
+    expect(fail.results[0].details).toMatch(/src\/b\.ts:\d+/);
+    expect(fail.results[0].details).toMatch(/remove|narrow|change/i);
   });
 
   it('checks script exit positive and negative cases', async () => {
@@ -140,6 +152,92 @@ describe('reality gate check types', () => {
     const fail = await runAllChecks([{ name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['1'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
+    expect(fail.results[0].details).toContain('check.sh');
+    expect(fail.results[0].details).toMatch(/rerun|inspect|fix/i);
+  });
+
+  it('keeps both the offending element and repair action in every bounded long failure', async () => {
+    const long = 'a'.repeat(170);
+    const missingPaths = Array.from({ length: 4 }, (_, index) => `missing-${index}-${long}.txt`);
+
+    const scanPaths = Array.from({ length: 3 }, (_, index) =>
+      `src/segment-${index}-${'b'.repeat(120)}/match-${'c'.repeat(120)}.ts`);
+    for (const path of scanPaths) write(path, 'const value = "forbidden";\n');
+
+    write('schema-data.json', '{}');
+    const requiredKeys = Array.from({ length: 5 }, (_, index) => `missing_${index}_${long}`);
+
+    const variancePath = `data/variance-${'d'.repeat(140)}.json`;
+    const varianceField = `rows.${'e'.repeat(155)}`;
+    write(variancePath, '{}');
+
+    const server = await localServer(204);
+    try {
+      const urls = Array.from({ length: 3 }, (_, index) =>
+        `${server.url}route-${index}-${'f'.repeat(210)}?access_token=not-a-real-secret`);
+      write('urls.json', JSON.stringify({ urls }));
+
+      const cases: Array<{
+        label: string;
+        check: CheckDecl;
+        element: RegExp;
+        action: RegExp;
+        omitted: boolean;
+      }> = [
+        {
+          label: 'file existence',
+          check: { name: 'files', type: 'file-exists-nonempty', params: { paths: missingPaths } },
+          element: /missing-0-a+/, action: /Create each missing file/i,
+          omitted: true,
+        },
+        {
+          label: 'static scan',
+          check: { name: 'scan', type: 'static-ast-scan', params: { glob: 'src\/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } },
+          element: /src\/segment-0-b+/, action: /Remove or change each named match/i,
+          omitted: true,
+        },
+        {
+          label: 'JSON schema',
+          check: { name: 'schema', type: 'json-schema-match', params: { file: 'schema-data.json', schema: { type: 'object', required: requiredKeys } } },
+          element: /\$\.missing_0_a+/, action: /Add or fix the named JSON values/i,
+          omitted: true,
+        },
+        {
+          label: 'HTTP reachability',
+          check: { name: 'http', type: 'http-reachability', params: { url: { json_file: 'urls.json', from_field: 'urls[*]' }, status: 200 } },
+          element: /127\.0\.0\.1/, action: /Check the endpoint, network, and expected status/i,
+          omitted: true,
+        },
+        {
+          label: 'variance floor',
+          check: { name: 'variance', type: 'variance-floor', params: { file: variancePath, field_path: varianceField, min_stddev: 0.1 } },
+          element: /variance-d+/, action: /Add valid observations or fix the file\/field path/i,
+          omitted: false,
+        },
+        {
+          label: 'silent script',
+          check: {
+            name: 'silent',
+            type: 'exec-script-exit-zero',
+            params: { script: `long_silent_condition="${'g'.repeat(620)}"\ntest "$long_silent_condition" = expected` },
+          },
+          element: /long_silent_condition/, action: /Rerun the script from the project root/i,
+          omitted: true,
+        },
+      ];
+
+      for (const item of cases) {
+        const report = await runAllChecks([item.check], context());
+        const details = report.results[0].details;
+        expect.soft(report.pass, item.label).toBe(false);
+        expect.soft(details.length, `${item.label} length`).toBeLessThanOrEqual(500);
+        expect.soft(details, `${item.label} element`).toMatch(item.element);
+        expect.soft(details, `${item.label} action`).toMatch(item.action);
+        expect.soft(details.includes('[details omitted]'), `${item.label} omission`).toBe(item.omitted);
+      }
+    } finally {
+      await server.close();
+    }
   });
 
   it('says the directory is not a repository instead of blaming the declared path', async () => {
@@ -225,6 +323,19 @@ describe('reality gate parser and aggregation', () => {
     const report = await runAllChecks(decls, context());
     expect(report.pass).toBe(false);
     expect(report.results.map((item) => item.pass)).toEqual([true, false]);
+  });
+
+  it('makes declaration, unknown-handler, and caught-handler failures actionable', async () => {
+    const report = await runAllChecks([
+      { kind: 'invalid', name: 'broken declaration', type: '__invalid-reality-check-declaration__', diagnostic: 'Reality check item #1 must have a string type' },
+      { name: 'unknown handler', type: 'does-not-exist', params: {} },
+      { name: 'missing JSON input', type: 'json-schema-match', params: { file: 'absent.json', schema: { type: 'object' } } },
+    ], context());
+
+    expect(report.results[0].details).toMatch(/item #1.*fix|fix.*item #1/i);
+    expect(report.results[1].details).toMatch(/does-not-exist.*replace|replace.*does-not-exist/i);
+    expect(report.results[2].details).toContain('absent.json');
+    expect(report.results[2].details).toMatch(/create|fix|check/i);
   });
 
   it('tells planners to use portable tools and probe optional non-standard commands', () => {
@@ -340,6 +451,8 @@ describe('store integration', () => {
     });
     expect(diagnostic?.details).toContain('Script excerpt:');
     expect(diagnostic?.details).toContain('clean_root');
+    expect(diagnostic?.details).toMatch(/rerun.*project root/i);
+    expect(diagnostic?.details).toMatch(/named diagnostic/i);
   });
 
   it('persists a named hard-failure reason and structured diagnostics in run.json', async () => {
@@ -371,7 +484,7 @@ describe('store integration', () => {
         type: 'exec-script-exit-zero',
         pass: false,
         advisory: false,
-        details: 'script exited 3',
+        details: expect.stringMatching(/script exited 3.*Rerun.*project root/i),
       }],
     });
   });
@@ -505,7 +618,7 @@ describe('store integration', () => {
         type: 'exec-script-exit-zero',
         pass: false,
         advisory: true,
-        details: 'script exited 6',
+        details: expect.stringMatching(/script exited 6.*Rerun.*project root/i),
         stderr: {
           tail: 'optional tool unavailable',
           truncated: false,

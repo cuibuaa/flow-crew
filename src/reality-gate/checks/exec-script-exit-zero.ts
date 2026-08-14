@@ -36,7 +36,7 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
   static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Scripts that use `git archive` must declare every repository input in `archive_paths`; each path is verified in `archive_ref` (default `HEAD`) before the script runs. Exit 127 is advisory only when stderr contains a command-not-found diagnostic.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number, archive_paths?: string[] (required with git archive), archive_ref?: string (default HEAD)' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
-    if (typeof params.script !== 'string') return result(false, 'script must be provided');
+    if (typeof params.script !== 'string') return result(false, '`params.script` must be provided; add a failure-capable script and rerun the check.');
     const args = Array.isArray(params.args) ? params.args : [];
     const timeoutMs = Math.max(1, params.timeout_seconds ?? 60) * 1000;
     const archiveFailure = await preflightCommittedArchiveInputs(params, context, timeoutMs);
@@ -65,16 +65,25 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
       return {
         ...result(
           false,
-          `environment could not run check: command not found: ${missingCommand} (exit 127)`,
+          `Environment could not run check: command not found: ${missingCommand} (exit 127). Install or replace the named command, then rerun the check.`,
           { ...execution, environmentDefect: 'command_not_found', missingCommand },
         ),
         advisory: true,
       };
     }
-    const status = execution.code === 0 ? 'script exited 0' : `script exited ${execution.code ?? 'without code'}`;
+    const status = execution.code === 0
+      ? 'script exited 0'
+      : execution.timedOut
+        ? 'script timed out'
+        : execution.signal
+          ? `script ended on signal ${execution.signal}`
+          : `script exited ${execution.code ?? 'without code'}`;
+    const actionableFailure = execution.code === 0 || diagnostic
+      ? status
+      : `${status} for script ${scriptExcerpt(cmd)}. Rerun it from the project root, inspect the captured stdout/stderr, and fix the named failing condition.`;
     return result(
       execution.code === 0,
-      diagnostic ? `${status}; ${diagnostic}` : status,
+      diagnostic ? `${status}; ${diagnostic}` : actionableFailure,
       diagnostic ? { ...execution, executorDiagnostic: diagnostic } : execution,
     );
   }
@@ -89,21 +98,21 @@ async function preflightCommittedArchiveInputs(
   if (!Array.isArray(params.archive_paths) || params.archive_paths.length === 0) {
     return result(
       false,
-      'clean-archive scripts must declare every repository input in `archive_paths`',
+      'Clean-archive scripts must declare every repository input in `archive_paths`; add the missing relative paths or remove `git archive`, then rerun the check.',
       { stdout: '', stderr: 'Executor preflight stopped the check before `git archive`: `archive_paths` is missing or empty.' },
     );
   }
   if (params.archive_paths.some((value) => typeof value !== 'string')) {
-    return result(false, '`archive_paths` must contain only repository-relative strings');
+    return result(false, '`archive_paths` must contain only repository-relative strings; correct the named list and rerun the check.');
   }
   if (params.archive_ref !== undefined && (typeof params.archive_ref !== 'string' || params.archive_ref.trim().length === 0)) {
-    return result(false, '`archive_ref` must be a nonempty git revision when provided');
+    return result(false, '`archive_ref` must be a nonempty git revision when provided; correct or remove it, then rerun the check.');
   }
   const archiveRef = params.archive_ref?.trim() || 'HEAD';
   for (const value of params.archive_paths) {
     const archivePath = normalizeArchivePath(value);
     if (!archivePath) {
-      return result(false, `archive path must be repository-relative and cannot traverse its root: ${JSON.stringify(value)}`);
+      return result(false, `Archive path must be repository-relative and cannot traverse its root: ${JSON.stringify(value)}. Correct or remove this path, then rerun the check.`);
     }
     const execution = await run(
       'git',
@@ -119,8 +128,8 @@ async function preflightCommittedArchiveInputs(
       const notARepository = /not a git repository|does not have any commits yet|unknown revision/i
         .test(execution.stderr);
       const summary = notARepository
-        ? `clean archive preflight could not run: ${context.projectDir} is not a git repository with ${archiveRef}`
-        : `clean archive preflight failed: ${archivePath} is not present in ${archiveRef}`;
+        ? `Clean archive preflight could not run: ${context.projectDir} is not a git repository with ${archiveRef}. Run from the intended repository or choose a valid archive revision.`
+        : `Clean archive preflight failed: ${archivePath} is not present in ${archiveRef}. Commit the declared input, correct archive_paths/archive_ref, or remove the archive check.`;
       const stderr = execution.stderr.trim().length > 0
         ? execution.stderr
         : `Executor preflight could not resolve ${archivePath} in ${archiveRef}.`;
@@ -144,7 +153,7 @@ function executorDiagnostic(execution: Execution, command: string): string {
     : execution.signal
       ? `ended on signal ${execution.signal}`
       : `exited ${execution.code ?? 'without an exit code'}`;
-  return `Executor diagnostic: the check ${status} and captured no stdout or stderr. Script excerpt: ${scriptExcerpt(command)}`;
+  return `Executor diagnostic: the check ${status} and captured no stdout or stderr. Script excerpt: ${scriptExcerpt(command)}. Rerun the script from the project root, make each condition emit a named diagnostic, and inspect exit, signal, and timeout evidence.`;
 }
 
 function scriptExcerpt(command: string): string {

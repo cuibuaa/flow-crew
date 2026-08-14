@@ -121,6 +121,9 @@ target, so different briefs at the conventional path cannot overwrite or imperso
 another. Refusal exits non-zero and names every blocker. **No ready record is written** for a
 partial link, a target mismatch, an unusable validation baseline, a validation launch error, or
 a record-write failure; an already-created worktree may remain for diagnosis.
+Every structured blocker includes `phase`, `reason`, and `repair` (plus the
+offending input/assertion when available); human output prints the repair
+directly beneath its refusal.
 
 ## `flowcrew land`
 
@@ -161,6 +164,9 @@ unpushed but is not at risk merely because no remote contains it. A clean reques
 prove that the target is a linked
 (not primary or bare) worktree with an attached local branch. Removal uses non-force worktree
 removal, pruning, and `branch -d`, stopping at the first failure.
+Each refusal has a position-matched repair in `refusalRepairs`, and human output
+prints it beside the reason. A failed removal step likewise records the failed
+Git operation and a repair that preserves unique data and surviving refs.
 
 `land` does not decide whether a terminal result is good or whether its evidence answers the
 right question. The operator reads and independently judges the result before requesting

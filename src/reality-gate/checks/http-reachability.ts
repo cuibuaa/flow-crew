@@ -11,9 +11,9 @@ export default class HttpReachabilityCheck implements RealityCheck {
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     const expected = params.status;
-    if (typeof expected !== 'number') return result(false, 'status must be a number');
+    if (typeof expected !== 'number') return result(false, '`params.status` must be a number; set the expected HTTP status and rerun the check.');
     const urls = this.urls(params, context);
-    if (urls.length === 0) return result(false, 'no URLs resolved');
+    if (urls.length === 0) return result(false, 'No URLs resolved; provide `params.url` or fix its JSON source field, then rerun the check.');
     const evidence: Array<{ url: string; status?: number; error?: string }> = [];
     for (const url of urls) {
       try {
@@ -24,7 +24,16 @@ export default class HttpReachabilityCheck implements RealityCheck {
       }
     }
     const failures = evidence.filter((item) => item.status !== expected);
-    return result(failures.length === 0, failures.length === 0 ? `${urls.length} URL(s) returned ${expected}` : `${failures.length}/${urls.length} URL(s) did not return ${expected}`, { urls: evidence });
+    const failureSummary = failures.slice(0, 8).map((item) =>
+      `${displayUrl(item.url)} ${item.error ? `failed (${item.error})` : `returned ${item.status ?? 'no status'} (expected ${expected})`}`).join(', ');
+    const omitted = failures.length - Math.min(failures.length, 8);
+    return result(
+      failures.length === 0,
+      failures.length === 0
+        ? `${urls.length} URL(s) returned ${expected}`
+        : `${failures.length}/${urls.length} URL(s) failed: ${failureSummary}${omitted > 0 ? ` (+${omitted} more)` : ''}. Check the endpoint, network, and expected status, then rerun the check.`,
+      { urls: evidence },
+    );
   }
 
   private urls(params: Params, context: CheckContext): string[] {
@@ -33,5 +42,17 @@ export default class HttpReachabilityCheck implements RealityCheck {
       return stringValuesAtPath(readJsonFile(params.url.json_file, context), params.url.from_field);
     }
     return [];
+  }
+}
+
+function displayUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    for (const key of [...parsed.searchParams.keys()]) parsed.searchParams.set(key, '[redacted]');
+    return parsed.toString().slice(0, 240);
+  } catch {
+    return value.slice(0, 240);
   }
 }

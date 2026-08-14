@@ -19,6 +19,21 @@ events, and the run summary, but does not block the terminal verdict. Evidence
 checks such as file existence, command exit codes, schemas, and numeric
 thresholds should remain hard.
 
+A project validation command is not automatically an exit-zero contract. Ship
+setup records the exact build, test, and lint baseline and its gate criterion. If
+that baseline is red under `no_regression_from_baseline`, a hard shell check must
+capture the current failures and compare their identities/count with the recorded
+baseline. It must not propagate the validation command's raw exit status as its
+verdict. If the workflow already performs that comparison, omit the redundant
+Reality-Gate check. Pre-dispatch lint blocks mechanically visible raw-status
+forms while accepting a check that performs the baseline comparison.
+
+Failure details identify the offending path, URL, JSON field, source match,
+numeric field, handler, or bounded redacted script excerpt and state the next
+repair action. A silent script failure also tells the author to rerun from the
+project root and make each condition emit a named diagnostic, so a multi-part
+check does not require manual reconstruction to discover which condition failed.
+
 There is one narrow runtime exception for `exec-script-exit-zero`: exit 127 is
 treated as an advisory environment defect only when stderr also contains a
 shell `command not found` diagnostic. The report, persisted JSON, and advisory

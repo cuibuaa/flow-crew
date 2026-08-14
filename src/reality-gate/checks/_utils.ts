@@ -3,7 +3,12 @@ import { isAbsolute, join } from 'node:path';
 import type { CheckContext, CheckResult } from '../types.js';
 
 export function trimDetails(details: string): string {
-  return details.length <= 500 ? details : `${details.slice(0, 497)}...`;
+  if (details.length <= 500) return details;
+  const omission = ' ... [details omitted] ... ';
+  const retained = 500 - omission.length;
+  const head = Math.ceil(retained / 2);
+  const tail = retained - head;
+  return `${details.slice(0, head)}${omission}${details.slice(-tail)}`;
 }
 
 export function result(pass: boolean, details: string, evidence?: object): CheckResult {

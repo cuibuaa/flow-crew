@@ -181,6 +181,33 @@ describe('decision-grade brief requirements', () => {
     expect(report.contractReady).toBe(true);
   });
 
+  it('is invariant at every ordinary soft-wrap position in the headline distribution requirement', () => {
+    const sentence = 'Also report the mean, median, and where the quoted value sits in its own distribution.';
+    const variants = [sentence, ...[...sentence.matchAll(/\s+/g)].map((match) =>
+      `${sentence.slice(0, match.index)}\n${sentence.slice((match.index ?? 0) + match[0].length)}`)];
+    const observations = variants.map((variant) => inspectBrief(structuredBrief([
+      '# Result',
+      'Report the headline statistic as the quoted result in basis points.',
+      variant,
+    ].join('\n'))).findings.some(({ code }) => code === 'headline_distribution_missing'));
+
+    expect(observations).toEqual(Array(variants.length).fill(false));
+  });
+
+  it('does not join distribution fragments across distinct paragraphs or list items', () => {
+    for (const separated of [
+      'Report the mean, median, and where the\n\nquoted value sits in its own distribution.',
+      '- Report the mean, median, and where the\n- quoted value sits in its own distribution.',
+    ]) {
+      const report = inspectBrief(structuredBrief([
+        '# Result',
+        'Report the headline statistic as the quoted result in basis points.',
+        separated,
+      ].join('\n')));
+      expect(report.findings.map(({ code }) => code)).toContain('headline_distribution_missing');
+    }
+  });
+
   it('does not treat a prohibition as the required headline distribution', () => {
     const report = inspectBrief(structuredBrief([
       '# Result',
@@ -542,6 +569,146 @@ describe('decision-grade brief requirements', () => {
       'preregistration_feasibility_missing',
       'operator_figure_anti_anchoring_missing',
     ]));
+  });
+});
+
+describe('logical prose soft-wrap boundaries', () => {
+  function softWraps(sentence: string): string[] {
+    return [sentence, ...[...sentence.matchAll(/\s+/g)].map((match) =>
+      `${sentence.slice(0, match.index)}\n${sentence.slice((match.index ?? 0) + match[0].length)}`)];
+  }
+
+  it('keeps an exact-method criterion exception invariant at every soft wrap', () => {
+    const sentence = 'The implementation must call `legacyProbe()`, because the exact method is the criterion.';
+    for (const variant of softWraps(sentence)) {
+      const report = inspectBrief(structuredBrief(`# Goal\n${variant}`));
+      expect(report.findings.map(({ code }) => code), variant).not.toContain('criterion_instrument_wording');
+    }
+
+    const splitBullets = inspectBrief(structuredBrief([
+      '# Goal',
+      '- The implementation must call `legacyProbe()`.',
+      '- The exact method itself is the criterion.',
+    ].join('\n')));
+    expect(splitBullets.findings.map(({ code }) => code)).toContain('criterion_instrument_wording');
+  });
+
+  it('keeps an assigned floor-artifact writer invariant at every soft wrap', () => {
+    const frontmatter = [
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/result.md]',
+      '    stage_glob: docs/stages/stage_*_verdict.md',
+      '    floor:',
+      '      min_attempted_stages: 1',
+    ].join('\n');
+    const sentence = 'The QA stage must write `docs/stages/stage_*_verdict.md` after verification.';
+    for (const variant of softWraps(sentence)) {
+      const report = inspectBrief(`---\n${frontmatter}\n---\n# Workflow\n${variant}`);
+      expect(report.findings.some(({ code }) => code === 'terminal_floor_uncountable_complete'), variant)
+        .toBe(false);
+    }
+
+    const splitBullets = inspectBrief(`---\n${frontmatter}\n---\n# Workflow\n- The QA stage must write evidence.\n- \`docs/stages/stage_*_verdict.md\` is inspected.`);
+    expect(splitBullets.findings.map(({ code }) => code)).toContain('terminal_floor_uncountable_complete');
+  });
+
+  it('keeps a per-stage writable-path mapping invariant at every soft wrap', () => {
+    const sentence = 'Use this per-stage writable paths mapping: Stage 1 may write `src/**` and `spec/**`.';
+    for (const variant of softWraps(sentence)) {
+      const report = inspectBrief(structuredBrief(`# Stage 1 — implementation\n${variant}`));
+      expect(report.findings.some(({ code }) => code === 'stage_writable_paths_missing'), variant)
+        .toBe(false);
+    }
+
+    const splitBullets = inspectBrief(structuredBrief([
+      '# Stage 1 — implementation',
+      '- The implementation stage has a per-stage writable declaration.',
+      '- Paths: `src/**` and `spec/**`.',
+    ].join('\n')));
+    expect(splitBullets.findings.map(({ code }) => code)).toContain('stage_writable_paths_missing');
+  });
+
+  it.each([
+    {
+      label: 'a tilde run inside a longer backtick fence',
+      body: [
+        '````text',
+        '~~~',
+        'The implementation must call `fencedProbe()`.',
+        '~~~',
+        '````',
+      ].join('\n'),
+    },
+    {
+      label: 'a shorter backtick run inside a longer backtick fence',
+      body: [
+        '````text',
+        '```',
+        'The implementation must call `fencedProbe()`.',
+        '```',
+        '````',
+      ].join('\n'),
+    },
+  ])('does not expose criterion prose after $label', ({ body }) => {
+    const report = inspectBrief(structuredBrief(`# Goal\n${body}`));
+    expect(report.findings.map(({ code }) => code)).not.toContain('criterion_instrument_wording');
+  });
+});
+
+describe('brief finding actionability', () => {
+  it('attaches a concrete next action to every previously non-actionable finding family', () => {
+    const activeResearch = [
+      '---',
+      'research:',
+      '  baseline: 0',
+      '  policy: best_of_n',
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/result.md]',
+      '---',
+      '# Goal',
+      'Explore safely.',
+    ].join('\n');
+    const unreachableFloor = [
+      '---',
+      'research:',
+      '  baseline: 0',
+      '  policy: best_of_n',
+      '  stop:',
+      '    max_rounds: 1',
+      'terminal_states:',
+      '  ceiling_hit:',
+      '    paths: [docs/ceiling.md]',
+      '    floor:',
+      '      min_attempted_stages: 2',
+      '---',
+      '# Goal',
+      'Explore safely.',
+    ].join('\n');
+    const reports = [
+      inspectBrief('---\nterminal_states: [\n---\n# Goal'),
+      inspectBrief(`${structuredBrief()}\n## Reality checks\nchecks: []\n`),
+      inspectBrief(structuredBrief()),
+      inspectBrief(activeResearch),
+      inspectBrief('# Goal\nShip safely.'),
+      inspectBrief(unreachableFloor),
+    ];
+    const expectedCodes = [
+      'frontmatter_invalid',
+      'reality_checks_empty_or_invalid',
+      'research_absent',
+      'research_confirm_missing',
+      'research_ship_target_missing',
+      'research_stop_rule_missing',
+      'terminal_states_missing',
+      'terminal_floor_unreachable',
+    ];
+    for (const code of expectedCodes) {
+      const finding = reports.flatMap(({ findings }) => findings).find((candidate) => candidate.code === code);
+      expect(finding, code).toBeDefined();
+      expect(finding?.suggestion, code).toMatch(/add|declare|fix|remove|lower|raise|use|choose|correct/i);
+    }
   });
 });
 

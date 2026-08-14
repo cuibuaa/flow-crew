@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
+import { formatDispatchStageSchemaFailure } from '../src/scheduler.js';
 
 const PLANNER_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml');
 const BRIEF_CONTRACT_PATH = resolve(import.meta.dirname, '..', 'guide', 'brief-contract.md');
@@ -28,6 +30,10 @@ const REQUIRED_CLAUSES = [
   {
     id: 'terminal-path-final-stage-only',
     pattern: /Every path declared by the task frontmatter under `terminal_states\.<status>\.paths` MUST be scoped to and written only by the final stage whose success commits that status\. Never put a declared terminal path in a non-final stage's `scope` or instruct a non-final stage to create or modify it: a fresh write commits the terminal status and skips every stage still pending, including verification and repair\./,
+  },
+  {
+    id: 'raw-validation-exit-forbidden',
+    pattern: /A hard Reality-Gate check MUST NOT make its verdict the unprocessed exit status of a project build, test, or lint command\. Compare current failure identities with the recorded validation baseline and its gate criterion, or omit the redundant validation check\./,
   },
   {
     id: 'gate-metric-optional-unless-contracted',
@@ -93,6 +99,11 @@ const GROUND_TRUTH_MUTATIONS = [
     id: 'terminal-path-final-stage-only',
     original: 'written only by the final stage',
     weakened: 'written by any stage',
+  },
+  {
+    id: 'raw-validation-exit-forbidden',
+    original: 'MUST NOT make its verdict the unprocessed exit status',
+    weakened: 'may make its verdict the unprocessed exit status',
   },
 ] as const;
 
@@ -199,8 +210,20 @@ function referenceExamples(prompt: string): string {
 }
 
 describe('planner dispatch contract', () => {
+  it('names the invalid dispatch field and a repair action', () => {
+    const parsed = z.object({ scope: z.array(z.string()), timeout_ms: z.number().positive() })
+      .safeParse({ scope: 'src/**', timeout_ms: -1 });
+    if (parsed.success) throw new Error('invalid dispatch fixture unexpectedly parsed');
+
+    const message = formatDispatchStageSchemaFailure(parsed.error);
+    expect(message).toContain('scope:');
+    expect(message).toContain('timeout_ms:');
+    expect(message).toMatch(/fix the named fields.*regenerate dispatch\.yaml/i);
+  });
+
   it('requires safe parallel scope, real dependency reasons, and TMPDIR placement', () => {
     expect(contractViolations(readPlannerPrompt())).toEqual([]);
+    expect(readPlannerPrompt()).toMatch(/\n\s*13\. A hard Reality-Gate check MUST NOT make its verdict/);
   });
 
   it.each(REQUIRED_CLAUSES)('rejects omission of $id', ({ id, pattern }) => {

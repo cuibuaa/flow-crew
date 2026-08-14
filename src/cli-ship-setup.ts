@@ -37,6 +37,9 @@ import {
   type ShipInputFileSystem,
 } from './ship-inputs.js';
 import { fcGlobalDir } from './store.js';
+import { shipSetupReadyRecordPath } from './ship-setup-record.js';
+
+export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -256,9 +259,12 @@ export interface TestPopulationParity {
 export interface ShipSetupBlocker {
   phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
   reason: string;
+  repair: string;
   input?: string;
   assertion?: BriefInputAssertionResult['kind'];
 }
+
+type ShipSetupBlockerInput = Omit<ShipSetupBlocker, 'repair'> & { repair?: string };
 
 interface ShipSetupFacts {
   version: 1;
@@ -368,21 +374,6 @@ export function shipSetupUsage(): string {
   ].join('\n');
 }
 
-/** Content-addressed FC-global path for one canonical target and measured brief. */
-export function shipSetupReadyRecordPath(
-  canonicalTargetDir: string,
-  briefDigest: string,
-  globalRoot = fcGlobalDir(),
-): string {
-  if (!/^[a-f0-9]{64}$/.test(briefDigest)) throw new Error('brief digest must be a lowercase SHA-256');
-  const identity = createHash('sha256')
-    .update(resolve(canonicalTargetDir))
-    .update('\0')
-    .update(briefDigest)
-    .digest('hex');
-  return join(resolve(globalRoot), 'ship-setups', `${identity}.json`);
-}
-
 function within(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
@@ -391,8 +382,8 @@ function within(root: string, candidate: string): boolean {
 function verificationBlockers(
   phase: 'source' | 'target',
   verification: BriefInputVerification,
-): ShipSetupBlocker[] {
-  const blockers: ShipSetupBlocker[] = verification.unboundAssertions.map((assertion) => ({
+): ShipSetupBlockerInput[] {
+  const blockers: ShipSetupBlockerInput[] = verification.unboundAssertions.map((assertion) => ({
     phase,
     assertion: assertion.kind,
     reason: `${assertion.state}: ${assertion.reason} (line ${assertion.line})`,
@@ -421,9 +412,33 @@ function verificationBlockers(
 
 function refused(
   facts: Omit<ShipSetupFacts, 'blockers'>,
-  blockers: ShipSetupBlocker[],
+  blockers: ShipSetupBlockerInput[],
 ): ShipSetupRefusedReport {
-  return { ...facts, state: 'refused', blockers };
+  return {
+    ...facts,
+    state: 'refused',
+    blockers: blockers.map((blocker) => ({
+      ...blocker,
+      repair: blocker.repair ?? shipSetupBlockerRepair(blocker),
+    })),
+  };
+}
+
+function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
+  const subject = blocker.input ? ` ${JSON.stringify(blocker.input)}` : '';
+  if (blocker.phase === 'source') {
+    return `Correct or remove the named leading input/assertion${subject}, ensure required source data is readable, then rerun ship-setup.`;
+  }
+  if (blocker.phase === 'worktree') {
+    return 'Inspect the reported Git base, branch, and target; correct the conflicting value or Git failure, then rerun ship-setup with a fresh reachable target.';
+  }
+  if (blocker.phase === 'target') {
+    return `Reconcile the named target input${subject} without overwriting unique data, ensure it stays inside the worktree and is readable, then rerun ship-setup.`;
+  }
+  if (blocker.phase === 'validation') {
+    return 'Correct the named validation declaration, command/environment, or test-population mismatch; run that command successfully from the target, then rerun ship-setup.';
+  }
+  return 'Restore writable task-state storage or choose the configured writable FC state root, then retry ship-setup so the ready record can be persisted atomically.';
 }
 
 function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; digest: string } {
@@ -598,10 +613,10 @@ function reconcileInputs(
   projectDir: string,
   targetDir: string,
   fs: ShipSetupFileSystem,
-): { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlocker[] } {
+): { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] } {
   const links: ShipSetupLink[] = [];
   const copies: ShipSetupCopy[] = [];
-  const blockers: ShipSetupBlocker[] = [];
+  const blockers: ShipSetupBlockerInput[] = [];
   const targetCanonical = fs.realpath(targetDir);
   const normalizedInputPath = (sourcePath: string): string => relative(projectDir, sourcePath)
     .split(sep)
@@ -1132,7 +1147,7 @@ export async function runShipSetup(
     }]);
   }
 
-  let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlocker[] };
+  let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
     reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
   } catch (error) {
@@ -1179,7 +1194,7 @@ export async function runShipSetup(
     declaredCommands: declaredValidation.commands,
   });
   facts = { ...facts, validationBaseline };
-  const validationBlockers: ShipSetupBlocker[] = validationBaseline.discovery.state === 'unknown'
+  const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
     ? [{
         phase: 'validation',
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,
@@ -1187,7 +1202,7 @@ export async function runShipSetup(
     : [];
   validationBlockers.push(...validationBaseline.results
     .filter((result) => result.state === 'launch_error')
-    .map((result): ShipSetupBlocker => {
+    .map((result): ShipSetupBlockerInput => {
       const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
       const declaration = command?.provenance?.source === 'brief'
         ? ` declared at ${command.provenance.evidencePath}`
@@ -1279,6 +1294,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
     const subject = blocker.input ? ` ${blocker.input}` : '';
     const assertion = blocker.assertion ? ` ${blocker.assertion}` : '';
     writer.write(`  REFUSED [${blocker.phase}]${subject}${assertion}: ${blocker.reason}\n`);
+    writer.write(`    REPAIR [${blocker.phase}]: ${blocker.repair ?? shipSetupBlockerRepair(blocker)}\n`);
   }
 }
 

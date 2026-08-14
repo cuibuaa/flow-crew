@@ -1,6 +1,12 @@
 import { posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
+import type {
+  ProjectValidationBaseline,
+  ValidationCommand,
+  ValidationCommandResult,
+  ValidationGateCriterion,
+} from './project-validation.js';
 
 export type RealityCheckPreflightCode =
   | 'presentation_proxy_heading_literal'
@@ -8,6 +14,7 @@ export type RealityCheckPreflightCode =
   | 'undeclared_artifact_existence'
   | 'copy_byte_equivalence'
   | 'hard_check_cannot_fail'
+  | 'hard_check_cannot_pass'
   | 'invalid_reality_check_declaration';
 
 export type RealityCheckPreflightTier = 'blocking' | 'advisory' | 'structural';
@@ -37,6 +44,11 @@ export interface RealityCheckPreflightReport {
   advisoryFindings: RealityCheckPreflightFinding[];
   structuralFindings: RealityCheckPreflightFinding[];
   refusingFindings: RealityCheckPreflightFinding[];
+}
+
+export interface RealityCheckPreflightContext {
+  /** Exact identity-bound ship-setup baseline supplied by orchestration. */
+  validationBaseline?: ProjectValidationBaseline;
 }
 
 export interface RealityCheckAdvisoryRewrite {
@@ -796,6 +808,275 @@ function infallibleHardScript(script: string): string | undefined {
   return undefined;
 }
 
+interface FailingValidationCommand {
+  command: ValidationCommand;
+  result: ValidationCommandResult;
+  criterion: ValidationGateCriterion;
+}
+
+interface RawValidationStatusEvidence extends FailingValidationCommand {
+  controlFlow: 'script-final-command' | 'captured-status-reexit' | 'terminal-if-branch';
+}
+
+function failingValidationCommands(
+  baseline: ProjectValidationBaseline | undefined,
+): FailingValidationCommand[] {
+  if (!baseline) return [];
+  return baseline.discovery.commands.flatMap((command) => {
+    const result = baseline.results.find((candidate) => candidate.role === command.role);
+    const criterion = baseline.gateCriteria.find((candidate) => candidate.role === command.role);
+    return result?.state === 'failed' && criterion?.rule === 'no_regression_from_baseline'
+      ? [{ command, result, criterion }]
+      : [];
+  });
+}
+
+/** Split only newline/semicolon simple-command boundaries. More general shell
+ * grammar is intentionally left unresolved instead of guessed at. */
+function simpleShellStatements(body: string): string[] | undefined {
+  const statements: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let comment = false;
+  const flush = () => {
+    const value = current.trim();
+    if (value) statements.push(value);
+    current = '';
+  };
+
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index];
+    if (comment) {
+      if (character === '\n' || character === '\r') {
+        comment = false;
+        flush();
+      }
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (escaped) escaped = false;
+      else if (character === '\\' && quote === '"') escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === '\\') {
+      if (index + 1 >= body.length) return undefined;
+      current += character + body[index + 1];
+      index += 1;
+      continue;
+    }
+    if (character === '#' && (current.length === 0 || /\s/.test(current.at(-1) ?? ''))) {
+      comment = true;
+      continue;
+    }
+    if (character === ';' || character === '\n' || character === '\r') {
+      flush();
+      continue;
+    }
+    current += character;
+  }
+  if (quote || escaped) return undefined;
+  flush();
+  return statements;
+}
+
+/** Remove only trailing stream redirections. Redirections before or between
+ * argv remain ambiguous and therefore do not match. */
+function withoutTrailingRedirections(segment: string): string {
+  let remaining = segment.trim();
+  const redirection = /\s*(?:\d*(?:>>?|<<?|<>|>\|)\s*(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|<>]+)|\d*(?:>&|<&)\s*(?:\d+|-))\s*$/;
+  while (true) {
+    const match = redirection.exec(remaining);
+    if (!match || match.index === remaining.length) return remaining;
+    remaining = remaining.slice(0, match.index).trimEnd();
+  }
+}
+
+/** Lex literal shell argv without expansion or evaluation. */
+function literalShellWords(segment: string): string[] | undefined {
+  const words: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: "'" | '"' | undefined;
+  const flush = () => {
+    if (started) words.push(current);
+    current = '';
+    started = false;
+  };
+
+  for (let index = 0; index < segment.length; index += 1) {
+    const character = segment[index];
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      else current += character;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') {
+        quote = undefined;
+      } else if (character === '\\') {
+        const next = segment[index + 1];
+        if (next === undefined) return undefined;
+        if (/[$`"\\\n]/.test(next)) current += next;
+        else current += character + next;
+        index += 1;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+    if (/\s/.test(character)) {
+      flush();
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (character === '\\') {
+      const next = segment[index + 1];
+      if (next === undefined) return undefined;
+      current += next;
+      started = true;
+      index += 1;
+      continue;
+    }
+    if (/[;&|<>(){}]/.test(character)) return undefined;
+    current += character;
+    started = true;
+  }
+  if (quote) return undefined;
+  flush();
+  return words;
+}
+
+function unwrapStatusTransparentCommands(words: readonly string[]): string[] | undefined {
+  let remaining = [...words];
+  while (remaining.length > 0) {
+    if (remaining[0] === 'command') {
+      remaining = remaining.slice(1);
+      if (remaining[0] === '-p' || remaining[0] === '--') remaining = remaining.slice(1);
+      else if (remaining[0]?.startsWith('-')) return undefined;
+      continue;
+    }
+    if (remaining[0] === 'exec') {
+      remaining = remaining.slice(1);
+      if (remaining[0] === '--') remaining = remaining.slice(1);
+      else if (remaining[0]?.startsWith('-')) return undefined;
+      continue;
+    }
+    if (remaining[0] !== 'env' && !remaining[0]?.endsWith('/env')) break;
+    let index = 1;
+    for (; index < remaining.length; index += 1) {
+      const word = remaining[index];
+      if (word === '--') {
+        index += 1;
+        break;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+      if (word === '-i' || word === '--ignore-environment') continue;
+      if (word === '-u' || word === '--unset' || word === '-C' || word === '--chdir') {
+        index += 1;
+        if (index >= remaining.length) return undefined;
+        continue;
+      }
+      if (/^--(?:unset|chdir)=/.test(word)) continue;
+      if (word.startsWith('-')) return undefined;
+      break;
+    }
+    remaining = remaining.slice(index);
+  }
+  return remaining.length > 0 ? remaining : undefined;
+}
+
+function simpleCommandArgv(segment: string): string[] | undefined {
+  const words = literalShellWords(withoutTrailingRedirections(segment));
+  return words ? unwrapStatusTransparentCommands(words) : undefined;
+}
+
+function isValidationCommand(segment: string, command: ValidationCommand): boolean {
+  const actual = simpleCommandArgv(segment);
+  const expected = [command.command, ...command.args];
+  return actual?.length === expected.length
+    && actual.every((word, index) => word === expected[index]);
+}
+
+function exitedStatusVariable(statement: string): string | undefined {
+  const match = /^exit\s+(?:"\$(?:\{([A-Za-z_][\w]*)\}|([A-Za-z_][\w]*))"|\$(?:\{([A-Za-z_][\w]*)\}|([A-Za-z_][\w]*)))$/.exec(statement);
+  return match?.slice(1).find((value): value is string => Boolean(value));
+}
+
+function capturedStatusVariable(statement: string): string | undefined {
+  return /^([A-Za-z_][\w]*)=(?:\$\?|"\$\?")$/.exec(statement)?.[1];
+}
+
+function rawCommandFlowAtEnd(
+  body: string,
+  command: ValidationCommand,
+): 'direct' | 'captured-status-reexit' | undefined {
+  const statements = simpleShellStatements(body);
+  if (!statements || statements.length === 0) return undefined;
+  if (isValidationCommand(statements.at(-1) ?? '', command)) return 'direct';
+  if (statements.length < 3) return undefined;
+  const statusVariable = capturedStatusVariable(statements.at(-2) ?? '');
+  const exitVariable = exitedStatusVariable(statements.at(-1) ?? '');
+  return statusVariable
+      && exitVariable === statusVariable
+      && isValidationCommand(statements.at(-3) ?? '', command)
+    ? 'captured-status-reexit'
+    : undefined;
+}
+
+function rawValidationStatus(
+  script: string,
+  baseline: ProjectValidationBaseline | undefined,
+): RawValidationStatusEvidence | undefined {
+  for (const candidate of failingValidationCommands(baseline)) {
+    const scriptFlow = rawCommandFlowAtEnd(script, candidate.command);
+    if (scriptFlow) {
+      return {
+        ...candidate,
+        controlFlow: scriptFlow === 'direct' ? 'script-final-command' : 'captured-status-reexit',
+      };
+    }
+    // Narrowly recognize a terminal if/else compound. A validation command is
+    // decisive only when it is the final simple command in one branch and the
+    // other branch is itself mechanically guaranteed to return success.
+    const terminalIf = /(?:^|[;\n])\s*if\b[\s\S]*?\bthen\b([\s\S]*?)\belse\b([\s\S]*?)\bfi\s*;?\s*$/i.exec(script);
+    if (!terminalIf) continue;
+    const [thenBody, elseBody] = [terminalIf[1], terminalIf[2]];
+    if ((rawCommandFlowAtEnd(thenBody, candidate.command) && infallibleHardScript(elseBody))
+        || (rawCommandFlowAtEnd(elseBody, candidate.command) && infallibleHardScript(thenBody))) {
+      return { ...candidate, controlFlow: 'terminal-if-branch' };
+    }
+  }
+  return undefined;
+}
+
+function rawValidationEvidence(item: RawValidationStatusEvidence): string {
+  const count = item.result.failureCount ?? item.criterion.baselineFailureCount;
+  const identities = item.result.failureIdentifiers.length > 0
+    ? item.result.failureIdentifiers
+    : item.criterion.baselineFailureIdentifiers;
+  const shown = identities.slice(0, 20);
+  const omitted = identities.length - shown.length;
+  return [
+    `control_flow=${item.controlFlow}`,
+    `role=${item.command.role}`,
+    `command=${JSON.stringify(item.command.display.slice(0, 240))}`,
+    `baseline_failure_count=${count ?? 'unknown'}`,
+    `baseline_failure_identities=${JSON.stringify(shown.map((identity) => identity.slice(0, 240)))}${omitted > 0 ? ` (+${omitted} more)` : ''}`,
+  ].join('; ');
+}
+
 function finding(
   declaration: CheckDecl,
   checkIndex: number,
@@ -803,7 +1084,9 @@ function finding(
   message: string,
   evidence?: string,
 ): RealityCheckPreflightFinding {
-  const tier: RealityCheckPreflightTier = code === 'copy_byte_equivalence' || code === 'hard_check_cannot_fail'
+  const tier: RealityCheckPreflightTier = code === 'copy_byte_equivalence'
+      || code === 'hard_check_cannot_fail'
+      || code === 'hard_check_cannot_pass'
     ? 'blocking'
     : code === 'invalid_reality_check_declaration'
       ? 'structural'
@@ -904,7 +1187,11 @@ export function demoteRealityCheckAdvisories(
  * remain visible advisory findings. Arbitrary shell semantics remain out of
  * scope.
  */
-export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: string): RealityCheckPreflightReport {
+export function inspectRealityChecks(
+  taskBrief: string,
+  realityChecksMarkdown: string,
+  context: RealityCheckPreflightContext = {},
+): RealityCheckPreflightReport {
   const declarations = parseChecksFromMarkdown(realityChecksMarkdown);
   const contract = deriveBriefContract(taskBrief);
   const findings: RealityCheckPreflightFinding[] = [];
@@ -916,7 +1203,7 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
         declaration,
         checkIndex,
         'invalid_reality_check_declaration',
-        `The declaration would fail independently of any contract property: ${declaration.diagnostic}`,
+        `The declaration would fail independently of any contract property: ${declaration.diagnostic}. Fix the named Reality-check item and its YAML fields before dispatch.`,
       ));
       return;
     }
@@ -930,7 +1217,7 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
           declaration,
           checkIndex,
           'presentation_proxy_heading_literal',
-          'An exact Markdown heading is decisive, so equivalent evidence under clearer wording can false-block the run.',
+          'An exact Markdown heading is decisive, so equivalent evidence under clearer wording can false-block the run. Replace the heading literal with a structural/property assertion, or declare that exact heading in the brief.',
           heading.evidence,
         ));
       }
@@ -941,8 +1228,27 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
           declaration,
           checkIndex,
           'hard_check_cannot_fail',
-          'The hard script is mechanically guaranteed to exit zero, so it cannot test the property named by the check.',
+          'The hard script is mechanically guaranteed to exit zero, so it cannot test the property named by the check. Make the script exit nonzero when the named property is false, or remove the hard check.',
           infallible,
+        ));
+      }
+
+      const cannotPass = rawValidationStatus(params.script, context.validationBaseline);
+      if (cannotPass) {
+        const count = cannotPass.result.failureCount ?? cannotPass.criterion.baselineFailureCount;
+        const identities = cannotPass.result.failureIdentifiers.length > 0
+          ? cannotPass.result.failureIdentifiers
+          : cannotPass.criterion.baselineFailureIdentifiers;
+        const shownIdentities = identities.slice(0, 20);
+        const identitySummary = shownIdentities.length === 0
+          ? ''
+          : ` Recorded failing identities: ${shownIdentities.map((identity) => JSON.stringify(identity.slice(0, 240))).join(', ')}${identities.length > shownIdentities.length ? ` (+${identities.length - shownIdentities.length} more)` : ''}.`;
+        findings.push(finding(
+          declaration,
+          checkIndex,
+          'hard_check_cannot_pass',
+          `The hard check makes its verdict the raw exit status of recorded ${cannotPass.command.role} command ${JSON.stringify(cannotPass.command.display.slice(0, 240))}, but that command has a failing recorded baseline${count === undefined ? '' : ` with ${count} failure${count === 1 ? '' : 's'}`} under no_regression_from_baseline.${identitySummary} Compare current failure identities with the recorded baseline, or omit the redundant validation check.`,
+          rawValidationEvidence(cannotPass),
         ));
       }
     }
@@ -953,7 +1259,7 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
         declaration,
         checkIndex,
         'contract_exception_conflict',
-        `The check forbids content that the brief explicitly preserves or permits at line ${conflict.line}.`,
+        `The check forbids content that the brief explicitly preserves or permits at line ${conflict.line}. Narrow the check to exempt that declared location, or change the brief's exception before dispatch.`,
         conflict.text,
       ));
     }
@@ -965,7 +1271,7 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
           declaration,
           checkIndex,
           'undeclared_artifact_existence',
-          `The hard existence check targets \`${path}\`, which no terminal, framework, or explicit production obligation requires.`,
+          `The hard existence check targets \`${path}\`, which no terminal, framework, or explicit production obligation requires. Declare \`${path}\` as an output if it is required, or remove this existence check.`,
           path,
         ));
       }
@@ -980,7 +1286,7 @@ export function inspectRealityChecks(taskBrief: string, realityChecksMarkdown: s
           declaration,
           checkIndex,
           'copy_byte_equivalence',
-          'The check makes equivalence between copies decisive even though the brief does not contract for byte identity.',
+          'The check makes equivalence between copies decisive even though the brief does not contract for byte identity. Replace byte comparison with the required semantic property, or declare byte identity in the brief.',
           evidence,
         ));
       }
