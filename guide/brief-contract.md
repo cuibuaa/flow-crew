@@ -434,9 +434,6 @@ registered role and has a unique ID:
   prompt_template: |
     Implement the accepted design and add focused tests.
   depends_on: [inspect_code]
-  timeout_ms: 600000
-  timeout_total_ms: 1800000
-  max_retries: 1
   skills: []
   dynamic_dispatch: false
   is_gate: false
@@ -445,10 +442,15 @@ registered role and has a unique ID:
 
 `id` and `role` are required. `prompt_template` defaults to empty, and `task` is
 accepted as a compatibility alias. Optional fields are `depends_on`,
-`condition`, `timeout_ms`, `timeout_total_ms`, `max_retries`, `skills`, `dynamic_dispatch`,
+`condition`, `skills`, `dynamic_dispatch`,
 `is_gate`, `retry_to`, and `scope`. Unknown roles and invalid or duplicate stages are
 skipped; an entirely unusable dispatch triggers a bounded re-plan or an
 actionable escalation.
+
+Dynamic plans do not control technical retry count. A historical `max_retries`
+field in planner output is ignored and omitted from the recorded workflow;
+`config/defaults.yaml::default_stage_technical_retries` remains the operator-owned
+bound for timeout retries.
 
 `depends_on` is a production edge, not merely an ordering hint. A dependency
 releases an ordinary dependent only after its stage status is `complete`.
@@ -510,13 +512,13 @@ path. The request, the decision, and the outcome are all recorded in the run dir
 this is the mechanism behind "a stage that needs something outside its boundary can ask"
 mentioned in the project README.
 
-`timeout_ms` is the initial attempt budget. `timeout_total_ms` is the immutable
-cap for the complete technical chain (scheduler retries, adapter retries,
-backoff, and fallback) and defaults to `3 * timeout_ms`; it cannot be smaller
-than the resolved initial budget. A running stage or supervisor may propose a
-reasoned extension of the current soft deadline, but worker policy records the
-decision first and never grants beyond this total cap. A real timeout retry is
-scheduled only with a strictly larger budget than the timed-out attempt.
+The attempt budget comes only from `config/defaults.yaml::default_timeout_ms`.
+It is immutable after an attempt starts and covers adapter retries, backoff,
+fallback loading, and fallback execution. A timed-out technical retry receives
+a strictly larger derived attempt budget; there is no aggregate technical-chain
+cap. Legacy timeout fields in a plan and runtime extension requests are rejected
+with a migration message, so a plan cannot make its first timeout fatal or move
+a running attempt's deadline without bound.
 
 Every `retry_to` target is normalized to a gate and added to the repair stage's
 dependencies. Only a completed, validated `pass:false` verdict makes that

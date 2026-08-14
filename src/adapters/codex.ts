@@ -362,12 +362,10 @@ export class CodexAdapter implements Adapter {
         writeCodexConfig(codexHome, effectiveRole);
         result = await execWithTimeout('codex', args, {
           cwd: opts.workDir,
-          timeout_ms: opts.hard_timeout_ms ?? opts.timeout_ms,
+          timeout_ms: opts.timeout_ms,
           liveLogPath,
           env: { CODEX_HOME: codexHome },
-          abortSignal: opts.abortSignal && opts.hardAbortSignal
-            ? AbortSignal.any([opts.abortSignal, opts.hardAbortSignal])
-            : (opts.abortSignal ?? opts.hardAbortSignal),
+          abortSignal: opts.abortSignal,
         });
         if (result.exitCode === 0) break;
         diagnosis = diagnoseAdapterFailure(result.output, result.exitCode);

@@ -454,7 +454,6 @@ interface DetachedRunOptions {
   supervise?: boolean | undefined;
   workflow?: string | undefined;
   maxIterations?: number | undefined;
-  timeoutMs?: number | undefined;
   adapter?: string | undefined;
 }
 
@@ -480,7 +479,6 @@ function spawnDetachedRun(opts: DetachedRunOptions): DetachedRunStarter {
   ];
   if (opts.workflow) args.push('--workflow', opts.workflow);
   if (typeof opts.maxIterations === 'number') args.push('--max-iterations', String(opts.maxIterations));
-  if (typeof opts.timeoutMs === 'number') args.push('--timeout', String(opts.timeoutMs));
   if (opts.adapter) args.push('--adapter', opts.adapter);
   if (opts.supervise === false) args.push('--no-supervise');
   if (opts.campaignId) args.push('--campaign', opts.campaignId);
@@ -888,7 +886,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     maxIterations: state.maxIterations ?? defaults.maxIterations,
     maxRetries: state.maxRetries ?? defaults.gateRetryLoops,
     autoApproveRetries: state.autoApproveRetries ?? true,
-    timeoutMs: state.timeoutMs,
+    timeoutMs: state.timeoutMs ?? defaults.timeoutMs,
     campaignTriggers: state.campaignTriggers,
     iterationLog: null,
     campaignId: campaign?.id,
@@ -1950,6 +1948,19 @@ export interface DashboardOptions {
   distDir?: string;
 }
 
+const DASHBOARD_TIMEOUT_MIGRATION = 'Stage timeout overrides were removed; edit config/defaults.yaml::default_timeout_ms instead.';
+const RemovedDashboardTimeoutSchema = z.unknown().refine(() => false, {
+  message: DASHBOARD_TIMEOUT_MIGRATION,
+});
+
+function containsRemovedStageTimeout(input: unknown): boolean {
+  if (Array.isArray(input)) return input.some(containsRemovedStageTimeout);
+  if (!input || typeof input !== 'object') return false;
+  const record = input as Record<string, unknown>;
+  if (Object.hasOwn(record, 'timeoutMs') || Object.hasOwn(record, 'timeout_ms') || Object.hasOwn(record, 'timeout_total_ms')) return true;
+  return Object.values(record).some(containsRemovedStageTimeout);
+}
+
 const DashboardTaskCreateSchema = z.object({
   name: z.string().refine((value) => value.trim().length > 0, 'name must not be blank').optional(),
   brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank').optional(),
@@ -1960,6 +1971,9 @@ const DashboardTaskCreateSchema = z.object({
   supervise: z.boolean().optional(),
   maxIterations: z.number().int().min(1).optional(),
   maxIter: z.number().int().min(1).optional(),
+  timeoutMs: RemovedDashboardTimeoutSchema.optional(),
+  timeout_ms: RemovedDashboardTimeoutSchema.optional(),
+  timeout_total_ms: RemovedDashboardTimeoutSchema.optional(),
   noCampaign: z.boolean().optional(),
   campaign: z.string().trim().min(1).optional(),
   campaignId: z.string().trim().min(1).optional(),
@@ -2586,7 +2600,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         supervise: parkedState.supervise ?? true,
         workflow: parkedState.workflowName || 'default',
         maxIterations: parkedState.maxIterations,
-        timeoutMs: parkedState.timeoutMs,
         adapter: typeof adapter === 'string' ? adapter : undefined,
       });
       if (!preparation.ok) {
@@ -2778,6 +2791,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(404).send({ error: "not found" });
     }
     const { plan, name, workflow } = req.body ?? {};
+    if (plan !== undefined && containsRemovedStageTimeout(plan)) {
+      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
+    }
     if (plan !== undefined) state.plan = plan;
     if (name !== undefined) {
       const nextDescription = typeof name === 'string' ? name : String(name);
@@ -2798,14 +2814,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(404).send({ error: "not found" });
     }
     const body = req.body ?? {};
+    if (Object.hasOwn(body, 'timeoutMs')) {
+      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
+    }
     if (body.name !== undefined) {
       const nextDescription = body.name != null ? String(body.name) : undefined;
       if (nextDescription !== state.taskDescription) state.briefAdmission = undefined;
       state.taskDescription = nextDescription;
-    }
-    if (body.timeoutMs !== undefined) {
-      const t = Number(body.timeoutMs);
-      if (isFinite(t) && t >= 0) state.timeoutMs = t;
     }
     if (body.maxIterations !== undefined) {
       const m = Number(body.maxIterations);
@@ -2899,6 +2914,9 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!isAwaitingApprovalRunStatus(state.status)) {
       return reply.code(400).send({ error: 'not awaiting approval' });
     }
+    if (Object.hasOwn(req.body ?? {}, 'timeoutMs')) {
+      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
+    }
     const shouldSpawn = !activeExecutions.has(req.params.id);
     if (shouldSpawn) {
       const targetProjectDir = state.projectDir ?? projectDir;
@@ -2942,10 +2960,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (req.body?.maxIterations !== undefined) {
       const m = Number(req.body.maxIterations);
       if (isFinite(m) && m >= 0) state.maxIterations = m;
-    }
-    if (req.body?.timeoutMs !== undefined) {
-      const t = Number(req.body.timeoutMs);
-      if (isFinite(t) && t >= 0) state.timeoutMs = t;
     }
     state.status = RUN_STATUS.RUNNING;
     writeRunState(projectDir, req.params.id, state);
@@ -4338,12 +4352,12 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         role: s.role,
         prompt_template: s.prompt_template,
         depends_on: s.depends_on,
-        timeout_ms: s.timeout_ms ?? config.defaults.timeout_ms ?? defaults.timeoutMs,
-        timeout_total_ms: s.timeout_total_ms ?? 3 * (s.timeout_ms ?? config.defaults.timeout_ms ?? defaults.timeoutMs),
+        attempt_budget_ms: defaults.timeoutMs,
         max_retries: s.max_retries ?? config.defaults.max_retries ?? defaults.stageTechnicalRetries,
       }));
     } catch (err) {
-      return reply.code(404).send({ error: `workflow not found: ${workflow}` });
+      const detail = err instanceof Error ? err.message : String(err);
+      return reply.code(404).send({ error: `workflow not found or invalid: ${workflow}: ${detail}` });
     }
   });
 

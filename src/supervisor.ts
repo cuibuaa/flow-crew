@@ -31,7 +31,6 @@ const log = createLogger({ name: 'supervisor' });
 export const SUPERVISOR_VERDICTS = [
   { id: 'WAIT', description: 'Agents making progress. No intervention.' },
   { id: 'GUIDE', description: 'Agent going wrong direction. Provide corrective instruction in "guidance".' },
-  { id: 'EXTEND', description: 'Verified progress will exceed the current soft deadline. Propose a positive extension_ms; worker policy may grant it only within the hard cap.' },
   { id: 'ABORT', description: 'Stage stuck/looping/wasting time. Kill it and let retry handle it.' },
   { id: 'REPLAN', description: 'Fundamental approach is wrong. Needs a new plan entirely.' },
   { id: 'REJECT', description: 'A stage emitted a deliverable that does NOT meet its own declared work/acceptance criteria (e.g. a verdict claims pass while its evidence shows otherwise, or a stage marked itself done with the required artifact missing/empty). The result must NOT be accepted — set "target_stage" to the stage and the work is re-done.' },
@@ -44,7 +43,6 @@ export interface SupervisorAssessment {
   targetStage: string | null;
   reason: string;
   guidance: string | null;
-  extensionMs?: number;
 }
 
 export function summarizeSupervisorGuidanceHistory(
@@ -113,7 +111,6 @@ export function parseSupervisorVerdict(output: string): SupervisorAssessment | n
         targetStage: parsed.target_stage ?? null,
         reason: parsed.reason ?? '',
         guidance: parsed.guidance ?? null,
-        ...(typeof parsed.extension_ms === 'number' ? { extensionMs: parsed.extension_ms } : {}),
       };
     } catch { /* try the next earlier match */ }
   }
@@ -295,7 +292,7 @@ export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
-Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>","extension_ms":<positive integer if EXTEND, else null>}
+Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>"}
 
 Verdicts:
 ${verdictList}
@@ -303,7 +300,6 @@ ${verdictList}
 Rules:
 - Default to WAIT when agents are making progress toward the goal.
 - GUIDE only when you see a concrete wrong direction (not just slow progress).
-- EXTEND only when verified current-attempt progress or added workload shows that correct work needs more time. Name the running target stage and request a positive extension_ms. EXTEND is a proposal: worker policy enforces the immutable total hard cap, and it never cancels ABORT.
 - REJECT only when an EMITTED deliverable contradicts its OWN declared work or acceptance criteria — e.g. a gate verdict says pass:true while the evidence/metric it cites shows fail, a stage claims it produced an artifact that is missing or empty, or a result codifies a smoke/error as success. Set "target_stage" to that stage; "reason" must name the specific contradiction (what was claimed vs what the evidence shows). REJECT forces the work to be re-done — it is NOT for slow progress (use WAIT) or a wrong overall approach (use REPLAN). CRITICAL GUARD: an HONEST NEGATIVE is a VALID deliverable, not a rejection — do NOT REJECT a result simply because the target metric was not beaten, the hypothesis failed, or the run found no improvement. Only REJECT when the deliverable itself is internally inconsistent or does not actually do the work it declares.
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
 - ABORT only in either of these cases: (1) a stage has made no real progress for ${stuckMinutes}+ minutes and is truly stuck, or (2) the same concrete wrong direction continues after repeated GUIDE decisions. Active or high-volume output is not proof that the direction is correct and must not prevent case (2) from escalating to ABORT. Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT infer case (1) from stdout silence alone if you can see file/artifact activity in the snapshot.
@@ -666,7 +662,7 @@ export class Supervisor {
     // "VERDICT: reason"; user input pushes "User guidance received: ...".
     if (this.observations.length > 0) {
       const noteworthy = this.observations.filter(o =>
-        /^(GUIDE|EXTEND|ABORT|REPLAN|REJECT|DONE):/.test(o) || o.startsWith('User guidance received:'),
+        /^(GUIDE|ABORT|REPLAN|REJECT|DONE):/.test(o) || o.startsWith('User guidance received:'),
       );
       const recent = noteworthy.slice(-5);
       if (recent.length > 0) {
@@ -1408,7 +1404,7 @@ export class Supervisor {
   private async act(
     assessment: SupervisorAssessment,
     progressSinceMs = Date.now(),
-    source: 'supervisor' | 'operator' = 'supervisor',
+    _source: 'supervisor' | 'operator' = 'supervisor',
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
 
@@ -1428,45 +1424,6 @@ export class Supervisor {
         }
         this.lastActionTime = Date.now();
         return assessment;
-
-      case 'EXTEND':
-        if (!assessment.targetStage || !Number.isSafeInteger(assessment.extensionMs) || Number(assessment.extensionMs) <= 0 || !assessment.reason.trim()) {
-          return {
-            verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
-            reason: 'EXTEND suppressed: target_stage, a non-empty reason, and a positive safe-integer extension_ms are required.',
-          };
-        }
-        try {
-          const state = readRunState(this.projectDir, this.runId);
-          const status = state.stages[assessment.targetStage];
-          const authoritative = status ? this.authoritativeStageStatus(assessment.targetStage, status) : undefined;
-          const attempt = authoritative ? currentRunningAttempt(authoritative) : undefined;
-          if (!attempt || !authoritative || !isRunningStageStatus(authoritative.status)) {
-            return {
-              verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
-              reason: `EXTEND suppressed: ${assessment.targetStage} has no current running attempt.`,
-            };
-          }
-          mkdirSync(signalDir, { recursive: true });
-          atomicWrite(join(signalDir, `timeout_extension_${assessment.targetStage}.json`), JSON.stringify({
-            version: 1,
-            requestId: `supervisor-${this.tickCount}-${assessment.targetStage}-${attempt.index}`,
-            kind: 'timeout_extension',
-            stageId: assessment.targetStage,
-            attemptIndex: attempt.index,
-            requestedExtensionMs: assessment.extensionMs,
-            reason: assessment.reason,
-            source,
-            requestedAt: new Date().toISOString(),
-          }, null, 2));
-          this.lastActionTime = Date.now();
-          return assessment;
-        } catch {
-          return {
-            verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
-            reason: `EXTEND suppressed: the engine-owned request for ${assessment.targetStage} could not be persisted.`,
-          };
-        }
 
       case 'ABORT':
         if (!assessment.targetStage) {

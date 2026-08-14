@@ -65,7 +65,6 @@ async function runScenario(
   const projectDir = reuse?.projectDir ?? makeProject();
   const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'research.yaml'));
   config.defaults.max_iterations = maxIterations;
-  config.defaults.timeout_ms = 30000;
   const adapter = adapterOverride ?? new ScriptedAdapter(script);
   const state = await scheduler.runWorkflow(
     config, raw, projectDir, adapter, new Map(), undefined,

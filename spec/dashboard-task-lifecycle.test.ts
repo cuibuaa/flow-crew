@@ -238,7 +238,7 @@ describe('dashboard project admission is pre-mutation', () => {
       name: 'legacy approval resume',
       status: RUN_STATUS.AWAITING_APPROVAL,
       url: (runId: string) => `/api/tasks/${runId}/approve`,
-      payload: { maxIterations: 99, timeoutMs: 1 },
+      payload: { maxIterations: 99 },
       prepare: () => undefined,
     },
     {
@@ -289,6 +289,28 @@ describe('dashboard project admission is pre-mutation', () => {
     expect(detachedSpawner).not.toHaveBeenCalled();
     expect(workflowLauncher).not.toHaveBeenCalled();
     expect(busyProbe).toHaveBeenCalledWith(projectDir, runId);
+  });
+});
+
+describe('dashboard stage-timeout ingress', () => {
+  it('rejects task, task-settings, and plan overrides with the defaults.yaml migration', async () => {
+    const runId = 'removed-timeout-ingress';
+    const runPath = writeRun(runId, RUN_STATUS.PENDING);
+    const before = snapshotTree(runPath);
+    const requests = [
+      { method: 'POST' as const, url: '/api/tasks', payload: { name: 'legacy task', timeoutMs: 1 } },
+      { method: 'PATCH' as const, url: `/api/tasks/${runId}`, payload: { timeoutMs: 1 } },
+      { method: 'PUT' as const, url: `/api/tasks/${runId}`, payload: { plan: [{ id: 'work', timeout_total_ms: 1 }] } },
+    ];
+
+    for (const request of requests) {
+      const response = await app!.inject(request);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toContain('config/defaults.yaml::default_timeout_ms');
+    }
+    expect(snapshotTree(runPath)).toEqual(before);
+    expect(detachedSpawner).not.toHaveBeenCalled();
+    expect(workflowLauncher).not.toHaveBeenCalled();
   });
 });
 

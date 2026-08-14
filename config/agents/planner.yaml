@@ -125,7 +125,8 @@ prompt: |
   - {project} — project root
   - {task_description} — the full task brief
   - {available_roles} / {available_skills} — same lists as above
-  - {default_timeout_ms} — current project default ({default_timeout_ms}ms)
+  - {default_timeout_ms} — current project-wide attempt budget ({default_timeout_ms}ms),
+    informational only; dispatch stages cannot override it
 
   # dispatch.yaml Schema (hard — fail-closed if violated)
   A YAML list at top level. Each item:
@@ -141,8 +142,6 @@ prompt: |
     retry_to: [<gate_ids>]          # if listed gate fails, re-run THIS stage then re-check the gate
     condition: <stage.field op value>  # optional — run this stage only if the expr holds
                                     #   (e.g. "verify_thing.status == failed"); ops: == != < <= > >=
-    timeout_ms: <number>            # optional — override {default_timeout_ms}
-    timeout_total_ms: <number>      # optional — immutable technical-chain cap; defaults to 3 * resolved timeout_ms
     skills: [<skill_names>]         # optional
 
   Gate verdict contract (write to {run_dir}/verdict_<stage_id>.json): {verdict_contract}
@@ -210,7 +209,7 @@ prompt: |
   - **Preserve real data flow.** Independent, disjoint-scope subtasks stay dependency-free and run in parallel; only consumers wait for producers.
   - **One gate→fix loop per gate, not two.** The retry_to mechanism handles retries. Don't bake a second verify+fix pair.
   - **End at the goal gate.** No stages beyond the deliverable.
-  - **Long-running stages need explicit timeout_ms and a bounded timeout_total_ms when the default 3× cap is inappropriate.** timeout_total_ms must be at least the resolved timeout_ms; it caps the whole technical chain, while runtime extensions only move the current soft deadline inside that cap.
+  - **Stage attempts use the project-wide `config/defaults.yaml::default_timeout_ms`.** Do not put timeout fields in `dispatch.yaml`; operators change the attempt budget with one edit before launching a run. A timed-out technical retry receives a larger immutable attempt budget automatically.
 
   # Self-verifying coder pattern (preferred for implement stages with testable output)
 

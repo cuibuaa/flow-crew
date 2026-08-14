@@ -23,7 +23,11 @@ import {
   type NegotiationRequester,
   type TimeoutExtensionRequestV1,
 } from './runtime-negotiation.js';
-import { HARD_CAP_OBSERVATION_TOLERANCE_MS, TechnicalChainController } from './technical-chain.js';
+import {
+  ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS,
+  AttemptDeadlineController,
+  type AttemptDeadlineClock,
+} from './attempt-deadline.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -35,9 +39,9 @@ export interface StageOpts {
   dependsOn: string[];
   promptTemplate: string;
   timeout_ms: number;
-  timeout_total_ms?: number;
-  technicalChain?: TechnicalChainController;
-  /** Internal dependency injection for deterministic technical-chain tests. */
+  /** Internal dependency injection for deterministic attempt-deadline tests. */
+  deadlineClock?: AttemptDeadlineClock;
+  /** Internal dependency injection for deterministic attempt-deadline tests. */
   technicalRetry?: {
     delaysMs?: readonly number[];
     loadFallbackAdapter?: (name: string) => Promise<Adapter>;
@@ -71,11 +75,9 @@ export interface TimeoutExtensionPolicyInput {
   attemptStartedWallMs: number;
   attemptElapsedMs: number;
   effectiveBudgetMs: number;
-  maxAttemptBudgetMs: number;
-  hardRemainingMs: number;
   supervisorAborted: boolean;
   attemptAborted: boolean;
-  hardCapAborted: boolean;
+  deadlineAborted: boolean;
 }
 
 export interface TimeoutExtensionPolicyDecision {
@@ -102,38 +104,26 @@ export function evaluateTimeoutExtensionRequest(
     : undefined;
   const adjudicatedAttemptElapsedMs = requestedAtAttemptElapsedMs ?? input.attemptElapsedMs;
   const timingBasis: TimeoutExtensionTimingBasis = usesRequestedAt ? 'requested_at' : 'legacy_consumption';
-  const headroom = Math.max(0, input.maxAttemptBudgetMs - input.effectiveBudgetMs);
-
   let rejectionReason: string | undefined;
   if (!input.request.reason) rejectionReason = 'timeout extension reason must be non-empty';
   else if (!Number.isSafeInteger(input.request.requestedExtensionMs) || input.request.requestedExtensionMs <= 0) rejectionReason = 'requestedExtensionMs must be a positive safe integer';
   else if (input.supervisorAborted) rejectionReason = 'a current-attempt ABORT already exists';
-  else if (adjudicatedAttemptElapsedMs >= input.effectiveBudgetMs || input.attemptAborted) rejectionReason = 'request arrived at or after the effective soft deadline';
-  else if (input.hardRemainingMs <= 0 || input.hardCapAborted || headroom <= 0) rejectionReason = 'technical-chain hard cap has no extension headroom';
+  else if (adjudicatedAttemptElapsedMs >= input.effectiveBudgetMs || input.attemptAborted || input.deadlineAborted) rejectionReason = 'request arrived at or after the immutable attempt deadline';
+  else rejectionReason = 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch';
 
   const requestedExtensionMs = Number.isSafeInteger(input.request.requestedExtensionMs)
     && input.request.requestedExtensionMs > 0
     ? input.request.requestedExtensionMs
     : 0;
-  const grantedExtensionMs = rejectionReason
-    ? 0
-    : Math.min(requestedExtensionMs, Math.max(0, Math.floor(headroom)));
-  const accepted = grantedExtensionMs > 0;
-  if (!accepted && !rejectionReason) rejectionReason = 'technical-chain hard cap has no extension headroom';
-
   return {
-    accepted,
+    accepted: false,
     requestedExtensionMs,
-    grantedExtensionMs,
+    grantedExtensionMs: 0,
     ...(rejectionReason ? { rejectionReason } : {}),
     timingBasis,
     adjudicatedAttemptElapsedMs,
     ...(requestedAtAttemptElapsedMs === undefined ? {} : { requestedAtAttemptElapsedMs }),
   };
-}
-
-export function deadlineTerminationCause(hardExpired: boolean): 'hard_cap_timeout' | 'soft_timeout' {
-  return hardExpired ? 'hard_cap_timeout' : 'soft_timeout';
 }
 
 function isAdapterError(output: string): boolean {
@@ -315,20 +305,13 @@ export async function runStage(
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const beforeSnapshot = snapshotMtimes(opts.projectDir, [kgPath]);
 
-  const ownsTechnicalChain = opts.technicalChain === undefined;
-  const technicalChain = opts.technicalChain ?? new TechnicalChainController({
-    initialBudgetMs: opts.timeout_ms,
-    hardTotalMs: opts.timeout_total_ms,
+  const attemptDeadline = new AttemptDeadlineController({
+    budgetMs: opts.timeout_ms,
     ledgerDir: join(opts.runDir, 'stages', opts.stageId),
+    ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
   });
-  const attemptStart = technicalChain.sampleTime();
-  const attemptChainElapsedAtStart = attemptStart.elapsedMs;
-  const attemptStartedWallMs = attemptStart.wallNowMs;
-  const maxAttemptBudgetMs = Math.max(0, technicalChain.hardTotalMs - attemptChainElapsedAtStart);
-  // Keep the scheduler-selected attempt budget observable as declared. The
-  // independent child/aggregate hard timer uses the (possibly slightly lower)
-  // live remainder and can still terminate first.
-  let effectiveBudgetMs = Math.max(1, opts.timeout_ms);
+  const attemptStartedWallMs = Date.parse(attemptDeadline.attemptStartedAt);
+  const effectiveBudgetMs = attemptDeadline.budgetMs;
 
   // Abort files are one-shot envelopes owned by this exact stage attempt. A
   // crash can leave a file behind, so ownership is validated on every launch;
@@ -339,14 +322,12 @@ export async function runStage(
   let supervisorAborted = false;
   let abortReason = '';
   let terminationCause: StageAttemptTimeoutSummary['terminationCause'];
-  let extensionCount = 0;
-  let cumulativeGrantedMs = 0;
+  let rejectedExtensionCount = 0;
   const timeoutDecisionPaths: string[] = [];
   const timeoutMismatchPaths: string[] = [];
   const handledRequestDigests = new Set<string>();
-  const appliedRequestDigests = new Set<string>();
 
-  const attemptElapsedMs = (): number => Math.max(0, technicalChain.elapsedMs() - attemptChainElapsedAtStart);
+  const attemptElapsedMs = (): number => attemptDeadline.elapsedMs();
   const relativeAuditPath = (path: string): string => relative(opts.runDir, path).replace(/\\/g, '/');
 
   const removeAbortSignal = (): void => {
@@ -417,32 +398,6 @@ export async function runStage(
   const stageTimeoutRequestPath = join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json');
   const engineTimeoutRequestPath = join(opts.runDir, 'signals', `timeout_extension_${opts.stageId}.json`);
 
-  let softTimer: ReturnType<typeof setTimeout> | undefined;
-  const scheduleSoftDeadline = (): void => {
-    if (softTimer) technicalChain.clearScheduledTimer(softTimer);
-    const softRemaining = effectiveBudgetMs - attemptElapsedMs();
-    // Extension grants are integral milliseconds. Once less than one
-    // millisecond of hard headroom remains, let the immutable hard timer own
-    // that fractional tail so attribution observes actual hard expiry.
-    const remaining = maxAttemptBudgetMs - effectiveBudgetMs < 1
-      ? technicalChain.remainingMs()
-      : softRemaining;
-    softTimer = technicalChain.scheduleTimer(() => {
-      // An already-persisted current-attempt ABORT or extension wins the
-      // coincident-deadline race because both channels are consumed first.
-      pollAbortSignal();
-      pollTimeoutExtensionRequests();
-      const rechecked = effectiveBudgetMs - attemptElapsedMs();
-      if (attemptAbortController.signal.aborted) return;
-      if (rechecked > 0) {
-        scheduleSoftDeadline();
-        return;
-      }
-      terminationCause ??= deadlineTerminationCause(technicalChain.isHardExpired());
-      attemptAbortController.abort(terminationCause);
-    }, Math.max(1, Math.min(2_147_483_647, Math.ceil(remaining))));
-  };
-
   const processTimeoutRequest = (request: TimeoutExtensionRequestV1): void => {
     const digest = negotiationRequestDigest(request);
     if (handledRequestDigests.has(digest)) return;
@@ -460,37 +415,30 @@ export async function runStage(
     }
 
     const elapsed = attemptElapsedMs();
-    const hardRemaining = technicalChain.remainingMs();
     const policy = evaluateTimeoutExtensionRequest({
       request,
       attemptStartedWallMs,
       attemptElapsedMs: elapsed,
       effectiveBudgetMs,
-      maxAttemptBudgetMs,
-      hardRemainingMs: hardRemaining,
       supervisorAborted: supervisorAborted || terminationCause === 'supervisor_abort',
       attemptAborted: attemptAbortController.signal.aborted,
-      hardCapAborted: technicalChain.signal.aborted,
+      deadlineAborted: attemptDeadline.signal.aborted,
     });
-    const { accepted, grantedExtensionMs: granted, rejectionReason } = policy;
-    const priorEffectiveBudgetMs = effectiveBudgetMs;
-    const nextEffectiveBudgetMs = priorEffectiveBudgetMs + granted;
+    const { rejectionReason } = policy;
     const publication = publishConstraintDecision({
       stagePath: join(opts.runDir, 'stages', opts.stageId),
       request,
       decidedBy: 'worker-policy',
       decision: {
-        accepted,
-        decision: accepted ? 'accepted' : 'rejected',
+        accepted: false,
+        decision: 'rejected',
         decidedAt: new Date().toISOString(),
-        policyBasis: accepted
-          ? `current attempt, pre-deadline by ${policy.timingBasis}, no ABORT, and grant bounded by the immutable technical-chain hard cap`
-          : rejectionReason ?? 'timeout extension rejected',
+        policyBasis: rejectionReason ?? 'running attempt deadlines are immutable',
         requestedExtensionMs: request.requestedExtensionMs,
-        grantedExtensionMs: granted,
-        priorEffectiveBudgetMs,
-        effectiveBudgetMs: accepted ? nextEffectiveBudgetMs : priorEffectiveBudgetMs,
-        chainElapsedBeforeAttemptMs: Math.round(attemptChainElapsedAtStart),
+        grantedExtensionMs: 0,
+        effectiveBudgetMs,
+        attemptBudgetMs: effectiveBudgetMs,
+        deadlineAt: attemptDeadline.deadlineAt,
         attemptElapsedMs: Math.round(elapsed),
         timingBasis: policy.timingBasis,
         adjudicatedAttemptElapsedMs: Math.round(policy.adjudicatedAttemptElapsedMs),
@@ -498,13 +446,9 @@ export async function runStage(
         ...(policy.requestedAtAttemptElapsedMs === undefined
           ? {}
           : { requestedAtAttemptElapsedMs: Math.round(policy.requestedAtAttemptElapsedMs) }),
-        requestSoftRemainingMs: Math.max(0, Math.round(priorEffectiveBudgetMs - policy.adjudicatedAttemptElapsedMs)),
-        softRemainingMs: Math.max(0, Math.round(priorEffectiveBudgetMs - elapsed)),
-        hardRemainingMs: Math.max(0, Math.round(hardRemaining)),
-        maxAttemptBudgetMs: Math.max(0, Math.floor(maxAttemptBudgetMs)),
-        hardTotalMs: technicalChain.hardTotalMs,
-        extensionCount: accepted ? extensionCount + 1 : extensionCount,
-        cumulativeGrantedMs: accepted ? cumulativeGrantedMs + granted : cumulativeGrantedMs,
+        requestRemainingMs: Math.max(0, Math.round(effectiveBudgetMs - policy.adjudicatedAttemptElapsedMs)),
+        remainingMs: Math.max(0, Math.round(attemptDeadline.remainingMs())),
+        rejectedExtensionCount: rejectedExtensionCount + 1,
         ...(rejectionReason ? { rejectionReason } : {}),
       },
     });
@@ -513,26 +457,15 @@ export async function runStage(
       return;
     }
     if (!timeoutDecisionPaths.includes(relativeAuditPath(publication.path))) timeoutDecisionPaths.push(relativeAuditPath(publication.path));
-    const decisionDigest = String(publication.decision.requestDigest);
-    if (publication.decision.accepted === true && !appliedRequestDigests.has(decisionDigest)) {
-      appliedRequestDigests.add(decisionDigest);
-      const recordedEffective = Number(publication.decision.effectiveBudgetMs);
-      const recordedGrant = Number(publication.decision.grantedExtensionMs);
-      effectiveBudgetMs = Number.isSafeInteger(recordedEffective)
-        ? Math.max(effectiveBudgetMs, recordedEffective)
-        : effectiveBudgetMs + Math.max(0, recordedGrant);
-      extensionCount = Math.max(extensionCount, Number(publication.decision.extensionCount) || extensionCount + 1);
-      cumulativeGrantedMs = Math.max(cumulativeGrantedMs, Number(publication.decision.cumulativeGrantedMs) || cumulativeGrantedMs + Math.max(0, recordedGrant));
-      technicalChain.append('timeout_extension_applied', {
-        stageId: opts.stageId,
-        attemptIndex,
-        requestedBy: request.requestedBy,
-        grantedExtensionMs: recordedGrant,
-        effectiveBudgetMs,
-        decisionPath: relativeAuditPath(publication.path),
-      });
-      scheduleSoftDeadline();
-    }
+    rejectedExtensionCount++;
+    attemptDeadline.append('timeout_extension_rejected', {
+      stageId: opts.stageId,
+      attemptIndex,
+      requestedBy: request.requestedBy,
+      requestedExtensionMs: request.requestedExtensionMs,
+      decisionPath: relativeAuditPath(publication.path),
+      rejectionReason,
+    });
   };
 
   function pollTimeoutExtensionRequests(): void {
@@ -556,10 +489,9 @@ export async function runStage(
 
   pollAbortSignal();
   pollTimeoutExtensionRequests();
-  scheduleSoftDeadline();
   const abortPollTimer = setInterval(pollAbortSignal, 2000);
   const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 20);
-  const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, technicalChain.signal]);
+  const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, attemptDeadline.signal]);
   const PHASE_ABORTED = Symbol('phase-aborted');
   const racePhaseWithAbort = <T>(phase: Promise<T>): Promise<T | typeof PHASE_ABORTED> => {
     if (aggregateAbortSignal.aborted) return Promise.resolve(PHASE_ABORTED);
@@ -590,11 +522,12 @@ export async function runStage(
     const tokensOut = typeof telemetry?.tokens_out === 'number' && Number.isFinite(telemetry.tokens_out)
       ? telemetry.tokens_out
       : undefined;
+    const timedOut = terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted;
     return {
       output: '',
-      exitCode: terminationCause === 'soft_timeout' || terminationCause === 'hard_cap_timeout' || terminationCause === 'hard_cap_clock_uncertain' ? 124 : 137,
+      exitCode: timedOut ? 124 : 137,
       duration_ms: Math.round(attemptElapsedMs()),
-      timedOut: terminationCause === 'soft_timeout' || terminationCause === 'hard_cap_timeout' || terminationCause === 'hard_cap_clock_uncertain',
+      timedOut,
       ...(tokensIn !== undefined ? { tokens_in: tokensIn } : {}),
       ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
     };
@@ -606,12 +539,16 @@ export async function runStage(
     selectedRole: AgentConfig,
     session: boolean,
   ): Promise<RunResult> => {
-    if (aggregateAbortSignal.aborted || technicalChain.remainingMs() <= 0) {
-      terminationCause ??= technicalChain.terminationCause() ?? 'hard_cap_timeout';
+    if (aggregateAbortSignal.aborted || attemptDeadline.remainingMs() <= 0) {
+      if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
       return cancelledResult();
     }
-    const hardRemainingMs = Math.max(1, Math.floor(technicalChain.remainingMs()));
-    technicalChain.append('adapter_phase_started', { stageId: opts.stageId, attemptIndex, hardRemainingMs, effectiveBudgetMs });
+    attemptDeadline.append('adapter_phase_started', {
+      stageId: opts.stageId,
+      attemptIndex,
+      remainingMs: Math.max(0, Math.floor(attemptDeadline.remainingMs())),
+      effectiveBudgetMs,
+    });
     return new Promise<RunResult>((resolvePromise, rejectPromise) => {
       let settled = false;
       let closeObservationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -630,7 +567,7 @@ export async function runStage(
         rejectPromise(error);
       };
       const onAbort = (): void => {
-        if (technicalChain.signal.aborted) terminationCause ??= technicalChain.terminationCause() ?? 'hard_cap_timeout';
+        if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
         // The signal initiates cancellation; the adapter promise is the child
         // lifecycle acknowledgement. Wait for it before claiming childClosedAt.
         // A broken adapter is bounded by the observation tolerance and is then
@@ -639,13 +576,12 @@ export async function runStage(
           closeObservationTimer = setTimeout(() => {
             childCloseUnverified = true;
             finish(cancelledResult());
-          }, HARD_CAP_OBSERVATION_TOLERANCE_MS);
+          }, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
         }
       };
       aggregateAbortSignal.addEventListener('abort', onAbort, { once: true });
       selectedAdapter.run(prompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
-        hard_timeout_ms: hardRemainingMs,
         workDir: opts.projectDir,
         runDir: opts.runDir,
         stageId: opts.stageId,
@@ -653,7 +589,6 @@ export async function runStage(
         sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
         preserveSession: opts.preserveSession,
         abortSignal: aggregateAbortSignal,
-        hardAbortSignal: technicalChain.signal,
       }).then(
         (value) => {
           lastChildClosedAt = new Date().toISOString();
@@ -670,11 +605,11 @@ export async function runStage(
     });
   };
   const adapterRetryDelays = opts.technicalRetry?.delaysMs ?? ADAPTER_RETRY_DELAYS;
-  const waitForRetry = (delayMs: number): Promise<boolean> => technicalChain.boundedSleep(delayMs, attemptAbortController.signal);
+  const waitForRetry = (delayMs: number): Promise<boolean> => attemptDeadline.boundedSleep(delayMs, attemptAbortController.signal);
 
   let result: RunResult;
-  // The abort + extension pollers live through adapter backoff and fallback so
-  // every phase remains governed by the same attempt deadline and chain cap.
+  // Abort and legacy-extension polling live through adapter backoff and
+  // fallback so every phase remains governed by this attempt's one deadline.
   try {
     result = await invokeAdapter(adapter, resolvedRole, true);
 
@@ -685,7 +620,7 @@ export async function runStage(
         const retryDelayMs = Math.max(0, adapterRetryDelays[attempt]);
         const delaySec = Math.round(retryDelayMs / 1000);
         try { appendFileSync(liveLogPath, `\n⏳ Adapter error detected — retrying in ${delaySec}s (attempt ${attempt + 2}/${adapterRetryDelays.length + 1})…\n`); } catch { /* ignore */ }
-        technicalChain.append('adapter_backoff_started', { stageId: opts.stageId, attemptIndex, delayMs: retryDelayMs });
+        attemptDeadline.append('adapter_backoff_started', { stageId: opts.stageId, attemptIndex, delayMs: retryDelayMs });
         if (!await waitForRetry(retryDelayMs)) {
           result = cancelledResult();
           break;
@@ -694,22 +629,22 @@ export async function runStage(
         if (result.exitCode === 0 || !isAdapterError(result.output)) break;
       }
 
-      // Final escape hatch: a different configured adapter may run once, but it
-      // consumes the same soft deadline and aggregate hard remainder.
+      // Final escape hatch: a different configured adapter may run once, but
+      // loading and execution consume the same immutable attempt deadline.
       if (!aggregateAbortSignal.aborted && result.exitCode !== 0 && isAdapterError(result.output)) {
         try {
           const projectDefaults = loadProjectDefaults(opts.projectDir);
           const primaryName = opts.role.adapter ?? inferAdapterName(adapter) ?? projectDefaults.adapter;
           const fallbackName = projectDefaults.adapter;
-          if (fallbackName && fallbackName !== primaryName && technicalChain.remainingMs() > 0) {
+          if (fallbackName && fallbackName !== primaryName && attemptDeadline.remainingMs() > 0) {
             try { appendFileSync(liveLogPath, `\n↩︎ Same-adapter retries exhausted (${primaryName}). Falling back to defaults.yaml adapter=${fallbackName} model=${projectDefaults.model}…\n`); } catch { /* ignore */ }
             const fallbackAdapter = await racePhaseWithAbort(
               (opts.technicalRetry?.loadFallbackAdapter ?? loadAdapterByName)(fallbackName),
             );
             if (fallbackAdapter === PHASE_ABORTED) {
-              if (technicalChain.signal.aborted) terminationCause ??= technicalChain.terminationCause() ?? 'hard_cap_timeout';
+              if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
               result = cancelledResult();
-            } else if (!aggregateAbortSignal.aborted && technicalChain.remainingMs() > 0) {
+            } else if (!aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0) {
               const fallbackRole: AgentConfig = {
                 ...resolvedRole,
                 adapter: fallbackName,
@@ -730,30 +665,23 @@ export async function runStage(
   } finally {
     clearInterval(abortPollTimer);
     clearInterval(extensionPollTimer);
-    if (softTimer) technicalChain.clearScheduledTimer(softTimer);
     cleanupAbortSignalAtExit();
+    // The execution attempt ends when adapter/fallback child settlement ends.
+    // Dispose here as well on thrown adapter errors so no long deadline timer
+    // survives this invocation and keeps the worker process alive.
+    attemptDeadline.dispose();
   }
 
-  // A soft deadline starts cancellation, but child settlement can consume the
-  // remaining aggregate budget. Attribute the final outcome from the chain's
-  // state after settlement instead of freezing the earlier cancellation intent.
-  if (
-    technicalChain.isHardExpired()
-    && (terminationCause === undefined || terminationCause === 'soft_timeout')
-  ) {
-    terminationCause = technicalChain.terminationCause() ?? 'hard_cap_timeout';
-  }
+  if (attemptDeadline.signal.aborted && !supervisorAborted) terminationCause = 'attempt_timeout';
   const timedOut = !supervisorAborted && (
-    terminationCause === 'soft_timeout'
-    || terminationCause === 'hard_cap_timeout'
-    || terminationCause === 'hard_cap_clock_uncertain'
+    terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
     || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
   if (timedOut) {
     result.timedOut = true;
-    terminationCause ??= technicalChain.signal.aborted ? (technicalChain.terminationCause() ?? 'hard_cap_timeout') : 'soft_timeout';
+    terminationCause = 'attempt_timeout';
   } else if (supervisorAborted) {
     terminationCause = 'supervisor_abort';
   } else if (result.exitCode === 0) {
@@ -775,32 +703,28 @@ export async function runStage(
   // If no adapter child was started, reaching settlement itself proves there is
   // no live child. Otherwise only an adapter promise settlement may certify it.
   const childClosedAt = childCloseUnverified ? undefined : (lastChildClosedAt ?? new Date().toISOString());
-  const chainSnapshot = technicalChain.snapshot();
+  const deadlineSnapshot = attemptDeadline.snapshot();
   const timeoutSummary: StageAttemptTimeoutSummary = {
-    chainId: technicalChain.chainId,
-    initialBudgetMs: technicalChain.initialBudgetMs,
-    effectiveBudgetMs,
-    hardTotalMs: technicalChain.hardTotalMs,
-    chainStartedAt: technicalChain.chainStartedAt,
-    hardDeadlineAt: technicalChain.hardDeadlineAt,
-    chargedElapsedMs: chainSnapshot.chargedElapsedMs,
-    hardRemainingMs: chainSnapshot.hardRemainingMs,
-    extensionCount,
-    cumulativeGrantedMs,
+    attemptId: attemptDeadline.attemptId,
+    budgetMs: effectiveBudgetMs,
+    attemptStartedAt: attemptDeadline.attemptStartedAt,
+    deadlineAt: attemptDeadline.deadlineAt,
+    elapsedMs: deadlineSnapshot.elapsedMs,
+    remainingMs: deadlineSnapshot.remainingMs,
+    rejectedExtensionCount,
     decisionPaths: timeoutDecisionPaths,
     mismatchPaths: timeoutMismatchPaths,
     terminationCause,
-    hardDeadlineReachedAt: chainSnapshot.hardDeadlineReachedAt,
+    deadlineReachedAt: deadlineSnapshot.deadlineReachedAt,
     ...(childClosedAt ? { childClosedAt } : {}),
-    deadlineOverrunMs: technicalChain.deadlineOverrunMs(),
+    deadlineOverrunMs: attemptDeadline.deadlineOverrunMs(),
   };
-  technicalChain.append('attempt_finished', {
+  attemptDeadline.append('attempt_finished', {
     stageId: opts.stageId,
     attemptIndex,
     exitCode: result.exitCode,
     effectiveBudgetMs,
-    extensionCount,
-    cumulativeGrantedMs,
+    rejectedExtensionCount,
     terminationCause,
   });
   const final = completeStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, {
@@ -813,8 +737,6 @@ export async function runStage(
         supervisorAborted
           ? (abortReason ? `aborted by supervisor: ${abortReason}` : 'aborted by supervisor')
           : result.adapterError ? 'adapter connection failed'
-          : terminationCause === 'hard_cap_clock_uncertain' ? 'technical-chain hard cap clock is uncertain'
-          : terminationCause === 'hard_cap_timeout' ? `hard cap timed out after ${Math.round(technicalChain.hardTotalMs / 1000)}s total`
           : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
           // instead of leaving the operator with a bare exit code.
@@ -833,8 +755,6 @@ export async function runStage(
   // Surface fallback attribution to callers without changing adapter semantics.
   result.writes = final.attempts?.at(-1)?.writes;
   result.writeAttribution = final.attempts?.at(-1)?.writeAttribution;
-
-  if (ownsTechnicalChain) technicalChain.dispose();
 
   return result;
 }

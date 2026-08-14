@@ -771,7 +771,6 @@ async function cmdQuick() {
   let workflow = 'default';
   let workflowExplicit = false; // true once the user passes --workflow, so we don't override their choice
   let maxIterations: number | undefined;
-  let timeout: number | undefined;
   let supervise = true; // supervisor brain on by default; opt out with --no-supervise
   let campaignArg: string | undefined; // --campaign <name> wins over defaults.yaml; --no-campaign forces undefined
   let campaignDisabled = false;
@@ -793,7 +792,11 @@ async function cmdQuick() {
     if (args[i] === '--adapter' && args[i + 1]) { adapter = args[++i]; launchArgs.push('--adapter', adapter); continue; }
     if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; workflowExplicit = true; launchArgs.push('--workflow', workflow); continue; }
     if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); launchArgs.push('--max-iterations', String(maxIterations)); continue; }
-    if (args[i] === '--timeout' && args[i + 1]) { timeout = parseInt(args[++i], 10); launchArgs.push('--timeout', String(timeout)); continue; }
+    if (args[i] === '--timeout' || args[i].startsWith('--timeout=')) {
+      console.error('The --timeout run override was removed; edit config/defaults.yaml::default_timeout_ms instead.');
+      process.exitCode = 1;
+      return;
+    }
     if (args[i] === '--supervise') { supervise = true; launchArgs.push('--supervise'); continue; }
     if (args[i] === '--no-supervise') { supervise = false; launchArgs.push('--no-supervise'); continue; }
     if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; launchArgs.push('--campaign', campaignArg); continue; }
@@ -869,7 +872,6 @@ async function cmdQuick() {
     console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
     console.error('  --max-iterations <n>    Override config/defaults.yaml for this run');
-    console.error('  --timeout <ms>          Override config/defaults.yaml for this run');
     console.error('  --supervise             Enable supervisor brain (default: ON)');
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
     console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug of the main worktree)');
@@ -1033,7 +1035,6 @@ async function cmdQuick() {
   const { loadWorkflow, runWorkflow } = await import('./scheduler.js');
   const { config, raw } = loadWorkflow(workflowPath);
   if (maxIterations) config.defaults.max_iterations = maxIterations;
-  if (timeout) config.defaults.timeout_ms = timeout;
 
   const agentsDir = join(projectDir, 'config', 'agents');
   const fallbackAgentsDir = join(import.meta.dirname ?? '.', '..', 'config', 'agents');
@@ -1061,7 +1062,7 @@ async function cmdQuick() {
   console.log(`Adapter: ${adapter}`);
   const projectDefaults = loadProjectDefaults(projectDir);
   console.log(`Max iterations: ${config.defaults.max_iterations ?? projectDefaults.max_iterations}`);
-  console.log(`Stage timeout: ${config.defaults.timeout_ms ?? projectDefaults.timeout_ms}ms`);
+  console.log(`Stage timeout: ${projectDefaults.timeout_ms}ms (config/defaults.yaml::default_timeout_ms)`);
   console.log(`Supervisor: ${supervise ? 'enabled' : 'disabled'}`);
   // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).

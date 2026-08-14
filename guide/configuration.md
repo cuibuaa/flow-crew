@@ -34,6 +34,21 @@ supervisor:
   stuck_threshold_ms: 600000
 ```
 
+`default_timeout_ms` is the sole control for how long a scheduled stage attempt
+may run. The scheduler reads it from this file, gives each attempt an immutable
+deadline, and uses a strictly larger derived budget for a technical timeout
+retry. Plans, workflows, CLI flags, and dashboard task payloads cannot override
+it, and there is no aggregate technical-chain timeout above it. Runtime requests
+to extend an active attempt are recorded and rejected; this ensures an infinite
+child still reaches its deadline.
+
+Raising the value trades fewer premature terminations for slower failure: a
+genuinely stuck stage may take the full longer budget to time out. The separate
+`supervisor.stuck_threshold_ms` remains an early-warning and intervention control
+for stages that stop making progress. It does not shorten or extend the stage
+attempt deadline, and changing the stage budget does not change supervisor
+polling or stuck detection.
+
 ## Adapters
 
 `flowcrew init` resolves the adapter once and writes the concrete value it chose, so a new

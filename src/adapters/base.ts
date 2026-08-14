@@ -19,19 +19,15 @@ export interface RunResult {
   writeAttribution?: 'structured' | 'snapshot' | 'unknown';
   /** Exact conversation UUID captured from adapter event output. */
   sessionId?: string;
-  /** Worker-owned effective soft budget after any accepted extension. */
+  /** Immutable budget assigned to this scheduler attempt. */
   effectiveTimeoutMs?: number;
   /** Worker-owned authoritative termination attribution. */
   timeoutTerminationCause?: string;
-  /** Scheduler refused to launch because no strictly larger budget fit the chain cap. */
-  hardCapExhausted?: boolean;
 }
 
 export interface RunOpts {
-  /** Attempt-local effective soft budget, retained for adapter/test observability. */
+  /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
   timeout_ms: number;
-  /** Child-local hard timer derived from the aggregate technical-chain remainder. */
-  hard_timeout_ms?: number;
   workDir: string;
   runDir: string;
   stageId: string;
@@ -45,8 +41,6 @@ export interface RunOpts {
    *  exitCode=137 ("Aborted by supervisor"). Used by worker.ts to honor supervisor ABORT
    *  verdicts that previously only wrote a signal file with no consumer. */
   abortSignal?: AbortSignal;
-  /** Aggregate technical-chain cancellation. Adapters must not reset this deadline. */
-  hardAbortSignal?: AbortSignal;
 }
 
 export interface AgentConfig {

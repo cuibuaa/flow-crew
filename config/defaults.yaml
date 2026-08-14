@@ -1,3 +1,6 @@
+# Sole operator control for a scheduled stage attempt. The deadline is immutable
+# once an attempt starts; a timeout retry gets a larger derived attempt budget.
+# Longer values reduce premature timeouts but also delay terminal failure.
 default_timeout_ms: 3600000
 default_max_iterations: 5
 default_gate_retry_loops: 3

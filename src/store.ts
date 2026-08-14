@@ -43,20 +43,17 @@ export type AttemptTokenUsage = 'known' | 'unknown';
 export type WriteAttribution = 'structured' | 'snapshot' | 'unknown';
 
 export interface StageAttemptTimeoutSummary {
-  chainId: string;
-  initialBudgetMs: number;
-  effectiveBudgetMs: number;
-  hardTotalMs: number;
-  chainStartedAt: string;
-  hardDeadlineAt: string;
-  chargedElapsedMs: number;
-  hardRemainingMs: number;
-  extensionCount: number;
-  cumulativeGrantedMs: number;
+  attemptId: string;
+  budgetMs: number;
+  attemptStartedAt: string;
+  deadlineAt: string;
+  elapsedMs: number;
+  remainingMs: number;
+  rejectedExtensionCount: number;
   decisionPaths: string[];
   mismatchPaths: string[];
-  terminationCause?: 'complete' | 'supervisor_abort' | 'soft_timeout' | 'hard_cap_timeout' | 'hard_cap_exhausted' | 'hard_cap_clock_uncertain' | 'adapter_error' | 'failed';
-  hardDeadlineReachedAt?: string;
+  terminationCause?: 'complete' | 'supervisor_abort' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
 }
@@ -92,7 +89,7 @@ export interface StageAttempt {
   writeAttribution?: WriteAttribution;
   /** Small summary plus path to the immutable attempt-level constraint audit. */
   constraintAudit?: StageConstraintAuditSummary;
-  /** Attempt-local soft budget and shared technical-chain hard-cap evidence. */
+  /** Attempt-local immutable deadline evidence. */
   timeout?: StageAttemptTimeoutSummary;
 }
 

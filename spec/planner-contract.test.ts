@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
-import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
-import { formatDispatchStageSchemaFailure } from '../src/scheduler.js';
+import { formatDispatchStageSchemaFailure, StageConfigSchema } from '../src/scheduler.js';
 
 const PLANNER_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml');
 const BRIEF_CONTRACT_PATH = resolve(import.meta.dirname, '..', 'guide', 'brief-contract.md');
@@ -211,14 +210,15 @@ function referenceExamples(prompt: string): string {
 
 describe('planner dispatch contract', () => {
   it('names the invalid dispatch field and a repair action', () => {
-    const parsed = z.object({ scope: z.array(z.string()), timeout_ms: z.number().positive() })
-      .safeParse({ scope: 'src/**', timeout_ms: -1 });
+    const parsed = StageConfigSchema.safeParse({ id: 'work', role: 'coder', scope: 'src/**' });
     if (parsed.success) throw new Error('invalid dispatch fixture unexpectedly parsed');
 
     const message = formatDispatchStageSchemaFailure(parsed.error);
     expect(message).toContain('scope:');
-    expect(message).toContain('timeout_ms:');
     expect(message).toMatch(/fix the named fields.*regenerate dispatch\.yaml/i);
+    expect(() => StageConfigSchema.parse({ id: 'work', role: 'coder', timeout_ms: 1_000 }))
+      .toThrow('config/defaults.yaml::default_timeout_ms');
+    expect(readPlannerPrompt()).not.toMatch(/^\s+timeout_(?:total_)?ms:/m);
   });
 
   it('requires safe parallel scope, real dependency reasons, and TMPDIR placement', () => {

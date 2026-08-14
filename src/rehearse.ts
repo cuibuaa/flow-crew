@@ -269,7 +269,6 @@ async function runRehearsal(argv: string[]): Promise<void> {
       const agentsDir = join(import.meta.dirname ?? '.', '..', 'config', 'agents');
       const { config, raw } = scheduler.loadWorkflow(join(import.meta.dirname ?? '.', '..', 'config', 'workflows', 'research.yaml'));
       config.defaults.max_iterations = seq.length + 3;
-      config.defaults.timeout_ms = 30000;
 
       const adapter = new ScriptedAdapter(script);
       const t0 = Date.now();

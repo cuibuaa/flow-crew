@@ -374,7 +374,6 @@ Common flags:
 | `--adapter <name>` | `defaults.yaml` | Registered adapter: `auto`, `codex`, `claude`, or `mock` |
 | `--workflow <name>` | `default` | Workflow from `config/workflows/` |
 | `--max-iterations <n>` | config | Max plan-execute-review cycles |
-| `--timeout <ms>` | config | Per-stage timeout |
 | `--supervise` | on | Enable supervisor |
 | `--no-supervise` | off | Disable supervisor for this run |
 | `--campaign <name>` | config or cwd slug | Attach run to a campaign |
@@ -386,6 +385,10 @@ Common flags:
 | `-` | none | Read task from stdin |
 
 Unknown adapter names fail before a task runs and list the registered values. The `mock` adapter reads deterministic per-stage JSON files from `MOCK_FIXTURE_DIR` and never invokes a model; use the isolated example in [`examples/README.md`](../examples/README.md) to see a complete zero-token loop.
+
+Stage attempt duration is configured only by
+`config/defaults.yaml::default_timeout_ms`. The removed `--timeout` run override
+fails with a migration hint instead of silently creating a second control.
 
 Campaign ownership and planner context are separate dimensions. `--no-campaign` makes the run fully
 standalone: it writes no campaign telemetry, contributes no campaign KG aggregation, and appears

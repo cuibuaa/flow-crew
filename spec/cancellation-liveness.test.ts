@@ -183,7 +183,7 @@ describe('process-authoritative project occupancy', () => {
     writeRun(candidateId, RUN_STATUS.RUNNING);
     const workflow: WorkflowConfig = {
       name: 'e13-direct-admission',
-      defaults: { max_iterations: 1, max_retries: 0, timeout_ms: 1_000 },
+      defaults: { max_iterations: 1, max_retries: 0 },
       stages: [],
     };
     const adapter = { run: vi.fn() } as unknown as Adapter;

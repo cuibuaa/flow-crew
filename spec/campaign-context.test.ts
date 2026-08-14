@@ -274,7 +274,6 @@ describe('campaign context production path', () => {
     writeFileSync(workflowPath, [
       'name: context-scenario',
       'defaults:',
-      '  timeout_ms: 5000',
       '  max_retries: 0',
       '  max_iterations: 1',
       'stages:',

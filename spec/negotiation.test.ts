@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
+import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { execWithTimeout } from '../src/adapters/base.js';
 import {
@@ -11,6 +11,7 @@ import {
   recordSchedulerTechnicalAttemptResult,
   runWorkflow,
   StageConfigSchema,
+  WorkflowConfigSchema,
   type WorkflowConfig,
 } from '../src/scheduler.js';
 import {
@@ -25,13 +26,12 @@ import {
 } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import {
-  TechnicalChainController,
-  HARD_CAP_OBSERVATION_TOLERANCE_MS,
+  ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS,
   createTechnicalRetryBudgetState,
   transitionTechnicalRetryBudget,
-  type TechnicalChainClock,
+  type AttemptDeadlineClock,
   type TechnicalRetryTerminalDecision,
-} from '../src/technical-chain.js';
+} from '../src/attempt-deadline.js';
 import { parseSupervisorVerdict } from '../src/supervisor.js';
 import {
   constraintDecisionPath,
@@ -88,7 +88,7 @@ function summaryResult(opts: RunOpts): RunResult | undefined {
   return opts.stageId === '_summary' ? { output: 'summary', exitCode: 0, duration_ms: 1 } : undefined;
 }
 
-class ManualTechnicalChainClock implements TechnicalChainClock {
+class ManualAttemptDeadlineClock implements AttemptDeadlineClock {
   private monotonicMs = 0;
   private wallMs = Date.parse('2026-01-01T00:00:00.000Z');
   private nextTimerId = 1;
@@ -119,18 +119,6 @@ class ManualTechnicalChainClock implements TechnicalChainClock {
     }
   }
 
-  advanceSemanticEvent(): void {
-    this.advance(1);
-  }
-}
-
-function applyBoundedRetryCpuLoad(): void {
-  const started = performance.now();
-  let accumulator = 0;
-  while (performance.now() - started < 125) {
-    accumulator = Math.imul(accumulator + 1, 31) >>> 0;
-  }
-  void accumulator;
 }
 
 function readJson(path: string): Record<string, unknown> {
@@ -238,14 +226,14 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     const yaml = [
       'name: e9-scope', 'defaults:', '  max_iterations: 1', `  max_retries: ${maxRetries}`,
       'stages:', '  - id: ordinary', '    role: coder', '    scope: [src/declared.ts]',
-      '    timeout_ms: 1000', '    timeout_total_ms: 3000', `    max_retries: ${maxRetries}`, '    prompt_template: scope fixture',
+      `    max_retries: ${maxRetries}`, '    prompt_template: scope fixture',
     ].join('\n');
     return {
       yaml,
       config: {
         name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{
           id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture',
-          timeout_ms: 1000, timeout_total_ms: 3000, max_retries: maxRetries, skills: [], dynamic_dispatch: false, is_gate: false,
+          max_retries: maxRetries, skills: [], dynamic_dispatch: false, is_gate: false,
         }],
       },
     };
@@ -272,7 +260,9 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'ordinary') {
-        expect(prompt).toContain('"requestedAt":"<ISO-8601 timestamp sampled immediately before writing>"');
+        expect(prompt).toContain('immutable');
+        expect(prompt).toContain('config/defaults.yaml::default_timeout_ms');
+        expect(prompt).not.toContain('timeout_extension_request.json');
         const directory = join(opts.runDir, 'stages', opts.stageId);
         writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
           version: 1, kind: 'scope_revision', requestId: 'ordinary-shared', stageId: opts.stageId,
@@ -392,7 +382,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
           'stages:',
           '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]', '    is_gate: true', '    task: review',
           '  - id: repair', '    role: repair', '    scope: [src/declared.ts]', '    retry_to: [review_gate]',
-          '    timeout_ms: 100', '    timeout_total_ms: 300', '    max_retries: 1', '    task: repair',
+          '    max_retries: 1', '    task: repair',
         ].join('\n'));
         return { output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
@@ -417,11 +407,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two without request\n');
       return { output: 'done', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' };
     } };
-    const clock = new ManualTechnicalChainClock();
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
       writeRoles('planner', 'qa', 'repair'), created.runId, 'repair scope attempts', true,
-      undefined, undefined, true, undefined, () => clock,
+      undefined, undefined, true,
     );
     expect(repairCalls).toBe(2);
     expect(final.status).not.toBe('complete');
@@ -540,77 +529,44 @@ describe('bounded timeout negotiation', () => {
     return { runId: created.runId, runDirPath: created.runDirPath };
   }
 
-  it('parses supervisor extension proposals without turning them into approvals', () => {
-    expect(parseSupervisorVerdict([
-      '{"verdict":"EXTEND","target_stage":"work","reason":"verified final checks remain","guidance":null,"extension_ms":75}',
-    ].join('\n'))).toMatchObject({
-      verdict: 'EXTEND',
-      targetStage: 'work',
-      reason: 'verified final checks remain',
-      extensionMs: 75,
-    });
+  it('does not advertise or accept supervisor extension verdicts', () => {
+    expect(parseSupervisorVerdict(
+      '{"verdict":"EXTEND","target_stage":"work","reason":"more time","guidance":null}',
+    )).toBeNull();
   });
 
-  it('recovers a technical chain conservatively and aborts on backwards wall time', () => {
-    const observedAt = Date.now();
-    const recovered = new TechnicalChainController({
-      initialBudgetMs: 100,
-      hardTotalMs: 300,
-      chainId: 'persisted-chain',
-      recovery: {
-        hardDeadlineAt: new Date(observedAt + 120).toISOString(),
-        lastObservedAt: new Date(observedAt - 20).toISOString(),
-        persistedChargedMs: 130,
-        chainStartedAt: new Date(observedAt - 130).toISOString(),
-      },
-    });
-    expect(recovered.chainId).toBe('persisted-chain');
-    expect(recovered.elapsedMs()).toBeGreaterThanOrEqual(179);
-    expect(recovered.remainingMs()).toBeLessThanOrEqual(120);
-    expect(recovered.elapsedMs() + recovered.remainingMs()).toBeLessThanOrEqual(301);
-    recovered.dispose();
-
-    const uncertain = new TechnicalChainController({
-      initialBudgetMs: 100,
-      hardTotalMs: 300,
-      recovery: {
-        hardDeadlineAt: new Date(observedAt + 1_000).toISOString(),
-        lastObservedAt: new Date(observedAt + 500).toISOString(),
-        persistedChargedMs: 10,
-      },
-    });
-    expect(uncertain.signal.aborted).toBe(true);
-    expect(uncertain.terminationCause()).toBe('hard_cap_clock_uncertain');
-    uncertain.dispose();
+  it('rejects every workflow or plan timeout override with a migration hint', () => {
+    const base = { id: 'work', role: 'coder' };
+    expect(() => StageConfigSchema.parse({ ...base, timeout_ms: 100 })).toThrow('config/defaults.yaml::default_timeout_ms');
+    expect(() => StageConfigSchema.parse({ ...base, timeout_total_ms: 100 })).toThrow('config/defaults.yaml::default_timeout_ms');
+    expect(() => WorkflowConfigSchema.parse({
+      name: 'removed-default', defaults: { timeout_ms: 100 }, stages: [base],
+    })).toThrow('config/defaults.yaml::default_timeout_ms');
   });
 
-  it('resumes a scheduler technical retry without replenishing an unprovable hard balance', { timeout: 10_000 }, async () => {
+  it('resumes a scheduler timeout retry from attempt evidence without an aggregate balance', { timeout: 10_000 }, async () => {
     async function scenario(withEvidence: boolean): Promise<{ budgets: number[]; status: ReturnType<typeof readStageStatus> }> {
       const yaml = [
         'name: resume-timeout', 'defaults:', '  max_iterations: 1', '  max_retries: 1', 'stages:',
-        '  - id: work', '    role: coder', '    timeout_ms: 30000', '    timeout_total_ms: 100000',
-        '    max_retries: 1', '    prompt_template: resume timeout',
+        '  - id: work', '    role: coder', '    max_retries: 1', '    prompt_template: resume timeout',
       ].join('\n');
       const config: WorkflowConfig = { name: 'resume-timeout', defaults: { max_iterations: 1, max_retries: 1 }, stages: [{
-        id: 'work', role: 'coder', depends_on: [], prompt_template: 'resume timeout', timeout_ms: 30_000,
-        timeout_total_ms: 100_000, max_retries: 1, skills: [], dynamic_dispatch: false, is_gate: false,
+        id: 'work', role: 'coder', depends_on: [], prompt_template: 'resume timeout',
+        max_retries: 1, skills: [], dynamic_dispatch: false, is_gate: false,
       }] };
       const created = prepareRun(config, yaml);
       const observedAt = Date.now();
       const priorTimeout = {
-        chainId: 'persisted-scheduler-chain',
-        initialBudgetMs: 30_000,
-        effectiveBudgetMs: 30_000,
-        hardTotalMs: 100_000,
-        chainStartedAt: new Date(observedAt - 45_000).toISOString(),
-        hardDeadlineAt: new Date(observedAt + 55_000).toISOString(),
-        chargedElapsedMs: 45_000,
-        hardRemainingMs: 55_000,
-        extensionCount: 0,
-        cumulativeGrantedMs: 0,
+        attemptId: 'persisted-attempt',
+        budgetMs: 3_600_000,
+        attemptStartedAt: new Date(observedAt - 3_600_000).toISOString(),
+        deadlineAt: new Date(observedAt).toISOString(),
+        elapsedMs: 3_600_000,
+        remainingMs: 0,
+        rejectedExtensionCount: 0,
         decisionPaths: [],
         mismatchPaths: [],
-        terminationCause: 'soft_timeout' as const,
+        terminationCause: 'attempt_timeout' as const,
         childClosedAt: new Date(observedAt).toISOString(),
       };
       const priorStatus = {
@@ -622,7 +578,7 @@ describe('bounded timeout negotiation', () => {
           startedAt: new Date(observedAt - 30_000).toISOString(),
           completedAt: new Date(observedAt).toISOString(),
           status: 'failed' as const,
-          duration_ms: 30_000,
+          duration_ms: 3_600_000,
           exitCode: 124,
           error: 'timed out after 0s',
           ...(withEvidence ? { timeout: priorTimeout } : {}),
@@ -646,29 +602,19 @@ describe('bounded timeout negotiation', () => {
 
     const recovered = await scenario(true);
     expect(recovered.budgets).toHaveLength(1);
-    expect(recovered.budgets[0]).toBeGreaterThan(30_000);
-    expect(recovered.budgets[0]).toBeLessThanOrEqual(55_000);
-    expect(recovered.status.attempts?.at(-1)?.timeout?.chainId).toBe('persisted-scheduler-chain');
+    expect(recovered.budgets[0]).toBe(7_200_000);
+    expect(recovered.status.attempts?.at(-1)?.timeout?.attemptId).not.toBe('persisted-attempt');
 
     rmSync(projectDir, { recursive: true, force: true });
     projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-e9-project-resume-missing-'));
-    const failClosed = await scenario(false);
-    expect(failClosed.budgets).toEqual([]);
-    expect(failClosed.status.error).toContain('hard_cap_clock_uncertain');
-    expect(failClosed.status.timeout?.terminationCause).toBe('hard_cap_clock_uncertain');
+    const recoveredFromRetryLedger = await scenario(false);
+    expect(recoveredFromRetryLedger.budgets).toEqual([7_200_000]);
+    expect(recoveredFromRetryLedger.status.status).toBe('complete');
   });
 
-  // Budgets here are 10x the other cases in this file, deliberately. Most of them
-  // assert that a stage DID time out, so jitter can only help them. This one asserts
-  // the opposite — that the work finishes inside the extended budget — and at the
-  // original 60ms + 70ms it left ~40ms of slack for the request/decision round trip
-  // plus process scheduling. Under a loaded machine (the full 140-file suite in
-  // parallel) that is not enough, and it failed intermittently with exit 124.
-  // Same semantics, ~400ms of slack, still about a second of wall clock.
-  it('lets a finite task finish through an audited pre-deadline extension', { timeout: 15_000 }, async () => {
+  it('rejects a pre-deadline extension and keeps the attempt budget immutable', { timeout: 5_000 }, async () => {
     const stageId = 'finite';
     const { runId, runDirPath } = directRunDir(stageId);
-    const chain = new TechnicalChainController({ initialBudgetMs: 600, hardTotalMs: 1_800, ledgerDir: join(runDirPath, 'stages', stageId) });
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json'), JSON.stringify({
         version: 1, kind: 'timeout_extension', requestId: 'finite-more', stageId: opts.stageId,
@@ -676,25 +622,27 @@ describe('bounded timeout negotiation', () => {
         requestedExtensionMs: 700, reason: 'verified final checks remain',
       }));
       await waitForDecision(join(opts.runDir, 'stages', opts.stageId), 'timeout_extension_decision_');
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      return { output: 'finished', exitCode: 0, duration_ms: 900 };
+      if (!opts.abortSignal?.aborted) {
+        await new Promise((resolve) => opts.abortSignal?.addEventListener('abort', resolve, { once: true }));
+      }
+      return { output: 'cancelled', exitCode: 137, duration_ms: 600 };
     } };
     const result = await runStage(adapter, {
-      stageId, role, dependsOn: [], promptTemplate: 'finite', timeout_ms: 600, timeout_total_ms: 1_800,
-      technicalChain: chain, projectDir, runId, runDir: runDirPath, retries: 0,
+      stageId, role, dependsOn: [], promptTemplate: 'finite', timeout_ms: 600,
+      projectDir, runId, runDir: runDirPath, retries: 0,
     });
-    chain.dispose();
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode).toBe(124);
     const status = readStageStatus(projectDir, runId, stageId);
-    expect(status.timeout).toMatchObject({ effectiveBudgetMs: 1_300, extensionCount: 1, cumulativeGrantedMs: 700, terminationCause: 'complete' });
+    expect(status.timeout).toMatchObject({ budgetMs: 600, rejectedExtensionCount: 1, terminationCause: 'attempt_timeout' });
     const decision = readJson(join(runDirPath, status.timeout!.decisionPaths[0]));
     expect(decision).toMatchObject({
-      accepted: true,
+      accepted: false,
       requestedBy: 'stage',
       decidedBy: 'worker-policy',
-      grantedExtensionMs: 700,
+      grantedExtensionMs: 0,
       timingBasis: 'requested_at',
       requestedAt: expect.any(String),
+      rejectionReason: 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch',
     });
   });
 
@@ -711,7 +659,7 @@ describe('bounded timeout negotiation', () => {
       return { output: 'first complete', exitCode: 0, duration_ms: 1 };
     } };
     await runStage(first, {
-      stageId, role, dependsOn: [], promptTemplate: 'first', timeout_ms: 100, timeout_total_ms: 300,
+      stageId, role, dependsOn: [], promptTemplate: 'first', timeout_ms: 100,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
     let secondBudget = 0;
@@ -720,77 +668,148 @@ describe('bounded timeout negotiation', () => {
       return { output: 'second complete without request', exitCode: 0, duration_ms: 1 };
     } };
     await runStage(second, {
-      stageId, role, dependsOn: [], promptTemplate: 'second', timeout_ms: 100, timeout_total_ms: 300,
+      stageId, role, dependsOn: [], promptTemplate: 'second', timeout_ms: 100,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
     const status = readStageStatus(projectDir, runId, stageId);
     expect(secondBudget).toBe(100);
     expect(status.attempts?.[1].timeout).toMatchObject({
-      effectiveBudgetMs: 100, extensionCount: 0, cumulativeGrantedMs: 0, decisionPaths: [],
+      budgetMs: 100, rejectedExtensionCount: 0, decisionPaths: [],
     });
   });
 
-  it('uses a strictly larger timeout retry budget and refuses a retry when no increase fits', { timeout: 10_000 }, () => {
-    function scenario(
-      total: number,
-      clock?: ManualTechnicalChainClock,
-    ): { budgets: number[]; terminalDecision: TechnicalRetryTerminalDecision } {
-      const controller = new TechnicalChainController({
-        initialBudgetMs: 50,
-        hardTotalMs: total,
-        ...(clock ? { clock } : {}),
-      });
-      const retry = createTechnicalRetryBudgetState({ controller });
-      const budgets: number[] = [];
-      try {
-        const first = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
-        if (first.type !== 'attempt_prepared') throw new Error('initial retry budget was not prepared');
-        budgets.push(first.budgetMs);
-
-        clock?.advanceSemanticEvent();
-        recordSchedulerTechnicalAttemptResult(retry, {
-          effectiveTimeoutMs: first.budgetMs,
-          timedOut: true,
-          timeoutTerminationCause: 'soft_timeout',
-        }, first.budgetMs);
-        applyBoundedRetryCpuLoad();
-        const second = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
-        if (second.type === 'terminal') return { budgets, terminalDecision: second.terminalDecision };
-        if (second.type !== 'attempt_prepared') throw new Error('retry budget transition did not make a decision');
-        budgets.push(second.budgetMs);
-
-        clock?.advanceSemanticEvent();
-        recordSchedulerTechnicalAttemptResult(retry, {
-          effectiveTimeoutMs: second.budgetMs,
-          timedOut: true,
-          timeoutTerminationCause: 'soft_timeout',
-        }, second.budgetMs);
-        const terminal = transitionTechnicalRetryBudget(retry, { type: 'retry_exhausted' });
-        if (terminal.type !== 'terminal') throw new Error('retry exhaustion was not terminal');
-        return { budgets, terminalDecision: terminal.terminalDecision };
-      } finally {
-        controller.dispose();
-      }
-    }
-    const semantic = {
-      expandable: scenario(150, new ManualTechnicalChainClock()),
-      capped: scenario(50, new ManualTechnicalChainClock()),
+  it('always prepares a strictly larger timeout retry without a second balance', () => {
+    const retry = createTechnicalRetryBudgetState({ initialBudgetMs: 50 });
+    const budgets: number[] = [];
+    const first = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
+    if (first.type !== 'attempt_prepared') throw new Error('initial retry budget was not prepared');
+    budgets.push(first.budgetMs);
+    recordSchedulerTechnicalAttemptResult(retry, {
+      effectiveTimeoutMs: first.budgetMs,
+      timedOut: true,
+      timeoutTerminationCause: 'attempt_timeout',
+    }, first.budgetMs);
+    const second = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
+    if (second.type !== 'attempt_prepared') throw new Error('retry budget was not prepared');
+    budgets.push(second.budgetMs);
+    recordSchedulerTechnicalAttemptResult(retry, {
+      effectiveTimeoutMs: second.budgetMs,
+      timedOut: true,
+      timeoutTerminationCause: 'attempt_timeout',
+    }, second.budgetMs);
+    const terminal = transitionTechnicalRetryBudget(retry, { type: 'retry_exhausted' });
+    if (terminal.type !== 'terminal') throw new Error('retry exhaustion was not terminal');
+    const semantic: { budgets: number[]; terminalDecision: TechnicalRetryTerminalDecision } = {
+      budgets,
+      terminalDecision: terminal.terminalDecision,
     };
-    expect(semantic).toEqual({
-      expandable: { budgets: [50, 100], terminalDecision: 'soft_timeout' },
-      capped: { budgets: [50], terminalDecision: 'hard_cap_exhausted' },
-    });
-
-    const legacy = scenario(150);
-    const legacyCounterexampleKilled = legacy.budgets.length === 1
-      && legacy.terminalDecision === 'hard_cap_exhausted';
-    expect(legacyCounterexampleKilled).toBe(true);
-
-    process.stdout.write(`M4_RETRY_SEMANTICS=${JSON.stringify(semantic)}\n`);
-    process.stdout.write(`legacyCounterexampleKilled=${String(legacyCounterexampleKilled)}\n`);
+    expect(semantic).toEqual({ budgets: [50, 100], terminalDecision: 'attempt_timeout' });
+    process.stdout.write(`SINGLE_TIMEOUT_RETRY_SEMANTICS=${JSON.stringify(semantic)}\n`);
   });
 
-  it('charges primary retries, bounded backoff, and fallback to one aggregate deadline', { timeout: 5_000 }, async () => {
+  it('makes the lost first-timeout shape recover with a larger second attempt', { timeout: 10_000 }, async () => {
+    const yaml = [
+      'name: retry-after-timeout',
+      'defaults:',
+      '  max_iterations: 1',
+      '  max_retries: 1',
+      'stages:',
+      '  - id: work',
+      '    role: coder',
+      '    max_retries: 1',
+      '    prompt_template: finish the work',
+    ].join('\n');
+    const config = WorkflowConfigSchema.parse({
+      name: 'retry-after-timeout',
+      defaults: { max_iterations: 1, max_retries: 1 },
+      stages: [{ id: 'work', role: 'coder', max_retries: 1, prompt_template: 'finish the work' }],
+    });
+    const created = prepareRun(config, yaml);
+    const budgets: number[] = [];
+    const adapter: Adapter = { async run(prompt, _agent, opts) {
+      const summary = summaryResult(opts);
+      if (summary) return summary;
+      budgets.push(opts.timeout_ms);
+      if (budgets.length === 1) {
+        return { output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true };
+      }
+      expect(prompt).toContain(`strictly larger immutable budget of ${opts.timeout_ms}ms`);
+      return { output: 'finished', exitCode: 0, duration_ms: 1 };
+    } };
+
+    const final = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      writeRoles('coder'), created.runId, 'timeout retry', true, false,
+    );
+    expect(final.status).toBe('complete');
+    expect(budgets).toEqual([3_600_000, 7_200_000]);
+    const attempts = readStageStatus(projectDir, created.runId, 'work').attempts ?? [];
+    expect(attempts.map((attempt) => attempt.timeout?.budgetMs)).toEqual(budgets);
+    expect(attempts.map((attempt) => attempt.timeout?.terminationCause)).toEqual(['attempt_timeout', 'complete']);
+  });
+
+  it('does not let planner-authored max_retries suppress the configured timeout retry', { timeout: 10_000 }, async () => {
+    mkdirSync(join(projectDir, 'config'), { recursive: true });
+    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
+      'default_timeout_ms: 50',
+      'default_stage_technical_retries: 1',
+      'adapter: mock',
+      'model: default',
+      'reasoning_effort: default',
+    ].join('\n'));
+    const yaml = [
+      'name: planner-retry-suppression',
+      'defaults:',
+      '  max_iterations: 1',
+      '  max_retries: 0',
+      'stages:',
+      '  - id: plan',
+      '    role: planner',
+      '    dynamic_dispatch: true',
+    ].join('\n');
+    const config = WorkflowConfigSchema.parse(parseYaml(yaml));
+    const created = prepareRun(config, yaml);
+    const budgets: number[] = [];
+    let workCalls = 0;
+    const adapter: Adapter = { async run(_prompt, _agent, opts) {
+      const summary = summaryResult(opts);
+      if (summary) return summary;
+      if (opts.stageId === 'plan') {
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          '- id: work',
+          '  role: coder',
+          '  scope: []',
+          '  depends_on: [plan]',
+          '  dependency_reasons: {plan: "Consumes the planner output."}',
+          '  max_retries: 0',
+          '  prompt_template: finish the dispatched work',
+        ].join('\n'));
+        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      workCalls++;
+      budgets.push(opts.timeout_ms);
+      if (workCalls === 1) {
+        return { output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true };
+      }
+      return { output: 'finished', exitCode: 0, duration_ms: 1 };
+    } };
+
+    const final = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      writeRoles('planner', 'coder'), created.runId, 'planner retry suppression', true, false,
+    );
+    const recorded = parseYaml(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf-8')) as {
+      stages: Array<{ id: string; max_retries?: number }>;
+    };
+    const observed = { workCalls, budgets, finalStatus: final.status };
+    process.stdout.write(`PLAN_RETRY_SUPPRESSION=${JSON.stringify(observed)}\n`);
+    expect(observed).toEqual({ workCalls: 2, budgets: [50, 100], finalStatus: 'complete' });
+    expect((final.dispatchedStages as Array<{ id: string; max_retries?: number }> | undefined)
+      ?.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
+    expect(recorded.stages.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
+  });
+
+  it('charges primary retries, bounded backoff, and fallback to one attempt deadline', { timeout: 5_000 }, async () => {
     const stageId = 'adapter_chain';
     const { runId, runDirPath } = directRunDir(stageId);
     mkdirSync(join(projectDir, 'config'), { recursive: true });
@@ -799,26 +818,20 @@ describe('bounded timeout negotiation', () => {
       'model: default',
       'reasoning_effort: default',
     ].join('\n'));
-    const clock = new ManualTechnicalChainClock();
-    const chain = new TechnicalChainController({
-      initialBudgetMs: 90,
-      hardTotalMs: 90,
-      ledgerDir: join(runDirPath, 'stages', stageId),
-      clock,
-    });
-    const hardBudgets: number[] = [];
+    const clock = new ManualAttemptDeadlineClock();
+    const adapterBudgets: number[] = [];
     let primaryCalls = 0;
     let fallbackCalls = 0;
     const primary: Adapter = { async run(_prompt, _agent, opts) {
       primaryCalls++;
-      hardBudgets.push(opts.hard_timeout_ms ?? 0);
+      adapterBudgets.push(opts.timeout_ms);
       if (primaryCalls === 1) setImmediate(() => clock.advance(5));
       if (primaryCalls === 2) setImmediate(() => clock.advance(7));
       return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
     } };
     const fallback: Adapter = { async run(_prompt, _agent, opts) {
       fallbackCalls++;
-      hardBudgets.push(opts.hard_timeout_ms ?? 0);
+      adapterBudgets.push(opts.timeout_ms);
       const started = Date.now();
       if (opts.abortSignal?.aborted) return { output: 'cancelled', exitCode: 137, duration_ms: 0 };
       return new Promise<RunResult>((resolve) => {
@@ -834,8 +847,7 @@ describe('bounded timeout negotiation', () => {
       dependsOn: [],
       promptTemplate: 'adapter chain',
       timeout_ms: 90,
-      timeout_total_ms: 90,
-      technicalChain: chain,
+      deadlineClock: clock,
       technicalRetry: {
         delaysMs: [5, 7],
         loadFallbackAdapter: async (name) => {
@@ -848,29 +860,25 @@ describe('bounded timeout negotiation', () => {
       runDir: runDirPath,
       retries: 0,
     });
-    chain.dispose();
     expect(result.exitCode).toBe(124);
     expect(primaryCalls).toBe(3);
     expect(fallbackCalls).toBe(1);
-    expect(hardBudgets).toHaveLength(4);
-    for (let index = 1; index < hardBudgets.length; index++) {
-      expect(hardBudgets[index]).toBeLessThanOrEqual(hardBudgets[index - 1]);
-    }
+    expect(adapterBudgets).toEqual([90, 90, 90, 90]);
     const status = readStageStatus(projectDir, runId, stageId);
-    expect(status.timeout?.terminationCause).toBe('hard_cap_timeout');
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
+    expect(status.timeout?.terminationCause).toBe('attempt_timeout');
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
     expect(clock.monotonicNow()).toBe(102);
     const ledgerName = readdirSync(join(runDirPath, 'stages', stageId))
-      .find((name) => name.startsWith('technical_chain_') && name.endsWith('.jsonl'));
+      .find((name) => name.startsWith('attempt_deadline_') && name.endsWith('.jsonl'));
     expect(ledgerName).toBeTruthy();
     const events = readFileSync(join(runDirPath, 'stages', stageId, ledgerName!), 'utf-8')
-      .trim().split('\n').map((line) => JSON.parse(line) as { type: string; chainId: string });
+      .trim().split('\n').map((line) => JSON.parse(line) as { type: string; attemptId: string });
     expect(events.filter((event) => event.type === 'adapter_backoff_started')).toHaveLength(2);
     expect(events.filter((event) => event.type === 'adapter_phase_started')).toHaveLength(4);
-    expect(new Set(events.map((event) => event.chainId))).toEqual(new Set([chain.chainId]));
+    expect(new Set(events.map((event) => event.attemptId))).toEqual(new Set([status.timeout?.attemptId]));
   });
 
-  it('includes fallback loading itself in the aggregate hard-cap race', { timeout: 5_000 }, async () => {
+  it('includes fallback loading itself in the attempt-deadline race', { timeout: 5_000 }, async () => {
     const stageId = 'hanging_loader';
     const { runId, runDirPath } = directRunDir(stageId);
     mkdirSync(join(projectDir, 'config'), { recursive: true });
@@ -880,17 +888,11 @@ describe('bounded timeout negotiation', () => {
     const primary: Adapter = { async run() {
       return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
     } };
-    const clock = new ManualTechnicalChainClock();
-    const chain = new TechnicalChainController({
-      initialBudgetMs: 60,
-      hardTotalMs: 120,
-      ledgerDir: join(runDirPath, 'stages', stageId),
-      clock,
-    });
+    const clock = new ManualAttemptDeadlineClock();
     const result = await runStage(primary, {
       stageId, role: { ...role, adapter: 'primary' }, dependsOn: [], promptTemplate: 'loader',
-      timeout_ms: 60, timeout_total_ms: 120,
-      technicalChain: chain,
+      timeout_ms: 60,
+      deadlineClock: clock,
       technicalRetry: {
         delaysMs: [],
         loadFallbackAdapter: async () => {
@@ -900,12 +902,9 @@ describe('bounded timeout negotiation', () => {
       },
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
-    chain.dispose();
     expect(clock.monotonicNow()).toBe(60);
     expect(result.exitCode).toBe(124);
-    expect(['soft_timeout', 'hard_cap_timeout']).toContain(
-      readStageStatus(projectDir, runId, stageId).timeout?.terminationCause,
-    );
+    expect(readStageStatus(projectDir, runId, stageId).timeout?.terminationCause).toBe('attempt_timeout');
   });
 
   it('waits for adapter cancellation settlement before recording child close', { timeout: 5_000 }, async () => {
@@ -925,7 +924,7 @@ describe('bounded timeout negotiation', () => {
     } };
     const started = Date.now();
     await runStage(adapter, {
-      stageId, role, dependsOn: [], promptTemplate: 'child close', timeout_ms: 40, timeout_total_ms: 40,
+      stageId, role, dependsOn: [], promptTemplate: 'child close', timeout_ms: 40,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
     const status = readStageStatus(projectDir, runId, stageId);
@@ -933,17 +932,15 @@ describe('bounded timeout negotiation', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(140);
     expect(status.timeout?.childClosedAt).toBeTruthy();
     expect(status.timeout?.deadlineOverrunMs).toBeGreaterThanOrEqual(100);
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
   });
 
-  it('kills an infinite local Node child at the aggregate cap despite repeated extension requests', { timeout: 15_000 }, async () => {
+  it('kills an infinite local Node child at its immutable attempt deadline despite repeated extension requests', { timeout: 15_000 }, async () => {
     const stageId = 'infinite';
     const { runId, runDirPath } = directRunDir(stageId);
     const initialBudgetMs = 500;
-    const hardTotalMs = 1_700;
     const requestedExtensionMs = 500;
-    const requestCadenceMs = 250;
-    const chain = new TechnicalChainController({ initialBudgetMs, hardTotalMs, ledgerDir: join(runDirPath, 'stages', stageId) });
+    const requestCadenceMs = 100;
     let requestNumber = 0;
     let resolveAdapterSettled!: () => void;
     const adapterSettled = new Promise<void>((resolve) => { resolveAdapterSettled = resolve; });
@@ -962,7 +959,7 @@ describe('bounded timeout negotiation', () => {
       const interval = setInterval(emit, requestCadenceMs);
       try {
         return await execWithTimeout(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-          cwd: projectDir, timeout_ms: opts.hard_timeout_ms ?? hardTotalMs, abortSignal: opts.abortSignal,
+          cwd: projectDir, timeout_ms: 10_000, abortSignal: opts.abortSignal,
         });
       } finally {
         clearInterval(interval);
@@ -970,22 +967,24 @@ describe('bounded timeout negotiation', () => {
       }
     } };
     const result = await runStage(adapter, {
-      stageId, role, dependsOn: [], promptTemplate: 'infinite', timeout_ms: initialBudgetMs, timeout_total_ms: hardTotalMs,
-      technicalChain: chain, projectDir, runId, runDir: runDirPath, retries: 0,
+      stageId, role, dependsOn: [], promptTemplate: 'infinite', timeout_ms: initialBudgetMs,
+      projectDir, runId, runDir: runDirPath, retries: 0,
     });
     // The worker now treats adapter settlement as the child lifecycle
     // acknowledgement, so this promise must already be settled on return.
     await adapterSettled;
-    chain.dispose();
     const elapsed = Date.now() - started;
     const status = readStageStatus(projectDir, runId, stageId);
     const decisions = status.timeout?.decisionPaths.map((path) => readJson(join(runDirPath, path))) ?? [];
     expect(result.exitCode).not.toBe(0);
-    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('hard_cap_timeout');
-    expect(status.timeout?.cumulativeGrantedMs).toBeLessThanOrEqual(hardTotalMs - initialBudgetMs);
-    expect(status.timeout?.effectiveBudgetMs).toBeLessThanOrEqual(hardTotalMs);
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(HARD_CAP_OBSERVATION_TOLERANCE_MS);
-    expect(elapsed).toBeLessThan(hardTotalMs + (2 * HARD_CAP_OBSERVATION_TOLERANCE_MS));
+    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('attempt_timeout');
+    expect(status.timeout?.deadlineReachedAt).toBeTruthy();
+    expect(status.timeout?.budgetMs).toBe(initialBudgetMs);
+    expect(status.timeout?.rejectedExtensionCount).toBeGreaterThanOrEqual(2);
+    expect(decisions.length).toBeGreaterThanOrEqual(2);
+    expect(decisions.every((decision) => decision.accepted === false && decision.grantedExtensionMs === 0)).toBe(true);
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
+    expect(elapsed).toBeLessThan(initialBudgetMs + (2 * ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS));
   });
 
   it('keeps a current-attempt supervisor ABORT authoritative over an extension', { timeout: 5_000 }, async () => {
@@ -1004,13 +1003,13 @@ describe('bounded timeout negotiation', () => {
       return { output: 'cancelled', exitCode: 137, duration_ms: 1 };
     } };
     const result = await runStage(adapter, {
-      stageId, role, dependsOn: [], promptTemplate: 'abort', timeout_ms: 200, timeout_total_ms: 600,
+      stageId, role, dependsOn: [], promptTemplate: 'abort', timeout_ms: 200,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
     expect(result.exitCode).toBe(137);
     const status = readStageStatus(projectDir, runId, stageId);
     expect(status.error).toContain('aborted by supervisor');
-    expect(status.timeout).toMatchObject({ extensionCount: 0, cumulativeGrantedMs: 0, terminationCause: 'supervisor_abort' });
+    expect(status.timeout).toMatchObject({ rejectedExtensionCount: 1, terminationCause: 'supervisor_abort' });
     const decision = readJson(findArtifact(join(runDirPath, 'stages', stageId), 'timeout_extension_decision_'));
     expect(decision).toMatchObject({ accepted: false, rejectionReason: 'a current-attempt ABORT already exists' });
   });

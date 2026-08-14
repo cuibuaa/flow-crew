@@ -122,7 +122,6 @@ describe('attempt token evidence', () => {
       dependsOn: [],
       promptTemplate: 'fixture',
       timeout_ms: 10_000,
-      timeout_total_ms: 20_000,
       projectDir,
       runId: created.runId,
       runDir: created.runDirPath,

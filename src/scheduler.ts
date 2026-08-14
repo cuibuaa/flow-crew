@@ -67,12 +67,12 @@ import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
 import { runStage } from './worker.js';
 import {
-  TechnicalChainController,
   createTechnicalRetryBudgetState,
+  nextTechnicalRetryBudget,
   transitionTechnicalRetryBudget,
-  type TechnicalChainClock,
+  type AttemptDeadlineClock,
   type TechnicalRetryBudgetState,
-} from './technical-chain.js';
+} from './attempt-deadline.js';
 import {
   buildScopeNegotiationTrace,
   negotiationRequestDigest,
@@ -913,21 +913,15 @@ function appendScopeRevisionContract(
     + gateIsolation;
 }
 
-function appendTimeoutExtensionContract(
+function appendAttemptDeadlineContract(
   prompt: string,
-  runDirPath: string,
-  stageId: string,
-  initialBudgetMs: number,
-  hardTotalMs: number,
+  attemptBudgetMs: number,
 ): string {
-  return `${prompt}\n\nRuntime timeout contract: this technical chain starts with ${initialBudgetMs}ms and has an immutable `
-    + `total hard cap of ${hardTotalMs}ms across attempts, adapter retries, backoff, and fallback. If verified work requires `
-    + `more than the current soft budget, request it before the deadline by writing exactly one JSON object to `
-    + `${join(runDirPath, 'stages', stageId, 'timeout_extension_request.json')} with `
-    + `{"version":1,"kind":"timeout_extension","requestId":"<unique id>","stageId":"${stageId}",`
-    + `"attemptIndex":<current attempt>,"requestedAt":"<ISO-8601 timestamp sampled immediately before writing>",`
-    + `"requestedExtensionMs":<positive integer>,"reason":"<verified progress or added workload>"}. `
-    + `Worker policy records its decision before moving the soft deadline; no request can raise the hard cap or cancel ABORT.`;
+  return `${prompt}\n\nRuntime timeout contract: this attempt has an immutable ${attemptBudgetMs}ms deadline. `
+    + `The base stage timeout comes only from config/defaults.yaml::default_timeout_ms. Adapter retries, backoff, `
+    + `fallback loading, and fallback execution all consume this same attempt deadline; runtime extension requests `
+    + `are rejected and cannot move it. If this attempt times out and a configured technical retry remains, the next `
+    + `attempt receives a strictly larger derived budget. A current-attempt supervisor ABORT remains authoritative.`;
 }
 
 function appendGateConstraintAuditContext(
@@ -1776,8 +1770,6 @@ const DISPATCH_SCHEMA_REMINDER = [
   '    dependency_reasons: {<stage_id>: <one-sentence reason>}   # required for each dependency',
   '    is_gate: true               # optional — quality gate (writes a verdict file)',
   '    retry_to: [<gate_ids>]      # optional',
-  '    timeout_ms: <positive integer>        # optional initial soft budget',
-  '    timeout_total_ms: <positive integer>  # optional immutable chain cap (>= timeout_ms)',
 ].join('\n');
 
 /**
@@ -1792,7 +1784,7 @@ export function buildRetryPreamble(
   timeoutMs: number,
   runDirPath: string,
   stageId: string,
-  timeoutContext?: { previousBudgetMs: number; nextBudgetMs: number; chargedElapsedMs: number; remainingHardTotalMs: number },
+  timeoutContext?: { previousBudgetMs: number; nextBudgetMs: number },
 ): string {
   const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
   let prevError: string | undefined;
@@ -1829,8 +1821,7 @@ export function buildRetryPreamble(
     cause = `Previous attempt failed with an adapter connection error (transient). Retry the same plan.`;
   } else if (timeoutContext) {
     cause = `Previous attempt timed out with an effective budget of ${timeoutContext.previousBudgetMs}ms. `
-      + `This attempt has ${timeoutContext.nextBudgetMs}ms; the technical chain has charged ${timeoutContext.chargedElapsedMs}ms `
-      + `and had ${timeoutContext.remainingHardTotalMs}ms remaining when this retry was selected.`;
+      + `This new attempt has a strictly larger immutable budget of ${timeoutContext.nextBudgetMs}ms.`;
   } else {
     cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
   }
@@ -2169,6 +2160,11 @@ function loadDefaults(projectDir?: string) {
   return loadProjectDefaults(projectDir);
 }
 
+/** Operator-owned bound for technical timeout retries; plans cannot override it. */
+function configuredTechnicalRetryLimit(projectDir?: string): number {
+  return Math.max(0, Math.floor(Number(loadDefaults(projectDir).stage_technical_retries)));
+}
+
 const AgentConfigSchema = z.object({
   name: z.string(),
   description: z.string().default(''),
@@ -2187,6 +2183,8 @@ function parseAgent(raw: unknown, projectDir?: string): AgentConfig {
   return agent;
 }
 
+const TIMEOUT_OVERRIDE_MIGRATION = 'Stage timeout overrides were removed; edit config/defaults.yaml::default_timeout_ms instead.';
+
 export const StageConfigSchema = z.object({
   id: z.string(),
   role: z.string(),
@@ -2197,41 +2195,42 @@ export const StageConfigSchema = z.object({
   dependency_reasons: z.record(z.string(), z.string()).optional(),
   condition: z.string().optional(),
   prompt_template: z.string().optional().default(''),
-  timeout_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-  /** Immutable total technical-chain cap; defaults to three times timeout_ms/T0. */
-  timeout_total_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  // Compatibility guards only: these fields cannot survive parsing and are
+  // deliberately absent from all runtime timeout resolution.
+  timeout_ms: z.never({ error: TIMEOUT_OVERRIDE_MIGRATION }).optional(),
+  timeout_total_ms: z.never({ error: TIMEOUT_OVERRIDE_MIGRATION }).optional(),
   max_retries: z.number().optional(),
   skills: z.array(z.string()).optional().default([]),
   dynamic_dispatch: z.boolean().optional().default(false),
   is_gate: z.boolean().optional().default(false),
   retry_to: z.array(z.string()).optional(),
-}).superRefine((stage, ctx) => {
-  if (stage.timeout_ms !== undefined && stage.timeout_total_ms !== undefined && stage.timeout_total_ms < stage.timeout_ms) {
-    ctx.addIssue({ code: 'custom', path: ['timeout_total_ms'], message: 'timeout_total_ms must be at least timeout_ms' });
-  }
 });
 
 export const WorkflowConfigSchema = z.object({
   name: z.string(),
   description: z.string().optional().default(''),
   defaults: z.object({
-    timeout_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    timeout_ms: z.never({ error: TIMEOUT_OVERRIDE_MIGRATION }).optional(),
+    timeout_total_ms: z.never({ error: TIMEOUT_OVERRIDE_MIGRATION }).optional(),
     max_retries: z.number().optional(),
     max_iterations: z.number().optional(),
   }).optional().default({}),
   stages: z.array(StageConfigSchema).min(1),
-}).superRefine((workflow, ctx) => {
-  for (let index = 0; index < workflow.stages.length; index++) {
-    const stage = workflow.stages[index];
-    const initial = stage.timeout_ms ?? workflow.defaults.timeout_ms;
-    if (initial !== undefined && stage.timeout_total_ms !== undefined && stage.timeout_total_ms < initial) {
-      ctx.addIssue({ code: 'custom', path: ['stages', index, 'timeout_total_ms'], message: 'timeout_total_ms must be at least the resolved initial timeout' });
-    }
-  }
 });
 
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
+
+/**
+ * Dynamic plans describe the DAG, not scheduler recovery policy. Keep accepting
+ * the historical field so an otherwise usable plan is not discarded, but strip
+ * it before the stage reaches state, workflow persistence, or execution.
+ */
+function parseDispatchedStageConfig(raw: unknown): StageConfig {
+  const stage = StageConfigSchema.parse(raw);
+  delete stage.max_retries;
+  return stage;
+}
 
 /** Normalize the quality topology for both static workflows and dynamic dispatch. */
 export function normalizeRetryGateRelationships(stages: StageConfig[]): StageConfig[] {
@@ -3327,7 +3326,7 @@ export function parseDispatchBlock(
         item.prompt_template = item.task;
         delete item.task;
       }
-      stages.push(StageConfigSchema.parse(item));
+      stages.push(parseDispatchedStageConfig(item));
       seenIds.add(item.id);
     } catch { /* non-critical */
       log.warn({ id: item.id }, 'Invalid stage in DISPATCH block, skipping');
@@ -3450,7 +3449,7 @@ function injectDispatchedStages(
       delete item.task;
     }
     try {
-      dispatched.push(StageConfigSchema.parse(item));
+      dispatched.push(parseDispatchedStageConfig(item));
       seenIds.add(item.id as string);
     } catch (error) {
       const diagnostic = formatDispatchStageSchemaFailure(error);
@@ -3604,9 +3603,6 @@ function injectDispatchedStages(
       dependency_reasons: s.dependency_reasons,
       condition: s.condition,
       prompt_template: s.prompt_template,
-      timeout_ms: s.timeout_ms,
-      timeout_total_ms: s.timeout_total_ms,
-      max_retries: s.max_retries,
       skills: s.skills.length ? s.skills : undefined,
       dynamic_dispatch: s.dynamic_dispatch || undefined,
       is_gate: s.is_gate || undefined,
@@ -4636,7 +4632,7 @@ export async function runWorkflow(
   campaignId?: string,
   inheritCampaignContext: boolean = true,
   briefAdmission?: BriefAdmissionRecord,
-  technicalChainClockFactory?: () => TechnicalChainClock,
+  attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
   if (briefAdmission) {
     if (taskDescription === undefined) {
@@ -4652,7 +4648,7 @@ export async function runWorkflow(
   }
   normalizeRetryGateRelationships(workflow.stages);
   // The run-local workflow is the normalized executable contract, including
-  // inferred gate/dependency facts and timeout caps, not the stale input text.
+  // inferred gate/dependency facts, not the stale input text.
   workflowYaml = stringifyYaml(workflow);
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
@@ -4696,7 +4692,7 @@ export async function runWorkflow(
       const state = readRunState(projectDir, runId);
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
-      state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+      state.timeoutMs = loadDefaults(projectDir).timeout_ms;
       if (taskDescription) state.taskDescription = taskDescription;
       if (briefAdmission) state.briefAdmission = briefAdmission;
       if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
@@ -4734,7 +4730,7 @@ export async function runWorkflow(
       state.status = 'running';
       state.workflowName = workflow.name;
       state.maxIterations = maxIterations;
-      state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+      state.timeoutMs = loadDefaults(projectDir).timeout_ms;
       state.currentIteration = 1;
       // Relaunch hygiene: this run previously reached a terminal state. Refresh the
       // lifecycle markers and purge prior-run signals so we don't (a) compute a
@@ -4775,7 +4771,7 @@ export async function runWorkflow(
     }
     state.maxIterations = maxIterations;
     state.currentIteration = 1;
-    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+    state.timeoutMs = loadDefaults(projectDir).timeout_ms;
     writeRunState(projectDir, runId, state);
   }
 
@@ -4835,7 +4831,7 @@ export async function runWorkflow(
     state.status = 'running';
     state.workflowName = workflow.name;
     state.maxIterations = maxIterations;
-    state.timeoutMs = workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+    state.timeoutMs = loadDefaults(projectDir).timeout_ms;
     state.currentIteration = resumeAtIteration;
     delete state.parked;
     writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
@@ -5373,7 +5369,7 @@ export async function runWorkflow(
     const iterationResult = await executeIteration(
       sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
       resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
-      availableSkillsList, technicalChainClockFactory,
+      availableSkillsList, attemptDeadlineClockFactory,
     );
 
     state = readRunState(projectDir, runId);
@@ -5577,7 +5573,7 @@ export async function runWorkflow(
               projectDir,
               runId,
               state.currentIteration ?? 1,
-              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, technicalChainClockFactory),
+              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory),
               repairSnapshot,
             );
             innerRetriesUsed = inner + 1;
@@ -5639,7 +5635,7 @@ export async function runWorkflow(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList, technicalChainClockFactory),
+                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory),
               );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
@@ -5682,7 +5678,7 @@ export async function runWorkflow(
       await executeIteration(
         sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
         resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
-        skills, taskDescription, availableSkillsList, technicalChainClockFactory,
+        skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
       );
       state = readRunState(projectDir, runId);
       const afterContinuation = JSON.stringify(Object.fromEntries(
@@ -5750,7 +5746,7 @@ export async function runWorkflow(
       await executeIteration(
         sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
         resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
-        availableSkillsList, technicalChainClockFactory,
+        availableSkillsList, attemptDeadlineClockFactory,
       );
       state = readRunState(projectDir, runId);
       if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
@@ -6935,95 +6931,50 @@ function buildGateFixCorrectionContract(
   ].join('\n');
 }
 
-function stageInitialTimeout(
-  stage: StageConfig,
-  state: StoreState,
-  workflow: WorkflowConfig,
-  projectDir: string,
-): number {
-  return stage.timeout_ms ?? state.timeoutMs ?? workflow.defaults.timeout_ms ?? loadDefaults(projectDir).timeout_ms;
+function stageInitialTimeout(projectDir: string): number {
+  return loadDefaults(projectDir).timeout_ms;
 }
 
-function stageHardTotal(stage: StageConfig, initialBudgetMs: number): number {
-  const total = stage.timeout_total_ms ?? initialBudgetMs * 3;
-  if (!Number.isSafeInteger(total) || total < initialBudgetMs) {
-    throw new Error(`Stage ${stage.id} timeout_total_ms must be a safe integer at least as large as its resolved timeout (${initialBudgetMs}ms)`);
-  }
-  return total;
+function budgetAfterTimeouts(initialBudgetMs: number, timeoutCount: number): number {
+  let budget = initialBudgetMs;
+  for (let index = 0; index < timeoutCount; index++) budget = nextTechnicalRetryBudget(budget);
+  return budget;
 }
 
-function createSchedulerTechnicalChain(
-  stage: StageConfig,
+function createSchedulerTechnicalRetryState(
   initialBudgetMs: number,
-  runDirPath: string,
-  clockFactory?: () => TechnicalChainClock,
   priorStatus?: StageStatus,
   recover = false,
 ): TechnicalRetryBudgetState {
-  // executeIteration claims a ready stage by changing pending -> running before
-  // this factory is called. The immutable prior attempt ledger + retry counter,
-  // not that transient top-level claim state, identify a recovered chain.
   const retryRecovery = recover && (
     isPendingStageStatus(priorStatus?.status ?? '')
     || isRunningStageStatus(priorStatus?.status ?? '')
   );
-  const hasRetryHistory = retryRecovery && (priorStatus?.retries ?? 0) > 0;
-  const candidateTimeout = hasRetryHistory ? priorStatus?.attempts?.at(-1)?.timeout : undefined;
-  // A completed attempt re-pended by plan validation or supervisor REJECT is a
-  // new semantic execution. Missing/non-complete evidence denotes a technical
-  // retry, whose old balance must be recovered or failed closed.
-  const recoveryExpected = hasRetryHistory && candidateTimeout?.terminationCause !== STAGE_STATUS.COMPLETE;
-  const priorTimeout = recoveryExpected ? candidateTimeout : undefined;
-  const canRecover = priorTimeout !== undefined
-    && Number.isSafeInteger(priorTimeout.hardTotalMs)
-    && priorTimeout.hardTotalMs >= initialBudgetMs
-    && Number.isSafeInteger(priorTimeout.effectiveBudgetMs)
-    && priorTimeout.effectiveBudgetMs > 0
-    && Number.isFinite(priorTimeout.chargedElapsedMs)
-    && priorTimeout.chargedElapsedMs >= 0
-    && priorTimeout.hardRemainingMs > 0
-    && typeof priorTimeout.childClosedAt === 'string';
-  const configuredHardTotal = stageHardTotal(stage, initialBudgetMs);
-  const controller = new TechnicalChainController({
-    initialBudgetMs,
-    hardTotalMs: canRecover ? priorTimeout.hardTotalMs : configuredHardTotal,
-    ledgerDir: join(runDirPath, 'stages', stage.id),
-    ...(clockFactory ? { clock: clockFactory() } : {}),
-    ...(canRecover ? {
-      chainId: priorTimeout.chainId,
-      recovery: {
-        hardDeadlineAt: priorTimeout.hardDeadlineAt,
-        lastObservedAt: priorTimeout.childClosedAt!,
-        persistedChargedMs: priorTimeout.chargedElapsedMs,
-        chainStartedAt: priorTimeout.chainStartedAt,
-      },
-    } : recoveryExpected ? {
-      // A technical retry with no trustworthy persisted balance must fail
-      // closed. Supplying deliberately invalid recovery evidence makes the
-      // controller attribute the stop as hard_cap_clock_uncertain instead of
-      // silently replenishing the chain.
-      recovery: {
-        hardDeadlineAt: 'unavailable',
-        lastObservedAt: new Date().toISOString(),
-        persistedChargedMs: configuredHardTotal,
-      },
-    } : {}),
-  });
+  const retries = retryRecovery ? Math.max(0, priorStatus?.retries ?? 0) : 0;
+  const priorTimeout = retries > 0 ? priorStatus?.attempts?.at(-1)?.timeout : undefined;
+  const persistedBudget = priorTimeout?.budgetMs;
+  const previousBudgetMs = Number.isSafeInteger(persistedBudget) && Number(persistedBudget) > 0
+    ? Number(persistedBudget)
+    : budgetAfterTimeouts(initialBudgetMs, Math.max(0, retries - 1));
+  const priorTimedOut = retries > 0 && (
+    priorTimeout?.terminationCause === 'attempt_timeout'
+    || priorStatus?.error?.startsWith('timed out after') === true
+  );
   return createTechnicalRetryBudgetState({
-    controller,
-    currentBudgetMs: canRecover ? priorTimeout.effectiveBudgetMs : initialBudgetMs,
-    previousEffectiveBudgetMs: canRecover ? priorTimeout.effectiveBudgetMs : undefined,
-    increaseAfterTimeout: canRecover && priorTimeout.terminationCause === 'soft_timeout',
-    attemptsStarted: recoveryExpected ? 1 : 0,
+    initialBudgetMs,
+    currentBudgetMs: retries > 0 ? previousBudgetMs : initialBudgetMs,
+    previousEffectiveBudgetMs: retries > 0 ? previousBudgetMs : undefined,
+    increaseAfterTimeout: priorTimedOut,
+    attemptsStarted: retries,
   });
 }
 
 function prepareSchedulerTechnicalAttempt(chain: TechnicalRetryBudgetState): {
   budgetMs: number;
-  retryContext?: { previousBudgetMs: number; nextBudgetMs: number; chargedElapsedMs: number; remainingHardTotalMs: number };
-} | undefined {
+  retryContext?: { previousBudgetMs: number; nextBudgetMs: number };
+} {
   const transition = transitionTechnicalRetryBudget(chain, { type: 'prepare_attempt' });
-  if (transition.type !== 'attempt_prepared') return undefined;
+  if (transition.type !== 'attempt_prepared') throw new Error('technical retry state did not prepare an attempt');
   return { budgetMs: transition.budgetMs, retryContext: transition.retryContext };
 }
 
@@ -7034,59 +6985,11 @@ export function recordSchedulerTechnicalAttemptResult(
 ): boolean {
   const effectiveBudgetMs = result.effectiveTimeoutMs ?? preparedBudgetMs;
   const retryableTimeout = result.timedOut === true
-    && result.timeoutTerminationCause === 'soft_timeout';
+    && result.timeoutTerminationCause === 'attempt_timeout';
   transitionTechnicalRetryBudget(chain, retryableTimeout
     ? { type: 'attempt_timed_out', effectiveBudgetMs }
     : { type: 'attempt_finished', effectiveBudgetMs });
   return retryableTimeout;
-}
-
-function recordHardCapExhausted(
-  stage: StageConfig,
-  projectDir: string,
-  runId: string,
-  retries: number,
-  chain: TechnicalRetryBudgetState,
-): RunResult {
-  const snapshot = chain.controller.snapshot();
-  const observedCause = chain.controller.terminationCause();
-  const terminationCause = observedCause === 'hard_cap_clock_uncertain' ? observedCause : 'hard_cap_exhausted';
-  completeStageAttempt(projectDir, runId, stage.id, retries, {
-    exitCode: 1,
-    duration_ms: 0,
-    error: terminationCause === 'hard_cap_clock_uncertain'
-      ? 'hard_cap_clock_uncertain: persisted technical-chain remaining time cannot be proven safely'
-      : 'hard_cap_exhausted: no strictly larger timeout retry budget fits the technical-chain total cap',
-    writeAttribution: 'unknown',
-    timeout: {
-      chainId: chain.controller.chainId,
-      initialBudgetMs: chain.controller.initialBudgetMs,
-      effectiveBudgetMs: chain.previousEffectiveBudgetMs ?? chain.currentBudgetMs,
-      hardTotalMs: chain.controller.hardTotalMs,
-      chainStartedAt: chain.controller.chainStartedAt,
-      hardDeadlineAt: chain.controller.hardDeadlineAt,
-      chargedElapsedMs: snapshot.chargedElapsedMs,
-      hardRemainingMs: snapshot.hardRemainingMs,
-      extensionCount: 0,
-      cumulativeGrantedMs: 0,
-      decisionPaths: [],
-      mismatchPaths: [],
-      terminationCause,
-      hardDeadlineReachedAt: snapshot.hardDeadlineReachedAt,
-      childClosedAt: new Date().toISOString(),
-      deadlineOverrunMs: chain.controller.deadlineOverrunMs(),
-    },
-  });
-  chain.controller.append('chain_terminated', { stageId: stage.id, reason: terminationCause });
-  return {
-    output: '',
-    exitCode: 1,
-    duration_ms: 0,
-    timedOut: false,
-    hardCapExhausted: true,
-    effectiveTimeoutMs: chain.previousEffectiveBudgetMs ?? chain.currentBudgetMs,
-    timeoutTerminationCause: terminationCause,
-  };
 }
 
 async function executeSingleStage(
@@ -7106,7 +7009,7 @@ async function executeSingleStage(
   fixStageIds?: string[],
   roundDiffPath?: string,
   availableSkills?: string,
-  technicalChainClockFactory?: () => TechnicalChainClock,
+  attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<void> {
   if (!agents.has(stage.role)) {
     const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -7115,8 +7018,7 @@ async function executeSingleStage(
     agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
   }
   const agent = agents.get(stage.role)!;
-  const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
-  const hardTotal = stageHardTotal(stage, initialTimeout);
+  const initialTimeout = stageInitialTimeout(projectDir);
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
   const currentGateAttempt = stage.is_gate
     ? gateAttemptCoordinate(state.currentIteration ?? 1, innerRetry)
@@ -7168,7 +7070,6 @@ async function executeSingleStage(
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
   }
 
-  resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
   resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
 
   if (stage.is_gate) {
@@ -7180,19 +7081,13 @@ async function executeSingleStage(
     availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
   }
 
-  const maxTechnicalRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
+  const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
   let retries = 0;
   const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
   const resumeSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined)
     ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
-  const technicalChain = createSchedulerTechnicalChain(
-    stage,
-    initialTimeout,
-    runDirPath,
-    technicalChainClockFactory,
-  );
+  const technicalRetry = createSchedulerTechnicalRetryState(initialTimeout);
 
-  try {
   while (true) {
     // A prior technical attempt is completed by runStage() directly in the
     // per-stage status file. Re-read that authoritative ledger before marking
@@ -7209,11 +7104,7 @@ async function executeSingleStage(
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
-    const prepared = prepareSchedulerTechnicalAttempt(technicalChain);
-    if (!prepared) {
-      recordHardCapExhausted(stage, projectDir, runId, retries, technicalChain);
-      break;
-    }
+    const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
     const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
     if (currentGateAttempt) {
       initializeGateMetricAttempt(
@@ -7228,12 +7119,11 @@ async function executeSingleStage(
       stageId: stage.id,
       role: agent,
       dependsOn: stage.depends_on ?? [],
-      promptTemplate: retries > 0
+      promptTemplate: appendAttemptDeadlineContract(retries > 0
         ? `${buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`
-        : resolvedPrompt,
+        : resolvedPrompt, prepared.budgetMs),
       timeout_ms: prepared.budgetMs,
-      timeout_total_ms: hardTotal,
-      technicalChain: technicalChain.controller,
+      ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
       projectDir,
       runId,
       runDir: runDirPath,
@@ -7250,7 +7140,7 @@ async function executeSingleStage(
     });
 
     const retryableTimeout = recordSchedulerTechnicalAttemptResult(
-      technicalChain,
+      technicalRetry,
       result,
       prepared.budgetMs,
     );
@@ -7261,13 +7151,10 @@ async function executeSingleStage(
         log.warn({ stage: stage.id, retry: retries }, 'Retrying timed-out stage (inner loop)');
         continue;
       }
-      transitionTechnicalRetryBudget(technicalChain, { type: 'retry_exhausted' });
+      transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
     }
 
     break;
-  }
-  } finally {
-    technicalChain.controller.dispose();
   }
 
   // Stage status is already written to individual status.json by runStage/worker.
@@ -7319,9 +7206,9 @@ async function executeIteration(
   skills?: string,
   taskDescription?: string,
   availableSkills?: string,
-  technicalChainClockFactory?: () => TechnicalChainClock,
+  attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
-  const technicalChains = new Map<string, TechnicalRetryBudgetState>();
+  const technicalRetries = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
     let state = readRunState(projectDir, runId);
 
@@ -7627,12 +7514,11 @@ async function executeIteration(
         agents.set(stage.role, applyBasePrompt(parseAgent(raw, projectDir), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
-      const initialTimeout = stageInitialTimeout(stage, state, workflow, projectDir);
-      const hardTotal = stageHardTotal(stage, initialTimeout);
+      const initialTimeout = stageInitialTimeout(projectDir);
       const currentGateAttempt = stage.is_gate
         ? gateAttemptCoordinate(state.currentIteration ?? 1)
         : undefined;
-      let technicalChain = technicalChains.get(stage.id);
+      let technicalRetry = technicalRetries.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');
 
@@ -7727,7 +7613,6 @@ async function executeIteration(
         resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
         resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
       }
-      resolvedPrompt = appendTimeoutExtensionContract(resolvedPrompt, runDirPath, stage.id, initialTimeout, hardTotal);
       resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, sorted, readRunState(projectDir, runId), runDirPath);
 
       if (stage.is_gate) {
@@ -7737,25 +7622,19 @@ async function executeIteration(
       const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
       const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled);
-      if (!technicalChain) {
-        technicalChain = createSchedulerTechnicalChain(
-          stage,
+      if (!technicalRetry) {
+        technicalRetry = createSchedulerTechnicalRetryState(
           initialTimeout,
-          runDirPath,
-          technicalChainClockFactory,
           state.stages[stage.id],
           true,
         );
-        technicalChains.set(stage.id, technicalChain);
+        technicalRetries.set(stage.id, technicalRetry);
       }
-      const prepared = prepareSchedulerTechnicalAttempt(technicalChain);
-      if (!prepared) {
-        const result = recordHardCapExhausted(stage, projectDir, runId, currentRetries, technicalChain);
-        return { stage, result, currentRetries };
-      }
+      const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
       if (currentRetries > 0) {
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
       }
+      resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
       if (currentGateAttempt) {
         initializeGateMetricAttempt(
           runDirPath,
@@ -7771,8 +7650,7 @@ async function executeIteration(
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
         timeout_ms: prepared.budgetMs,
-        timeout_total_ms: hardTotal,
-        technicalChain: technicalChain.controller,
+        ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
         projectDir,
         runId,
         runDir: runDirPath,
@@ -7791,7 +7669,7 @@ async function executeIteration(
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
       });
-      recordSchedulerTechnicalAttemptResult(technicalChain, result, prepared.budgetMs);
+      recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);
       return { stage, result, currentRetries };
      } catch (err) {
        // A stage that THROWS (e.g. missing/invalid agent yaml at runtime) must not
@@ -7830,9 +7708,13 @@ async function executeIteration(
     let failed = false;
 
     for (const { stage, result, currentRetries } of results) {
-      const maxRetries = Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? loadDefaults(projectDir).stage_technical_retries)));
+      const maxFailureRetries = Math.max(0, Math.floor(Number(
+        stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit(projectDir),
+      )));
+      const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
+      const isAttemptTimeout = result.timedOut && result.timeoutTerminationCause === 'attempt_timeout';
 
-      if (!result.hardCapExhausted && result.timedOut && result.timeoutTerminationCause === 'soft_timeout' && currentRetries < maxRetries) {
+      if (isAttemptTimeout && currentRetries < maxTechnicalRetries) {
         const nextRetry = currentRetries + 1;
         const retryStatus = rependStageStatus(readStageStatus(projectDir, runId, stage.id), nextRetry);
         writeStageStatus(projectDir, runId, stage.id, retryStatus);
@@ -7841,12 +7723,12 @@ async function executeIteration(
         continue;
       }
 
-      if (result.timedOut && result.timeoutTerminationCause === 'soft_timeout') {
-        const technicalChain = technicalChains.get(stage.id);
-        if (technicalChain) transitionTechnicalRetryBudget(technicalChain, { type: 'retry_exhausted' });
+      if (isAttemptTimeout) {
+        const technicalRetry = technicalRetries.get(stage.id);
+        if (technicalRetry) transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
       }
 
-      if (!result.hardCapExhausted && result.exitCode !== 0 && currentRetries < maxRetries) {
+      if (!isAttemptTimeout && result.exitCode !== 0 && currentRetries < maxFailureRetries) {
         // Preserve the failed attempt's `error`: buildRetryPreamble reads it to
         // tell the next attempt WHY the previous one died. Writing the pending
         // status without it left that branch dead, so EVERY non-timeout failure
@@ -7861,8 +7743,7 @@ async function executeIteration(
       }
 
       if (result.exitCode !== 0) {
-        technicalChains.get(stage.id)?.controller.dispose();
-        technicalChains.delete(stage.id);
+        technicalRetries.delete(stage.id);
         log.error({ stage: stage.id }, 'Stage failed');
         failed = true;
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
@@ -7871,8 +7752,7 @@ async function executeIteration(
       }
 
       state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
-      technicalChains.get(stage.id)?.controller.dispose();
-      technicalChains.delete(stage.id);
+      technicalRetries.delete(stage.id);
       stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');
     }

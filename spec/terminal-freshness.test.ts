@@ -57,7 +57,6 @@ async function run(
 ) {
   const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'default.yaml'));
   config.defaults.max_iterations = 3;
-  config.defaults.timeout_ms = 30_000;
   const adapter = new ScriptedAdapter(script);
   const state = await scheduler.runWorkflow(
     config, raw, projectDir, adapter, new Map(), undefined,

@@ -38,7 +38,7 @@ describe('settled terminal decisions', () => {
   async function run(script: StageScript, brief: string) {
     const workflow = WorkflowConfigSchema.parse({
       name: 'loop-close-fixture',
-      defaults: { timeout_ms: 5_000, max_retries: 0, max_iterations: 1 },
+      defaults: { max_retries: 0, max_iterations: 1 },
       stages: [{
         id: 'deliver',
         role: 'coder',
