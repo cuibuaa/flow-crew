@@ -205,6 +205,13 @@ keeping it true is prompted by nothing, which is why an entry naming a cancelled
 it described. Close it when the wrap-up above is finished, not when the run reaches a terminal
 status — the run ending is what starts the work of accepting it.
 
+A launch you deliberately hold back has no launch to prompt the entry. When rehearsal has produced a
+digest you intend to use later — because a prerequisite round must land first, or because data must
+still accrue — record the entry at that point, carrying the digest, the precondition, and the
+baseline you measured, and mark it blocked by the task it waits on so the dependency is visible to
+the watcher rather than only to you. Work waiting on elapsed time needs this most, because no event
+will arrive to prompt it.
+
 Report the actual mode and settings. For background work, give `flowcrew task list`,
 `flowcrew task show <id>`, `flowcrew task cancel <id>`, and `flowcrew watch`; do not claim daemon
 ownership for a foreground run. `quick` starts work—it does not prove the deliverable.
