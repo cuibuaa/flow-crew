@@ -159,6 +159,24 @@ describe('ship-preflight previous-run fact', () => {
     expect(clean.report.previousRun.realityGate).toBeUndefined();
   });
 
+  it('preserves and labels an unrecognized previous-run status', async () => {
+    writeRun('future-status', {
+      projectDir: fixture.project,
+      status: 'future_archived_state',
+      failureReason: 'future writer retained this evidence',
+    }, 5_000);
+    const output = new Capture();
+
+    const code = await cmdShipPreflightWithDeps(
+      ['ship-preflight'],
+      commonDeps({ stdout: output.writer }),
+    );
+
+    expect(code).toBe(0);
+    expect(output.value).toContain('Previous run: future-status — future_archived_state [UNRECOGNIZED:');
+    expect(output.value).toContain('Unrecognized archived run status "future_archived_state"');
+  });
+
   it('summarises thousands of unreadable entries without retaining or printing their names', async () => {
     const stateRuns = join(fixture.stateRoot, 'runs');
     const ids = Array.from({ length: 7_603 }, (_, index) => `entry-${index}`);

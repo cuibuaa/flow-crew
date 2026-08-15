@@ -2,7 +2,26 @@
 
 Every run stores one status in its `run.json`. The vocabulary is defined by
 `RUN_STATUS` in `src/store.ts`; terminal and successful subsets are derived from
-that same definition.
+that same definition. `RUN_STATUS_SEMANTICS` gives every member one required
+lifecycle bucket, process-success decision, and mutation-blocking decision.
+Guards such as `isTerminalRunStatus` and `isSuccessfulRunStatus` delegate to
+that table rather than reconstructing subsets. CLI/dashboard wording, campaign
+scoring, archive preflight, rehearsal verdicts, summaries, and supervisor
+progress have their own exhaustive typed maps because those are distinct
+consequences, not alternate spellings of the same question. Adding a vocabulary
+member therefore fails TypeScript compilation until every required consequence
+has a non-empty value.
+
+The compiler guarantee begins only after archive text is resolved. `run.json`
+may have been written by a newer or older FlowCrew version, so
+`resolveRunStatus` returns either a known status with its semantics or an
+unknown result carrying the original parsed value and an explicit reason. A
+well-formed archive with an unrecognized status remains readable and displays
+that raw value as unrecognized; it is never converted to `pending`, `running`,
+or a terminal status. Scheduler resume, run-state writes, campaign scoring, and
+`flowcrew land --remove` refuse consequential action until the tool understands
+the value or an operator explicitly migrates the archive. Malformed JSON remains
+a separate archive-read error.
 
 ## Status reference
 
@@ -101,6 +120,14 @@ puts the exact deferred/no-match reasons in `failureReason`, and emits a
 `running`, and a declared terminal contract cannot silently degrade to plain
 `complete`.
 
+In particular, a gate re-evaluation inside a `retry_to` repair loop can be the
+last writer: its passing verdict and terminal artifact do not pass through the
+ordinary post-batch observer. The converged `gate_pass` path therefore invokes
+the same declared-terminal evaluator before any plain completion. It commits
+the artifact's declared status only after the existing freshness, floor,
+settled-stage, confirmation, and Reality-Gate checks succeed; otherwise it
+commits `incomplete` with those checks' refusal reasons.
+
 Lifecycle `status` and the terminal artifact remain independent evidence; the
 diagnostic never rewrites `status`. `flowcrew status`, `flowcrew list`, daemon
 task list/show, and `flowcrew watch` report a status mismatch in both
@@ -114,6 +141,12 @@ directions:
 
 Active stages, stale files, unsafe paths, and multiple fresh candidates remain
 silent because none proves a unique terminal outcome.
+
+Compile-time totality does not prove that a human chose the correct semantics
+for a newly added row, that external writers emit valid JSON, or that every
+ad-hoc JSON parser outside the typed boundary remembers to resolve before it
+acts. Review, behavior specs, and the fail-closed write/action guards remain the
+convention-level protection for those facts.
 
 ## When the supervisor is hard-killed
 

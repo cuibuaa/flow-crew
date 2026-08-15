@@ -6,8 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { routeLogsToFile } from '../src/logging.js';
+import { readRunEvents } from '../src/run-events.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
-import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, runDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
 
 const metricReadControl = vi.hoisted(() => ({
   path: '',
@@ -108,7 +109,7 @@ function dispatchYaml(includeUnrelatedRejectedGate = false): string {
     'stages:',
     `  - id: ${GATE_ID}`,
     '    role: qa',
-    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, checks/e18-gate-retry-entry.test.ts]',
+    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, checks/e18-gate-retry-entry.test.ts, docs/final_verification.md]',
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "audit the planned E18 change"}',
     '    is_gate: true',
@@ -137,6 +138,7 @@ interface ScenarioOptions {
   staleMetricReads?: number;
   logPath?: string;
   includeUnrelatedRejectedGate?: boolean;
+  terminalArtifactOnPass?: boolean;
 }
 
 async function runScenario(options: ScenarioOptions): Promise<{
@@ -181,6 +183,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
             passing: JSON.stringify(metricArtifact(true)),
           });
         }
+        if (pass && options.terminalArtifactOnPass) {
+          mkdirSync(join(projectDir, 'docs'), { recursive: true });
+          writeFileSync(
+            join(projectDir, 'docs', 'final_verification.md'),
+            '# Synthetic final verification\n\nThe declared outcome is complete.\n',
+          );
+        }
         return { output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       if (opts.stageId === UNRELATED_GATE_ID) {
@@ -217,7 +226,9 @@ async function runScenario(options: ScenarioOptions): Promise<{
     undefined,
     writeRoles(),
     undefined,
-    'E18 scheduler-level integration fixture',
+    options.terminalArtifactOnPass
+      ? `---\nterminal_states:\n  complete:\n    paths: [docs/final_verification.md]\n---\n# E18 scheduler-level terminal fixture\n`
+      : 'E18 scheduler-level integration fixture',
     true,
   );
   if (restoreLogs) {
@@ -289,6 +300,28 @@ describe('gate retry loop entry', () => {
       'iteration_1',
       'round_2',
     ))).toBe(false);
+  });
+
+  it('re-evaluates a declared terminal artifact written by the repaired gate', async () => {
+    const result = await runScenario({
+      gatePasses: [false, true],
+      terminalArtifactOnPass: true,
+    });
+    const events = readRunEvents(projectDir, result.final.runId);
+
+    expect(result.gateCalls).toBe(2);
+    expect(result.repairCalls).toBe(1);
+    expect(result.final.status).toBe(RUN_STATUS.COMPLETE);
+    expect(result.final.terminalArtifact).toBe('final_verification.md');
+    expect(Object.values(result.final.stages).map((stage) => stage.status)).toEqual([
+      'complete',
+      'complete',
+      'complete',
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'run_completed',
+      detail: expect.stringContaining(`Terminal state '${RUN_STATUS.COMPLETE}' reached via docs/final_verification.md`),
+    }));
   });
 
   it('uses a fresh round-zero entrance read instead of reaching the dispatch guard', async () => {

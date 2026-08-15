@@ -12,6 +12,7 @@ import {
   extractTaskTitle,
   isAwaitingApprovalRunStatus,
   isPausedRunStatus,
+  isPendingRunStatus,
   isPendingStageStatus,
   isRunMutationBlockedStatus,
   isRunningRunStatus,
@@ -22,13 +23,14 @@ import {
   readStageInput,
   readStageStatus,
   rependStageStatus,
+  resolveRunStatus,
   runDir,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
   writeRunState,
 } from "./store.js";
-import type { StageAttempt, StoreState, SupervisorAttempt } from "./store.js";
+import type { RunStatus, StageAttempt, StoreState, SupervisorAttempt } from "./store.js";
 import { countStandaloneRunsFromIndex, deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex, listRunningRunIdsFromIndex, getMaxUpdatedAt } from './run-index.js';
 import {
   listCampaigns,
@@ -175,12 +177,35 @@ const CAMPAIGN_PRESENTATION_STATUS = {
   STALE: 'stale',
   IDLE: 'idle',
 } as const;
-const RUN_OUTCOME_PASSTHROUGH = new Set<string>([
-  RUN_STATUS.RUNNING,
-  RUN_STATUS.AWAITING_APPROVAL,
-  RUN_STATUS.PARKED,
-  RUN_STATUS.PENDING,
-]);
+
+interface DashboardRunPresentation {
+  campaignOutcome: string;
+  taskStatus: string;
+}
+
+/** Dashboard projections are distinct public consequences and are exhaustive. */
+const DASHBOARD_RUN_PRESENTATION = {
+  [RUN_STATUS.PENDING]: { campaignOutcome: 'pending', taskStatus: 'pending' },
+  [RUN_STATUS.RUNNING]: { campaignOutcome: 'running', taskStatus: 'running' },
+  [RUN_STATUS.PARKED]: { campaignOutcome: 'parked', taskStatus: 'parked' },
+  [RUN_STATUS.COMPLETE]: { campaignOutcome: 'shipped', taskStatus: 'completed' },
+  [RUN_STATUS.FAILED]: { campaignOutcome: 'failed', taskStatus: 'failed' },
+  [RUN_STATUS.AWAITING_APPROVAL]: { campaignOutcome: 'awaiting_approval', taskStatus: 'awaiting_approval' },
+  [RUN_STATUS.SHIPPED]: { campaignOutcome: 'shipped', taskStatus: 'shipped' },
+  [RUN_STATUS.CEILING_HIT]: { campaignOutcome: 'ceiling_hit', taskStatus: 'ceiling_hit' },
+  [RUN_STATUS.ESCALATED]: { campaignOutcome: 'escalated', taskStatus: 'escalated' },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { campaignOutcome: 'reality_gate_failed', taskStatus: 'reality_gate_failed' },
+  [RUN_STATUS.PHASE_COMPLETE]: { campaignOutcome: 'phase_complete', taskStatus: 'phase_complete' },
+  [RUN_STATUS.STOPPED]: { campaignOutcome: 'stopped', taskStatus: 'stopped' },
+  [RUN_STATUS.INCOMPLETE]: { campaignOutcome: 'incomplete', taskStatus: 'incomplete' },
+} as const satisfies Record<RunStatus, DashboardRunPresentation>;
+
+function dashboardRunPresentation(status: unknown): DashboardRunPresentation {
+  const resolution = resolveRunStatus(status);
+  if (resolution.kind === 'known') return DASHBOARD_RUN_PRESENTATION[resolution.status];
+  const unrecognized = `unrecognized ${resolution.display}`;
+  return { campaignOutcome: unrecognized, taskStatus: unrecognized };
+}
 const INBOX_FILTER_STATES = new Set<string>(Object.values(INBOX_FILTER_STATE));
 const COMPLETE_METRIC_NAME_FRAGMENT = 'complete';
 
@@ -806,6 +831,7 @@ export function readExecutionDefaults(configDir?: string): { timeoutMs: number; 
 
 function stateToTask(state: StoreState, projectDir: string, configDir?: string, opts?: { includeIterationLog?: boolean }): TaskShape {
   const defaults = readExecutionDefaults(configDir);
+  const runPresentation = dashboardRunPresentation(state.status);
   // Fast path: use stored campaign fields directly to avoid O(n) listCampaigns scan per task
   const campaign = state.campaignStorageKey
     ? { id: state.campaignId ?? state.campaignStorageKey, name: extractTaskTitle(state.campaignName) || state.campaignId || state.campaignStorageKey, storageKey: state.campaignStorageKey }
@@ -874,7 +900,7 @@ function stateToTask(state: StoreState, projectDir: string, configDir?: string, 
     name: extractTaskTitle(state.taskDescription) || state.workflowName,
     type: '',
     workflow: state.workflowName,
-    status: state.status === RUN_STATUS.COMPLETE ? 'completed' : state.status,
+    status: runPresentation.taskStatus,
     stages,
     startedAt: state.startedAt,
     elapsed_ms,
@@ -1118,9 +1144,7 @@ function runMatchesCampaign(state: StoreState, id: string): boolean {
 }
 
 function summarizeRunOutcome(status?: string): string {
-  if (status === RUN_STATUS.COMPLETE || status === RUN_STATUS.SHIPPED) return CAMPAIGN_PRESENTATION_STATUS.SHIPPED;
-  if (status && RUN_OUTCOME_PASSTHROUGH.has(status)) return status;
-  return status || 'unknown';
+  return status === undefined ? 'unknown' : dashboardRunPresentation(status).campaignOutcome;
 }
 
 /** True when the run has a generated summary.md the dashboard can display. */
@@ -3190,7 +3214,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (activeExecutions.has(id)) {
       return reply.code(409).send({ error: 'Cancel the task before rerunning' });
     }
-    if (state.status === RUN_STATUS.PENDING) {
+    if (isPendingRunStatus(state.status)) {
       return reply.code(400).send({ error: 'Task has not been executed yet — use execute instead' });
     }
     const targetProjectDir = state.projectDir ?? projectDir;

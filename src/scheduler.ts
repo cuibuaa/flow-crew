@@ -17,6 +17,7 @@ import {
   initializeReservedRun,
   readRunReservation,
   readRunState,
+  requireKnownRunStatus,
   reserveRun,
   writeRunState,
   writeStageStatus,
@@ -4670,6 +4671,10 @@ export async function runWorkflow(
     if (!hasRunState && !reservation) {
       throw new Error(`Existing run is unreadable and has no valid reservation: ${runId}`);
     }
+    if (hasRunState) {
+      const archived = readRunState(projectDir, runId);
+      requireKnownRunStatus(archived.status, `resume run ${runId}`);
+    }
     const launchClaim = claimLaunchIntent(projectDir, runId);
     if (!launchClaim.claimed) {
       if (hasRunState) return readRunState(projectDir, runId);
@@ -5085,6 +5090,7 @@ export async function runWorkflow(
   for (let iteration = resumeAtIteration; iteration <= maxIterations; iteration++) {
     const isResumedIteration = resumingFromPark && iteration === resumeAtIteration;
     let state = readRunState(projectDir, runId);
+    requireKnownRunStatus(state.status, `execute scheduler iteration for run ${runId}`);
 
     // Exit if run was cancelled externally or already terminated
     if (isTerminalRunStatus(state.status)) {

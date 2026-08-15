@@ -11,9 +11,11 @@ import {
   isRunningRunStatus,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
+  resolveRunStatus,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
+  type RunStatus,
 } from './store.js';
 import { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
 import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
@@ -46,6 +48,28 @@ import {
 const args = process.argv.slice(2);
 const command = args[0];
 const CAMPAIGN_PENDING_SUBCOMMAND = 'pending';
+
+interface CliRunStatusPresentation {
+  listLabel: string;
+  notificationTitle: string;
+}
+
+/** Every known lifecycle value has an explicit operator-facing CLI consequence. */
+const CLI_RUN_STATUS_PRESENTATION = {
+  [RUN_STATUS.PENDING]: { listLabel: '· pending ', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.RUNNING]: { listLabel: '⟳ running ', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.PARKED]: { listLabel: '· parked  ', notificationTitle: 'FlowCrew: Awaiting Your Approval' },
+  [RUN_STATUS.COMPLETE]: { listLabel: '✓ complete', notificationTitle: 'FlowCrew: Task Complete' },
+  [RUN_STATUS.FAILED]: { listLabel: '✗ failed  ', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.AWAITING_APPROVAL]: { listLabel: '· awaiting_approval', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.SHIPPED]: { listLabel: '· shipped ', notificationTitle: 'FlowCrew: shipped' },
+  [RUN_STATUS.CEILING_HIT]: { listLabel: '· ceiling_hit', notificationTitle: 'FlowCrew: ceiling_hit' },
+  [RUN_STATUS.ESCALATED]: { listLabel: '· escalated', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { listLabel: '· reality_gate_failed', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.PHASE_COMPLETE]: { listLabel: '· phase_complete', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.STOPPED]: { listLabel: '· stopped ', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.INCOMPLETE]: { listLabel: '· incomplete', notificationTitle: 'FlowCrew: Task Failed' },
+} as const satisfies Record<RunStatus, CliRunStatusPresentation>;
 
 function encodeBriefAdmission(record: BriefAdmissionRecord): string {
   return Buffer.from(JSON.stringify(record), 'utf8').toString('base64url');
@@ -1115,10 +1139,10 @@ async function cmdQuick() {
 
   // Desktop notification
   try {
-    const title = finalState.status === RUN_STATUS.COMPLETE ? 'FlowCrew: Task Complete'
-      : isPausedRunStatus(finalState.status) ? 'FlowCrew: Awaiting Your Approval'
-      : isSuccessfulRunStatus(finalState.status) ? `FlowCrew: ${finalState.status}`
-      : 'FlowCrew: Task Failed';
+    const finalStatus = resolveRunStatus(finalState.status);
+    const title = finalStatus.kind === 'known'
+      ? CLI_RUN_STATUS_PRESENTATION[finalStatus.status].notificationTitle
+      : `FlowCrew: Unrecognized status ${finalStatus.display}`;
     const body = task.slice(0, 80);
     if (process.platform === 'darwin') {
       const { execSync: es } = await import('node:child_process');
@@ -1310,8 +1334,12 @@ function cmdStatus() {
     return;
   }
   const { id, directory: runDir, state } = selected;
+  const statusResolution = resolveRunStatus(state.status);
   const mismatch = terminalArtifactStatusMismatch(state, { runDir });
   if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
+  if (statusResolution.kind === 'unknown') {
+    console.log(`Status: unrecognized archived value ${statusResolution.display}; no lifecycle meaning was inferred`);
+  }
 
   // Show summary.md if generated (best overview of what was done)
   const summaryPath = join(runDir, 'summary.md');
@@ -1328,7 +1356,7 @@ function cmdStatus() {
   // Fallback: show run.json summary
   console.log(`# Run: ${id}\n`);
   console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
-  console.log(`Status: ${state.status}`);
+  console.log(`Status: ${statusResolution.kind === 'known' ? statusResolution.status : `unrecognized ${statusResolution.display}`}`);
   console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}\n`);
   console.log('## Stages');
   for (const [id, ss] of Object.entries(state.stages ?? {})) {
@@ -1354,7 +1382,10 @@ function cmdList() {
     try {
       const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8'));
       const mismatch = terminalArtifactStatusMismatch(state, { runDir: join(root, runId) });
-      const lifecycle = state.status === RUN_STATUS.COMPLETE ? '✓ complete' : state.status === RUN_STATUS.FAILED ? '✗ failed  ' : state.status === RUN_STATUS.RUNNING ? '⟳ running ' : '· ' + state.status.padEnd(8);
+      const statusResolution = resolveRunStatus(state.status);
+      const lifecycle = statusResolution.kind === 'unknown'
+        ? `? unrecognized ${statusResolution.display}`
+        : CLI_RUN_STATUS_PRESENTATION[statusResolution.status].listLabel;
       const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
       const startMs = new Date(state.startedAt).getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
@@ -1464,6 +1495,11 @@ function cmdGuide() {
     const candidate = readGuideCandidate(root, targetRunId);
     if (!candidate) {
       console.error(`Run "${targetRunId}" is unreadable or unsafe; guidance was not sent.`);
+      process.exit(1);
+    }
+    const statusResolution = resolveRunStatus(candidate.status);
+    if (statusResolution.kind === 'unknown') {
+      console.error(`Run "${targetRunId}" has unrecognized archived status ${statusResolution.display}; guidance was not sent.`);
       process.exit(1);
     }
     if (!isRunningRunStatus(candidate.status)) {
@@ -2031,9 +2067,11 @@ async function cmdCampaignLoop(): Promise<void> {
       // The inner run's terminal verdict. A reality_gate_failed run had its claim rejected by the
       // inner safety net — the outer loop must not ship its journaled number.
       try {
-        const r = JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')) as { status?: string };
-        return typeof r.status === 'string' ? r.status : 'complete';
-      } catch { return 'complete'; }
+        const r = JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')) as { status?: unknown };
+        return r?.status;
+      } catch (error) {
+        throw new Error(`Refusing to score campaign run ${runId}: its run.json is unreadable`, { cause: error });
+      }
     },
   });
   console.log(`Campaign-loop ${result.decision}: ${result.reason}`);

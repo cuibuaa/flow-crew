@@ -28,6 +28,105 @@ export const RUN_STATUS = {
 } as const;
 export type RunStatus = typeof RUN_STATUS[keyof typeof RUN_STATUS];
 
+export type RunLifecycleBucket =
+  | 'queued'
+  | 'executing'
+  | 'paused'
+  | 'legacy_approval'
+  | 'terminal';
+
+export interface RunStatusSemantics {
+  /** Exactly one lifecycle bucket; callers must not reconstruct this partition. */
+  lifecycle: RunLifecycleBucket;
+  /** Process-level success, including an honest research ceiling. */
+  successful: boolean;
+  /** Dashboard/history mutations must not race this lifecycle owner. */
+  mutationBlocked: boolean;
+}
+
+/**
+ * Total semantic row for every known lifecycle status. A new RUN_STATUS member
+ * cannot compile until its lifecycle, process outcome, and mutation behavior
+ * are chosen explicitly. Required, non-optional fields prevent an empty row
+ * from masquerading as consideration.
+ */
+export const RUN_STATUS_SEMANTICS = {
+  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false },
+  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true },
+  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true },
+  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
+  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.AWAITING_APPROVAL]: { lifecycle: 'legacy_approval', successful: false, mutationBlocked: true },
+  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
+  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
+  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.PHASE_COMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.STOPPED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+} as const satisfies Record<RunStatus, RunStatusSemantics>;
+
+export type RunStatusResolution =
+  | {
+      kind: 'known';
+      status: RunStatus;
+      semantics: RunStatusSemantics;
+    }
+  | {
+      kind: 'unknown';
+      /** Original parsed JSON value. It is evidence and is never coerced. */
+      raw: unknown;
+      display: string;
+      reason: string;
+    };
+
+function displayUnknownRunStatus(value: unknown): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (value === undefined) return 'undefined';
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded !== undefined) return encoded;
+  } catch { /* fall through to a type-safe description */ }
+  return Object.prototype.toString.call(value);
+}
+
+/** Resolve untrusted run.json text without inventing a lifecycle meaning. */
+export function resolveRunStatus(value: unknown): RunStatusResolution {
+  if (typeof value === 'string'
+      && Object.prototype.hasOwnProperty.call(RUN_STATUS_SEMANTICS, value)) {
+    const status = value as RunStatus;
+    return { kind: 'known', status, semantics: RUN_STATUS_SEMANTICS[status] };
+  }
+  const display = displayUnknownRunStatus(value);
+  return {
+    kind: 'unknown',
+    raw: value,
+    display,
+    reason: `Unrecognized archived run status ${display}; lifecycle meaning was not inferred`,
+  };
+}
+
+export class UnknownRunStatusError extends Error {
+  readonly resolution: Extract<RunStatusResolution, { kind: 'unknown' }>;
+
+  constructor(value: unknown, action: string) {
+    const resolution = resolveRunStatus(value);
+    if (resolution.kind !== 'unknown') {
+      throw new Error(`UnknownRunStatusError requires an unrecognized status, received ${resolution.status}`);
+    }
+    super(`Refusing to ${action}: ${resolution.reason}`);
+    this.name = 'UnknownRunStatusError';
+    this.resolution = resolution;
+  }
+}
+
+/** Require known semantics before a consequential action. */
+export function requireKnownRunStatus(value: unknown, action: string): RunStatus {
+  const resolution = resolveRunStatus(value);
+  if (resolution.kind === 'unknown') throw new UnknownRunStatusError(value, action);
+  return resolution.status;
+}
+
 /** Stage execution is a separate state machine from the enclosing run. */
 export const STAGE_STATUS = {
   PENDING: 'pending',
@@ -565,6 +664,14 @@ export interface StoreState {
   };
 }
 
+/** Parsed archive shape before the status text has been trusted. */
+export type ArchivedStoreState = Omit<StoreState, 'status'> & { status: unknown };
+
+export interface ArchivedRunStateRead {
+  state: ArchivedStoreState;
+  status: RunStatusResolution;
+}
+
 export const FC_DIR = '.fc';
 // FC_HOME (env) or setFcGlobalDir() override the global state root (~/.fc).
 // Consumers: engine-scenario tests and `flowcrew rehearse` run real workflows
@@ -621,16 +728,10 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
  * a second, drift-prone copy of these vocabularies.
  */
 export const TERMINAL_STATUSES = [
-  RUN_STATUS.COMPLETE,
-  RUN_STATUS.FAILED,
-  RUN_STATUS.SHIPPED,
-  RUN_STATUS.CEILING_HIT,
-  RUN_STATUS.ESCALATED,
-  RUN_STATUS.REALITY_GATE_FAILED,
-  RUN_STATUS.PHASE_COMPLETE,
-  RUN_STATUS.STOPPED,
-  RUN_STATUS.INCOMPLETE,
-] as const;
+  ...Object.values(RUN_STATUS).filter((status) => (
+    RUN_STATUS_SEMANTICS[status].lifecycle === 'terminal'
+  )),
+] as readonly RunStatus[];
 
 /** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
 export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>)';
@@ -639,8 +740,9 @@ export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (s
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';
 
 /** Single source of truth for "this run has reached a terminal state". */
-export function isTerminalRunStatus(status: string): boolean {
-  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+export function isTerminalRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'terminal';
 }
 
 /**
@@ -655,33 +757,49 @@ export function isTerminalRunStatus(status: string): boolean {
  * a parked run holds no pid, so the orphan reaper must not see it as alive and
  * the single-in-flight lock must not see it as busy.
  */
-export const PAUSED_STATUSES = [RUN_STATUS.PARKED] as const;
+export const PAUSED_STATUSES = [
+  ...Object.values(RUN_STATUS).filter((status) => (
+    RUN_STATUS_SEMANTICS[status].lifecycle === 'paused'
+  )),
+] as readonly RunStatus[];
 
-export function isPausedRunStatus(status: string): boolean {
-  return (PAUSED_STATUSES as readonly string[]).includes(status);
+export function isPausedRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'paused';
+}
+
+/** A run has been admitted but execution has not begun. */
+export function isPendingRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'queued';
 }
 
 /** "The run is alive in the lifecycle" — running OR paused, i.e. not finished. */
-export function isActiveRunStatus(status: string): boolean {
-  return isRunningRunStatus(status) || isPausedRunStatus(status);
+export function isActiveRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known'
+    && (resolution.semantics.lifecycle === 'executing' || resolution.semantics.lifecycle === 'paused');
 }
 
 /** A scheduler process is presently executing this run. Parked is deliberately false. */
-export function isRunningRunStatus(status: string): boolean {
-  return status === RUN_STATUS.RUNNING;
+export function isRunningRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'executing';
 }
 
 /** Legacy plan approval transition; distinct from a parked approval-inbox suspension. */
-export function isAwaitingApprovalRunStatus(status: string): boolean {
-  return status === RUN_STATUS.AWAITING_APPROVAL;
+export function isAwaitingApprovalRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'legacy_approval';
 }
 
 /**
  * Dashboard mutations that rewrite run/stage history must wait while execution,
  * legacy plan approval, or a parked approval request still owns the run.
  */
-export function isRunMutationBlockedStatus(status: string): boolean {
-  return isActiveRunStatus(status) || isAwaitingApprovalRunStatus(status);
+export function isRunMutationBlockedStatus(status: unknown): boolean {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'unknown' || resolution.semantics.mutationBlocked;
 }
 
 /**
@@ -696,8 +814,9 @@ export function isRunMutationBlockedStatus(status: string): boolean {
  * Used for the CLI exit code so a spawning parent (e.g. the campaign outer loop's
  * execSync) does not mistake a normal ceiling for a crash.
  */
-export function isSuccessfulRunStatus(status: string): boolean {
-  return status === RUN_STATUS.COMPLETE || status === RUN_STATUS.SHIPPED || status === RUN_STATUS.CEILING_HIT;
+export function isSuccessfulRunStatus(status: unknown): status is RunStatus {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' && resolution.semantics.successful;
 }
 
 function isRealityGatedTerminal(status: string): boolean {
@@ -1114,12 +1233,42 @@ export function createRun(
   return initializeReservedRun(projectDir, reservation.runId, workflowName, workflowYaml, stageIds);
 }
 
+export function readArchivedRunState(projectDir: string, runId: string): ArchivedRunStateRead {
+  const parsed = JSON.parse(
+    readFileSync(join(runDir(projectDir, runId), 'run.json'), 'utf-8'),
+  ) as ArchivedStoreState;
+  return { state: parsed, status: resolveRunStatus(parsed?.status) };
+}
+
+/**
+ * Typed compatibility reader for engine-owned runs. Archive-facing and
+ * consequential callers should use readArchivedRunState/resolveRunStatus.
+ * This cast does not coerce at runtime: unknown raw text remains intact.
+ */
 export function readRunState(projectDir: string, runId: string): StoreState {
-  return JSON.parse(readFileSync(join(runDir(projectDir, runId), 'run.json'), 'utf-8'));
+  return readArchivedRunState(projectDir, runId).state as StoreState;
 }
 
 export function writeRunState(projectDir: string, runId: string, state: StoreState): void {
-  atomicWrite(join(runDir(projectDir, runId), 'run.json'), JSON.stringify(state, null, 2));
+  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
+  requireKnownRunStatus(state.status, `write run state ${runId}`);
+  if (existsSync(runJsonPath)) {
+    try {
+      const current = JSON.parse(readFileSync(runJsonPath, 'utf-8')) as { status?: unknown };
+      const currentStatus = resolveRunStatus(current.status);
+      if (currentStatus.kind === 'unknown') {
+        throw new UnknownRunStatusError(
+          current.status,
+          `overwrite archived run ${runId}; update the tool or migrate the archive explicitly`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof UnknownRunStatusError) throw error;
+      // Preserve existing recovery behavior for malformed JSON. Unknown but
+      // well-formed status text is handled above and never reaches this arm.
+    }
+  }
+  atomicWrite(runJsonPath, JSON.stringify(state, null, 2));
   try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
   emitCampaignEnvelopeEvents(projectDir, runId, state);
 }

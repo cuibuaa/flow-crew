@@ -36,6 +36,7 @@ import {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   readRunReservation,
+  resolveRunStatus,
   reserveRun,
   RUN_STATUS,
   runsRoot,
@@ -638,6 +639,16 @@ export class Orchestrator {
     if (bound) {
       if (this.isSingleFlightCollision(bound)) {
         this.deferSingleFlightCollision(task, bound);
+        return true;
+      }
+      const statusResolution = resolveRunStatus(bound.status);
+      if (statusResolution.kind === 'unknown') {
+        this.defer(
+          task,
+          `${reason}; ${statusResolution.reason}; refusing to replay or reconcile the bound run`,
+          'wait',
+          task.run_id,
+        );
         return true;
       }
       if (isTerminalRunStatus(bound.status)) {

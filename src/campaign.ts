@@ -5,7 +5,15 @@ import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { bumpVersion, ensureBriefDir, readHead } from './brief-versioning.js';
 import type { BriefVersionInfo } from './brief-versioning.js';
-import { campaignDir, runDir, runsRoot, updateRunState, isTerminalRunStatus, RUN_STATUS } from './store.js';
+import {
+  campaignDir,
+  isTerminalRunStatus,
+  requireKnownRunStatus,
+  runDir,
+  RUN_STATUS,
+  runsRoot,
+  updateRunState,
+} from './store.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { appendPendingReview } from './campaign-review.js';
 import { findSimilar, persistCampaignArc } from './cross-campaign-kg.js';
@@ -471,14 +479,17 @@ async function pollRunCompletion(cfg: CampaignConfig, runId: string): Promise<Ru
   const statePath = join(runDir(cfg.projectDir, runId), 'run.json');
   while (Date.now() - started < maxMs) {
     const state = readJsonIfExists(statePath);
-    if (state && isTerminalStatus(state.status)) {
+    const status = state
+      ? requireKnownRunStatus(state.status, `score campaign run ${runId}`)
+      : undefined;
+    if (state && status && isTerminalStatus(status)) {
       const dir = runDir(cfg.projectDir, runId);
       const decision = readJsonIfExists(join(dir, 'research_decision.json'));
       const journal = readJsonIfExists(join(dir, 'research_journal.json'));
       const metricValue = Number(state?.[cfg.goal.metric] ?? decision?.[cfg.goal.metric] ?? decision?.runningBest ?? decision?.result);
       return {
         runId,
-        status: state.status,
+        status,
         result: Number.isFinite(metricValue) ? metricValue : undefined,
         decision,
         journal,

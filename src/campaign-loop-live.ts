@@ -11,7 +11,12 @@
  * the CLI (`flowcrew campaign-loop`) supplies the production launcher/reader.
  */
 import type { Adapter, AgentConfig, RunOpts } from './adapters/base.js';
-import { type ResearchConfig, isPausedRunStatus, isSuccessfulRunStatus } from './store.js';
+import {
+  type ResearchConfig,
+  requireKnownRunStatus,
+  RUN_STATUS,
+  type RunStatus,
+} from './store.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { runCampaignLoop, type CampaignLoopDeps, type CampaignLoopResult, type DirectionOutcome } from './campaign-loop.js';
@@ -121,7 +126,7 @@ export interface LiveCampaignDepsOpts {
    * this, a false positive the inner reality gate already caught would leak through as a false ship.
    * Omitted → the outcome is trusted (back-compat for callers with no run-status channel).
    */
-  readRunStatus?: (runId: string) => string;
+  readRunStatus?: (runId: string) => unknown;
   /**
    * Optional campaign brief text (goal, gates, and the DOMAIN ledger of directions already
    * tried/dead). Appended to the propose prompt so the proposer avoids re-proposing directions
@@ -144,6 +149,25 @@ export class CampaignAwaitingApprovalError extends Error {
     this.name = 'CampaignAwaitingApprovalError';
   }
 }
+
+export type LiveCampaignRunAction = 'score' | 'reject' | 'await_approval';
+
+/** A completed inner launch must have one explicit outer-loop consequence. */
+export const LIVE_CAMPAIGN_RUN_ACTIONS = {
+  [RUN_STATUS.PENDING]: 'reject',
+  [RUN_STATUS.RUNNING]: 'reject',
+  [RUN_STATUS.PARKED]: 'await_approval',
+  [RUN_STATUS.COMPLETE]: 'score',
+  [RUN_STATUS.FAILED]: 'reject',
+  [RUN_STATUS.AWAITING_APPROVAL]: 'reject',
+  [RUN_STATUS.SHIPPED]: 'score',
+  [RUN_STATUS.CEILING_HIT]: 'score',
+  [RUN_STATUS.ESCALATED]: 'reject',
+  [RUN_STATUS.REALITY_GATE_FAILED]: 'reject',
+  [RUN_STATUS.PHASE_COMPLETE]: 'reject',
+  [RUN_STATUS.STOPPED]: 'reject',
+  [RUN_STATUS.INCOMPLETE]: 'reject',
+} as const satisfies Record<RunStatus, LiveCampaignRunAction>;
 
 /** Build the real {propose, executeDirection, objective} for runCampaignLoop. */
 export function createLiveCampaignDeps(opts: LiveCampaignDepsOpts): CampaignLoopDeps {
@@ -171,14 +195,16 @@ export function createLiveCampaignDeps(opts: LiveCampaignDepsOpts): CampaignLoop
       // (e.g. reality_gate_failed) had its claimed numbers REJECTED by the inner safety net. Scoring
       // it at baseline (no improvement) instead of its journaled claim is what stops a caught false
       // positive from leaking out of the outer loop as a false ship.
-      const status = opts.readRunStatus ? opts.readRunStatus(runId) : 'complete';
+      const rawStatus = opts.readRunStatus ? opts.readRunStatus(runId) : 'complete';
+      const status = requireKnownRunStatus(rawStatus, `score campaign direction '${direction}' from run ${runId}`);
+      const action = LIVE_CAMPAIGN_RUN_ACTIONS[status];
       // A pause is not a rejected experiment: no verdict exists yet. Abort this
       // outer invocation before runCampaignLoop appends an outcome or marks the
       // direction tried; the operator can resume after resolving the inbox.
-      if (isPausedRunStatus(status)) {
+      if (action === 'await_approval') {
         throw new CampaignAwaitingApprovalError(runId, direction, status);
       }
-      if (!isSuccessfulRunStatus(status)) {
+      if (action === 'reject') {
         return { direction, bestResult: opts.objective.baseline, status, rejected: true };
       }
       return { direction, bestResult: opts.readBest(runId), status };

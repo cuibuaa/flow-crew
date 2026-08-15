@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   fcGlobalDir,
   isTerminalRunStatus,
+  resolveRunStatus,
   type StoreState,
 } from './store.js';
 
@@ -927,6 +928,9 @@ function repairsForRefusals(
   acknowledgement: LandRemovalAcknowledgement,
 ): string[] {
   return reasons.map((reason) => {
+    if (reason.startsWith('unrecognized archived run status')) {
+      return 'Update FlowCrew to a version that understands the archived status, or migrate it explicitly after reviewing its original evidence; land will not infer a terminal outcome.';
+    }
     if (reason === 'run has not reached a terminal status') {
       return 'Let the run reach a declared terminal state, verify its verdict, then rerun the land audit.';
     }
@@ -1086,7 +1090,8 @@ export async function runLand(
     .map((artifact) => ({ operation: 'artifact', reason: `${artifact.path}: ${artifact.reason}` }));
   const inspected = await inspectInventory(state, projectDir, deps.git, deps.fs);
   const inspectionIssues = [...artifactIssues, ...inspected.issues];
-  const terminal = isTerminalRunStatus(state.status);
+  const statusResolution = resolveRunStatus(state.status);
+  const terminal = statusResolution.kind === 'known' && isTerminalRunStatus(statusResolution.status);
   const expectedRegenerableCount = inspected.inventory.regenerable.buildOutputs.count
     + inspected.inventory.regenerable.installedDependencies.count;
   const removalAcknowledgement: LandRemovalAcknowledgement = {
@@ -1105,6 +1110,9 @@ export async function runLand(
     parsed.remove,
     removalAcknowledgement,
   );
+  if (statusResolution.kind === 'unknown') {
+    reasons.unshift(`unrecognized archived run status ${statusResolution.display}; refusing worktree or branch removal`);
+  }
   const baseReport: LandReport = {
     version: 1,
     state: 'audit',

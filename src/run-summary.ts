@@ -2,8 +2,13 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
-import { RUN_STATUS, runsRoot, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './store.js';
-import type { StoreState } from './store.js';
+import {
+  resolveRunStatus,
+  RUN_STATUS,
+  runsRoot,
+  TERMINAL_STATUSES as STORE_TERMINAL_STATUSES,
+} from './store.js';
+import type { RunStatus, StoreState } from './store.js';
 import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
 import { readRunEvents } from './run-events.js';
 // Re-exported for back-compat + the unit test. The codex adapter now applies this
@@ -22,6 +27,23 @@ const log = createLogger({ name: 'run-summary' });
 // and had already drifted (missing phase_complete / stopped / incomplete).
 // A paused ('parked') run is deliberately absent: it has no verdict to narrate.
 const TERMINAL_STATUSES = new Set<string>(STORE_TERMINAL_STATUSES);
+
+/** Research-summary spelling is a separate operator consequence, so it is total here. */
+export const RESEARCH_SUMMARY_DECISION_LABELS = {
+  [RUN_STATUS.PENDING]: RUN_STATUS.PENDING,
+  [RUN_STATUS.RUNNING]: RUN_STATUS.RUNNING,
+  [RUN_STATUS.PARKED]: RUN_STATUS.PARKED,
+  [RUN_STATUS.COMPLETE]: RUN_STATUS.COMPLETE,
+  [RUN_STATUS.FAILED]: RUN_STATUS.FAILED,
+  [RUN_STATUS.AWAITING_APPROVAL]: RUN_STATUS.AWAITING_APPROVAL,
+  [RUN_STATUS.SHIPPED]: 'ship',
+  [RUN_STATUS.CEILING_HIT]: 'stop_ceiling',
+  [RUN_STATUS.ESCALATED]: RUN_STATUS.ESCALATED,
+  [RUN_STATUS.REALITY_GATE_FAILED]: RUN_STATUS.REALITY_GATE_FAILED,
+  [RUN_STATUS.PHASE_COMPLETE]: RUN_STATUS.PHASE_COMPLETE,
+  [RUN_STATUS.STOPPED]: RUN_STATUS.STOPPED,
+  [RUN_STATUS.INCOMPLETE]: RUN_STATUS.INCOMPLETE,
+} as const satisfies Record<RunStatus, string>;
 
 const CODE_NARRATIVE_PROMPT = `You are summarizing a multi-agent coding run for the operator who launched it.
 Write ONLY the following markdown sections, in this order, and nothing else:
@@ -274,11 +296,13 @@ function renderResearchOutcome(state: StoreState, data: ResearchData): string {
   // a true terminal `ceiling_hit`/`incomplete`. When the run is terminal, the run.json status is
   // authoritative; the snapshot `reason` is only used as supplementary text and only when the
   // snapshot is consistent with the terminal status (else it would echo a stale rationale).
-  const isTerminal = TERMINAL_STATUSES.has(state.status);
+  const statusResolution = resolveRunStatus(state.status);
+  const isTerminal = statusResolution.kind === 'known'
+    && TERMINAL_STATUSES.has(statusResolution.status);
   // Map the terminal status to the policy-decision vocabulary used in the summary.
-  const terminalDecisionLabel = state.status === RUN_STATUS.SHIPPED ? 'ship'
-    : state.status === RUN_STATUS.CEILING_HIT ? 'stop_ceiling'
-    : state.status; // incomplete / failed / reality_gate_failed / etc. shown verbatim
+  const terminalDecisionLabel = statusResolution.kind === 'known'
+    ? RESEARCH_SUMMARY_DECISION_LABELS[statusResolution.status]
+    : `unrecognized ${statusResolution.display}`;
   // The snapshot is "consistent" with the terminal only when it agrees (e.g. a real ship snapshot
   // on a shipped run, or a stop_ceiling snapshot on a ceiling_hit run). A `continue` snapshot on a
   // terminal run is by definition stale.

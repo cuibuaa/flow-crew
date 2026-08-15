@@ -278,6 +278,34 @@ describe('campaign page evidence classifier', () => {
 });
 
 describe('research trend admission', () => {
+  it('requires exact archived status spellings before admitting measurements', async () => {
+    const state = runState('exact-measurement-status');
+    writeEvidence(state);
+    const outcomes = [
+      RUN_STATUS.SHIPPED,
+      RUN_STATUS.CEILING_HIT,
+      'valid_ship',
+      ' shipped ',
+      ' ceiling_hit ',
+      ' valid_ship ',
+    ];
+    const entries: CampaignHistoryEntry[] = outcomes.map((outcome, index) => ({
+      seq: index + 1,
+      runId: state.runId,
+      iteration: index + 1,
+      score: index + 1,
+      metric: 'quality_pct',
+      pass: false,
+      outcome,
+      timestamp: `2026-08-02T10:0${index}:00.000Z`,
+    }));
+
+    const view = await readCampaignOperatorView(projectDir, campaignId, pageSources([state], { entries }));
+
+    expect(view.research.value?.acceptedPointCount).toBe(3);
+    expect(view.research.value?.selected?.points.map((point) => point.value)).toEqual([1, 2, 3]);
+  });
+
   it('requires two compatible accepted points and direction before naming a best round', async () => {
     const one = runState('trend-one', { status: RUN_STATUS.SHIPPED, research: { baseline: 0, policy: 'greedy_stack' } });
     writeEvidence(one, {

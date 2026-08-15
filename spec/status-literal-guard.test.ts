@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isAwaitingApprovalRunStatus,
   isPausedRunStatus,
+  isPendingRunStatus,
   isRunMutationBlockedStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
@@ -147,7 +148,7 @@ describe('central run-status semantics', () => {
   it('classifies every declared run status into exactly one lifecycle bucket', () => {
     for (const status of Object.values(RUN_STATUS)) {
       const buckets = [
-        status === RUN_STATUS.PENDING,
+        isPendingRunStatus(status),
         isRunningRunStatus(status),
         isAwaitingApprovalRunStatus(status),
         isPausedRunStatus(status),

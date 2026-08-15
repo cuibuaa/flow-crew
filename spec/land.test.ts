@@ -18,7 +18,12 @@ import {
   type LandGitResponse,
   type LandGitRunner,
 } from '../src/cli-land.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import {
+  fcGlobalDir,
+  isTerminalRunStatus,
+  RUN_STATUS,
+  setFcGlobalDir,
+} from '../src/store.js';
 
 class Capture {
   value = '';
@@ -138,6 +143,15 @@ function destructiveOperations(runner: ReturnType<typeof vi.fn<LandGitRunner>>):
 }
 
 describe('flowcrew land inventory and refusal boundary', () => {
+  it.each(Object.values(RUN_STATUS))('uses scheduler terminal semantics for %s', async (status) => {
+    writeState({ status });
+
+    const report = await runLand(['land', '--run', fixture.runId], { git: gitRunner() });
+
+    expect(report.status).toBe(status);
+    expect(report.terminal).toBe(isTerminalRunStatus(status));
+  });
+
   it('reports the terminal status and conservatively grades every raw unique-state path', async () => {
     writeProjectFile('loose.txt');
     writeProjectFile('cache/generator.ts', 'export const retained = true;\n');
@@ -510,6 +524,27 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(report.state).toBe('refused');
     expect(report.refusalReasons).toContain('declared terminal artifacts are absent: docs/result.md');
     expect(report.refusalRepairs.join('\n')).toMatch(/restore|produce|preserve/i);
+    expect(destructiveOperations(runner)).toEqual([]);
+  });
+
+  it('preserves an unrecognized archived status and refuses every removal step explicitly', async () => {
+    writeState({ status: 'future_archived_state' });
+    const runner = gitRunner(cleanRemovalResponses());
+
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: runner });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      status: 'future_archived_state',
+      terminal: false,
+      readyForRemoval: false,
+    });
+    expect(report.refusalReasons).toContain(
+      'unrecognized archived run status "future_archived_state"; refusing worktree or branch removal',
+    );
+    expect(report.refusalRepairs.join('\n')).toMatch(/understands.*status|migrate.*explicitly/i);
     expect(destructiveOperations(runner)).toEqual([]);
   });
 

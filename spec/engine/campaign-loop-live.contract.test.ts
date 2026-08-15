@@ -170,6 +170,27 @@ describe('P3 live-glue — outer loop respects the inner reality-gate verdict', 
     expect(launched).toEqual(['approval-direction']);
     expect(bestReads).toBe(0);
   });
+
+  it('refuses an unrecognized inner status instead of fabricating a rejected baseline outcome', async () => {
+    let bestReads = 0;
+    await expect(runLiveCampaign({
+      projectDir: '/tmp/none',
+      campaignId: 'c',
+      objective: objective({ beat: 15, maxRounds: 3, haltAfterNoImprovement: 3 }),
+      proposeRole,
+      adapter: mockAdapter(['{"next_direction":"future-status-direction"}']),
+      proposeRunOpts: runOpts,
+      launchInner: async () => 'run-future-status',
+      readBest: () => {
+        bestReads += 1;
+        return 99;
+      },
+      readRunStatus: () => 'future_archived_state',
+    })).rejects.toThrow(
+      /Refusing to score campaign direction 'future-status-direction'.*Unrecognized archived run status "future_archived_state"/,
+    );
+    expect(bestReads).toBe(0);
+  });
 });
 
 describe('P3 live-glue — runLiveCampaign (mock adapter + inner launcher)', () => {

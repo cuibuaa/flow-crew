@@ -367,6 +367,27 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
+  it('refuses to reconcile or replay a bound run with an unrecognized archived status', async () => {
+    const runId = 'bound-future-status';
+    writeRun(runId, 'future_archived_state');
+    const task = registry.create({
+      brief_text: 'must not replay',
+      projectDir: tempDir,
+      status: 'running',
+      run_id: runId,
+    });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+
+    await orchestrator.tickOnce();
+
+    expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 1, run_id: runId });
+    expect(registry.get(task.id)?.defer_reason).toContain(
+      'Unrecognized archived run status "future_archived_state"; lifecycle meaning was not inferred',
+    );
+    expect(registry.get(task.id)?.defer_reason).toContain('refusing to replay or reconcile the bound run');
+    expect(systemd.runs).toHaveLength(0);
+  });
+
   it('fails closed when a known run binding is unreadable and not a reservation', async () => {
     const task = registry.create({
       brief_text: 'must not replay',

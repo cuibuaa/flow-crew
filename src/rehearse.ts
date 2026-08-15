@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
 import { routeLogsToFile } from './logging.js';
 import { extractBriefPathMentions } from './ship-inputs.js';
+import { resolveRunStatus, RUN_STATUS, type RunStatus } from './store.js';
 
 export { lintInstrumentCriteria } from './brief-preflight.js';
 export type { CriterionLintWarning } from './brief-preflight.js';
@@ -36,6 +37,25 @@ export type GitIgnoreProbe = (
   projectDir: string,
   candidatePaths: readonly string[],
 ) => readonly string[];
+
+type RehearsalRunConsequence = 'ship_warning' | 'ceiling_ok' | 'fail';
+
+/** A rehearsal's verdict is an operator consequence distinct from process success. */
+const REHEARSAL_RUN_CONSEQUENCES = {
+  [RUN_STATUS.PENDING]: 'fail',
+  [RUN_STATUS.RUNNING]: 'fail',
+  [RUN_STATUS.PARKED]: 'fail',
+  [RUN_STATUS.COMPLETE]: 'fail',
+  [RUN_STATUS.FAILED]: 'fail',
+  [RUN_STATUS.AWAITING_APPROVAL]: 'fail',
+  [RUN_STATUS.SHIPPED]: 'ship_warning',
+  [RUN_STATUS.CEILING_HIT]: 'ceiling_ok',
+  [RUN_STATUS.ESCALATED]: 'fail',
+  [RUN_STATUS.REALITY_GATE_FAILED]: 'fail',
+  [RUN_STATUS.PHASE_COMPLETE]: 'fail',
+  [RUN_STATUS.STOPPED]: 'fail',
+  [RUN_STATUS.INCOMPLETE]: 'fail',
+} as const satisfies Record<RunStatus, RehearsalRunConsequence>;
 
 function probeGitignoredPaths(projectDir: string, candidatePaths: readonly string[]): string[] {
   if (candidatePaths.length === 0) return [];
@@ -280,12 +300,19 @@ async function runRehearsal(argv: string[]): Promise<void> {
       const runDirPath = join(tempFcHome, 'runs', state.runId!);
 
       // ---------- verdicts on the simulated run ----------
-      if (state.status === store.RUN_STATUS.SHIPPED) {
+      const statusResolution = resolveRunStatus(state.status);
+      const rehearsalConsequence = statusResolution.kind === 'known'
+        ? REHEARSAL_RUN_CONSEQUENCES[statusResolution.status]
+        : 'fail';
+      if (rehearsalConsequence === 'ship_warning') {
         add('warn', 'Rehearsal terminal status = shipped — the confirm command passed in the sandbox; verify that it actually evaluates data rather than always exiting 0');
-      } else if (state.status === store.RUN_STATUS.CEILING_HIT) {
+      } else if (rehearsalConsequence === 'ceiling_ok') {
         add('ok', `Rehearsal terminal status = ceiling_hit (${secs}s · 0 tokens)`);
       } else {
-        add('fail', `Rehearsal terminal status = ${state.status}${state.failureReason ? ` — ${state.failureReason}` : ''}`);
+        const displayedStatus = statusResolution.kind === 'known'
+          ? statusResolution.status
+          : `unrecognized ${statusResolution.display}`;
+        add('fail', `Rehearsal terminal status = ${displayedStatus}${state.failureReason ? ` — ${state.failureReason}` : ''}`);
       }
 
       let journalRounds = 0;

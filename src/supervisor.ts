@@ -4,24 +4,44 @@ import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import {
   atomicWrite,
+  isAwaitingApprovalRunStatus,
+  isPausedRunStatus,
   isRunningStageStatus,
   isSettledStageStatus,
   isTerminalRunStatus,
   readStageStatus,
   readRunState,
+  resolveRunStatus,
   RUN_STATUS,
   runDir as getRunDirPath,
   STAGE_STATUS,
   stageDir,
   updateRunState,
 } from './store.js';
-import type { StageStatus, StoreState, SupervisorAttempt, SupervisorUsage } from './store.js';
+import type { RunStatus, StageStatus, StoreState, SupervisorAttempt, SupervisorUsage } from './store.js';
 import type { SupervisorConfig } from './config.js';
 import { appendTraceEvent } from './trace.js';
 import { ABORT_SIGNAL_VERSION, type AbortSignalSource, type StageAbortSignal } from './abort-signal.js';
 import { createLogger } from './logging.js';
 
 const log = createLogger({ name: 'supervisor' });
+
+/** Preserve the established progress wording while making every known row explicit. */
+export const SUPERVISOR_PROGRESS_OUTCOME_LABELS = {
+  [RUN_STATUS.PENDING]: 'In progress',
+  [RUN_STATUS.RUNNING]: 'In progress',
+  [RUN_STATUS.PARKED]: 'In progress',
+  [RUN_STATUS.COMPLETE]: 'Complete',
+  [RUN_STATUS.FAILED]: 'Failed',
+  [RUN_STATUS.AWAITING_APPROVAL]: 'In progress',
+  [RUN_STATUS.SHIPPED]: 'In progress',
+  [RUN_STATUS.CEILING_HIT]: 'In progress',
+  [RUN_STATUS.ESCALATED]: 'In progress',
+  [RUN_STATUS.REALITY_GATE_FAILED]: 'In progress',
+  [RUN_STATUS.PHASE_COMPLETE]: 'In progress',
+  [RUN_STATUS.STOPPED]: 'In progress',
+  [RUN_STATUS.INCOMPLETE]: 'In progress',
+} as const satisfies Record<RunStatus, string>;
 
 /**
  * Single source of truth for supervisor verdicts (P4 of the Atom Architecture).
@@ -369,7 +389,7 @@ export function detectSupervisorAnomalySignals(input: {
     const timeRatio = budget.totalTimeMs && budget.totalTimeMs > 0 ? (budget.usedTimeMs ?? 0) / budget.totalTimeMs : 0;
     if (Math.max(tokenRatio, timeRatio) >= 0.9) signals.push(`budget_near_exhaustion:${Math.max(tokenRatio, timeRatio).toFixed(3)}`);
   }
-  if (input.state.status === RUN_STATUS.AWAITING_APPROVAL || input.state.status === RUN_STATUS.PARKED) {
+  if (isAwaitingApprovalRunStatus(input.state.status) || isPausedRunStatus(input.state.status)) {
     signals.push(`pending_approval_state:${input.state.status}`);
   }
   return [...new Set(signals)];
@@ -615,8 +635,12 @@ export class Supervisor {
 
     // Outcome first — single most actionable line. Read this and you know
     // whether you need to do anything.
+    const statusResolution = resolveRunStatus(status);
+    const outcomeLabel = statusResolution.kind === 'known'
+      ? SUPERVISOR_PROGRESS_OUTCOME_LABELS[statusResolution.status]
+      : `Unrecognized status ${statusResolution.display}`;
     lines.push('## Outcome');
-    lines.push(`${status === RUN_STATUS.COMPLETE ? 'Complete' : status === RUN_STATUS.FAILED ? 'Failed' : 'In progress'} (${elapsed}s, iteration ${iteration}/${maxIter}, ${retries} interventions)`);
+    lines.push(`${outcomeLabel} (${elapsed}s, iteration ${iteration}/${maxIter}, ${retries} interventions)`);
     lines.push('');
 
     if (this.decisions.length > 0) {

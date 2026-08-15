@@ -473,6 +473,28 @@ describe('systemd confirmation truth', () => {
 });
 
 describe('cancel-and-confirm coordinator', () => {
+  it('stops execution but preserves an unrecognized archived lifecycle value explicitly', async () => {
+    const runId = 'cancel-future-status';
+    writeRun(runId, 'future_archived_state');
+    const coordinator = new RunCancellationCoordinator({
+      registry,
+      units: new FakeSystemd(),
+      timeoutMs: 0,
+      signalGraceMs: 0,
+    });
+
+    const result = await coordinator.cancelRun(runId);
+
+    expect(result).toMatchObject({
+      ok: true,
+      status: 'cancelled',
+      runId,
+      preservedRunStatus: 'future_archived_state',
+    });
+    expect(result.message).toContain('run lifecycle was preserved because Unrecognized archived run status');
+    expect(readRunState(projectDir, runId).status).toBe('future_archived_state');
+  });
+
   it('exposes before/during/after truth and joins concurrent task/run callers', async () => {
     const runId = 'cancel-three-barriers';
     writeRun(runId, RUN_STATUS.RUNNING, LIVE_FIXTURE_PID, {

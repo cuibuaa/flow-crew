@@ -39,7 +39,13 @@ import {
   type UnresolvedBriefInputDeclaration,
   type VerifiedBriefInput,
 } from './ship-inputs.js';
-import { RUN_STATUS, runsRoot, type StoreState } from './store.js';
+import {
+  resolveRunStatus,
+  RUN_STATUS,
+  runsRoot,
+  type RunStatus,
+  type StoreState,
+} from './store.js';
 
 export { extractBriefInputPaths } from './ship-inputs.js';
 
@@ -104,6 +110,7 @@ export interface PreviousRunReport {
   state: 'found' | 'none';
   id?: string;
   status?: string;
+  statusReason?: string;
   runDir?: string;
   evidence?: PreviousRunEvidence;
   realityGate?: {
@@ -176,15 +183,40 @@ interface ParsedArgs {
   brief?: string;
 }
 
-const CLEAN_FINISHES = new Set<string>([RUN_STATUS.COMPLETE, RUN_STATUS.SHIPPED]);
-const ADVERSE_STATUSES = new Set<string>([
-  RUN_STATUS.FAILED,
-  RUN_STATUS.REALITY_GATE_FAILED,
-  RUN_STATUS.CEILING_HIT,
-  RUN_STATUS.ESCALATED,
-  RUN_STATUS.INCOMPLETE,
-  RUN_STATUS.STOPPED,
-]);
+type PriorRunEvidenceAction = 'clean' | 'inspect';
+
+/** Whether ship preflight must surface prior-run failure evidence. */
+const PRIOR_RUN_EVIDENCE_ACTIONS = {
+  [RUN_STATUS.PENDING]: 'inspect',
+  [RUN_STATUS.RUNNING]: 'inspect',
+  [RUN_STATUS.PARKED]: 'inspect',
+  [RUN_STATUS.COMPLETE]: 'clean',
+  [RUN_STATUS.FAILED]: 'inspect',
+  [RUN_STATUS.AWAITING_APPROVAL]: 'inspect',
+  [RUN_STATUS.SHIPPED]: 'clean',
+  [RUN_STATUS.CEILING_HIT]: 'inspect',
+  [RUN_STATUS.ESCALATED]: 'inspect',
+  [RUN_STATUS.REALITY_GATE_FAILED]: 'inspect',
+  [RUN_STATUS.PHASE_COMPLETE]: 'inspect',
+  [RUN_STATUS.STOPPED]: 'inspect',
+  [RUN_STATUS.INCOMPLETE]: 'inspect',
+} as const satisfies Record<RunStatus, PriorRunEvidenceAction>;
+
+const CAMPAIGN_HYGIENE_ADVERSE = {
+  [RUN_STATUS.PENDING]: false,
+  [RUN_STATUS.RUNNING]: false,
+  [RUN_STATUS.PARKED]: false,
+  [RUN_STATUS.COMPLETE]: false,
+  [RUN_STATUS.FAILED]: true,
+  [RUN_STATUS.AWAITING_APPROVAL]: false,
+  [RUN_STATUS.SHIPPED]: false,
+  [RUN_STATUS.CEILING_HIT]: true,
+  [RUN_STATUS.ESCALATED]: true,
+  [RUN_STATUS.REALITY_GATE_FAILED]: true,
+  [RUN_STATUS.PHASE_COMPLETE]: false,
+  [RUN_STATUS.STOPPED]: true,
+  [RUN_STATUS.INCOMPLETE]: true,
+} as const satisfies Record<RunStatus, boolean>;
 const DAEMON_CAVEAT = 'Daemon freshness compares the running daemon with dist, not src with dist. A dist build that is behind src can still report FRESH; inspect sourceToDist too.';
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -409,12 +441,17 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
 
   if (!latest) return { state: 'none', scan };
   const status = latest.state.status as string;
+  const statusResolution = resolveRunStatus(status);
+  const evidenceAction = statusResolution.kind === 'known'
+    ? PRIOR_RUN_EVIDENCE_ACTIONS[statusResolution.status]
+    : 'inspect';
   return {
     state: 'found',
     id: latest.id,
     status,
+    ...(statusResolution.kind === 'unknown' ? { statusReason: statusResolution.reason } : {}),
     runDir: latest.path,
-    ...(!CLEAN_FINISHES.has(status)
+    ...(evidenceAction === 'inspect'
       ? {
           evidence: priorRunEvidence(latest.path, latest.state, deps),
           realityGate: priorRealityGate(latest.path, latest.state, deps),
@@ -504,7 +541,10 @@ function campaignHygiene(
     const entries = deps.readCampaignEntries(project, resolution.storageKey);
     const ended = entries.filter((entry) => entry.kind === 'task_ended' && typeof entry.status === 'string');
     const recent = ended.slice(-10);
-    const recentAdverse = recent.filter((entry) => ADVERSE_STATUSES.has(entry.status as string)).length;
+    const recentAdverse = recent.filter((entry) => {
+      const status = resolveRunStatus(entry.status);
+      return status.kind === 'unknown' || CAMPAIGN_HYGIENE_ADVERSE[status.status];
+    }).length;
     return {
       ...resolution,
       totalEntries: entries.length,
@@ -727,7 +767,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   const prior = report.previousRun;
   if (prior.state === 'none') writer.write('Previous run: none found for this project\n');
   else {
-    writer.write(`Previous run: ${prior.id} — ${prior.status}\n`);
+    writer.write(`Previous run: ${prior.id} — ${prior.status}${prior.statusReason ? ` [UNRECOGNIZED: ${prior.statusReason}]` : ''}\n`);
     if (prior.evidence) renderEvidence(writer, prior.evidence.source === 'terminal_artifact' ? 'terminal evidence' : 'failure reason', prior.evidence.text);
     if (prior.realityGate) renderEvidence(writer, 'Reality-Gate evidence', prior.realityGate.evidence);
   }

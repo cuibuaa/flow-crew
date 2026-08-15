@@ -14,9 +14,11 @@ import {
   campaignsRoot,
   isAwaitingApprovalRunStatus,
   isPausedRunStatus,
+  isPendingRunStatus,
   isRunningRunStatus,
   isTerminalRunStatus,
   readRunState,
+  resolveRunStatus,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
@@ -136,7 +138,7 @@ export interface CampaignActivityItem {
   runId: string;
   shortName: string;
   fullTitle: string;
-  status: RunStatus;
+  status: string;
   statusExplanation: string;
   durationMs: number | null;
   durationPartial: boolean;
@@ -185,14 +187,14 @@ export interface ResearchNarrative {
   otherMetrics: ResearchMetricGroup[];
   acceptedPointCount: number;
   confirmNotes: string[];
-  latestCanonicalStatus: RunStatus | null;
+  latestCanonicalStatus: string | null;
 }
 
 export interface EngineeringDelivery {
   runId: string;
   shortName: string;
   fullTitle: string;
-  status: RunStatus;
+  status: string;
   statusExplanation: string;
   conclusion: string;
   commits: string[];
@@ -210,7 +212,7 @@ export interface CampaignRunRow {
   runId: string;
   shortName: string;
   fullTitle: string;
-  status: RunStatus;
+  status: string;
   statusExplanation: string;
   conclusion: string;
   durationMs: number | null;
@@ -258,7 +260,7 @@ export interface CampaignIndexRow {
   };
   recent: {
     status: CampaignSourceStatus;
-    runStatus: RunStatus | null;
+    runStatus: string | null;
     statusExplanation: string | null;
     conclusion: string;
   };
@@ -386,11 +388,26 @@ const RESEARCH_CONFIRM_STATUS = {
   FAILED: 'failed',
   NOT_RUN: 'not_run',
 } as const;
-const ACCEPTED_TERMINALS = new Set<string>([
-  RUN_STATUS.SHIPPED,
-  RUN_STATUS.CEILING_HIT,
-  VALID_SHIP,
-]);
+interface CampaignMeasurementAdmission {
+  /** Whether this lifecycle outcome independently admits a measured campaign point. */
+  accepted: boolean;
+}
+
+const CAMPAIGN_MEASUREMENT_ADMISSION = {
+  [RUN_STATUS.PENDING]: { accepted: false },
+  [RUN_STATUS.RUNNING]: { accepted: false },
+  [RUN_STATUS.PARKED]: { accepted: false },
+  [RUN_STATUS.COMPLETE]: { accepted: false },
+  [RUN_STATUS.FAILED]: { accepted: false },
+  [RUN_STATUS.AWAITING_APPROVAL]: { accepted: false },
+  [RUN_STATUS.SHIPPED]: { accepted: true },
+  [RUN_STATUS.CEILING_HIT]: { accepted: true },
+  [RUN_STATUS.ESCALATED]: { accepted: false },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { accepted: false },
+  [RUN_STATUS.PHASE_COMPLETE]: { accepted: false },
+  [RUN_STATUS.STOPPED]: { accepted: false },
+  [RUN_STATUS.INCOMPLETE]: { accepted: false },
+} as const satisfies Record<RunStatus, CampaignMeasurementAdmission>;
 const EXECUTED_STAGE_STATUSES = new Set<string>([
   STAGE_STATUS.RUNNING,
   STAGE_STATUS.COMPLETE,
@@ -1004,6 +1021,14 @@ async function loadCampaign(
         ));
         continue;
       }
+      const statusResolution = resolveRunStatus(state.status);
+      if (statusResolution.kind === 'unknown') {
+        stateIssues.push(issue(
+          'run-status-unrecognized',
+          'A run has an unrecognized archived lifecycle status',
+          { runId, detail: statusResolution.reason },
+        ));
+      }
       runs.push(createRunEvidence(projectDir, state, entries, tasks));
     } catch (error) {
       stateIssues.push(issue(
@@ -1054,6 +1079,13 @@ function metricKey(metric: string): string {
   return metric.trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
 }
 
+function acceptsCampaignMeasurement(statusValue: unknown): boolean {
+  if (statusValue === VALID_SHIP) return true;
+  const resolution = resolveRunStatus(statusValue);
+  return resolution.kind === 'known'
+    && CAMPAIGN_MEASUREMENT_ADMISSION[resolution.status].accepted;
+}
+
 function runDirection(run: RunEvidence, metric: string): 'higher' | 'lower' | 'unknown' {
   if (run.state.research) return run.state.research.higherIsBetter === false ? 'lower' : 'higher';
   const directions = run.metricArtifacts
@@ -1070,8 +1102,8 @@ function acceptedLedgerEntry(entry: CampaignHistoryEntry): boolean {
     || entry.terminalStudyComplete === true
     || raw.confirmed === true
     || raw.confirm_pass === true
-    || ACCEPTED_TERMINALS.has(nonEmptyString(entry.status) ?? '')
-    || ACCEPTED_TERMINALS.has(nonEmptyString(entry.outcome) ?? '');
+    || acceptsCampaignMeasurement(entry.status)
+    || acceptsCampaignMeasurement(entry.outcome);
 }
 
 function acceptedPointsFromRuns(
@@ -1181,8 +1213,8 @@ function outerAcceptedPoints(loaded: LoadedCampaign, runs: RunEvidence[]): Accep
     const round = finiteNumber(row.iter) ?? finiteNumber(row.iteration) ?? index + 1;
     const runId = nonEmptyString(row.runId) ?? nonEmptyString(row.run_id);
     const accepted = row.pass === true
-      || ACCEPTED_TERMINALS.has(nonEmptyString(row.outcome) ?? '')
-      || ACCEPTED_TERMINALS.has(nonEmptyString(outcome?.status) ?? '')
+      || acceptsCampaignMeasurement(row.outcome)
+      || acceptsCampaignMeasurement(outcome?.status)
       || (value !== undefined && journalValues.has(value));
     if (value === undefined || !runId || !accepted) continue;
     points.push({
@@ -1341,22 +1373,27 @@ function classify(
   };
 }
 
-export function statusExplanation(status: RunStatus): string {
-  switch (status) {
-    case RUN_STATUS.PENDING: return 'Queued and waiting to execute';
-    case RUN_STATUS.RUNNING: return 'Executing';
-    case RUN_STATUS.PARKED: return 'No worker; waiting for an operator decision';
-    case RUN_STATUS.AWAITING_APPROVAL: return 'Waiting for legacy plan approval';
-    case RUN_STATUS.COMPLETE: return 'Engineering DAG completed';
-    case RUN_STATUS.FAILED: return 'Execution failed';
-    case RUN_STATUS.SHIPPED: return 'Research or declared gate confirmed delivery';
-    case RUN_STATUS.CEILING_HIT: return 'Honest ceiling reached without a better result';
-    case RUN_STATUS.ESCALATED: return 'Escalated and needs intervention';
-    case RUN_STATUS.REALITY_GATE_FAILED: return 'Reality gate failed';
-    case RUN_STATUS.PHASE_COMPLETE: return 'Stage complete; campaign can continue';
-    case RUN_STATUS.STOPPED: return 'Stopped by the operator or system';
-    case RUN_STATUS.INCOMPLETE: return 'Budget exhausted while work was in progress';
-  }
+export const RUN_STATUS_EXPLANATIONS = {
+  [RUN_STATUS.PENDING]: 'Queued and waiting to execute',
+  [RUN_STATUS.RUNNING]: 'Executing',
+  [RUN_STATUS.PARKED]: 'No worker; waiting for an operator decision',
+  [RUN_STATUS.AWAITING_APPROVAL]: 'Waiting for legacy plan approval',
+  [RUN_STATUS.COMPLETE]: 'Engineering DAG completed',
+  [RUN_STATUS.FAILED]: 'Execution failed',
+  [RUN_STATUS.SHIPPED]: 'Research or declared gate confirmed delivery',
+  [RUN_STATUS.CEILING_HIT]: 'Honest ceiling reached without a better result',
+  [RUN_STATUS.ESCALATED]: 'Escalated and needs intervention',
+  [RUN_STATUS.REALITY_GATE_FAILED]: 'Reality gate failed',
+  [RUN_STATUS.PHASE_COMPLETE]: 'Stage complete; campaign can continue',
+  [RUN_STATUS.STOPPED]: 'Stopped by the operator or system',
+  [RUN_STATUS.INCOMPLETE]: 'Budget exhausted while work was in progress',
+} as const satisfies Record<RunStatus, string>;
+
+export function statusExplanation(status: unknown): string {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known'
+    ? RUN_STATUS_EXPLANATIONS[resolution.status]
+    : `${resolution.reason}; campaign actions are refused until this tool understands it`;
 }
 
 function stageDurationLowerBound(state: StoreState): number {
@@ -1388,7 +1425,7 @@ export function deriveRunWallClock(state: StoreState, nowMs: number): { millisec
       ? { milliseconds: Math.max(0, paused - started), partial: false }
       : { milliseconds: stageDurationLowerBound(state), partial: true };
   }
-  if (state.status === RUN_STATUS.PENDING) {
+  if (isPendingRunStatus(state.status)) {
     const attempted = Object.values(state.stages).some(stageWasExecuted) || Boolean(state.supervisor?.calls);
     return attempted
       ? { milliseconds: stageDurationLowerBound(state), partial: true }
@@ -1837,11 +1874,15 @@ function activityForCampaign(loaded: LoadedCampaign, readers: CampaignPageSource
   const issues = campaignRunIssues(loaded);
   for (const run of sortedRuns(loaded.runs)) {
     if (isTerminalRunStatus(run.state.status)) continue;
+    const statusResolution = resolveRunStatus(run.state.status);
     const title = deriveCampaignRunTitle(run.state.taskDescription, run.workflow.name ?? run.state.workflowName);
     const duration = deriveRunWallClock(run.state, nowMs);
     let worker: CampaignActivityItem['worker'] = 'none';
     let anomaly: string | undefined;
-    if (isRunningRunStatus(run.state.status)) {
+    if (statusResolution.kind === 'unknown') {
+      worker = 'unknown';
+      anomaly = statusResolution.reason;
+    } else if (isRunningRunStatus(run.state.status)) {
       try {
         const live = readers.hasLiveWorker(run.state.projectDir, run.state.runId);
         worker = live === null ? 'unknown' : live ? 'live' : 'missing';
@@ -2067,11 +2108,14 @@ function indexAttention(
 }
 
 function partialState(record: RunIndexRecord, projectDir: string): StoreState {
+  // Index text came from run.json. Preserve future values for presentation;
+  // statusExplanation resolves them explicitly instead of fabricating pending.
+  const archivedStatus = typeof record.status === 'string' ? record.status : RUN_STATUS.PENDING;
   return {
     runId: record.runId,
     workflowName: record.workflowName ?? '',
     projectDir,
-    status: (Object.values(RUN_STATUS) as string[]).includes(record.status ?? '') ? record.status as RunStatus : RUN_STATUS.PENDING,
+    status: archivedStatus as RunStatus,
     stages: {},
     startedAt: record.startedAt ?? '',
     completedAt: record.completedAt,
@@ -2084,7 +2128,7 @@ function partialState(record: RunIndexRecord, projectDir: string): StoreState {
 
 function activitySummary(states: StoreState[], readers: CampaignPageSources, incomplete = false): CampaignIndexRow['activity'] {
   const running = states.filter((state) => isRunningRunStatus(state.status));
-  const waiting = states.filter((state) => state.status === RUN_STATUS.PENDING || isPausedRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status));
+  const waiting = states.filter((state) => isPendingRunStatus(state.status) || isPausedRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status));
   let needsIntervention = states.some((state) => isPausedRunStatus(state.status));
   let status: CampaignSourceStatus = incomplete ? CAMPAIGN_SOURCE_STATUS.PARTIAL : CAMPAIGN_SOURCE_STATUS.COMPLETE;
   for (const state of running) {
@@ -2173,7 +2217,7 @@ export async function readCampaignOperatorIndex(
     const runIds = new Set(records.map((record) => record.runId));
     const activeRecords = records.filter((record) => {
       const status = record.status ?? '';
-      return isRunningRunStatus(status) || status === RUN_STATUS.PENDING || isPausedRunStatus(status) || isAwaitingApprovalRunStatus(status);
+      return isRunningRunStatus(status) || isPendingRunStatus(status) || isPausedRunStatus(status) || isAwaitingApprovalRunStatus(status);
     });
     const latestRecord = [...records].sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? '') || b.runId.localeCompare(a.runId))[0];
     const wantedIds = new Set([...activeRecords.map((record) => record.runId), ...(latestRecord ? [latestRecord.runId] : []), ...tasks.filter((task) => task.run_id && runIds.has(task.run_id)).map((task) => task.run_id!)]);
@@ -2198,7 +2242,16 @@ export async function readCampaignOperatorIndex(
       if (state.campaignAlert) localRunAttention.add(`alert:${state.runId}`);
     }
     const recentState = latestRecord ? fullStates.get(latestRecord.runId) ?? partialState(latestRecord, projectDir) : null;
-    const recentStatePartial = Boolean(latestRecord && !fullStates.has(latestRecord.runId));
+    const recentStatusResolution = recentState ? resolveRunStatus(recentState.status) : null;
+    const recentStatePartial = Boolean(latestRecord && !fullStates.has(latestRecord.runId))
+      || recentStatusResolution?.kind === 'unknown';
+    if (recentStatusResolution?.kind === 'unknown' && recentState) {
+      issues.push(issue(
+        'run-status-unrecognized',
+        'A recent campaign run has an unrecognized archived lifecycle status',
+        { runId: recentState.runId, detail: recentStatusResolution.reason },
+      ));
+    }
     let conclusion = recentState ? 'Outcome summary unavailable' : 'No run records yet';
     if (recentState) {
       const task = tasks.find((item) => item.run_id === recentState.runId);

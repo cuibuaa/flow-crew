@@ -12,6 +12,8 @@ import {
   isPendingStageStatus,
   isRunningStageStatus,
   isTerminalRunStatus,
+  requireKnownRunStatus,
+  resolveRunStatus,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
@@ -451,11 +453,18 @@ export class RunCancellationCoordinator {
     this.clearObservationBudget(target);
     const completedAt = this.now().toISOString();
     let preservedRunStatus: string | undefined;
+    let unrecognizedRunStatusReason: string | undefined;
     const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
     if (latestRun) {
       const latest = this.readRunTarget(latestRun.binding);
       if (latest) {
-        if (isTerminalRunStatus(latest.state.status)) {
+        const statusResolution = resolveRunStatus(latest.state.status);
+        if (statusResolution.kind === 'unknown') {
+          preservedRunStatus = typeof latest.state.status === 'string'
+            ? latest.state.status
+            : statusResolution.display;
+          unrecognizedRunStatusReason = statusResolution.reason;
+        } else if (isTerminalRunStatus(statusResolution.status)) {
           preservedRunStatus = latest.state.status;
         } else {
           this.updateRun(latest, completedAt);
@@ -494,7 +503,9 @@ export class RunCancellationCoordinator {
       observation,
       message: preserveTerminalTask
         ? 'Execution was already terminal; stop was confirmed and terminal state was preserved.'
-        : 'Cancellation confirmed: unit and scheduler process are stopped.',
+        : unrecognizedRunStatusReason
+          ? `Cancellation confirmed: unit and scheduler process are stopped; run lifecycle was preserved because ${unrecognizedRunStatusReason}.`
+          : 'Cancellation confirmed: unit and scheduler process are stopped.',
       ...(preservedRunStatus ? { preservedRunStatus } : {}),
     };
   }
@@ -746,11 +757,13 @@ export class RunCancellationCoordinator {
     const canonicalPath = resolve(join(runsRoot(), run.runId));
     if (canonicalPath === resolve(run.runPath)) {
       updateRunState(run.projectDir, run.runId, (state) => {
+        requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
         if (!isTerminalRunStatus(state.status)) mutateCancelledRun(state, completedAt);
       });
       return;
     }
     const state = JSON.parse(readFileSync(join(run.runPath, 'run.json'), 'utf-8')) as StoreState;
+    requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
     if (!isTerminalRunStatus(state.status)) {
       mutateCancelledRun(state, completedAt);
       atomicWrite(join(run.runPath, 'run.json'), JSON.stringify(state, null, 2));
