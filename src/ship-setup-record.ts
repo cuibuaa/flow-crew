@@ -62,7 +62,8 @@ function validResult(value: unknown): value is ValidationCommandResult {
     && FAILURE_IDENTITIES.has(item.failureIdentity as ValidationCommandResult['failureIdentity'])
     && (item.failureCount === undefined
       || (Number.isSafeInteger(item.failureCount) && (item.failureCount as number) >= 0))
-    && (item.exitCode === undefined || Number.isInteger(item.exitCode)));
+    && (item.exitCode === undefined || Number.isInteger(item.exitCode))
+    && (item.reason === undefined || typeof item.reason === 'string'));
 }
 
 function validCriterion(value: unknown): value is ValidationGateCriterion {

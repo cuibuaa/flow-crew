@@ -39,6 +39,7 @@ import {
 } from './ship-inputs.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
+import { parseTapOutput } from './tap-output.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -1203,57 +1204,10 @@ function parseTapPopulation(
   const output = [response.stdout, response.stderr]
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
     .join('\n');
-  if (/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/m.test(output)) {
-    return { reason: 'TAP output was truncated before population parsing' };
-  }
-  const lines = output.split(/\r?\n/);
-  if (lines.some((line) => /^\s*Bail out!/i.test(line))) {
-    return { reason: 'TAP output contains a bailout' };
-  }
-  const versions = lines.filter((line) => /^TAP version \d+\s*$/i.test(line));
-  if (versions.length !== 1) {
-    return { reason: versions.length === 0 ? 'output is not complete TAP (version line missing)' : 'TAP output has ambiguous version lines' };
-  }
-  const plans = lines.flatMap((line) => {
-    const match = /^(\d+)\.\.(\d+)(?:\s+#.*)?\s*$/.exec(line);
-    return match ? [{ start: Number(match[1]), end: Number(match[2]) }] : [];
-  });
-  if (plans.length !== 1) {
-    return { reason: plans.length === 0 ? 'TAP output has no top-level plan' : 'TAP output has multiple top-level plans' };
-  }
-  const records = new Map<number, string>();
-  for (const line of lines) {
-    const match = /^(?:not ok|ok)\s+(\d+)(?:\s*-\s*(.*?))?\s*$/i.exec(line);
-    if (!match) continue;
-    const ordinal = Number(match[1]);
-    if (!Number.isSafeInteger(ordinal) || records.has(ordinal)) {
-      return { reason: `TAP output has a duplicate or invalid top-level ordinal: ${match[1]}` };
-    }
-    const name = (match[2] ?? '').replace(/(?:^|\s+)#\s+(?:SKIP|TODO)\b.*$/i, '').trim();
-    if (!name) {
-      return { reason: `TAP top-level record ${match[1]} has no test name, so identity parity cannot be established` };
-    }
-    records.set(ordinal, name);
-  }
-  const [plan] = plans;
-  if (plan.start !== 1 || !Number.isSafeInteger(plan.end)) {
-    return { reason: `TAP output has an unsupported top-level plan ${plan.start}..${plan.end}` };
-  }
-  const expectedCount = plan.end === 0 ? 0 : plan.end;
-  if (records.size !== expectedCount) {
-    return { reason: `TAP records do not match the top-level plan: expected ${expectedCount}, observed ${records.size}` };
-  }
-  const expectedOrdinals = Array.from({ length: expectedCount }, (_, index) => index + 1);
-  const missingOrdinals = expectedOrdinals.filter((ordinal) => !records.has(ordinal));
-  const extraOrdinals = [...records.keys()].filter((ordinal) => ordinal < 1 || ordinal > plan.end);
-  if (missingOrdinals.length > 0 || extraOrdinals.length > 0) {
-    const missing = missingOrdinals.length > 0 ? ` missing ${missingOrdinals.join(', ')}` : '';
-    const extra = extraOrdinals.length > 0 ? ` extra ${extraOrdinals.join(', ')}` : '';
-    return { reason: `TAP records do not match the top-level plan${missing}${extra}` };
-  }
+  const parsed = parseTapOutput(output);
+  if (parsed.state !== 'complete') return { reason: parsed.reason };
   const occurrences = new Map<string, number>();
-  const identities = expectedOrdinals.map((ordinal) => {
-    const name = records.get(ordinal) ?? '';
+  const identities = parsed.records.map(({ name }) => {
     const occurrence = (occurrences.get(name) ?? 0) + 1;
     occurrences.set(name, occurrence);
     return `${occurrence}:${name}`;

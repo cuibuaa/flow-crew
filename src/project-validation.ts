@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { parseTapOutput } from './tap-output.js';
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type PackageRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -579,7 +580,13 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
   });
 });
 
-function failureFacts(output: string): { count?: number; identifiers: string[] } {
+interface FailureFacts {
+  count?: number;
+  identifiers: string[];
+  reason?: string;
+}
+
+function legacyFailureFacts(output: string): { count?: number; identifiers: string[] } {
   const identifiers = new Set<string>();
   const lines = output.split(/\r?\n/);
   for (const raw of lines) {
@@ -611,6 +618,46 @@ function failureFacts(output: string): { count?: number; identifiers: string[] }
   return { count, identifiers: [...identifiers].sort() };
 }
 
+function failureFacts(output: string): FailureFacts {
+  if (output.trim().length === 0) {
+    return {
+      identifiers: [],
+      reason: 'Failure identity is unavailable because the validation command produced no output',
+    };
+  }
+
+  const tap = parseTapOutput(output);
+  if (tap.state === 'complete') {
+    const failed = tap.records
+      .filter((record) => record.status === 'not_ok' && record.directive === undefined);
+    if (failed.length === 0) {
+      return {
+        identifiers: [],
+        reason: 'Failure identity is unavailable because complete TAP reported no failing top-level records despite the nonzero exit',
+      };
+    }
+    return {
+      count: tap.failureCount,
+      identifiers: [...new Set(failed.map((record) => record.name))],
+    };
+  }
+  if (tap.state === 'invalid') {
+    return {
+      identifiers: [],
+      reason: tap.cause === 'truncated'
+        ? `Failure identity is unavailable because validation output was truncated before parsing: ${tap.reason}`
+        : `Failure identity is unavailable because TAP output is structurally incomplete or inconsistent: ${tap.reason}`,
+    };
+  }
+
+  const legacy = legacyFailureFacts(output);
+  if (legacy.count !== undefined || legacy.identifiers.length > 0) return legacy;
+  return {
+    identifiers: [],
+    reason: 'Failure identity is unavailable because the non-TAP output format is not recognized',
+  };
+}
+
 function criterionFor(result: ValidationCommandResult): ValidationGateCriterion {
   if (result.state === 'passed') {
     return {
@@ -628,7 +675,7 @@ function criterionFor(result: ValidationCommandResult): ValidationGateCriterion 
       baselineFailureIdentifiers: result.failureIdentifiers,
       description: result.failureIdentity === 'known'
         ? `${result.role} may improve, but may not add a failing identifier or exceed the baseline failure count`
-        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure is unresolved, never treated as zero`,
+        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure is unresolved, never treated as zero. ${result.reason ?? 'Failure identification did not record a cause'}`,
     };
   }
   return {
@@ -681,10 +728,10 @@ export async function runProjectValidationBaseline(
       response = { exitCode: null, error: errorMessage(error) };
     }
     const durationMs = response.durationMs ?? Math.max(0, now() - started);
-    const output = boundedOutput(
-      [response.stdout, response.stderr].filter((value): value is string => Boolean(value)).join('\n'),
-      maxOutputBytes,
-    );
+    const rawOutput = [response.stdout, response.stderr]
+      .filter((value): value is string => Boolean(value))
+      .join('\n');
+    const output = boundedOutput(rawOutput, maxOutputBytes);
     if (response.error || response.exitCode === null) {
       results.push({
         role,
@@ -712,7 +759,10 @@ export async function runProjectValidationBaseline(
       });
       continue;
     }
-    const facts = response.exitCode === 0 ? { identifiers: [] as string[] } : failureFacts(output);
+    const facts: FailureFacts = response.exitCode === 0 ? { identifiers: [] } : failureFacts(rawOutput);
+    const failureIdentity = response.exitCode === 0
+      ? 'none'
+      : facts.count !== undefined || facts.identifiers.length > 0 ? 'known' : 'unknown';
     results.push({
       role,
       display: command.display,
@@ -722,7 +772,8 @@ export async function runProjectValidationBaseline(
       output,
       ...(facts.count === undefined ? {} : { failureCount: facts.count }),
       failureIdentifiers: facts.identifiers,
-      failureIdentity: response.exitCode === 0 ? 'none' : facts.count !== undefined || facts.identifiers.length > 0 ? 'known' : 'unknown',
+      failureIdentity,
+      ...(failureIdentity === 'unknown' ? { reason: facts.reason } : {}),
     });
   }
 

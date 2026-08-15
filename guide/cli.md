@@ -125,6 +125,11 @@ Every structured blocker includes `phase`, `reason`, and `repair` (plus the
 offending input/assertion when available); human output prints the repair
 directly beneath its refusal.
 
+For a failed command, setup extracts failure identity from the complete joined response before it
+byte-bounds only the stored output field. A long record therefore remains bounded while an early
+failure can still be identified. If the command runner's earlier streaming bound has already added
+an omission marker, setup refuses to identify failures from the surviving fragment.
+
 Test-population evidence has its own three-way result. Setup first prefers an exact Vitest, pytest,
 or explicitly declared-file collector. If that knowledge is unavailable, it runs the source test
 suite once and compares complete top-level TAP identities with the output observed from the target
@@ -149,6 +154,20 @@ configured runner and the reason. In that state the operator retains the executa
 and all its unchanged gates, but loses the assurance that the target covers the source population.
 A target command that cannot launch, including exit 127, remains a refusal regardless of population
 state.
+
+Generic population comparison and baseline failure extraction use the same fail-closed top-level
+TAP reader. It requires one version and plan, unique planned ordinals, non-empty names, no bailout
+or omission marker, and agreement between `not ok` records and a top-level `# fail` summary when one
+is printed. Population identities remain name-local and occurrence-qualified; baseline failure
+identifiers remain the failed top-level names.
+
+When a failed baseline is still `unknown`, its result records whether output was empty, truncated,
+structurally invalid TAP, or an unrecognized non-TAP format. The rendered
+`no_regression_from_baseline` gate repeats that cause and continues to leave a later failure
+unresolved rather than treating the baseline as zero. Identification remains unavailable for
+malformed/incomplete TAP, nested leaf detail beyond its top-level name, output lost at the runner's
+streaming cap, JSON/JUnit-only or custom-prose runners outside the three legacy adapters, unsupported
+ANSI/control variants, and failures with no output.
 
 ## `flowcrew land`
 

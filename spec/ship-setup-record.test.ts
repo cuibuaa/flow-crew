@@ -77,6 +77,22 @@ describe('ship-setup ready-record baseline reader', () => {
       .toBeUndefined();
   });
 
+  it('round-trips the recorded cause of an unknown failed baseline', () => {
+    const item = fixture();
+    const result = item.validationBaseline.results[0];
+    result.failureIdentifiers = [];
+    result.failureIdentity = 'unknown';
+    result.reason = 'Failure identity is unavailable because the non-TAP output format is not recognized';
+    delete result.failureCount;
+    item.validationBaseline.gateCriteria[0].baselineFailureIdentifiers = [];
+    delete item.validationBaseline.gateCriteria[0].baselineFailureCount;
+    item.validationBaseline.gateCriteria[0].description = `test remains unresolved. ${result.reason}`;
+    writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
+
+    expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
+      .toEqual(item.validationBaseline);
+  });
+
   it.each([
     ['record version mismatch', (record: Record<string, unknown>) => { record.version = 2; }],
     ['not ready', (record: Record<string, unknown>) => { record.state = 'refused'; }],
@@ -99,6 +115,15 @@ describe('ship-setup ready-record baseline reader', () => {
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toBeUndefined();
     writeFileSync(item.recordPath, JSON.stringify({ ...item.record, validationBaseline: { version: 1 } }), 'utf-8');
+    expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
+      .toBeUndefined();
+  });
+
+  it('rejects a non-string validation result reason', () => {
+    const item = fixture();
+    (item.validationBaseline.results[0] as unknown as Record<string, unknown>).reason = 42;
+    writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
+
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toBeUndefined();
   });

@@ -672,6 +672,20 @@ tests do not create the guarded risk of silently running fewer tests. A missing 
 still refuses, and a rename reports the old identity as missing and the new one as extra. Exact
 collector identity and strict-parity behavior are unchanged.
 
+The population comparison and baseline failure extraction share one structural TAP reader. It
+accepts only one version, one column-zero plan, a complete set of uniquely numbered, non-empty
+column-zero records, and a matching top-level `# fail` summary when that summary is present.
+Indented TAP remains nested evidence and is not promoted to a top-level identity. Population
+comparison occurrence-qualifies every complete record; failure extraction records the names of
+the complete reader's `not ok` records. Those are deliberately different conclusions over the
+same validated syntax.
+
+Failure extraction runs against the complete joined command response available at the baseline
+handoff, before only the persisted `output` field is byte-bounded. The ready record therefore stays
+bounded without hiding an early failure from identification. The command runner has an earlier,
+independent streaming bound; if that bound is reached, its omission marker makes the structural
+reader refuse the partial output instead of trusting whichever records survived.
+
 Name-local identity cannot prove execution order or detect a name-preserving body change. For
 duplicates it can prove multiplicity, but it cannot identify which same-named body was added,
 removed, or changed. Truncated, ambiguous, bailed-out, non-TAP output, or records without names
@@ -679,6 +693,18 @@ instead produce a ready record with test-population state `unverified`, the conf
 the reason source coverage could not be established. This is the same modelling choice as
 `research.feasibility: not_computable`: an underivable assurance is first-class and reason-bearing,
 not silently converted into either success or failure.
+
+A failed validation result whose failure identity remains `unknown` carries a reason. Empty output,
+capture truncation, structurally invalid TAP, and an unrecognized non-TAP format are distinct causes;
+the same cause is persisted on the result and appended to the human
+`no_regression_from_baseline` gate line. The gate remains conservative: a later failure is
+unresolved and is never compared with an invented zero baseline.
+
+Failure identification still cannot see malformed or incomplete TAP, output lost at the earlier
+streaming bound, nested leaf failures beyond the complete top-level record name, non-TAP runners
+outside the retained `FAIL`/`FAILED`, cross-mark, and compiler-diagnostic adapters, ANSI/control
+variants those adapters do not normalize, JSON- or JUnit-only reports, custom prose, or failures
+that emit no output. These remain reason-bearing `unknown` results rather than guessed identities.
 
 The costs and assurances differ by state:
 

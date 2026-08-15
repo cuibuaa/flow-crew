@@ -426,11 +426,16 @@ describe('configuration-driven project validation baseline', () => {
       runCommand: () => ({ exitCode: 9, stderr: 'opaque failure; 0 errors were classified' }),
     });
     const test = baseline.results.find((entry) => entry.role === 'test');
-    expect(test).toMatchObject({ state: 'failed', failureIdentity: 'unknown' });
+    expect(test).toMatchObject({
+      state: 'failed',
+      failureIdentity: 'unknown',
+      reason: expect.stringContaining('non-TAP output format is not recognized'),
+    });
+    if (!test?.reason) throw new Error('unknown failure cause was not recorded');
     expect(test?.failureCount).toBeUndefined();
     expect(baseline.gateCriteria.find((entry) => entry.role === 'test')).toMatchObject({
       rule: 'no_regression_from_baseline',
-      description: expect.stringContaining('unresolved'),
+      description: expect.stringContaining(test.reason),
     });
   });
 

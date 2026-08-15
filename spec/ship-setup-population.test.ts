@@ -582,7 +582,14 @@ describe('ship-setup test population integrity', () => {
       testPopulation: { state: 'matched', source: { count: 2 }, target: { count: 2 } },
       validationBaseline: {
         results: expect.arrayContaining([
-          expect.objectContaining({ role: 'test', state: 'failed', exitCode: 1 }),
+          expect.objectContaining({
+            role: 'test',
+            state: 'failed',
+            exitCode: 1,
+            failureCount: 1,
+            failureIdentifiers: ['fails'],
+            failureIdentity: 'known',
+          }),
         ]),
         gateCriteria: expect.arrayContaining([
           expect.objectContaining({ role: 'test', rule: 'no_regression_from_baseline' }),
@@ -591,10 +598,52 @@ describe('ship-setup test population integrity', () => {
     });
   });
 
+  it('records and renders the cause of an unknown failed baseline without changing its gate', async () => {
+    const briefPath = writeRunnerProject('custom-test-runner');
+    const targetDir = join(root, 'target-opaque-red');
+    const stdout = new Capture();
+    const stderr = new Capture();
+    const runner = vi.fn<ValidationCommandRunner>(() => ({
+      exitCode: 1,
+      stderr: 'custom runner stopped without a recognized failure identity',
+      durationMs: 13,
+    }));
+
+    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
+      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
+        copyManifest(request.targetDir);
+        return { exitCode: 0 };
+      }),
+      runValidationCommand: runner,
+      globalDir: () => join(root, 'state'),
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.value).toBe('');
+    expect(stdout.value).toContain('gate test: no_regression_from_baseline');
+    expect(stdout.value).toContain('non-TAP output format is not recognized');
+    const records = readdirSync(join(root, 'state', 'ship-setups'));
+    expect(records).toHaveLength(1);
+    const record = JSON.parse(readFileSync(join(root, 'state', 'ship-setups', records[0]), 'utf-8'));
+    expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
+      role: 'test',
+      state: 'failed',
+      failureIdentifiers: [],
+      failureIdentity: 'unknown',
+      reason: expect.stringContaining('non-TAP output format is not recognized'),
+    }));
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['truncated', '[... 512 earlier bytes omitted ...]\nTAP version 13\nok 2 - beta\n1..2'],
     ['incomplete', 'TAP version 13\nok 1 - alpha\n1..2'],
     ['ambiguous', 'TAP version 13\nok 1 - alpha\n1..1\n1..1'],
+    ['bailed-out', 'TAP version 13\nnot ok 1 - alpha\nBail out! stopped\n1..1\n# fail 1'],
+    ['plan-less', 'TAP version 13\nnot ok 1 - alpha\n# fail 1'],
+    ['summary-contradiction', 'TAP version 13\nnot ok 1 - alpha\n1..1\n# fail 0'],
   ])('degrades %s TAP output to a recorded unverified state', async (_label, output) => {
     const briefPath = writeRunnerProject('node --test');
     const targetDir = join(root, `target-${_label}`);
@@ -614,7 +663,7 @@ describe('ship-setup test population integrity', () => {
       testPopulation: {
         state: 'unverified',
         runner: { source: { display: 'node --test' } },
-        reason: expect.stringMatching(/truncated|records do not match|multiple top-level plans/),
+        reason: expect.stringMatching(/truncated|records do not match|multiple top-level plans|bailout|no top-level plan|failure summary does not match/),
       },
     });
   });
