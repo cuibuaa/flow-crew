@@ -251,10 +251,33 @@ describe('planner Reality-Gate check preflight', () => {
 
     expect(report.blockingTierFindings).toContainEqual(expect.objectContaining({
       code: 'hard_check_cannot_pass',
-      message: expect.stringContaining('python -m pytest tests'),
-      evidence: expect.stringContaining('tests/test_gate.py::test_known_1'),
+      message: expect.stringMatching(/python -m pytest tests.*complete failure evidence/),
+      evidence: expect.stringMatching(/baseline_failure_evidence=complete.*tests\/test_gate\.py::test_known_1/),
     }));
     expect(report.blockingTierFindings[0].message).toMatch(/compare .*fail|omit .*validation/i);
+  });
+
+  it('labels partial baseline identities as a lower bound and its count as observed evidence', () => {
+    const baseline = failingValidationBaseline(
+      'python -m pytest tests',
+      ['tests/test_gate.py::test_retained'],
+    );
+    baseline.results[0].failureEvidence = 'partial';
+    baseline.results[0].reason = 'validation output was truncated';
+    baseline.gateCriteria[0].baselineFailureEvidence = 'partial';
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+      name: 'project validation remains acceptable',
+      type: 'exec-script-exit-zero',
+      params: { script: 'python -m pytest tests' },
+    }), { validationBaseline: baseline });
+    const finding = report.blockingTierFindings.find(({ code }) => code === 'hard_check_cannot_pass');
+
+    expect(finding?.message).toMatch(/partial failure evidence.*observed partial-evidence count of 1.*not a proven whole-run count/i);
+    expect(finding?.message).toMatch(/identities \(lower bound\).*red-to-red comparison must remain unresolved/i);
+    expect(finding?.evidence).toContain('baseline_failure_evidence=partial');
+    expect(finding?.evidence).toContain('baseline_observed_failure_count=1');
+    expect(finding?.evidence).toContain('baseline_failure_identities_lower_bound=');
+    expect(finding?.evidence).not.toContain('baseline_failure_count=');
   });
 
   it.each([

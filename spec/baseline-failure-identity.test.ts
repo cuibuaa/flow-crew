@@ -69,6 +69,7 @@ describe('baseline failure identity extraction', () => {
       failureCount: 10,
       failureIdentifiers: names,
       failureIdentity: 'known',
+      failureEvidence: 'complete',
     });
   });
 
@@ -91,6 +92,7 @@ describe('baseline failure identity extraction', () => {
       failureCount: 1,
       failureIdentifiers: ['early native failure'],
       failureIdentity: 'known',
+      failureEvidence: 'complete',
     });
     expect(result.output).toMatch(/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/);
     expect(result.output).not.toContain('not ok 1 - early native failure');
@@ -113,6 +115,7 @@ describe('baseline failure identity extraction', () => {
       failureCount: 1,
       failureIdentifiers: ['actual failure'],
       failureIdentity: 'known',
+      failureEvidence: 'complete',
     });
   });
 
@@ -139,7 +142,70 @@ describe('baseline failure identity extraction', () => {
       failureCount: 1,
       failureIdentifiers: [identifier],
       failureIdentity: 'known',
+      failureEvidence: 'complete',
     });
+  });
+
+  it('recovers a retained Vitest failure and observed count as partial evidence after truncation', async () => {
+    const identifier = 'spec/portable-scenario.test.ts > Scenario A: retained failure identity';
+    const output = [
+      '[... 512 earlier bytes omitted ...]',
+      `FAIL  ${identifier}`,
+      'Test Files  1 failed | 158 passed (159)',
+      'Tests  1 failed | 1665 passed | 4 skipped (1670)',
+    ].join('\n');
+
+    const baseline = await baselineFor({ exitCode: 1, stdout: output });
+    const result = testResult(baseline);
+    const criterion = baseline.gateCriteria.find(({ role }) => role === 'test');
+
+    expect(result).toMatchObject({
+      failureCount: 1,
+      failureIdentifiers: [identifier],
+      failureIdentity: 'known',
+      failureEvidence: 'partial',
+      reason: expect.stringMatching(/recovered.*partial.*truncated/i),
+    });
+    expect(criterion).toMatchObject({
+      baselineFailureCount: 1,
+      baselineFailureIdentifiers: [identifier],
+      baselineFailureEvidence: 'partial',
+      description: expect.stringMatching(/partial.*lower bound.*not a proven whole-run count.*unresolved/i),
+    });
+    expect(evaluateValidationDelta(baseline, [result]).find(({ role }) => role === 'test'))
+      .toMatchObject({ state: 'unresolved', newFailureIdentifiers: [] });
+  });
+
+  it('refuses red-to-red conclusions when either side has partial evidence, while green transitions stay decisive', async () => {
+    const partialBaseline = await baselineFor({
+      exitCode: 1,
+      stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/partial.test.ts\nTests 1 failed',
+    });
+    const completeBaseline = await baselineFor({
+      exitCode: 1,
+      stdout: 'FAIL spec/partial.test.ts\nTests 1 failed',
+    });
+    const partial = testResult(partialBaseline);
+    const complete = testResult(completeBaseline);
+    const passed: ValidationCommandResult = {
+      role: 'test',
+      state: 'passed',
+      exitCode: 0,
+      durationMs: 1,
+      output: '',
+      failureIdentifiers: [],
+      failureIdentity: 'none',
+    };
+    const greenBaseline = await baselineFor({ exitCode: 0 });
+
+    expect(evaluateValidationDelta(partialBaseline, [complete]).find(({ role }) => role === 'test'))
+      .toMatchObject({ state: 'unresolved', reason: expect.stringContaining('partial') });
+    expect(evaluateValidationDelta(completeBaseline, [partial]).find(({ role }) => role === 'test'))
+      .toMatchObject({ state: 'unresolved', reason: expect.stringContaining('partial') });
+    expect(evaluateValidationDelta(partialBaseline, [passed]).find(({ role }) => role === 'test'))
+      .toMatchObject({ state: 'pass', reason: expect.stringContaining('improved to green') });
+    expect(evaluateValidationDelta(greenBaseline, [partial]).find(({ role }) => role === 'test'))
+      .toMatchObject({ state: 'regression', reason: expect.stringContaining('green') });
   });
 
   it('keeps opaque non-TAP unknown, records its cause, and leaves the delta unresolved', async () => {
@@ -177,13 +243,16 @@ describe('baseline failure identity extraction', () => {
   });
 
   it('distinguishes empty output from opaque output', async () => {
-    const result = testResult(await baselineFor({ exitCode: 1 }));
+    const baseline = await baselineFor({ exitCode: 1 });
+    const result = testResult(baseline);
 
     expect(result).toMatchObject({
       failureIdentifiers: [],
       failureIdentity: 'unknown',
       reason: expect.stringContaining('produced no output'),
     });
+    expect(baseline.gateCriteria.find(({ role }) => role === 'test')?.description)
+      .toContain(result.reason);
   });
 
   it.each([
@@ -194,12 +263,12 @@ describe('baseline failure identity extraction', () => {
     },
     {
       label: 'bailed out',
-      output: 'TAP version 13\nnot ok 1 - partial\nFAIL spec/must-not-leak.test.ts\nBail out! infrastructure stopped\n1..1\n# fail 1',
+      output: 'TAP version 13\nnot ok 1 - partial\nBail out! infrastructure stopped\n1..1\n# fail 1',
       cause: /contains a bailout/,
     },
     {
       label: 'plan-less',
-      output: 'TAP version 13\nnot ok 1 - partial\nFAIL spec/must-not-leak.test.ts',
+      output: 'TAP version 13\nnot ok 1 - partial',
       cause: /no top-level plan/,
     },
     {
@@ -218,7 +287,8 @@ describe('baseline failure identity extraction', () => {
       cause: /failure summary does not match/,
     },
   ])('fails closed for $label TAP', async ({ output, cause }) => {
-    const result = testResult(await baselineFor({ exitCode: 1, stdout: output }));
+    const baseline = await baselineFor({ exitCode: 1, stdout: output });
+    const result = testResult(baseline);
 
     expect(result).toMatchObject({
       failureIdentifiers: [],
@@ -226,13 +296,34 @@ describe('baseline failure identity extraction', () => {
       reason: expect.stringMatching(cause),
     });
     expect(result.failureCount).toBeUndefined();
+    expect(baseline.gateCriteria.find(({ role }) => role === 'test')?.description)
+      .toContain(result.reason);
+  });
+
+  it('retains a structural TAP cause while using complete line-oriented evidence from the full buffer', async () => {
+    const baseline = await baselineFor({
+      exitCode: 1,
+      stdout: 'TAP version 13\nnot ok 1 - incomplete TAP record\nFAIL spec/recovered.test.ts',
+    });
+    const result = testResult(baseline);
+
+    expect(result).toMatchObject({
+      failureCount: 1,
+      failureIdentifiers: ['spec/recovered.test.ts'],
+      failureIdentity: 'known',
+      failureEvidence: 'complete',
+      reason: expect.stringMatching(/recovered.*structural TAP.*no top-level plan/i),
+    });
+    expect(baseline.gateCriteria.find(({ role }) => role === 'test')?.description)
+      .toMatch(/no top-level plan/);
   });
 
   it('does not claim known-zero failures when a nonzero command emits complete passing TAP', async () => {
-    const result = testResult(await baselineFor({
+    const baseline = await baselineFor({
       exitCode: 1,
       stdout: 'TAP version 13\nok 1 - reported pass\n1..1\n# fail 0',
-    }));
+    });
+    const result = testResult(baseline);
 
     expect(result).toMatchObject({
       failureIdentifiers: [],
@@ -240,5 +331,7 @@ describe('baseline failure identity extraction', () => {
       reason: expect.stringContaining('no failing top-level records despite the nonzero exit'),
     });
     expect(result.failureCount).toBeUndefined();
+    expect(baseline.gateCriteria.find(({ role }) => role === 'test')?.description)
+      .toContain(result.reason);
   });
 });

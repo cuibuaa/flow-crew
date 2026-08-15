@@ -684,7 +684,9 @@ Failure extraction runs against the complete joined command response available a
 handoff, before only the persisted `output` field is byte-bounded. The ready record therefore stays
 bounded without hiding an early failure from identification. The command runner has an earlier,
 independent streaming bound; if that bound is reached, its omission marker makes the structural
-reader refuse the partial output instead of trusting whichever records survived.
+reader refuse a whole-run TAP conclusion. Failure extraction then applies its line-oriented
+`FAIL`/`FAILED`, cross-mark, and compiler-diagnostic adapters to the retained lines. Facts recovered
+there are kept instead of being hidden by the structural refusal.
 
 Name-local identity cannot prove execution order or detect a name-preserving body change. For
 duplicates it can prove multiplicity, but it cannot identify which same-named body was added,
@@ -700,11 +702,28 @@ the same cause is persisted on the result and appended to the human
 `no_regression_from_baseline` gate line. The gate remains conservative: a later failure is
 unresolved and is never compared with an invented zero baseline.
 
-Failure identification still cannot see malformed or incomplete TAP, output lost at the earlier
-streaming bound, nested leaf failures beyond the complete top-level record name, non-TAP runners
-outside the retained `FAIL`/`FAILED`, cross-mark, and compiler-diagnostic adapters, ANSI/control
-variants those adapters do not normalize, JSON- or JUnit-only reports, custom prose, or failures
-that emit no output. These remain reason-bearing `unknown` results rather than guessed identities.
+Known failed results written by the current implementation also carry `failureEvidence`, either
+`complete` or `partial`; the derived criterion carries the same value as
+`baselineFailureEvidence`. Older version-1 records without these additive fields retain their prior
+complete-known comparison behavior. If an omission marker is present and a line adapter finds a
+failure, the result is `known` with `failureEvidence: partial` and retains a recovery/truncation
+reason. Its identifier list is only a lower bound. A parsed summary count is preserved as observed
+evidence, but it is not asserted to describe the whole run. Human gate and preflight evidence label
+both facts accordingly.
+
+Red-to-red delta evaluation requires complete evidence on both sides. If either side is partial, it
+returns unresolved: a partial identity cannot support identifier-set equality or subset, absence of
+new failures, count equality, count increase or decrease, or an unchanged-red pass. A current lower
+bound may omit a genuinely new failure; a baseline lower bound may contain an identity that would
+only appear new against the retained subset. Green-to-red remains a regression and red-to-green
+remains a pass because those transitions do not depend on comparing two failure inventories.
+
+Failure identification still cannot see malformed or incomplete TAP without a recognized failure
+line, bytes wholly lost at the earlier streaming bound, nested leaf failures beyond the complete
+top-level record name, non-TAP runners outside the retained `FAIL`/`FAILED`, cross-mark, and
+compiler-diagnostic adapters, ANSI/control variants those adapters do not normalize, JSON- or
+JUnit-only reports, custom prose, or failures that emit no output. These remain reason-bearing
+`unknown` results rather than guessed identities.
 
 The costs and assurances differ by state:
 

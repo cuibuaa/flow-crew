@@ -5,6 +5,7 @@ import { parseTapOutput } from './tap-output.js';
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type PackageRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
+export type FailureEvidence = 'complete' | 'partial';
 
 export interface ValidationFileSystem {
   exists(path: string): boolean;
@@ -70,6 +71,7 @@ export interface ValidationCommandResult {
   failureCount?: number;
   failureIdentifiers: string[];
   failureIdentity: 'known' | 'unknown' | 'none';
+  failureEvidence?: FailureEvidence;
   reason?: string;
 }
 
@@ -78,6 +80,7 @@ export interface ValidationGateCriterion {
   rule: 'must_remain_green' | 'no_regression_from_baseline' | 'baseline_unresolved' | 'not_configured';
   baselineFailureCount?: number;
   baselineFailureIdentifiers: string[];
+  baselineFailureEvidence?: FailureEvidence;
   description: string;
 }
 
@@ -583,6 +586,7 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
 interface FailureFacts {
   count?: number;
   identifiers: string[];
+  evidence?: FailureEvidence;
   reason?: string;
 }
 
@@ -639,9 +643,20 @@ function failureFacts(output: string): FailureFacts {
     return {
       count: tap.failureCount,
       identifiers: [...new Set(failed.map((record) => record.name))],
+      evidence: 'complete',
     };
   }
   if (tap.state === 'invalid') {
+    const legacy = legacyFailureFacts(output);
+    if (legacy.count !== undefined || legacy.identifiers.length > 0) {
+      return {
+        ...legacy,
+        evidence: tap.cause === 'truncated' ? 'partial' : 'complete',
+        reason: tap.cause === 'truncated'
+          ? `Failure identity was recovered from retained lines as partial evidence because validation output was truncated before structural TAP parsing: ${tap.reason}`
+          : `Failure identity was recovered from line-oriented output after structural TAP parsing could not conclude: ${tap.reason}`,
+      };
+    }
     return {
       identifiers: [],
       reason: tap.cause === 'truncated'
@@ -651,7 +666,9 @@ function failureFacts(output: string): FailureFacts {
   }
 
   const legacy = legacyFailureFacts(output);
-  if (legacy.count !== undefined || legacy.identifiers.length > 0) return legacy;
+  if (legacy.count !== undefined || legacy.identifiers.length > 0) {
+    return { ...legacy, evidence: 'complete' };
+  }
   return {
     identifiers: [],
     reason: 'Failure identity is unavailable because the non-TAP output format is not recognized',
@@ -668,13 +685,19 @@ function criterionFor(result: ValidationCommandResult): ValidationGateCriterion 
     };
   }
   if (result.state === FAILED_VALIDATION_STATE) {
+    const failureEvidence = result.failureEvidence ?? 'complete';
     return {
       role: result.role,
       rule: 'no_regression_from_baseline',
       ...(result.failureCount === undefined ? {} : { baselineFailureCount: result.failureCount }),
       baselineFailureIdentifiers: result.failureIdentifiers,
+      ...(result.failureEvidence === undefined
+        ? {}
+        : { baselineFailureEvidence: result.failureEvidence }),
       description: result.failureIdentity === 'known'
-        ? `${result.role} may improve, but may not add a failing identifier or exceed the baseline failure count`
+        ? failureEvidence === 'partial'
+          ? `${result.role} failed with partial evidence: retained failing identifiers are a lower bound and any observed count is not a proven whole-run count; a later failure remains unresolved because red-to-red comparisons require complete evidence. ${result.reason ?? 'Validation output was incomplete'}`
+          : `${result.role} may improve, but may not add a failing identifier or exceed the baseline failure count${result.reason ? `. ${result.reason}` : ''}`
         : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure is unresolved, never treated as zero. ${result.reason ?? 'Failure identification did not record a cause'}`,
     };
   }
@@ -773,7 +796,8 @@ export async function runProjectValidationBaseline(
       ...(facts.count === undefined ? {} : { failureCount: facts.count }),
       failureIdentifiers: facts.identifiers,
       failureIdentity,
-      ...(failureIdentity === 'unknown' ? { reason: facts.reason } : {}),
+      ...(failureIdentity === 'known' ? { failureEvidence: facts.evidence ?? 'complete' } : {}),
+      ...(facts.reason === undefined ? {} : { reason: facts.reason }),
     });
   }
 
@@ -810,6 +834,14 @@ export function evaluateValidationDelta(
     }
     if (prior.failureIdentity === 'unknown') {
       return { role: prior.role, state: 'unresolved', reason: 'Baseline failure identity/count was unavailable', newFailureIdentifiers: [] };
+    }
+    if (prior.failureEvidence === 'partial' || next.failureEvidence === 'partial') {
+      return {
+        role: prior.role,
+        state: 'unresolved',
+        reason: 'Baseline or current failure evidence is partial; red-to-red identifier and count comparisons require complete evidence',
+        newFailureIdentifiers: [],
+      };
     }
     const priorIds = new Set(prior.failureIdentifiers);
     const newFailureIdentifiers = next.failureIdentifiers.filter((identifier) => !priorIds.has(identifier));

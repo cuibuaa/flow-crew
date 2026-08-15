@@ -73,6 +73,8 @@ describe('ship-setup ready-record baseline reader', () => {
     const item = fixture();
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toEqual(item.validationBaseline);
+    expect(item.validationBaseline.results[0].failureEvidence).toBeUndefined();
+    expect(item.validationBaseline.gateCriteria[0].baselineFailureEvidence).toBeUndefined();
     expect(readShipSetupReadyValidationBaseline(item.projectDir, `${item.brief}\n`, item.globalRoot))
       .toBeUndefined();
   });
@@ -91,6 +93,44 @@ describe('ship-setup ready-record baseline reader', () => {
 
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toEqual(item.validationBaseline);
+  });
+
+  it('round-trips partial known evidence and its matching gate marker', () => {
+    const item = fixture();
+    const result = item.validationBaseline.results[0];
+    result.failureEvidence = 'partial';
+    result.reason = 'Failure identity was recovered from retained lines after output truncation';
+    item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
+    item.validationBaseline.gateCriteria[0].description = 'retained identities are a lower bound';
+    writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
+
+    expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
+      .toEqual(item.validationBaseline);
+  });
+
+  it.each([
+    ['partial result without a cause', (item: ReturnType<typeof fixture>) => {
+      item.validationBaseline.results[0].failureEvidence = 'partial';
+      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
+    }],
+    ['result and criterion evidence mismatch', (item: ReturnType<typeof fixture>) => {
+      item.validationBaseline.results[0].failureEvidence = 'complete';
+      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
+    }],
+    ['evidence marker on an unknown result', (item: ReturnType<typeof fixture>) => {
+      const result = item.validationBaseline.results[0];
+      result.failureIdentity = 'unknown';
+      result.failureEvidence = 'partial';
+      result.reason = 'unavailable';
+      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
+    }],
+  ])('rejects inconsistent failure evidence: %s', (_label, mutate) => {
+    const item = fixture();
+    mutate(item);
+    writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
+
+    expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
+      .toBeUndefined();
   });
 
   it.each([

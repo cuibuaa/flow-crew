@@ -1066,14 +1066,18 @@ function rawValidationEvidence(item: RawValidationStatusEvidence): string {
   const identities = item.result.failureIdentifiers.length > 0
     ? item.result.failureIdentifiers
     : item.criterion.baselineFailureIdentifiers;
+  const evidence = item.result.failureIdentity === 'known'
+    ? item.result.failureEvidence ?? item.criterion.baselineFailureEvidence ?? 'complete'
+    : 'unknown';
   const shown = identities.slice(0, 20);
   const omitted = identities.length - shown.length;
   return [
     `control_flow=${item.controlFlow}`,
     `role=${item.command.role}`,
     `command=${JSON.stringify(item.command.display.slice(0, 240))}`,
-    `baseline_failure_count=${count ?? 'unknown'}`,
-    `baseline_failure_identities=${JSON.stringify(shown.map((identity) => identity.slice(0, 240)))}${omitted > 0 ? ` (+${omitted} more)` : ''}`,
+    `baseline_failure_evidence=${evidence}`,
+    `${evidence === 'partial' ? 'baseline_observed_failure_count' : 'baseline_failure_count'}=${count ?? 'unknown'}`,
+    `${evidence === 'partial' ? 'baseline_failure_identities_lower_bound' : 'baseline_failure_identities'}=${JSON.stringify(shown.map((identity) => identity.slice(0, 240)))}${omitted > 0 ? ` (+${omitted} more)` : ''}`,
   ].join('; ');
 }
 
@@ -1239,15 +1243,24 @@ export function inspectRealityChecks(
         const identities = cannotPass.result.failureIdentifiers.length > 0
           ? cannotPass.result.failureIdentifiers
           : cannotPass.criterion.baselineFailureIdentifiers;
+        const evidence = cannotPass.result.failureIdentity === 'known'
+          ? cannotPass.result.failureEvidence ?? cannotPass.criterion.baselineFailureEvidence ?? 'complete'
+          : 'unknown';
+        const partial = evidence === 'partial';
         const shownIdentities = identities.slice(0, 20);
         const identitySummary = shownIdentities.length === 0
           ? ''
-          : ` Recorded failing identities: ${shownIdentities.map((identity) => JSON.stringify(identity.slice(0, 240))).join(', ')}${identities.length > shownIdentities.length ? ` (+${identities.length - shownIdentities.length} more)` : ''}.`;
+          : ` ${partial ? 'Retained failing identities (lower bound)' : 'Recorded failing identities'}: ${shownIdentities.map((identity) => JSON.stringify(identity.slice(0, 240))).join(', ')}${identities.length > shownIdentities.length ? ` (+${identities.length - shownIdentities.length} more)` : ''}.`;
+        const countSummary = count === undefined
+          ? ''
+          : partial
+            ? ` and an observed partial-evidence count of ${count} (not a proven whole-run count)`
+            : ` and ${count} failure${count === 1 ? '' : 's'}`;
         findings.push(finding(
           declaration,
           checkIndex,
           'hard_check_cannot_pass',
-          `The hard check makes its verdict the raw exit status of recorded ${cannotPass.command.role} command ${JSON.stringify(cannotPass.command.display.slice(0, 240))}, but that command has a failing recorded baseline${count === undefined ? '' : ` with ${count} failure${count === 1 ? '' : 's'}`} under no_regression_from_baseline.${identitySummary} Compare current failure identities with the recorded baseline, or omit the redundant validation check.`,
+          `The hard check makes its verdict the raw exit status of recorded ${cannotPass.command.role} command ${JSON.stringify(cannotPass.command.display.slice(0, 240))}, but that command has a failing recorded baseline with ${evidence} failure evidence${countSummary} under no_regression_from_baseline.${identitySummary}${partial ? ' The recorded failure evidence is partial, so a red-to-red comparison must remain unresolved.' : ''} Compare current failure identities with the recorded baseline, or omit the redundant validation check.`,
           rawValidationEvidence(cannotPass),
         ));
       }

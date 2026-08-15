@@ -128,7 +128,10 @@ directly beneath its refusal.
 For a failed command, setup extracts failure identity from the complete joined response before it
 byte-bounds only the stored output field. A long record therefore remains bounded while an early
 failure can still be identified. If the command runner's earlier streaming bound has already added
-an omission marker, setup refuses to identify failures from the surviving fragment.
+an omission marker, the structural TAP reader still refuses to make a whole-run conclusion, but
+the three line-oriented adapters inspect the retained lines. A match is recorded with
+`failureEvidence: partial`: retained identifiers are a lower bound, and a summary count is an
+observed count rather than a proven whole-run count. The truncation cause remains on the result.
 
 Test-population evidence has its own three-way result. Setup first prefers an exact Vitest, pytest,
 or explicitly declared-file collector. If that knowledge is unavailable, it runs the source test
@@ -158,15 +161,23 @@ state.
 Generic population comparison and baseline failure extraction use the same fail-closed top-level
 TAP reader. It requires one version and plan, unique planned ordinals, non-empty names, no bailout
 or omission marker, and agreement between `not ok` records and a top-level `# fail` summary when one
-is printed. Population identities remain name-local and occurrence-qualified; baseline failure
-identifiers remain the failed top-level names.
+is printed. Population identities remain name-local and occurrence-qualified; complete baseline
+failure identifiers remain the failed top-level names. Failure extraction alone can fall back to
+the `FAIL`/`FAILED`, cross-mark, and compiler-diagnostic line adapters after the structural reader
+refuses. Those adapters report only what their individual matched lines establish.
 
 When a failed baseline is still `unknown`, its result records whether output was empty, truncated,
 structurally invalid TAP, or an unrecognized non-TAP format. The rendered
 `no_regression_from_baseline` gate repeats that cause and continues to leave a later failure
-unresolved rather than treating the baseline as zero. Identification remains unavailable for
-malformed/incomplete TAP, nested leaf detail beyond its top-level name, output lost at the runner's
-streaming cap, JSON/JUnit-only or custom-prose runners outside the three legacy adapters, unsupported
+unresolved rather than treating the baseline as zero. Truncated or structurally invalid TAP remains
+`unknown` only when no line adapter recovers a failure fact. A recovered truncated result is
+`known` and `partial`, and its gate says that a later red-to-red comparison is unresolved. If either
+side of such a comparison is partial, the gate cannot conclude identifier equality or subset,
+absence of new failures, count equality or increase/decrease, or an unchanged-red pass. Green to
+red remains a regression and red to green remains a pass because neither decision depends on a
+complete red-to-red inventory. Identification remains unavailable for malformed/incomplete TAP
+without a recognized failure line, nested leaf detail beyond its top-level name, entirely lost
+output, JSON/JUnit-only or custom-prose runners outside the three legacy adapters, unsupported
 ANSI/control variants, and failures with no output.
 
 ## `flowcrew land`

@@ -15,6 +15,7 @@ const RESULT_STATES = new Set<ValidationCommandResult['state']>([
   'passed', 'failed', 'launch_error', 'not_configured', 'unresolved',
 ]);
 const FAILURE_IDENTITIES = new Set<ValidationCommandResult['failureIdentity']>(['known', 'unknown', 'none']);
+const FAILURE_EVIDENCE = new Set<NonNullable<ValidationCommandResult['failureEvidence']>>(['complete', 'partial']);
 const GATE_RULES = new Set<ValidationGateCriterion['rule']>([
   'must_remain_green', 'no_regression_from_baseline', 'baseline_unresolved', 'not_configured',
 ]);
@@ -50,7 +51,7 @@ function validCommand(value: unknown): value is ValidationCommand {
 
 function validResult(value: unknown): value is ValidationCommandResult {
   const item = record(value);
-  return Boolean(item
+  const shapeValid = Boolean(item
     && role(item.role)
     && typeof item.state === 'string'
     && RESULT_STATES.has(item.state as ValidationCommandResult['state'])
@@ -64,11 +65,21 @@ function validResult(value: unknown): value is ValidationCommandResult {
       || (Number.isSafeInteger(item.failureCount) && (item.failureCount as number) >= 0))
     && (item.exitCode === undefined || Number.isInteger(item.exitCode))
     && (item.reason === undefined || typeof item.reason === 'string'));
+  if (!shapeValid || !item) return false;
+  if (item.failureEvidence === undefined) return true;
+  if (typeof item.failureEvidence !== 'string'
+      || !FAILURE_EVIDENCE.has(item.failureEvidence as NonNullable<ValidationCommandResult['failureEvidence']>)
+      || item.state !== 'failed'
+      || item.failureIdentity !== 'known') return false;
+  if (item.failureEvidence !== 'partial') return true;
+  const hasFailureFacts = (item.failureIdentifiers as string[]).length > 0
+    || item.failureCount !== undefined;
+  return hasFailureFacts && typeof item.reason === 'string' && item.reason.trim().length > 0;
 }
 
 function validCriterion(value: unknown): value is ValidationGateCriterion {
   const item = record(value);
-  return Boolean(item
+  const shapeValid = Boolean(item
     && role(item.role)
     && typeof item.rule === 'string'
     && GATE_RULES.has(item.rule as ValidationGateCriterion['rule'])
@@ -76,6 +87,14 @@ function validCriterion(value: unknown): value is ValidationGateCriterion {
     && typeof item.description === 'string'
     && (item.baselineFailureCount === undefined
       || (Number.isSafeInteger(item.baselineFailureCount) && (item.baselineFailureCount as number) >= 0)));
+  if (!shapeValid || !item) return false;
+  if (item.baselineFailureEvidence === undefined) return true;
+  if (typeof item.baselineFailureEvidence !== 'string'
+      || !FAILURE_EVIDENCE.has(item.baselineFailureEvidence as NonNullable<ValidationGateCriterion['baselineFailureEvidence']>)
+      || item.rule !== 'no_regression_from_baseline') return false;
+  return item.baselineFailureEvidence !== 'partial'
+    || (item.baselineFailureIdentifiers as string[]).length > 0
+    || item.baselineFailureCount !== undefined;
 }
 
 function validBaseline(value: unknown, canonicalTarget: string): value is ProjectValidationBaseline {
@@ -89,10 +108,17 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
       || !discovery.commands.every(validCommand)
       || !Array.isArray(discovery.missingRoles)
       || !discovery.missingRoles.every(role)) return false;
-  return Array.isArray(baseline.results)
-    && baseline.results.every(validResult)
-    && Array.isArray(baseline.gateCriteria)
-    && baseline.gateCriteria.every(validCriterion);
+  const rawResults = baseline.results;
+  const rawCriteria = baseline.gateCriteria;
+  if (!Array.isArray(rawResults) || !Array.isArray(rawCriteria)) return false;
+  const results = rawResults.filter(validResult);
+  const criteria = rawCriteria.filter(validCriterion);
+  if (results.length !== rawResults.length || criteria.length !== rawCriteria.length) return false;
+  return results.every((result) => {
+    const criterion = criteria.find((candidate) => candidate.role === result.role);
+    if (result.failureEvidence === undefined && criterion?.baselineFailureEvidence === undefined) return true;
+    return result.failureEvidence === criterion?.baselineFailureEvidence;
+  });
 }
 
 /** SHA-256 identity of the exact admitted brief bytes. */
