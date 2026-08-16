@@ -4,6 +4,7 @@ import {
   mkdirSync,
   rmSync,
   writeFileSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,7 +83,11 @@ async function genericReport(
 }
 
 beforeEach(() => {
-  root = join(tmpdir(), `flowcrew-population-identity-qa-${randomBytes(6).toString('hex')}`);
+  // Canonicalize the fixture root: on macOS the temp directory is reached through a
+    // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
+    // path differ from what the code under test computes. Reproducible on Linux by
+    // pointing TMPDIR at a symlink.
+    root = join(realpathSync.native(tmpdir()), `flowcrew-population-identity-qa-${randomBytes(6).toString('hex')}`);
   sourceDir = join(root, 'source');
 });
 

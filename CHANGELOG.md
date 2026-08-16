@@ -1,5 +1,179 @@
 # Changelog
 
+## [0.8.0] - 2026-08-15
+
+**Breaking:** `timeout_ms` and `timeout_total_ms` are no longer accepted in a brief's stage
+frontmatter. A brief carrying either is refused with the migration in the message: stage duration is
+governed by `config/defaults.yaml::default_timeout_ms` and nowhere else. This is the only change in
+this release that requires editing an existing file.
+
+### Fixed — a baseline that recorded a failure but could not name it
+
+The validation baseline exists so a later failure can be attributed to the round or to the base it
+started from. It was recording that a test command failed while leaving *which* tests failed
+unknown, which makes the attribution it was built for impossible.
+
+- **The failure extractor never saw the shape its own runners emit.** It recognised a `FAIL`-prefixed
+  name, a cross-marked name, and a compiler diagnostic — and not TAP, which is what `node --test`
+  produces. The count patterns all expected the number before the word, so `# fail 10` matched
+  nothing either. The gap survived because this repository's own suite emits one of the recognised
+  shapes, so the engine could always identify its own baseline and never its users'. Separately, the
+  extractor was handed the byte-bounded copy of the output while the unbounded text was still in
+  hand. A shared TAP reader now serves both the failure path and the population path, facts are read
+  from the raw output while only a bounded copy is stored, and an unresolved identity carries a
+  recorded cause — no output, truncated by capture, structurally incomplete TAP, complete TAP with no
+  failing record, or an unrecognised format — which reaches the ready record and the operator-visible
+  gate line.
+
+- **The repair above refused too broadly, and the next launch showed it.** An invalid TAP parse
+  returned immediately, so a truncated buffer never reached the line-oriented adapters below it. A
+  recorded baseline carried a `FAIL` line and an explicit count inside the bytes it had kept and
+  reported the identity as unavailable — something the previous extractor would have found.
+  Truncation is a sound reason to distrust TAP, whose plan and version lines describe a whole run; it
+  is not a reason to distrust a line. Per-line adapters now run when the structural reader cannot
+  conclude, and what they recover is marked partial: bytes were dropped, so the identifiers are a
+  lower bound. Partial evidence is barred from the red-to-red comparison — when either side is
+  partial the delta is unresolved with that reason, because a partial list treated as complete would
+  let a genuinely new failure be dismissed as pre-existing.
+
+- **A test's identity moved when an unrelated test was inserted before it.** Population parity built
+  each identity from a top-level ordinal joined to a name, so inserting one test renamed every test
+  after it, and a real launch was refused with the same test listed as both missing and extra.
+  Identities are now name-local and position-independent, duplicate names stay distinguishable, and a
+  target that legitimately carries more tests than its source is reported as source-plus-additions
+  rather than as a wholesale mismatch.
+
+- **"I cannot verify this" shared an exit with "I refuse."** Parity was resolved with per-runner
+  knowledge, and a runner it did not recognise produced `unavailable`, wired straight to a refusal
+  before any baseline ran. A project was unshippable for choosing Node's own test runner, which has
+  no collect-only mode at all, so no branch of the existing shape could be written for it. Adding a
+  branch for `node --test` would have been the wrong repair — enumerating runners is the same losing
+  game as enumerating shell forms — so the model now separates verified, unverified and refused.
+
+### Fixed — state the engine could describe but not decide
+
+- **A run finished, said so, and stayed `running`.** Every stage complete, the supervisor's own
+  verdict `DONE`, the declared terminal artifact present and declaring complete — and the lifecycle
+  status unchanged until a human intervened. The divergence was not invisible: the watch surface
+  printed it in plain words. It was recognised where it was displayed and nowhere that could act on
+  it. Every site that decides on a run status now supplies a value per status through an exhaustive
+  record, so adding a member fails the build at each of them until someone answers for it there —
+  listing a case is no longer enough. `resolveRunStatus` gives the archive a boundary: raw text
+  becomes either a known status carrying its lifecycle semantics or an explicit unknown that keeps
+  the raw value and states why, so a padded or differently-cased spelling stays unknown instead of
+  being normalised into a status nobody wrote. Closure is automatic but gated — it runs only through
+  the scheduler's existing full terminal check, on a declared artifact that is unique, safe and
+  fresh, because a wrong automatic transition would be worse than the stall it replaces.
+
+- **A dependent was released although its producer had been skipped.** A research round lost its only
+  measurement and still produced a terminal document: the measuring stage carried a dispatch-level
+  condition on the preceding audit, the audit passed, and the stage was recorded skipped with zero
+  retries anyway. A passing gate now leaves only its `retry_to` repair branch skipped, and a
+  dependent whose producer was skipped or failed stays pending while the run ends incomplete. A run
+  that stops with nothing is recoverable; a run that reports on nothing is not. A frozen-rule scan
+  of 1,998 readable terminal workflows found the affected edge in exactly one — the run that
+  surfaced it.
+
+- **A re-plan deleted the records it was replacing.** A repeatedly-rejecting gate triggered a
+  re-plan, and the re-plan removed every completed stage record before persisting the replacement
+  graph. One stage's output was zero bytes after an hour of work whose repairs were on disk and
+  verified; in a later run the stage that vanished was the audit that would have checked a lint now
+  live in this engine. The defect does not destroy deliverables — it destroys the account of how they
+  were produced, which is worse in the case where the account was the deliverable. Evidence is now
+  captured before deletion, into iteration-qualified records.
+
+- **Stage duration had more than one control.** Overrides in brief frontmatter competed with project
+  configuration, so the answer to "how long may this stage run" depended on where you looked. There
+  is now one control: `config/defaults.yaml::default_timeout_ms`. See the breaking note above.
+
+### Changed — rules a correct task can actually satisfy
+
+- **Four instances of one defect had accumulated: a rule whose judgement is right but whose
+  expression admits no compliant answer.** The test that separates it from a merely strict rule is
+  not whether the rule is correct but whether a correct task can satisfy it. The trigger was a
+  Reality-Gate check whose verdict was a validation command's raw exit status while the recorded
+  criterion for that role was no-regression over nine known failing identities — exit zero was
+  unreachable, so the check could never pass on a repository whose suite is red. The class was
+  repaired rather than the instance.
+
+- **Three more rules had the right intent and a form that made them either impossible to obey or safe
+  to ignore.** The safety clause forbidding agents to touch other run directories bound reading to
+  writing, so a task authorising the run corpus as read-only evidence collided with it — and the
+  collision was not theoretical: two stages quoted the clause as a prohibition and the first skipped
+  an entire audit, reporting its central claim as unverifiable. The mutation ban is now absolute and
+  stated separately; read authorisation never grants mutation authority. A rule that must be worked
+  around teaches that rules are advisory, which costs more than the rule protected.
+
+- **A brief could not declare feasibility without also declaring a metric loop it did not have.** The
+  lint demanded a machine-readable `research.feasibility` model from any brief committing to a
+  selection procedure before measuring, and the parser recognised the block holding that model only
+  when a numeric baseline was present. A diagnostic round has no metric to beat, so its only routes
+  were to invent a baseline or to delete the wording that made the lint fire. Feasibility now parses
+  ahead of the baseline gate; the research loop stays gated on the numeric baseline exactly as
+  before.
+
+- **A project that never declared its validation could not be shipped to at all.** `ship-setup`
+  discovered build, test and lint from project configuration and refused when it found none — right
+  when a target's dependencies are missing, wrong when a project simply never declared them
+  anywhere. A brief may now supply argv-shaped commands in its frontmatter, resolved role-by-role and
+  fail-closed: project configuration governs a role it declares, a brief fills a role configuration
+  leaves empty, and a conflict refuses.
+
+- **The pre-registration lint could not tell a task's own commitment from a description of one.** It
+  fired whenever the vocabulary appeared beside a rule-like noun, so a brief about the detector, a
+  post-mortem, and a guide section explaining the requirement were indistinguishable from a brief
+  that actually froze a rule. A later gap left the opposite hole: a commitment stated in a single
+  sentence escaped while full-length historical briefs were still caught, making detection depend on
+  how much surrounding text a brief happened to carry. Both are closed, measured across a full
+  traversal of the historical brief corpus, and checks now report what they saw rather than only
+  their verdict.
+
+- **Reality-Gate checks are authored fresh every run and were reviewed by nothing.** The suite audit
+  that removed 31 value-fastened assertions could not reach them, so the habit survived exactly where
+  it decides whether a run may succeed: two correct rounds were marked `reality_gate_failed` by
+  checks they had written about themselves. The planner rule meant to prevent this named two bad
+  shapes rather than what makes them bad, and both failures were shapes the enumeration did not
+  reach; it now states the criterion. Prose alone was already the instrument that failed, so
+  generated checks are inspected after planning and before dispatch, with findings tiered by whether
+  the declaration a check refers to can be read.
+
+### Changed — what the watcher believes, and what the published project contains
+
+- **A stall was reported at three stage attempts, and measurement says that is not a stall.** One
+  verify stage reached attempt four while converging from seventeen failing tests to one; another hit
+  attempt three with its second gate round clean. The attempt threshold is removed rather than
+  raised, because the count was never the signal. What replaces it is directional and read from
+  archived rejected verdicts: a gate whose metric moves away from its threshold across rounds is not
+  converging, and one whose count is identical across two rounds has stopped progressing.
+  Reconstructing that history also corrected an operator claim — the real series is seven with one
+  regression, not eight with two.
+
+- **The private verification tree is no longer part of the published project.** Nothing under it is
+  tracked, the test config no longer collects it, and the only places that still name it are the
+  ignore rules and two past changelog entries describing what was true when those versions shipped.
+  Editing a past entry so it stops mentioning a path that existed then would falsify the record. The
+  published suite now stands alone and names its subjects, and only the fixtures a published test
+  actually reads are tracked.
+
+- **A spec that a lost round had covered is guarded again.** The condition-fact resolution it
+  verified had no other coverage after the work was destroyed by a bad commit, and is now specified
+  independently of that history.
+
+- **Conventions that lived only in one machine's memory now live in the procedure.** Memory is scoped
+  per working directory, so rules recorded while working from one path were invisible to a session
+  started from another — same skill, same person, different behaviour. Work of one kind belongs in
+  one task, because the planner parallelises inside it better than a chain can be sequenced from
+  outside. And a launch held back on purpose still needs its task entry at rehearsal time, carrying
+  its precondition and measured baseline and marked blocked by what it waits on: creating the entry
+  is prompted by the launch, so work waiting on elapsed time gets no prompt at all.
+
+- **The README described what a run does without saying what the thing is.** The Atom Architecture is
+  referenced throughout the source — P1 through P4, role atoms, the context primitive — and had no
+  statement anywhere a reader would find it. It is now named in the tagline, the opening, and where
+  the design is explained: a self-evolving multi-agent system built on execution primitives and a
+  harness loop, whose engine stays task-agnostic because every task-specific rule lives in the brief
+  and its declared checks rather than in the core.
+
 ## [0.7.0] - 2026-08-11
 
 ### Changed — the launch path is composed of tested commands instead of remembered steps

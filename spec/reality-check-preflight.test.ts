@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { stringify } from 'yaml';
@@ -978,8 +978,12 @@ describe('planner check admission boundary', () => {
 
   beforeEach(() => {
     originalFcHome = fcGlobalDir();
-    isolatedFcHome = mkdtempSync(join(tmpdir(), `fc-check-admission-${randomBytes(4).toString('hex')}-`));
-    projectDir = mkdtempSync(join(tmpdir(), `fc-check-project-${randomBytes(4).toString('hex')}-`));
+    // Canonicalize the fixture roots: on macOS the temp directory is reached through a
+    // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
+    // path differ from what the code under test computes. Reproducible on Linux by
+    // pointing TMPDIR at a symlink.
+    isolatedFcHome = realpathSync.native(mkdtempSync(join(tmpdir(), `fc-check-admission-${randomBytes(4).toString('hex')}-`)));
+    projectDir = realpathSync.native(mkdtempSync(join(tmpdir(), `fc-check-project-${randomBytes(4).toString('hex')}-`)));
     setFcGlobalDir(isolatedFcHome);
   });
 

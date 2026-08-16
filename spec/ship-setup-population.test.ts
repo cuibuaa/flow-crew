@@ -8,6 +8,7 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -110,7 +111,11 @@ const collectTests: ValidationCommandRunner = (request) => {
 
 beforeEach(() => {
   previousGlobalDir = fcGlobalDir();
-  root = join(tmpdir(), `flowcrew-ship-setup-population-${randomBytes(6).toString('hex')}`);
+  // Canonicalize the fixture root: on macOS the temp directory is reached through a
+    // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
+    // path differ from what the code under test computes. Reproducible on Linux by
+    // pointing TMPDIR at a symlink.
+    root = join(realpathSync.native(tmpdir()), `flowcrew-ship-setup-population-${randomBytes(6).toString('hex')}`);
   projectDir = join(root, 'source');
   setFcGlobalDir(join(root, 'fc-home'));
 });
