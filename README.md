@@ -5,7 +5,7 @@
 # FlowCrew
 
 <p align="center"><strong>Give it a brief. Walk away. Come back to a result it has already proven — or an honest "it didn't work."</strong></p>
-<p align="center"><em>Long-running AI work — research, RL, refactors, whole features — that ships only what survives its own gates.</em></p>
+<p align="center"><em>A self-evolving multi-agent system for long-running AI work — research, RL, refactors, whole features — that ships only what survives its own gates.</em></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
@@ -24,7 +24,7 @@
 
 **Most AI agents are eager to tell you they succeeded. FlowCrew is built to catch itself when it didn't.**
 
-Hand it a task brief and it runs as a supervised crew — planner, coder, researcher, reviewer, QA, supervisor — that plans, executes, retries, and checks its own work for hours, unattended.
+It is a **self-evolving multi-agent system**: hand it a task brief and a supervised crew — planner, coder, researcher, reviewer, QA, supervisor — plans, executes, retries, and **iteratively self-corrects** for hours, unattended, until the result survives its own checks.
 
 A run is called **shipped** only after a check it cannot edit runs and passes.
 
@@ -258,6 +258,12 @@ mock flows around it. Launching a brief you already have from the command line �
 or scheduled runs — is in the [CLI reference](guide/cli.md).
 
 ## What makes it work
+
+FlowCrew is a **self-evolving multi-agent architecture** built on a small set of **execution primitives ("atoms")**
+and a **harness loop**: the planner composes your goal from those atoms, and the crew iterates — plan, execute, gate,
+re-plan — self-correcting until the result survives its own checks. The engine stays **task-agnostic** — every
+task-specific rule lives in the brief and its declared checks, never in the core — so the same loop carries research
+and engineering alike. Three design choices carry the weight.
 
 ### A crew of roles, and one authority withheld
 
