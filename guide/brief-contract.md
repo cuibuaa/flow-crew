@@ -492,6 +492,15 @@ declared scope is reverted to its pre-stage contents once the attempt ends — t
 what backs the "do not edit the project while a run is working in it" rule: your edit and
 the stage's are indistinguishable in the snapshot diff that scope enforcement reads.
 
+The same limitation governs parallel-write warnings. A shared-worktree snapshot says
+only that a path changed while a stage was running; it is observation, not ownership
+proof. The scheduler reports a parallel write conflict only when both latest attempts
+directly attribute the same normalized path (`writeAttribution: structured`). Snapshot
+and unknown attribution remain in attempt history and constraint audits as reduced-
+confidence evidence, but neither is used to claim that two stages authored one file.
+Consequently, a real write by an adapter that cannot report structured paths may go
+unwarned; its snapshot overlap could equally have been caused entirely by its peer.
+
 For an authored multi-stage brief, include an explicit writable-path mapping for every stage,
 including planning and gates. Brief preflight warns when the mapping is absent; it cannot
 choose the correct paths for the author. The planner still translates that contract into each

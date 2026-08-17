@@ -59,7 +59,7 @@ import {
   resolveRequest,
   type ApprovalRisk,
 } from './inbox.js';
-import type { StoreState, StageStatus, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
+import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
 import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
 import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
@@ -2471,10 +2471,10 @@ export function selectRunnableBatch(ready: StageConfig[]): {
 export interface ParallelWriteConflict {
   stageIds: [string, string];
   files: string[];
-  attribution: [string, string];
+  attribution: [WriteAttribution, WriteAttribution];
 }
 
-function latestAttemptWrites(status: StageStatus | undefined): { files: string[]; attribution: string } {
+function latestAttemptWrites(status: StageStatus | undefined): { files: string[]; attribution: WriteAttribution } {
   const attempt = status?.attempts?.at(-1);
   const files = (attempt?.writes ?? [])
     .map((file) => file.trim().replace(/\\/g, '/'))
@@ -2484,6 +2484,21 @@ function latestAttemptWrites(status: StageStatus | undefined): { files: string[]
     // writing the same run-owned artifact outside the project remain visible.
     .map((file) => posix.normalize(file));
   return { files: [...new Set(files)], attribution: attempt?.writeAttribution ?? 'unknown' };
+}
+
+function directlyAttributesWrites(attribution: WriteAttribution): boolean {
+  switch (attribution) {
+    case 'structured':
+      return true;
+    case 'snapshot':
+    case 'unknown':
+      return false;
+    default: {
+      const exhaustive: never = attribution;
+      void exhaustive;
+      return false;
+    }
+  }
 }
 
 export function detectParallelWriteConflicts(
@@ -2496,6 +2511,10 @@ export function detectParallelWriteConflicts(
     const leftSet = new Set(left.files);
     for (let j = i + 1; j < stageIds.length; j++) {
       const right = latestAttemptWrites(statuses[stageIds[j]]);
+      // A shared-worktree snapshot observes that a path changed while the stage
+      // ran; it cannot establish which concurrent stage authored the change.
+      // Require direct attribution from both sides before claiming co-authorship.
+      if (!directlyAttributesWrites(left.attribution) || !directlyAttributesWrites(right.attribution)) continue;
       const files = [...new Set(right.files.filter((file) => leftSet.has(file)))].sort();
       if (files.length > 0) {
         conflicts.push({

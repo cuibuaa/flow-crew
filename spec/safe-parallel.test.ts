@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -96,6 +96,94 @@ async function runStatic(scopes: [string[], string[]], reportedWrites: string[] 
   return { final, maxActive, events: readRunEvents(projectDir, created.runId) };
 }
 
+async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
+  const sharedPath = 'src/shared.ts';
+  const scopes: [string[], string[]] = mode === 'one-writer'
+    ? [[sharedPath], []]
+    : [['src/left.ts'], ['src/right.ts']];
+  const yaml = [
+    'name: physical-write-test',
+    'defaults:',
+    '  max_iterations: 1',
+    '  max_retries: 0',
+    'stages:',
+    '  - id: left',
+    '    role: coder',
+    `    scope: ${JSON.stringify(scopes[0])}`,
+    '  - id: right',
+    '    role: coder',
+    `    scope: ${JSON.stringify(scopes[1])}`,
+  ].join('\n');
+  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
+  writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+  mkdirSync(join(projectDir, 'src'), { recursive: true });
+
+  let active = 0;
+  let maxActive = 0;
+  let entered = 0;
+  let releaseBoth!: () => void;
+  let markWriterDone!: () => void;
+  let markObserverSawWrite!: () => void;
+  let observerSawWrite = false;
+  const bothEntered = new Promise<void>((resolve) => { releaseBoth = resolve; });
+  const writerDone = new Promise<void>((resolve) => { markWriterDone = resolve; });
+  const observerSawWritePromise = new Promise<void>((resolve) => { markObserverSawWrite = resolve; });
+  const physicalWriteCalls = { left: 0, right: 0 };
+
+  const adapter: Adapter = {
+    async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      if (opts.stageId === '_summary') {
+        return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+      }
+      active++;
+      maxActive = Math.max(maxActive, active);
+      entered++;
+      if (entered === 2) releaseBoth();
+      await bothEntered;
+      try {
+        if (mode === 'one-writer') {
+          if (opts.stageId === 'left') {
+            physicalWriteCalls.left++;
+            writeFileSync(join(projectDir, sharedPath), 'export const source = "left";\n');
+            markWriterDone();
+            await observerSawWritePromise;
+            return {
+              output: 'left wrote', exitCode: 0, duration_ms: 1,
+              writes: [sharedPath], writeAttribution: 'structured',
+            };
+          }
+          await writerDone;
+          observerSawWrite = existsSync(join(projectDir, sharedPath));
+          markObserverSawWrite();
+          return {
+            output: 'right observed without writing', exitCode: 0, duration_ms: 1,
+            writeAttribution: 'unknown',
+          };
+        }
+
+        physicalWriteCalls[opts.stageId as 'left' | 'right']++;
+        writeFileSync(join(projectDir, sharedPath), `export const source = "${opts.stageId}";\n`);
+        return {
+          output: `${opts.stageId} wrote`, exitCode: 0, duration_ms: 1,
+          writes: [sharedPath], writeAttribution: 'structured',
+        };
+      } finally {
+        active--;
+      }
+    },
+  };
+  const final = await runWorkflow(workflow, yaml, projectDir, adapter, new Map(), undefined, writeAgent(), created.runId);
+  return {
+    final,
+    maxActive,
+    observerSawWrite,
+    physicalWriteCalls,
+    events: readRunEvents(projectDir, created.runId),
+    sharedPath,
+  };
+}
+
 beforeEach(() => {
   projectDir = join(tmpdir(), `flowcrew-e6-parallel-${randomBytes(6).toString('hex')}`);
   mkdirSync(projectDir, { recursive: true });
@@ -174,11 +262,41 @@ describe('safe scope batching', () => {
     expect(siblings.deferred).toEqual([]);
   });
 
-  it('warns and fails when disjoint declarations hide the same factual structured write', async () => {
-    const measured = await runStatic([['src/left.ts'], ['src/right.ts']], ['src/shared.ts']);
-    const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
+  it('does not claim that a snapshot observer co-wrote its concurrent peer\'s physical write', async () => {
+    const measured = await runPhysicalWriteScenario('one-writer');
+    const warnings = measured.events.filter((event) => event.type === 'parallel_write_conflict');
+    const leftAttempt = measured.final.stages.left.attempts?.at(-1);
+    const rightAttempt = measured.final.stages.right.attempts?.at(-1);
+
     expect(measured.maxActive).toBe(2);
-    expect(warning).toMatchObject({ level: 'warning', stageIds: ['left', 'right'], files: ['src/shared.ts'] });
+    expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 0 });
+    expect(measured.observerSawWrite).toBe(true);
+    expect(leftAttempt).toMatchObject({ writes: [measured.sharedPath], writeAttribution: 'structured' });
+    expect(rightAttempt).toMatchObject({
+      writes: [measured.sharedPath],
+      writeAttribution: 'snapshot',
+      constraintAudit: { appliedWriteCount: 0 },
+    });
+    expect(warnings).toEqual([]);
+    expect(measured.final.status).toBe('complete');
+  });
+
+  it('warns when two concurrent adapters physically write and structurally report the same file', async () => {
+    const measured = await runPhysicalWriteScenario('two-writers');
+    const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
+
+    expect(measured.maxActive).toBe(2);
+    expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 1 });
+    expect(measured.final.stages.left.attempts?.at(-1)).toMatchObject({
+      writes: [measured.sharedPath], writeAttribution: 'structured',
+    });
+    expect(measured.final.stages.right.attempts?.at(-1)).toMatchObject({
+      writes: [measured.sharedPath], writeAttribution: 'structured',
+    });
+    expect(warning).toMatchObject({
+      level: 'warning', stageIds: ['left', 'right'], files: [measured.sharedPath],
+    });
+    expect(warning?.detail).toContain('attribution: structured / structured');
     expect(measured.final.status).toBe('failed');
     expect(measured.final.stages.left.constraintAudit).toMatchObject({ violationCount: 1 });
     expect(measured.final.stages.right.constraintAudit).toMatchObject({ violationCount: 1 });
@@ -200,21 +318,56 @@ describe('safe scope batching', () => {
     expect(measured.final.stages.right.error).toContain('scope_violation');
   });
 
-  it('warns when snapshot-attributed stages record the same run artifact outside the project', () => {
+  it('requires structured evidence from both sides across every attribution pairing', () => {
     const shared = '../fc-home/runs/example/knowledge_graph.json';
-    const conflicts = detectParallelWriteConflicts(
-      ['left', 'right'],
-      {
-        left: completedWithWrite(shared, 'snapshot'),
-        right: completedWithWrite(shared, 'snapshot'),
-      },
-    );
+    const attributions: WriteAttribution[] = ['structured', 'snapshot', 'unknown'];
+    const outcomes: Record<string, string[]> = {};
+    for (const leftAttribution of attributions) {
+      for (const rightAttribution of attributions) {
+        outcomes[`${leftAttribution}/${rightAttribution}`] = detectParallelWriteConflicts(
+          ['left', 'right'],
+          {
+            left: completedWithWrite(shared, leftAttribution),
+            right: completedWithWrite(shared, rightAttribution),
+          },
+        ).flatMap((conflict) => conflict.files);
+      }
+    }
 
-    expect(conflicts).toEqual([{
+    expect(outcomes).toEqual({
+      'structured/structured': [shared],
+      'structured/snapshot': [],
+      'structured/unknown': [],
+      'snapshot/structured': [],
+      'snapshot/snapshot': [],
+      'snapshot/unknown': [],
+      'unknown/structured': [],
+      'unknown/snapshot': [],
+      'unknown/unknown': [],
+    });
+
+    const legacyUnknown = completedWithWrite(shared, 'unknown');
+    delete legacyUnknown.attempts?.[0].writeAttribution;
+    expect(detectParallelWriteConflicts(['left', 'right'], {
+      left: completedWithWrite(shared, 'structured'),
+      right: legacyUnknown,
+    })).toEqual([]);
+  });
+
+  it('retains path normalization and ignores disjoint structured writes', () => {
+    expect(detectParallelWriteConflicts(['left', 'right'], {
+      left: completedWithWrite('./src/area/../shared.ts', 'structured'),
+      right: completedWithWrite('src/shared.ts', 'structured'),
+    })).toEqual([{
       stageIds: ['left', 'right'],
-      files: [shared],
-      attribution: ['snapshot', 'snapshot'],
+      files: ['src/shared.ts'],
+      attribution: ['structured', 'structured'],
     }]);
+
+    expect(detectParallelWriteConflicts(['left', 'right'], {
+      left: completedWithWrite('src/left.ts', 'structured'),
+      right: completedWithWrite('src/right.ts', 'structured'),
+    })).toEqual([]);
   });
 
   it('keeps a linear DAG one-stage-at-a-time', () => {
