@@ -2,9 +2,13 @@ import { randomBytes } from 'node:crypto';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { ATTEMPT_TERMINATION_GRACE_MS } from './adapters/base.js';
 
-/** Child settlement is observed after cancellation; this is not execution time. */
-export const ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS = 500;
+/** Extra time for the child close event after a signal or hard escalation. */
+export const ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS = 500;
+/** Five-second group escalation plus close observation; this is not execution time. */
+export const ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS =
+  ATTEMPT_TERMINATION_GRACE_MS + ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS;
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -125,9 +129,13 @@ export class AttemptDeadlineController {
     return this.deadlineReachedWall === undefined ? undefined : new Date(this.deadlineReachedWall).toISOString();
   }
 
-  deadlineOverrunMs(observedWall = this.clock.wallNow()): number {
-    if (this.deadlineReachedWall === undefined) return 0;
-    return Math.max(0, observedWall - this.deadlineReachedWall);
+  deadlineOverrunMs(): number {
+    // The deadline itself is immutable. Measure settlement beyond that
+    // boundary with the same monotonic clock that created it, rather than from
+    // a possibly late timer callback or an adjustable wall clock. Millisecond
+    // records round any positive sub-millisecond overrun up to one.
+    const overrun = this.clock.monotonicNow() - this.deadlineMono;
+    return overrun > 0 ? Math.max(1, Math.ceil(overrun)) : 0;
   }
 
   snapshot(): AttemptDeadlineSnapshot {

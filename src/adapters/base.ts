@@ -37,9 +37,10 @@ export interface RunOpts {
   sessionOwnerStageId?: string;
   /** Keep the owning adapter home for one eligible direct successor. */
   preserveSession?: boolean;
-  /** When triggered, the spawned child process group is SIGKILLed and the adapter returns
-   *  exitCode=137 ("Aborted by supervisor"). Used by worker.ts to honor supervisor ABORT
-   *  verdicts that previously only wrote a signal file with no consumer. */
+  /** When triggered, the spawned POSIX process group receives a bounded graceful
+   *  termination attempt and the adapter returns exitCode=137 ("Aborted by
+   *  supervisor"). Used by worker.ts to honor supervisor ABORT verdicts that
+   *  previously only wrote a signal file with no consumer. */
   abortSignal?: AbortSignal;
 }
 
@@ -69,13 +70,99 @@ type ExecOpts = {
   abortSignal?: AbortSignal;
 };
 
-function killChild(child: ChildProcess): void {
+/** Bounded cleanup opportunity after an attempt deadline or supervisor abort. */
+export const ATTEMPT_TERMINATION_GRACE_MS = 5_000;
+
+function hardKillChild(child: ChildProcess): void {
   try {
     if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
     else child.kill('SIGKILL');
   } catch {
     try { child.kill('SIGKILL'); } catch { /* already exited */ }
   }
+}
+
+interface ChildTerminator {
+  terminateGracefully(): void;
+  hardKill(): void;
+  settleAfterChildClose(): Promise<void>;
+}
+
+function createChildTerminator(child: ChildProcess): ChildTerminator {
+  let terminationStarted = false;
+  let terminationCompleted = false;
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let groupPollTimer: ReturnType<typeof setTimeout> | undefined;
+  let resolveSettlement: (() => void) | undefined;
+
+  const hardKill = (): void => hardKillChild(child);
+  const groupIsAlive = (): boolean => {
+    if (process.platform === 'win32' || !child.pid) return false;
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const completeTermination = (): void => {
+    if (terminationCompleted) return;
+    terminationCompleted = true;
+    clearTimeout(escalationTimer);
+    clearTimeout(groupPollTimer);
+    escalationTimer = undefined;
+    groupPollTimer = undefined;
+    resolveSettlement?.();
+    resolveSettlement = undefined;
+  };
+  const terminateGracefully = (): void => {
+    if (terminationStarted) return;
+    terminationStarted = true;
+
+    // Node maps signal names to forceful process termination on Windows and
+    // cannot signal a Windows process group. Waiting after "SIGTERM" there
+    // would add delay without providing a POSIX-style cleanup opportunity.
+    if (process.platform === 'win32') {
+      hardKill();
+      completeTermination();
+      return;
+    }
+
+    try {
+      if (child.pid) process.kill(-child.pid, 'SIGTERM');
+      else child.kill('SIGTERM');
+    } catch {
+      try { child.kill('SIGTERM'); } catch { /* already exited */ }
+    }
+    escalationTimer = setTimeout(() => {
+      hardKill();
+      completeTermination();
+    }, ATTEMPT_TERMINATION_GRACE_MS);
+  };
+
+  const settleAfterChildClose = (): Promise<void> => {
+    if (!terminationStarted || terminationCompleted || !groupIsAlive()) {
+      completeTermination();
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      resolveSettlement = resolve;
+      const pollGroup = (): void => {
+        if (!groupIsAlive()) {
+          completeTermination();
+          return;
+        }
+        groupPollTimer = setTimeout(pollGroup, 25);
+      };
+      groupPollTimer = setTimeout(pollGroup, 25);
+    });
+  };
+
+  return {
+    terminateGracefully,
+    hardKill,
+    settleAfterChildClose,
+  };
 }
 
 function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResult> {
@@ -93,18 +180,20 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
     });
+    const terminator = createChildTerminator(child);
     const chunks: Buffer[] = [];
     let aborted = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killChild(child);
+      terminator.terminateGracefully();
     }, Math.max(1, opts.timeout_ms));
 
     // Honor cancellation via AbortSignal (worker.ts polls signals/abort_<stageId>.json
-    // and aborts the controller it owns; we then SIGKILL the child process group).
+    // and aborts the controller it owns; we then begin bounded group termination).
     const onAbort = () => {
       aborted = true;
-      killChild(child);
+      clearTimeout(timer);
+      terminator.terminateGracefully();
     };
     if (opts.abortSignal) {
       if (opts.abortSignal.aborted) onAbort();
@@ -115,14 +204,16 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
-      resolve({
-        output: aborted
-          ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage cancelled by control plane]\n')
-          : (output ?? Buffer.concat(chunks).toString('utf-8')),
-        exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
-        duration_ms: Date.now() - start,
-        timedOut,
+      void terminator.settleAfterChildClose().then(() => {
+        if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
+        resolve({
+          output: aborted
+            ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage cancelled by control plane]\n')
+            : (output ?? Buffer.concat(chunks).toString('utf-8')),
+          exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
+          duration_ms: Date.now() - start,
+          timedOut,
+        });
       });
     };
 
@@ -184,9 +275,19 @@ export function execWithStdin(
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
     });
-    if (opts.onChild) opts.onChild({ kill: () => killChild(child) });
-    const timer = setTimeout(() => { timedOut = true; killChild(child); }, Math.max(1, opts.timeout_ms));
-    const onAbort = () => { aborted = true; killChild(child); };
+    const terminator = createChildTerminator(child);
+    // This handle is used after Claude's separate post-result grace, so it
+    // intentionally remains an immediate hard stop rather than adding another.
+    if (opts.onChild) opts.onChild({ kill: terminator.hardKill });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminator.terminateGracefully();
+    }, Math.max(1, opts.timeout_ms));
+    const onAbort = () => {
+      aborted = true;
+      clearTimeout(timer);
+      terminator.terminateGracefully();
+    };
     let abortedBeforeWrite = false;
     if (opts.abortSignal) {
       if (opts.abortSignal.aborted) { abortedBeforeWrite = true; onAbort(); }
@@ -208,12 +309,14 @@ export function execWithStdin(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
-      resolve({
-        output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
-        exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
-        duration_ms: Date.now() - start,
-        timedOut,
+      void terminator.settleAfterChildClose().then(() => {
+        if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
+        resolve({
+          output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
+          exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
+          duration_ms: Date.now() - start,
+          timedOut,
+        });
       });
     };
     child.stdout.on('data', (d: Buffer) => {

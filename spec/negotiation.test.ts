@@ -26,7 +26,7 @@ import {
 } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import {
-  ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS,
+  ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS,
   createTechnicalRetryBudgetState,
   transitionTechnicalRetryBudget,
   type AttemptDeadlineClock,
@@ -866,7 +866,7 @@ describe('bounded timeout negotiation', () => {
     expect(adapterBudgets).toEqual([90, 90, 90, 90]);
     const status = readStageStatus(projectDir, runId, stageId);
     expect(status.timeout?.terminationCause).toBe('attempt_timeout');
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS);
     expect(clock.monotonicNow()).toBe(102);
     const ledgerName = readdirSync(join(runDirPath, 'stages', stageId))
       .find((name) => name.startsWith('attempt_deadline_') && name.endsWith('.jsonl'));
@@ -932,7 +932,7 @@ describe('bounded timeout negotiation', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(140);
     expect(status.timeout?.childClosedAt).toBeTruthy();
     expect(status.timeout?.deadlineOverrunMs).toBeGreaterThanOrEqual(100);
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS);
   });
 
   it('kills an infinite local Node child at its immutable attempt deadline despite repeated extension requests', { timeout: 15_000 }, async () => {
@@ -983,8 +983,8 @@ describe('bounded timeout negotiation', () => {
     expect(status.timeout?.rejectedExtensionCount).toBeGreaterThanOrEqual(2);
     expect(decisions.length).toBeGreaterThanOrEqual(2);
     expect(decisions.every((decision) => decision.accepted === false && decision.grantedExtensionMs === 0)).toBe(true);
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
-    expect(elapsed).toBeLessThan(initialBudgetMs + (2 * ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS));
+    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS);
+    expect(elapsed).toBeLessThan(initialBudgetMs + (2 * ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS));
   });
 
   it('keeps a current-attempt supervisor ABORT authoritative over an extension', { timeout: 5_000 }, async () => {

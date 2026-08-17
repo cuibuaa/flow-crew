@@ -42,6 +42,21 @@ it, and there is no aggregate technical-chain timeout above it. Runtime requests
 to extend an active attempt are recorded and rejected; this ensures an infinite
 child still reaches its deadline.
 
+On POSIX systems, reaching that immutable deadline (or receiving a supervisor
+ABORT) sends `SIGTERM` to the detached stage process group, then sends `SIGKILL`
+after a fixed five-second grace period if the group has not exited. The grace is
+post-deadline cleanup time, not extra execution budget: `deadlineAt` and
+`budgetMs` do not move, `elapsedMs` continues through child settlement, and
+`deadlineOverrunMs` records the real time beyond the deadline. This gives signal
+handlers a bounded chance to release files, sockets, and subprocesses while an
+uncooperative child still has a finite stop time.
+
+Native Windows does not provide the same process-group signal semantics through
+Node: the supported signal names terminate the direct child forcefully. FlowCrew
+therefore retains immediate direct-child termination on Windows instead of
+waiting five seconds for a cleanup opportunity that `child.kill('SIGTERM')`
+cannot provide.
+
 Raising the value trades fewer premature terminations for slower failure: a
 genuinely stuck stage may take the full longer budget to time out. The separate
 `supervisor.stuck_threshold_ms` remains an early-warning and intervention control
