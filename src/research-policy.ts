@@ -14,6 +14,7 @@
  * This replaces the per-phase prose decision-tables that brief authors
  * previously hand-wrote (e.g. "$144~$198 → continue, $128~$144 → ceiling").
  */
+import { z } from 'zod';
 import type { ResearchConfig, ResearchPolicy } from './store.js';
 
 /**
@@ -29,6 +30,14 @@ export const RESEARCH_POLICIES = [
 ] as const;
 
 export const RESEARCH_POLICY_IDS: readonly string[] = RESEARCH_POLICIES.map((p) => p.id);
+
+/**
+ * The same three ids as a parse-time contract. `RESEARCH_POLICY_IDS.includes(...)`
+ * answers the membership question but leaves the caller to decide what an unknown
+ * value means; every caller so far decided "use the default, say nothing". A schema
+ * makes the rejection the caller's to handle rather than the caller's to remember.
+ */
+export const ResearchPolicySchema = z.enum(['greedy_stack', 'best_of_n', 'replace_if_better']);
 
 export interface ResearchRound {
   label: string;

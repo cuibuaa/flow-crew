@@ -710,6 +710,17 @@ export function inspectBrief(
   const rc = parsed.research;
   const preregistration = preregistrationEvidence(brief);
   let researchFeasibility: ResearchFeasibilityEvaluation[] | undefined;
+  if (parsed.researchPolicyError) {
+    add({
+      code: 'research_policy_invalid',
+      level: 'fail',
+      message: `research.policy is invalid: ${parsed.researchPolicyError}`,
+      acknowledgementRequired: true,
+      ...(preregistration ?? {}),
+      risk: 'An unrecognised policy silently becomes greedy_stack, whose keep/drop rule is measured against research.baseline; a brief that meant a different rule gets one it never chose and only finds out from the campaign\'s terminal decision.',
+      suggestion: 'Set research.policy to greedy_stack, best_of_n, or replace_if_better, or omit it to take greedy_stack deliberately.',
+    });
+  }
   if (parsed.researchFeasibilityError) {
     add({
       code: 'research_feasibility_invalid',

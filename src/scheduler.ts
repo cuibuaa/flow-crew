@@ -61,7 +61,7 @@ import {
 } from './inbox.js';
 import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
 import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
-import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, type ResearchRound } from './research-policy.js';
+import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, ResearchPolicySchema, type ResearchRound } from './research-policy.js';
 import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
@@ -174,6 +174,7 @@ export interface ParsedBriefFrontmatter {
   researchFeasibility?: ResearchFeasibilityConfig;
   /** Strict-parser error retained even when no metric-loop config is created. */
   researchFeasibilityError?: string;
+  researchPolicyError?: string;
   stripped: string;
   frontmatterError?: string;
 }
@@ -208,8 +209,19 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
       else out.researchFeasibilityError = feasibility.error;
     }
     if (typeof r.baseline === 'number') {
-      const policy = (typeof r.policy === 'string' && RESEARCH_POLICY_IDS.includes(r.policy))
-        ? r.policy as ResearchConfig['policy'] : 'greedy_stack';
+      // An unrecognised policy used to fall through to greedy_stack without a word.
+      // That silence cost a real campaign: a brief wrote `policy: heuristic_policy_v1`,
+      // believing the field named the opponent rather than the keep/drop rule, got the
+      // default, and the run's premature ceiling was only traced back to it by reading
+      // this line. Report it the way the neighbouring feasibility parse reports its
+      // failures -- an error on `out` that brief-preflight raises as a finding -- rather
+      // than throwing, because nothing in this function throws.
+      const policyParse = ResearchPolicySchema.safeParse(r.policy ?? 'greedy_stack');
+      if (!policyParse.success) {
+        out.researchPolicyError =
+          `${JSON.stringify(r.policy)} is not one of ${RESEARCH_POLICY_IDS.join(', ')}`;
+      }
+      const policy: ResearchConfig['policy'] = policyParse.success ? policyParse.data : 'greedy_stack';
       const research: ResearchConfig = { baseline: r.baseline, policy };
       // Honor higher_is_better; coerce the common YAML-quoting mistake ("false"/"true"
       // as strings) instead of silently dropping it (which would flip every keep/ship
