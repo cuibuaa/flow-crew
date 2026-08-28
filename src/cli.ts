@@ -1,10 +1,74 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, lstatSync, statSync, renameSync as fsRenameSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
-import { execFileSync, execSync } from 'node:child_process';
-import { createInterface } from 'node:readline/promises';
-import { parse as parseYaml, parseDocument } from 'yaml';
-import {
+import type { RunStatus } from './store.js';
+import type { AdapterName, AdapterResolution } from './adapters/availability.js';
+import type { RegisterRpcResponse } from './orchestrator-rpc.js';
+import type { TaskCreateInput } from './task-registry.js';
+import type { BriefAdmissionRecord } from './brief-preflight.js';
+
+const bootstrapArgs = process.argv.slice(2);
+// A status surface invokes this path repeatedly. Keep it ahead of the orchestration imports so
+// rendering does not pay to initialize the scheduler, dashboard, YAML, and adapter modules.
+if (bootstrapArgs[0] === 'fc_tasks') {
+  try {
+    const { cmdFcTasks } = await import('./cli-fc-tasks.js');
+    process.exitCode = cmdFcTasks(bootstrapArgs);
+  } catch (error) {
+    process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
+} else {
+const [
+  fsModule,
+  pathModule,
+  childProcessModule,
+  readlineModule,
+  yamlModule,
+  storeModule,
+  configModule,
+  campaignModule,
+  briefVersioningModule,
+  campaignReviewModule,
+  adapterLoaderModule,
+  adapterAvailabilityModule,
+  cliDoctorModule,
+  runLockModule,
+  terminalArtifactStatusModule,
+] = await Promise.all([
+  import('node:fs'),
+  import('node:path'),
+  import('node:child_process'),
+  import('node:readline/promises'),
+  import('yaml'),
+  import('./store.js'),
+  import('./config.js'),
+  import('./campaign.js'),
+  import('./brief-versioning.js'),
+  import('./campaign-review.js'),
+  import('./adapters/loader.js'),
+  import('./adapters/availability.js'),
+  import('./cli-doctor.js'),
+  import('./run-lock.js'),
+  import('./terminal-artifact-status.js'),
+]);
+
+const {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  lstatSync,
+  statSync,
+  renameSync: fsRenameSync,
+} = fsModule;
+const { dirname, join, relative, resolve } = pathModule;
+const { execFileSync, execSync } = childProcessModule;
+const { createInterface } = readlineModule;
+const { parse: parseYaml, parseDocument } = yamlModule;
+const {
   campaignDir,
   extractTaskTitle,
   isPausedRunStatus,
@@ -15,37 +79,25 @@ import {
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
-  type RunStatus,
-} from './store.js';
-import { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } from './config.js';
-import { loadCampaignConfig, runCampaign, stopCampaign } from './campaign.js';
-import { diffVersions, readHead, rollback } from './brief-versioning.js';
-import { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
-import { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } from './adapters/loader.js';
-import {
+} = storeModule;
+const { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } = configModule;
+const { loadCampaignConfig, runCampaign, stopCampaign } = campaignModule;
+const { diffVersions, readHead, rollback } = briefVersioningModule;
+const { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } = campaignReviewModule;
+const { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } = adapterLoaderModule;
+const {
   ADAPTER_CLI,
   ADAPTER_INSTALL_HINT,
   findExecutableOnPath,
   installedAdapters,
   RECOMMENDED,
   resolveAdapterChoice,
-  type AdapterName,
-  type AdapterResolution,
-} from './adapters/availability.js';
-import { detectSupervisorBackend } from './cli-doctor.js';
-import type { RegisterRpcResponse } from './orchestrator-rpc.js';
-import type { TaskCreateInput } from './task-registry.js';
-import type { BriefAdmissionRecord } from './brief-preflight.js';
-import {
-  isLiveFlowcrewSchedulerForRun,
-  parseSchedulerPidMarker,
-} from './run-lock.js';
-import {
-  formatTerminalArtifactStatusMismatch,
-  terminalArtifactStatusMismatch,
-} from './terminal-artifact-status.js';
+} = adapterAvailabilityModule;
+const { detectSupervisorBackend } = cliDoctorModule;
+const { isLiveFlowcrewSchedulerForRun, parseSchedulerPidMarker } = runLockModule;
+const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
 
-const args = process.argv.slice(2);
+const args = bootstrapArgs;
 const command = args[0];
 const CAMPAIGN_PENDING_SUBCOMMAND = 'pending';
 
@@ -1842,6 +1894,7 @@ Commands:
   daemon    Operate the background orchestrator (restart/status; serve is foreground/internal)
   dashboard Query the running web dashboard (status)
   task      List and manage background tasks
+  fc_tasks  Render and safely update a conversational task ledger
   audit-reality  Run declared checks against task history
   inbox     Review and resolve approval requests that parked a run
   ship-preflight  Gather prior-run, campaign, build, and brief-input facts before shipping
@@ -1872,6 +1925,7 @@ Examples:
   flowcrew doctor --compact-registry
   flowcrew start  # web dashboard only
   flowcrew task list
+  flowcrew fc_tasks render
   flowcrew guide --run <run-id> "try a different approach"
   flowcrew clean --keep 3
   flowcrew campaign run examples/example_campaign.yaml --dry-run
@@ -1888,6 +1942,7 @@ Options:
 Environment:
   PORT          Server port (default: 3000)
   PROJECT_DIR   Project directory (default: current directory)
+  FC_TASKS_ROOT Task-ledger root (default: ~/.claude/tasks)
 `);
 }
 
@@ -2189,4 +2244,5 @@ switch (command) {
     console.error(`Unknown command: ${command}`);
     printUsage();
     process.exit(1);
+}
 }

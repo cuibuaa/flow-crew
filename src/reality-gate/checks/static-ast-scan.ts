@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join, matchesGlob, relative, resolve, sep } from 'node:path';
 import type { CheckContext, RealityCheck } from '../types.js';
 import { resolvePath, result } from './_utils.js';
 
@@ -17,6 +17,13 @@ export default class StaticAstScanCheck implements RealityCheck {
     if (typeof params.forbid_pattern !== 'string') return result(false, '`params.forbid_pattern` must be provided; declare the forbidden pattern and rerun the check.');
     if (typeof params.language !== 'string') return result(false, '`params.language` must be provided; declare the source language and rerun the check.');
     const files = expandGlob(params.glob, context);
+    if (files.length === 0) {
+      return result(
+        false,
+        `glob ${params.glob} matched no files. Fix the glob so the declared subject is actually scanned, then rerun the check.`,
+        { filesScanned: 0, findings: [] },
+      );
+    }
     const pattern = new RegExp(params.forbid_pattern, 'gm');
     const findings: Array<{ file: string; line: number; match: string }> = [];
     for (const file of files) {
@@ -40,20 +47,32 @@ export default class StaticAstScanCheck implements RealityCheck {
 }
 
 function expandGlob(glob: string, context: CheckContext): string[] {
-  const normalized = glob.replace(/\\/g, '/');
+  const normalized = glob.replace(/\\/g, '/').replace(/^\.\//u, '');
   const star = normalized.search(/[*{[]/);
   const basePart = star >= 0 ? normalized.slice(0, star) : normalized;
   const baseDir = basePart.includes('/') ? basePart.slice(0, basePart.lastIndexOf('/')) : '.';
-  const suffix = normalized.match(/\.([A-Za-z0-9]+)$/)?.[1];
   const root = resolvePath(baseDir || '.', context);
-  const all = walk(root);
-  if (!suffix) return all;
-  return all.filter((file) => file.endsWith(`.${suffix}`));
+  if (!existsSync(root)) return [];
+  const resolvedRoot = resolve(root);
+  const projectRoot = resolve(context.projectDir);
+  const anchor = pathWithin(projectRoot, resolvedRoot) ? projectRoot : resolve(context.taskDir);
+  return walk(root)
+    .filter((file) => {
+      const candidate = isAbsolute(normalized)
+        ? resolve(file).replaceAll('\\', '/')
+        : relative(anchor, file).replaceAll('\\', '/');
+      return matchesGlob(candidate, normalized);
+    })
+    .sort();
+}
+
+function pathWithin(root: string, candidate: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
 
 function walk(dir: string): string[] {
   const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
+  for (const entry of readdirSync(dir).sort()) {
     const path = join(dir, entry);
     const stat = statSync(path);
     if (stat.isDirectory()) out.push(...walk(path));

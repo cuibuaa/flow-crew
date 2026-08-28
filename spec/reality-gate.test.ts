@@ -145,6 +145,53 @@ describe('reality gate check types', () => {
     expect(fail.results[0].details).toMatch(/remove|narrow|change/i);
   });
 
+  it('matches the complete normalized glob path and refuses a vacuous scan', async () => {
+    write('spec/fc-tasks.test.ts', 'const focused = "clean";\n');
+    write('spec/cli-fc-tasks.test.ts', 'const otherFocused = "clean";\n');
+    write('spec/unrelated.test.ts', 'const unrelated = "forbidden";\n');
+    write('spec/nested/fc-tasks.test.ts', 'const nested = "forbidden";\n');
+    const declaration = {
+      name: 'focused scan',
+      type: 'static-ast-scan',
+      params: {
+        glob: 'spec/*fc-tasks*.test.ts',
+        language: 'typescript',
+        forbid_pattern: 'forbidden',
+      },
+    } satisfies CheckDecl;
+
+    const scopedPass = await runAllChecks([declaration], context());
+    expect(scopedPass.pass).toBe(true);
+    expect(scopedPass.results[0].evidence).toMatchObject({ filesScanned: 2, findings: [] });
+
+    write('spec/cli-fc-tasks.test.ts', 'const otherFocused = "forbidden";\n');
+    const realViolation = await runAllChecks([declaration], context());
+    expect(realViolation.pass).toBe(false);
+    expect(realViolation.results[0].evidence).toMatchObject({
+      filesScanned: 2,
+      findings: [expect.objectContaining({
+        file: expect.stringMatching(/spec[/\\]cli-fc-tasks\.test\.ts$/u),
+        match: 'forbidden',
+      })],
+    });
+
+    const vacuous = await runAllChecks([{
+      ...declaration,
+      params: { ...declaration.params, glob: 'spec/*missing*.test.ts' },
+    }], context());
+    expect(vacuous.pass).toBe(false);
+    expect(vacuous.results[0].details).toMatch(/matched no files.*fix the glob/iu);
+    expect(vacuous.results[0].evidence).toMatchObject({ filesScanned: 0, findings: [] });
+
+    const absentBase = await runAllChecks([{
+      ...declaration,
+      params: { ...declaration.params, glob: 'absent/**/*.ts' },
+    }], context());
+    expect(absentBase.pass).toBe(false);
+    expect(absentBase.results[0].details).toMatch(/matched no files.*fix the glob/iu);
+    expect(absentBase.results[0].evidence).toMatchObject({ filesScanned: 0, findings: [] });
+  });
+
   it('checks script exit positive and negative cases', async () => {
     const script = write('check.sh', '#!/usr/bin/env bash\nexit "${1:-0}"\n');
     chmodSync(script, 0o755);

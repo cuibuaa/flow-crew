@@ -19,6 +19,7 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `daemon` | Operate the background orchestrator. |
 | `dashboard` | Query the running web dashboard. |
 | `task` | Inspect and control daemon tasks. |
+| `fc_tasks` | Render, inspect, and atomically update the conversational task ledger. |
 | `audit-reality` | Re-run deterministic checks against task history. |
 | `inbox` | Resolve approval requests that parked runs. |
 | `ship-preflight` | Gather prior-run, campaign, build, and declared-input facts before shipping. |
@@ -50,6 +51,7 @@ flowcrew dashboard status            # query the web dashboard listener
 flowcrew campaign run <config.yaml>
 flowcrew campaign-loop - --project <dir> --campaign <name>
 flowcrew task list
+flowcrew fc_tasks render
 flowcrew audit-reality
 flowcrew inbox list
 flowcrew ship-preflight --brief docs/task_brief.md
@@ -63,6 +65,10 @@ flowcrew clean
 flowcrew export
 flowcrew version
 ```
+
+See [`fc_tasks`](fc_tasks.md) for the legacy-compatible store contract, width-bounded status-line
+rendering, exact optional FlowCrew task/run links, validated create/update commands, and the
+distinct Claude Code and Codex plumbing.
 
 ## `flowcrew ship-preflight`
 
