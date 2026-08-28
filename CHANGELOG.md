@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.8.1] - 2026-08-28
+
+**Breaking:** an unrecognised `research.policy` is refused instead of being silently coerced to
+`greedy_stack`. A brief that names a policy which does not exist — a typo, or a value invented for
+the occasion — used to launch anyway under a default nobody chose, and the run then behaved
+correctly for a question nobody asked. A campaign was lost to exactly that: its brief named
+`heuristic_policy_v1`, got `greedy_stack`, and no warning was emitted anywhere. Fix the value, or
+keep the default deliberately by omitting the field.
+
+This ships as a patch because what it refuses was never valid: a brief naming a policy that exists
+is unaffected, and a brief naming one that does not was already running under a policy nobody chose.
+Nothing else in this release changes an existing behaviour — the ledger below is a new command that
+no current workflow touches.
+
+### Added — a durable record of what a session still owes
+
+A session accumulates obligations it must come back to: a launch to verify, a worktree to reclaim,
+a finding to act on. Until now it carried them only in whatever its transcript happened to
+preserve, which is to say it lost them. `flowcrew fc_tasks` gives that record a home outside the
+conversation — entries created and patched by the CLI, rendered in the terminal, and repaired by a
+tool built for the job when a write leaves one damaged.
+
+- An update changes one field without the caller resending the whole entry. A caller obliged to
+  resend everything in order to change a subject will eventually resend something stale.
+- A damaged ledger is repaired rather than discarded, because the entries in it are the reason it
+  exists.
+- Every write publishes through a temporary file and a rename, so a reader never observes a
+  half-written entry.
+
+### Fixed — an acknowledged write that could not survive the crash it claimed to
+
+The ledger above shipped with defects an independent review then found. Auditing the same diff a
+second time found more, implementing the fixes found more still, and the gate that verified them
+reproduced seven the implementation had missed: thirty-nine in total, each reproduced on unmodified
+code before being fixed, each carrying a regression that fails on the pre-fix tree and passes after.
+
+- **Success was reported before durability was established.** `fsyncDirectory` swallowed every
+  error, so a directory flush returning `ENOSPC` or `EIO` still returned success to a caller that
+  had already been told its entry was safe. A first create flushed only the child session directory
+  and never the parent that had just acquired its entry, so a crash could lose the whole
+  acknowledged session while the child flush reported fine.
+- **Two updates to the same entry both succeeded and one of them vanished.** Each read the original
+  record, each published with an unconditional rename, and no version check or shared lock sat
+  between the read and the publication. The later writer's stale snapshot won, and the earlier
+  writer had already been told its patch was durable.
+- **A write that reported success left the ledger unreadable.** The scan limit rejected only a count
+  *greater* than the maximum, so the entry that landed exactly on the limit was accepted — and the
+  next default read, seeing one more file than it would scan, refused the ledger to renderers and
+  writers alike.
+- **An over-budget attempt was persisted as complete.** An adapter doing synchronous work across its
+  deadline starved the timer that was supposed to enforce it; the resolved promise settled first,
+  the still-pending timer was cleared on the way out, and exit zero was accepted. Three further
+  settlement paths — a late rejection, an abort during starvation, and an abort between the deadline
+  signal and the child's exit — each reported a different wrong cause or code.
+- **Untrusted names reached places that trusted them.** The exported reader followed `..` out of its
+  store root; a ledger filename could carry terminal control sequences into refusal output; a
+  session directory swapped between the check and the open let an acknowledged create write outside
+  its target; and the static scan's walk-before-filter let an excluded symlink either fail the gate
+  or leave the project.
+
+### Fixed — two adjacent claims that were true only by accident
+
+- **A write conflict was claimed when only one stage had reported.** Parallel dispatch treated a
+  single structured report as evidence of a collision, so a stage that wrote nothing could be told
+  it had raced. The claim now requires both sides to have reported their writes.
+- **A terminated attempt was killed before it could clean up.** Termination gave no window for the
+  adapter to release what it held, so a cancelled run left its temporary state behind. The attempt
+  now gets a bounded chance to finish cleanly before the process group goes.
+
 ## [0.8.0] - 2026-08-15
 
 **Breaking:** `timeout_ms` and `timeout_total_ms` are no longer accepted in a brief's stage
