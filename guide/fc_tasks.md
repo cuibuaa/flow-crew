@@ -47,7 +47,8 @@ not exist, it instead says `no ledger`. Those states are intentionally different
 
 Every emitted row is clipped to the terminal display width from `COLUMNS`. Clipping uses terminal
 column width, including double-width CJK text, rather than JavaScript string length. Control
-characters cannot add rows or terminal escapes. The total row count is bounded by `LINES`; when
+characters, including Unicode bidirectional overrides and isolates, cannot add rows, terminal
+escapes, or visually reorder a task row. The total row count is bounded by `LINES`; when
 rows do not fit, the last available row reports how many were omitted. With only one available row,
 that overflow notice is appended to the header because a separate overflow row cannot fit. If the
 front end supplies neither variable, the renderer uses conservative defaults.
@@ -75,12 +76,13 @@ are:
 |---|---|
 | `invalid_dimensions` | `COLUMNS` or `LINES` is not a positive bounded integer. |
 | `payload_not_json` | A supplied front-end payload is not JSON. |
+| `payload_too_large` | A supplied front-end payload exceeds the bounded parse limit. |
 | `payload_not_object` | A supplied payload is not a JSON object. |
 | `session_absent` | No explicit, payload, or observed environment selector exists. |
 | `session_key_absent` | The selected payload key is absent. |
 | `session_invalid` | A selector is empty or unsafe as one path segment. |
 | `store_unreadable` | The session directory cannot be scanned or contains a non-file JSON entry. |
-| `scan_limit_exceeded` | The bounded JSON-file scan would be exceeded. |
+| `scan_limit_exceeded` | A JSON-file, directory-entry, or total-byte scan bound would be exceeded. |
 | `entry_not_json` | An entry cannot be parsed as JSON. |
 | `entry_invalid` | An entry does not satisfy the legacy field types or status vocabulary. |
 | `duplicate_id` | Two files claim the same entry id. |
@@ -91,6 +93,37 @@ are:
 If valid and corrupt files coexist, valid counts and task rows remain visible alongside a warning.
 Invalid command-line syntax is also non-blank, but exits non-zero because it is a usage error rather
 than a renderer state.
+
+## Resource bounds and existing-ledger migration
+
+All byte limits are measured on UTF-8 input. Command input from stdin, `--entry`, or
+`--payload-arg`, and a direct renderer front-end payload, is limited to 1,048,576 bytes before
+JSON parsing. Each of `subject`, `description`, and `activeForm`
+is limited to 262,144 bytes, and each of `blocks` and `blockedBy` is limited to 1,000 ids. A stored
+entry file is limited to 1,048,576 bytes; one session is limited to 16,777,216 entry bytes,
+4,096 directory entries of all names, and the selected JSON-entry count (1,000 by default).
+Linked `run.json` and reservation records are each limited to 1,048,576 bytes. Reads use the limit
+plus a sentinel byte, so a file that grows during the read is still refused rather than allocated
+without bound. The engine root and `tasks.jsonl` registry must be real, stable, non-symbolic
+objects. The configured run archive, a linked run directory, and each child component must be
+real directories; symlinks are never followed to an outside task or run record. Selected
+engine-task rows are limited to 16,777,216 bytes in aggregate; task/run
+statuses are limited to 4,096 bytes and engine project paths to 65,536 bytes before rendering. A
+resolver invocation inspects at most the newest 16,777,216 bytes of `tasks.jsonl`, so an old link
+outside that bounded tail becomes unavailable instead of forcing an unbounded registry scan.
+A `tasks.jsonl` registry row is limited to 4,194,304 bytes (4 MiB). To migrate an existing
+oversized row, compact its optional payload and append a fresh authoritative row under that limit;
+if another oversized row still lies in the required tail, re-emit the currently linked task rows
+after it or repair the registry from a backup. The conversational ledger itself needs no rewrite.
+
+These are validation restrictions, not a JSON format migration. Existing ordinary seven-field and
+linked entries keep the same shape and location. An existing hand-written ledger or engine record
+over a limit becomes explicitly degraded, unavailable, or stale until an operator shortens the
+offending fields/file or removes unrelated directory debris; FlowCrew never truncates or rewrites
+it automatically. Use `list --json` and the named degraded issue to locate the affected session,
+then make a backup and repair the source file with an external editor before retrying a validating
+write. For a linked task older than the registry tail budget, append a fresh authoritative task row
+through the engine or clear and re-establish the ledger link; the JSON ledger itself needs no rewrite.
 
 ## Validated and atomic writes
 
@@ -165,8 +198,9 @@ The faults that continue to block publication are explicit:
 This does widen `update`'s blast radius: it may now overwrite one source file after observing that
 the pre-state is invalid, where it previously refused before target selection. Exact raw-id
 selection, strict candidate validation, full post-state validation, link verification, and atomic
-replacement bound that authority. A refusal still leaves every JSON file unchanged, and `create`
-does not receive this exception.
+replacement bound that authority. A refusal before atomic replacement leaves every JSON file
+unchanged, and `create` does not receive this repair exception. A persistence refusal after
+replacement has the explicitly outcome-ambiguous semantics described below.
 
 The seven fields above remain the complete legacy shape. A validating write may add one optional
 FlowCrew-owned field:
@@ -197,12 +231,30 @@ scan the archive top level and does not signal scheduler pids. Resolver overhead
 benchmarked separately from the unlinked render baseline because registry history and linked-entry
 count affect it.
 
-Validation happens before publication. The engine writes and flushes a uniquely named temporary
-file in the session directory. `create` publishes it with create-only semantics; `update` atomically
-renames it over exactly the selected entry. A validation or publication failure removes the
-temporary file. Failed create publishes no entry, and failed update leaves the prior entry bytes
-unchanged. Temporary files do not use the `.json` suffix and therefore cannot masquerade as ledger
-entries after an interrupted process.
+Validation and publication form one session-scoped transaction. A cross-process lock covers the
+fresh authoritative read, entry-count admission, full proposed-ledger validation, temporary-file
+flush, create-only hard link or atomic update rename, and session-directory flush. A create at the
+configured maximum is refused before publication, and two acknowledged updates cannot silently
+erase one another's patches. Creating a session also flushes the parent directory that acquired
+its name. The same captured directory identity is rechecked around temporary creation,
+publication, and persistence, so a replaced or symlinked session fails closed. A successful return
+therefore follows every supported persistence step; real I/O errors
+such as `EIO` and `ENOSPC` are never treated as an unsupported directory-sync operation.
+
+Temporary basenames use random fixed-size identities rather than the task id, so the documented
+240-byte id boundary still fits filesystems with a 255-byte component limit. Temporary files do
+not use the `.json` suffix and therefore cannot masquerade as ledger entries after an interrupted
+process. A failure before link/rename removes the temporary and leaves create unpublished or update
+unchanged. A directory-persistence failure after link/rename is necessarily outcome-ambiguous: the
+command refuses and tells the caller to reread the ledger, because claiming rollback would be
+false.
+
+Lock metadata lives in an ephemeral `.fc-tasks-lock-<session-hash>` directory at the store root,
+never in a `.json` ledger entry. A lock whose recorded process is definitely gone is recovered;
+PID reuse, unreadable/partial ownership metadata, and permission failures remain fail-safe and
+refuse the writer. If a crash leaves such an indeterminate lock, verify that no writer process owns
+the session before removing that one lock directory and retrying. A time threshold alone never
+steals a live writer's lock.
 
 The reader requires no field beyond the seven-field legacy shape and renders existing files in
 place. It tolerates unknown extra fields while reading for forward compatibility and recognizes and

@@ -369,6 +369,10 @@ describe('fc_tasks session adapters and degradation totality', () => {
     const results = [
       renderFcTasks({ storeRoot: root, explicitSession: 'missing', columns: 0 }),
       renderFcTasks({ storeRoot: root, payload: { provided: true, text: '{bad' } }),
+      renderFcTasks({
+        storeRoot: root,
+        payload: { provided: true, text: `{"session_id":"${'x'.repeat(1024 * 1024)}"}` },
+      }),
       renderFcTasks({ storeRoot: root, payload: { provided: true, text: '[]' } }),
       renderFcTasks({ storeRoot: root }),
       renderFcTasks({ storeRoot: root, payload: { provided: true, text: '{}' } }),

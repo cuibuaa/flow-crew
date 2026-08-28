@@ -40,7 +40,13 @@ deadline, and uses a strictly larger derived budget for a technical timeout
 retry. Plans, workflows, CLI flags, and dashboard task payloads cannot override
 it, and there is no aggregate technical-chain timeout above it. Runtime requests
 to extend an active attempt are recorded and rejected; this ensures an infinite
-child still reaches its deadline.
+child still reaches its deadline. Adapter settlement also checks the same
+monotonic boundary synchronously before the deadline timer is disposed, so an
+exit-zero adapter result cannot become `complete` merely because a blocked event
+loop delayed the timer callback. Rejected adapter promises pass through the
+same settlement check. A current-attempt supervisor ABORT is consumed first at
+that boundary and remains authoritative even when timer polling was starved or
+the deadline signal happened first; its result remains exit 137 and not timed out.
 
 On POSIX systems, reaching that immutable deadline (or receiving a supervisor
 ABORT) sends `SIGTERM` to the detached stage process group, then sends `SIGKILL`

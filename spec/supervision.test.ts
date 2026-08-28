@@ -491,7 +491,7 @@ describe('attempt-scoped one-shot abort signals', () => {
     expect(liveLog).toContain('observed attempt 1');
   });
 
-  it('cleans an owned signal when the adapter throws before the next poll', async () => {
+  it('keeps an owned supervisor ABORT authoritative when the adapter throws before the next poll', async () => {
     const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
     const adapter: Adapter = {
       run: async () => {
@@ -507,7 +507,12 @@ describe('attempt-scoped one-shot abort signals', () => {
       },
     };
 
-    await expect(runStage(adapter, stageOptions())).rejects.toThrow('deterministic adapter crash');
+    const result = await runStage(adapter, stageOptions());
+    expect(result).toMatchObject({
+      exitCode: 137,
+      timedOut: false,
+      timeoutTerminationCause: 'supervisor_abort',
+    });
     expect(existsSync(signalPath)).toBe(false);
   });
 });

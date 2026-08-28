@@ -532,6 +532,13 @@ export async function runStage(
       ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
     };
   };
+  const observeAdapterSettlement = (): void => {
+    // Timer starvation delays both deadline and supervisor polling. Consume a
+    // current-attempt ABORT first because supervisor authority takes
+    // precedence, then observe the monotonic deadline synchronously.
+    pollAbortSignal();
+    if (!supervisorAborted) attemptDeadline.observeSettlement();
+  };
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
   const invokeAdapter = async (
@@ -592,12 +599,14 @@ export async function runStage(
       }).then(
         (value) => {
           lastChildClosedAt = new Date().toISOString();
+          observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
           // parsed while the adapter was closing its child process.
           finish(aggregateAbortSignal.aborted ? cancelledResult(value) : value);
         },
         (error) => {
           lastChildClosedAt = new Date().toISOString();
+          observeAdapterSettlement();
           if (aggregateAbortSignal.aborted) finish(cancelledResult());
           else fail(error);
         },
@@ -662,11 +671,19 @@ export async function runStage(
 
       if (result.exitCode !== 0 && isAdapterError(result.output)) result.adapterError = true;
     }
+  } catch (error) {
+    observeAdapterSettlement();
+    if (!aggregateAbortSignal.aborted) throw error;
+    result = cancelledResult();
   } finally {
+    pollAbortSignal();
     clearInterval(abortPollTimer);
     clearInterval(extensionPollTimer);
     cleanupAbortSignalAtExit();
     // The execution attempt ends when adapter/fallback child settlement ends.
+    // A blocked event loop can settle after the immutable boundary before its
+    // timer callback runs, so observe monotonic expiry before disposal.
+    if (!supervisorAborted) attemptDeadline.observeSettlement();
     // Dispose here as well on thrown adapter errors so no long deadline timer
     // survives this invocation and keeps the worker process alive.
     attemptDeadline.dispose();
@@ -680,9 +697,12 @@ export async function runStage(
     || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
   if (timedOut) {
+    result.exitCode = 124;
     result.timedOut = true;
     terminationCause = 'attempt_timeout';
   } else if (supervisorAborted) {
+    result.exitCode = 137;
+    result.timedOut = false;
     terminationCause = 'supervisor_abort';
   } else if (result.exitCode === 0) {
     terminationCause = 'complete';

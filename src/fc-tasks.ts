@@ -1,6 +1,7 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   fsyncSync,
@@ -8,15 +9,15 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
-  readFileSync,
+  opendirSync,
   readSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import stringWidth from 'string-width';
 
 export const FC_TASK_FIELDS = [
@@ -60,6 +61,7 @@ export interface FcTaskEntry {
 export const RENDER_DEGRADATION_CODES = [
   'invalid_dimensions',
   'payload_not_json',
+  'payload_too_large',
   'payload_not_object',
   'session_absent',
   'session_key_absent',
@@ -98,12 +100,14 @@ interface StoredTask extends FcTaskEntry {
 interface ParsedTaskSource {
   sourceName: string;
   sourcePath: string;
+  sourceBytes: number;
   sourceRecord: unknown;
 }
 
 interface UnreadableTaskSource {
   sourceName: string;
   sourcePath: string;
+  sourceBytes: number;
   issue: LedgerIssue;
 }
 
@@ -116,6 +120,7 @@ type LedgerScanResult =
       sources: ScannedTaskSource[];
       entries: StoredTask[];
       issues: LedgerIssue[];
+      totalBytes: number;
     }
   | {
       state: 'unavailable';
@@ -212,8 +217,23 @@ const DEFAULT_LINES = 24;
 const DEFAULT_MAX_ENTRIES = 1_000;
 const MAX_COLUMNS = 10_000;
 const MAX_LINES = 1_000;
+const MAX_LEDGER_DIRECTORY_ENTRIES = 4_096;
+const MAX_FRONTEND_PAYLOAD_BYTES = 1024 * 1024;
+const MAX_LEDGER_ENTRY_BYTES = 1024 * 1024;
+const MAX_LEDGER_TOTAL_BYTES = 16 * 1024 * 1024;
+const MAX_TASK_TEXT_BYTES = 256 * 1024;
+const MAX_TASK_RELATIONSHIPS = DEFAULT_MAX_ENTRIES;
+const MAX_LEDGER_GRAPH_ERRORS = DEFAULT_MAX_ENTRIES;
+const MAX_ENGINE_RUN_RECORD_BYTES = 1024 * 1024;
+const MAX_ENGINE_STATUS_BYTES = 4 * 1024;
+const MAX_ENGINE_PROJECT_PATH_BYTES = 64 * 1024;
+const MAX_ENGINE_TASK_SNAPSHOT_BYTES = MAX_LEDGER_TOTAL_BYTES;
+const MAX_ENGINE_REGISTRY_SCAN_BYTES = MAX_LEDGER_TOTAL_BYTES;
+const LEDGER_LOCK_WAIT_MS = 5_000;
+const LEDGER_LOCK_POLL_MS = 10;
 const INVALID_SEGMENT_CHARACTERS = /[<>:"/\\|?*]/u;
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const lockWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
 export function defaultFcTasksRoot(): string {
   return join(homedir(), '.claude', 'tasks');
@@ -237,8 +257,18 @@ export function isSafePathSegment(value: string): boolean {
 function containsControlCharacter(value: string): boolean {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+    return isTerminalControl(codePoint);
   });
+}
+
+function isTerminalControl(codePoint: number): boolean {
+  return codePoint <= 0x1f
+    || (codePoint >= 0x7f && codePoint <= 0x9f)
+    || codePoint === 0x061c
+    || codePoint === 0x200e
+    || codePoint === 0x200f
+    || (codePoint >= 0x202a && codePoint <= 0x202e)
+    || (codePoint >= 0x2066 && codePoint <= 0x2069);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -246,7 +276,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function uniqueStringArray(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+  if (!Array.isArray(value)) {
+    throw new FcTasksRefusal(`${field} must be an array of strings`);
+  }
+  if (value.length > MAX_TASK_RELATIONSHIPS) {
+    throw new FcTasksRefusal(`${field} exceeds the ${MAX_TASK_RELATIONSHIPS}-id limit`);
+  }
+  if (value.some((item) => typeof item !== 'string')) {
     throw new FcTasksRefusal(`${field} must be an array of strings`);
   }
   const values = value as string[];
@@ -279,6 +315,11 @@ export function validateFcTaskEntry(value: unknown, strictFields = false): FcTas
   if (typeof subject !== 'string') throw new FcTasksRefusal('subject must be a string');
   if (typeof description !== 'string') throw new FcTasksRefusal('description must be a string');
   if (typeof activeForm !== 'string') throw new FcTasksRefusal('activeForm must be a string');
+  for (const [field, text] of Object.entries({ subject, description, activeForm })) {
+    if (Buffer.byteLength(text, 'utf-8') > MAX_TASK_TEXT_BYTES) {
+      throw new FcTasksRefusal(`${field} exceeds the ${MAX_TASK_TEXT_BYTES}-byte limit`);
+    }
+  }
   if (typeof value.status !== 'string' || !FC_TASK_STATUSES.includes(value.status as FcTaskStatus)) {
     throw new FcTasksRefusal(`status must be one of ${FC_TASK_STATUSES.join(', ')}`);
   }
@@ -352,8 +393,10 @@ function parseEngineTask(value: unknown, expectedId: number): EngineTaskRecord |
       || value.id !== expectedId
       || typeof value.status !== 'string'
       || value.status.trim() === ''
+      || Buffer.byteLength(value.status, 'utf-8') > MAX_ENGINE_STATUS_BYTES
       || typeof value.projectDir !== 'string'
-      || value.projectDir.trim() === '') return undefined;
+      || value.projectDir.trim() === ''
+      || Buffer.byteLength(value.projectDir, 'utf-8') > MAX_ENGINE_PROJECT_PATH_BYTES) return undefined;
   if (value.run_id !== undefined && (typeof value.run_id !== 'string' || value.run_id.trim() === '')) {
     return undefined;
   }
@@ -372,6 +415,100 @@ function pathWithin(root: string, candidate: string): boolean {
   const resolvedRoot = resolve(root);
   const resolvedCandidate = resolve(candidate);
   return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}${sep}`);
+}
+
+type DirectoryIdentity = { dev: number | bigint; ino: number | bigint };
+
+function containedDirectoryIdentity(root: string, candidate: string): DirectoryIdentity | undefined {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  if (!pathWithin(resolvedRoot, resolvedCandidate)) return undefined;
+  const relativePath = relative(resolvedRoot, resolvedCandidate);
+  const components = relativePath === '' ? [] : relativePath.split(sep);
+  let current = resolvedRoot;
+  try {
+    const rootStat = lstatSync(current);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return undefined;
+    if (components.length === 0) {
+      return { dev: rootStat.dev, ino: rootStat.ino };
+    }
+    let finalIdentity: DirectoryIdentity | undefined;
+    for (const component of components) {
+      current = join(current, component);
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+      finalIdentity = { dev: stat.dev, ino: stat.ino };
+    }
+    return finalIdentity;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameContainedDirectory(
+  root: string,
+  candidate: string,
+  expected: DirectoryIdentity,
+): boolean {
+  const current = containedDirectoryIdentity(root, candidate);
+  return current !== undefined && current.dev === expected.dev && current.ino === expected.ino;
+}
+
+type BoundedFileRead =
+  | { ok: true; text: string; byteLength: number }
+  | { ok: false; reason: 'missing' | 'oversized' | 'unsafe' | 'unreadable'; detail: string };
+
+function readBoundedRegularFile(path: string, maximumBytes: number): BoundedFileRead {
+  let before;
+  try {
+    before = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, reason: 'missing', detail: 'file is missing' };
+    }
+    return { ok: false, reason: 'unreadable', detail: 'file cannot be inspected' };
+  }
+  if (!before.isFile() || before.isSymbolicLink()) {
+    return { ok: false, reason: 'unsafe', detail: 'path is not a regular non-symbolic file' };
+  }
+
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+      return { ok: false, reason: 'unsafe', detail: 'file changed between inspection and open' };
+    }
+    if (opened.size > maximumBytes) {
+      return { ok: false, reason: 'oversized', detail: `file exceeds the ${maximumBytes}-byte limit` };
+    }
+    const bytes = Buffer.allocUnsafe(maximumBytes + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > maximumBytes) {
+      return { ok: false, reason: 'oversized', detail: `file grew beyond the ${maximumBytes}-byte limit` };
+    }
+    const after = lstatSync(path);
+    if (!after.isFile() || after.isSymbolicLink()
+        || after.dev !== opened.dev || after.ino !== opened.ino) {
+      return { ok: false, reason: 'unsafe', detail: 'file changed while it was being read' };
+    }
+    return { ok: true, text: bytes.subarray(0, offset).toString('utf-8'), byteLength: offset };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* the read has already failed closed */ }
+    }
+  }
 }
 
 function resolveEngineRun(
@@ -395,45 +532,73 @@ function resolveEngineRun(
   if ((!isAbsolute(task.runId) && !isSafePathSegment(task.runId)) || !pathWithin(runRoot, runPath)) {
     return { state: 'stale', taskId: task.id, detail: 'bound run path is outside the configured archive' };
   }
+  const runDirectoryIdentity = containedDirectoryIdentity(runRoot, runPath);
+  if (!runDirectoryIdentity) {
+    return { state: 'stale', taskId: task.id, detail: 'bound run directory is not a real contained directory' };
+  }
 
   let rawRun: unknown;
-  try {
-    rawRun = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as unknown;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return { state: 'stale', taskId: task.id, detail: 'bound run record is unreadable' };
+  const runRecord = readBoundedRegularFile(
+    join(runPath, 'run.json'),
+    MAX_ENGINE_RUN_RECORD_BYTES,
+  );
+  if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {
+    return { state: 'stale', taskId: task.id, detail: 'bound run directory changed while it was inspected' };
+  }
+  if (!runRecord.ok) {
+    if (runRecord.reason !== 'missing') {
+      const detail = runRecord.reason === 'oversized'
+        ? 'bound run record is oversized'
+        : 'bound run record is unreadable';
+      return { state: 'stale', taskId: task.id, detail };
     }
-    try {
-      const reservation = JSON.parse(
-        readFileSync(join(runPath, '.run-reservation.json'), 'utf-8'),
-      ) as unknown;
-      if (!isObject(reservation)
-          || reservation.version !== 1
-          || reservation.runId !== expectedRunId
-          || typeof reservation.projectDir !== 'string'
-          || resolve(reservation.projectDir) !== task.projectDir
-          || typeof reservation.reservedAt !== 'string'
-          || !Number.isFinite(Date.parse(reservation.reservedAt))) {
-        return { state: 'stale', taskId: task.id, detail: 'bound run reservation does not match the task' };
-      }
-      return {
-        state: 'resolved',
-        taskId: task.id,
-        taskStatus: task.status,
-        projectDir: task.projectDir,
-        ...(task.briefDigest === undefined ? {} : { briefDigest: task.briefDigest }),
-        runId: expectedRunId,
-      };
-    } catch {
+    const reservationRecord = readBoundedRegularFile(
+      join(runPath, '.run-reservation.json'),
+      MAX_ENGINE_RUN_RECORD_BYTES,
+    );
+    if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {
+      return { state: 'stale', taskId: task.id, detail: 'bound run directory changed while it was inspected' };
+    }
+    if (!reservationRecord.ok) {
       return { state: 'stale', taskId: task.id, detail: 'bound run record is missing' };
     }
+    let reservation: unknown;
+    try {
+      reservation = JSON.parse(reservationRecord.text) as unknown;
+    } catch {
+      return { state: 'stale', taskId: task.id, detail: 'bound run reservation does not match the task' };
+    }
+    if (!isObject(reservation)
+        || reservation.version !== 1
+        || reservation.runId !== expectedRunId
+        || typeof reservation.projectDir !== 'string'
+        || resolve(reservation.projectDir) !== task.projectDir
+        || typeof reservation.reservedAt !== 'string'
+        || !Number.isFinite(Date.parse(reservation.reservedAt))) {
+      return { state: 'stale', taskId: task.id, detail: 'bound run reservation does not match the task' };
+    }
+    return {
+      state: 'resolved',
+      taskId: task.id,
+      taskStatus: task.status,
+      projectDir: task.projectDir,
+      ...(task.briefDigest === undefined ? {} : { briefDigest: task.briefDigest }),
+      runId: expectedRunId,
+    };
+  }
+  try {
+    rawRun = JSON.parse(runRecord.text) as unknown;
+  } catch {
+    return { state: 'stale', taskId: task.id, detail: 'bound run record is unreadable' };
   }
 
   if (!isObject(rawRun)
       || (rawRun.runId !== undefined && rawRun.runId !== expectedRunId)
       || typeof rawRun.status !== 'string'
       || rawRun.status.trim() === ''
+      || Buffer.byteLength(rawRun.status, 'utf-8') > MAX_ENGINE_STATUS_BYTES
       || typeof rawRun.projectDir !== 'string'
+      || Buffer.byteLength(rawRun.projectDir, 'utf-8') > MAX_ENGINE_PROJECT_PATH_BYTES
       || resolve(rawRun.projectDir) !== task.projectDir) {
     return { state: 'stale', taskId: task.id, detail: 'bound run record does not match the task' };
   }
@@ -455,16 +620,32 @@ function resolveEngineRun(
 function readLatestEngineTasks(
   registryPath: string,
   requestedIds: ReadonlySet<number>,
+  engineRoot: string,
+  engineRootIdentity: DirectoryIdentity,
 ): EngineTaskSnapshot {
   const tasks = new Map<number, unknown>();
   if (requestedIds.size === 0) return { ok: true, tasks };
 
   let descriptor: number | undefined;
   try {
-    descriptor = openSync(registryPath, 'r');
-    let offset = fstatSync(descriptor).size;
+    if (!sameDirectory(engineRoot, engineRootIdentity)) {
+      return { ok: false, detail: 'configured engine root changed before its registry was read' };
+    }
+    const before = lstatSync(registryPath);
+    if (!before.isFile() || before.isSymbolicLink()) {
+      return { ok: false, detail: 'engine task registry is not a regular non-symbolic file' };
+    }
+    descriptor = openSync(registryPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+      return { ok: false, detail: 'engine task registry changed between inspection and open' };
+    }
+    let offset = opened.size;
     let carry = Buffer.alloc(0);
     let unreadable = 0;
+    let selectedBytes = 0;
+    let scannedBytes = 0;
+    let snapshotOversized = false;
 
     const inspect = (bytes: Buffer): void => {
       const line = bytes.toString('utf-8').trim();
@@ -480,34 +661,72 @@ function readLatestEngineTasks(
           && Number.isSafeInteger(parsed.id)
           && requestedIds.has(parsed.id as number)
           && !tasks.has(parsed.id as number)) {
+        selectedBytes += bytes.length;
+        if (selectedBytes > MAX_ENGINE_TASK_SNAPSHOT_BYTES) {
+          snapshotOversized = true;
+          return;
+        }
         tasks.set(parsed.id as number, parsed);
       }
     };
 
-    while (offset > 0 && tasks.size < requestedIds.size && unreadable === 0) {
-      const length = Math.min(ENGINE_REGISTRY_READ_CHUNK, offset);
+    while (offset > 0
+        && tasks.size < requestedIds.size
+        && unreadable === 0
+        && !snapshotOversized
+        && scannedBytes < MAX_ENGINE_REGISTRY_SCAN_BYTES) {
+      const length = Math.min(
+        ENGINE_REGISTRY_READ_CHUNK,
+        offset,
+        MAX_ENGINE_REGISTRY_SCAN_BYTES - scannedBytes,
+      );
       offset -= length;
       const chunk = Buffer.allocUnsafe(length);
       const bytesRead = readSync(descriptor, chunk, 0, length, offset);
+      if (bytesRead !== length) {
+        return { ok: false, detail: 'engine task registry changed while it was being read' };
+      }
+      scannedBytes += bytesRead;
       const combined = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
       let lineEnd = combined.length;
       for (let index = combined.length - 1; index >= 0; index -= 1) {
         if (combined[index] !== 0x0a) continue;
         inspect(combined.subarray(index + 1, lineEnd));
         lineEnd = index;
-        if (tasks.size === requestedIds.size || unreadable > 0) break;
+        if (tasks.size === requestedIds.size || unreadable > 0 || snapshotOversized) break;
       }
       carry = Buffer.from(combined.subarray(0, lineEnd));
       if (carry.length > MAX_ENGINE_REGISTRY_ROW_BYTES) {
         return { ok: false, detail: 'engine task registry contains an oversized record' };
       }
     }
-    if (offset === 0 && tasks.size < requestedIds.size && unreadable === 0) inspect(carry);
+    if (offset > 0
+        && tasks.size < requestedIds.size
+        && unreadable === 0
+        && !snapshotOversized) {
+      return {
+        ok: false,
+        detail: `engine task registry tail scan exceeds the ${MAX_ENGINE_REGISTRY_SCAN_BYTES}-byte limit`,
+      };
+    }
+    if (offset === 0
+        && tasks.size < requestedIds.size
+        && unreadable === 0
+        && !snapshotOversized) inspect(carry);
+    if (snapshotOversized) {
+      return { ok: false, detail: 'engine task snapshot exceeds the bounded read limit' };
+    }
     if (unreadable > 0) {
       return {
         ok: false,
         detail: `engine task registry has ${unreadable} unreadable record${unreadable === 1 ? '' : 's'} in the required tail`,
       };
+    }
+    const after = lstatSync(registryPath);
+    if (!after.isFile() || after.isSymbolicLink()
+        || after.dev !== opened.dev || after.ino !== opened.ino
+        || !sameDirectory(engineRoot, engineRootIdentity)) {
+      return { ok: false, detail: 'engine task registry changed while it was being read' };
     }
     return { ok: true, tasks };
   } catch {
@@ -534,12 +753,14 @@ export function createEngineTaskRunResolver(
 
   const loadSnapshot = (): EngineTaskSnapshot => {
     if (snapshot) return snapshot;
+    let engineRootIdentity: DirectoryIdentity;
     try {
       const rootStat = lstatSync(engineRoot);
-      if (!rootStat.isDirectory()) {
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
         snapshot = { ok: false, detail: 'configured engine root is not a directory' };
         return snapshot;
       }
+      engineRootIdentity = { dev: rootStat.dev, ino: rootStat.ino };
     } catch {
       snapshot = { ok: false, detail: 'configured engine root is unavailable' };
       return snapshot;
@@ -550,12 +771,18 @@ export function createEngineTaskRunResolver(
       snapshot = { ok: true, tasks: new Map() };
       return snapshot;
     }
-    snapshot = readLatestEngineTasks(registryPath, requestedIds);
+    snapshot = readLatestEngineTasks(
+      registryPath,
+      requestedIds,
+      engineRoot,
+      engineRootIdentity,
+    );
     return snapshot;
   };
 
   return {
     prepare(entries): void {
+      requestedIds.clear();
       for (const entry of entries) {
         if (entry.flowcrewTaskId !== undefined) requestedIds.add(entry.flowcrewTaskId);
       }
@@ -651,6 +878,7 @@ function graphErrors(entries: readonly FcTaskEntry[]): string[] {
         } else if (!ids.has(target)) {
           errors.push(`${entry.id}.${field} names missing entry ${target}`);
         }
+        if (errors.length >= MAX_LEDGER_GRAPH_ERRORS) return errors;
       }
     }
   }
@@ -713,106 +941,151 @@ function scanTaskLedger(
   session: string,
   maxEntries = DEFAULT_MAX_ENTRIES,
 ): LedgerScanResult {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+    return unavailableLedger(
+      'scan_limit_exceeded',
+      'maxEntries must be a positive safe integer',
+    );
+  }
+  if (!isSafePathSegment(session)) {
+    return unavailableLedger('store_unreadable', 'session is not a safe path segment');
+  }
   const sessionPath = join(storeRoot, session);
+  let directoryIdentity: { dev: number | bigint; ino: number | bigint };
   try {
     const stat = lstatSync(sessionPath);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      const issue: LedgerIssue = {
-        code: 'store_unreadable',
-        detail: 'session ledger is not a real directory',
-      };
-      return {
-        state: 'unavailable',
-        sources: [],
-        entries: [],
-        issues: [issue],
-      };
+      return unavailableLedger('store_unreadable', 'session ledger is not a real directory');
     }
+    directoryIdentity = { dev: stat.dev, ino: stat.ino };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { state: 'no_ledger', sources: [], entries: [], issues: [] };
     }
-    const issue: LedgerIssue = {
-      code: 'store_unreadable',
-      detail: 'session ledger cannot be inspected',
-    };
-    return {
-      state: 'unavailable',
-      sources: [],
-      entries: [],
-      issues: [issue],
-    };
+    return unavailableLedger('store_unreadable', 'session ledger cannot be inspected');
   }
   let names: string[];
   try {
-    const directoryEntries = readdirSync(sessionPath, { withFileTypes: true });
-    const jsonEntries = directoryEntries.filter(({ name }) => name.endsWith('.json'));
-    if (jsonEntries.length > maxEntries) {
-      const issue: LedgerIssue = {
-        code: 'scan_limit_exceeded',
-        detail: `ledger has ${jsonEntries.length} JSON entries; scan limit is ${maxEntries}`,
-      };
-      return {
-        state: 'unavailable',
-        sources: [],
-        entries: [],
-        issues: [issue],
-      };
+    names = [];
+    let directoryEntries = 0;
+    const directory = opendirSync(sessionPath);
+    try {
+      for (;;) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        directoryEntries += 1;
+        if (directoryEntries > MAX_LEDGER_DIRECTORY_ENTRIES) {
+          return unavailableLedger(
+            'scan_limit_exceeded',
+            `ledger directory exceeds the ${MAX_LEDGER_DIRECTORY_ENTRIES}-entry scan limit`,
+          );
+        }
+        if (!entry.name.endsWith('.json')) continue;
+        if (names.length >= maxEntries) {
+          return unavailableLedger(
+            'scan_limit_exceeded',
+            `ledger has more than ${maxEntries} JSON entries; scan limit is ${maxEntries}`,
+          );
+        }
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          return unavailableLedger(
+            'store_unreadable',
+            `${entry.name} is not a regular ledger file`,
+          );
+        }
+        names.push(entry.name);
+      }
+    } finally {
+      directory.closeSync();
     }
-    const nonFiles = jsonEntries.filter((entry) => !entry.isFile());
-    if (nonFiles.length > 0) {
-      const issue: LedgerIssue = {
-        code: 'store_unreadable',
-        detail: `${nonFiles[0].name} is not a regular ledger file`,
-      };
-      return {
-        state: 'unavailable',
-        sources: [],
-        entries: [],
-        issues: [issue],
-      };
-    }
-    names = jsonEntries.map(({ name }) => name).sort();
+    names.sort();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { state: 'no_ledger', sources: [], entries: [], issues: [] };
     }
-    const issue: LedgerIssue = {
-      code: 'store_unreadable',
-      detail: `cannot scan session ledger: ${error instanceof Error ? error.message : String(error)}`,
-    };
-    return {
-      state: 'unavailable',
-      sources: [],
-      entries: [],
-      issues: [issue],
-    };
+    return unavailableLedger(
+      'store_unreadable',
+      `cannot scan session ledger: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!sameDirectory(sessionPath, directoryIdentity)) {
+    return unavailableLedger('store_unreadable', 'session ledger changed while it was being scanned');
   }
 
   const sources: ScannedTaskSource[] = [];
+  let totalBytes = 0;
   for (const sourceName of names) {
     const sourcePath = join(sessionPath, sourceName);
+    if (!sameDirectory(sessionPath, directoryIdentity)) {
+      return unavailableLedger('store_unreadable', 'session ledger changed while it was being read');
+    }
+    const opened = readBoundedRegularFile(sourcePath, MAX_LEDGER_ENTRY_BYTES);
+    if (!opened.ok) {
+      const code = opened.reason === 'oversized' ? 'entry_invalid' : 'store_unreadable';
+      sources.push({
+        sourceName,
+        sourcePath,
+        sourceBytes: 0,
+        issue: { code, detail: `${sourceName}: ${opened.detail}` },
+      });
+      continue;
+    }
+    totalBytes += opened.byteLength;
+    if (totalBytes > MAX_LEDGER_TOTAL_BYTES) {
+      return unavailableLedger(
+        'scan_limit_exceeded',
+        `ledger exceeds the ${MAX_LEDGER_TOTAL_BYTES}-byte total scan limit`,
+      );
+    }
     try {
       sources.push({
         sourceName,
         sourcePath,
-        sourceRecord: JSON.parse(readFileSync(sourcePath, 'utf-8')),
+        sourceBytes: opened.byteLength,
+        sourceRecord: JSON.parse(opened.text),
       });
-    } catch (error) {
-      const code = error instanceof SyntaxError ? 'entry_not_json' : 'store_unreadable';
+    } catch {
       sources.push({
         sourceName,
         sourcePath,
+        sourceBytes: opened.byteLength,
         issue: {
-          code,
-          detail: `${sourceName}: ${code === 'entry_not_json' ? 'invalid JSON' : 'cannot be read'}`,
+          code: 'entry_not_json',
+          detail: `${sourceName}: invalid JSON`,
         },
       });
+    }
+    if (!sameDirectory(sessionPath, directoryIdentity)) {
+      return unavailableLedger('store_unreadable', 'session ledger changed while it was being read');
     }
   }
 
   const validated = validateLedgerSources(sources);
-  return { state: 'ready', sources, ...validated };
+  return { state: 'ready', sources, totalBytes, ...validated };
+}
+
+function unavailableLedger(code: LedgerIssue['code'], detail: string): LedgerScanResult {
+  return {
+    state: 'unavailable',
+    sources: [],
+    entries: [],
+    issues: [{ code, detail }],
+  };
+}
+
+function sameDirectory(
+  path: string,
+  expected: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  try {
+    const current = lstatSync(path);
+    return current.isDirectory()
+      && !current.isSymbolicLink()
+      && current.dev === expected.dev
+      && current.ino === expected.ino;
+  } catch {
+    return false;
+  }
 }
 
 export function readTaskLedger(
@@ -831,7 +1104,7 @@ export function readTaskLedger(
 function sanitizeRow(value: string): string {
   const withoutControls = [...value].map((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? ' ' : character;
+    return isTerminalControl(codePoint) ? ' ' : character;
   }).join('');
   return withoutControls.replace(/\s+/gu, ' ').trim();
 }
@@ -867,7 +1140,7 @@ function parseDimension(
 
 type SessionResolution =
   | { ok: true; session: string }
-  | { ok: false; code: Extract<RenderDegradationCode, 'payload_not_json' | 'payload_not_object' | 'session_absent' | 'session_key_absent' | 'session_invalid'>; detail: string };
+  | { ok: false; code: Extract<RenderDegradationCode, 'payload_not_json' | 'payload_too_large' | 'payload_not_object' | 'session_absent' | 'session_key_absent' | 'session_invalid'>; detail: string };
 
 export function resolveFcTasksSession(options: {
   explicitSession?: string;
@@ -883,6 +1156,16 @@ export function resolveFcTasksSession(options: {
   }
 
   if (options.payload?.provided) {
+    if (typeof options.payload.text !== 'string') {
+      return { ok: false, code: 'payload_not_json', detail: 'front-end payload is not JSON text' };
+    }
+    if (Buffer.byteLength(options.payload.text, 'utf-8') > MAX_FRONTEND_PAYLOAD_BYTES) {
+      return {
+        ok: false,
+        code: 'payload_too_large',
+        detail: `front-end payload exceeds the ${MAX_FRONTEND_PAYLOAD_BYTES}-byte limit`,
+      };
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(options.payload.text);
@@ -1090,10 +1373,23 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
   }
 }
 
-function assertWritableSession(storeRoot: string, session: string, create: boolean): string {
+function assertWritableSession(
+  storeRoot: string,
+  session: string,
+  create: boolean,
+): { path: string; identity: DirectoryIdentity } {
   if (!isSafePathSegment(session)) throw new FcTasksRefusal('session must be a non-empty safe path segment');
+  if (create) ensureDirectoryChain(storeRoot);
   const sessionPath = join(storeRoot, session);
-  if (create) mkdirSync(sessionPath, { recursive: true });
+  if (create) {
+    try {
+      mkdirSync(sessionPath, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new FcTasksRefusal(`session ledger cannot be created: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
   let stat;
   try {
     stat = lstatSync(sessionPath);
@@ -1106,17 +1402,71 @@ function assertWritableSession(storeRoot: string, session: string, create: boole
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new FcTasksRefusal('session ledger must be a real directory');
   }
-  return sessionPath;
+  try {
+    fsyncDirectory(storeRoot);
+  } catch (error) {
+    throw new FcTasksRefusal(`session directory persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    path: sessionPath,
+    identity: { dev: stat.dev, ino: stat.ino },
+  };
 }
 
-function readWritableLedger(storeRoot: string, session: string, maxEntries?: number): StoredTask[] {
-  const ledger = readTaskLedger(storeRoot, session, maxEntries);
-  if (ledger.state === 'no_ledger') return [];
+function ensureDirectoryChain(path: string): void {
+  const missing: string[] = [];
+  let cursor = resolve(path);
+  while (!existsSync(cursor)) {
+    missing.push(cursor);
+    const parent = resolve(cursor, '..');
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  for (const directory of missing.reverse()) {
+    const parent = resolve(directory, '..');
+    try {
+      mkdirSync(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new FcTasksRefusal(`ledger store cannot be created durably: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    try {
+      const stat = lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error('created path is not a real directory');
+      }
+      // EEXIST can mean a peer won the mkdir race. Its parent entry still needs
+      // the same persistence barrier before this process may acknowledge a write.
+      fsyncDirectory(parent);
+    } catch (error) {
+      throw new FcTasksRefusal(`ledger store cannot be created durably: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+function writableMaxEntries(value: number | undefined): number {
+  const limit = value ?? DEFAULT_MAX_ENTRIES;
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new FcTasksRefusal('maxEntries must be a positive safe integer');
+  }
+  return limit;
+}
+
+function readWritableLedger(
+  storeRoot: string,
+  session: string,
+  maxEntries?: number,
+): { entries: StoredTask[]; totalBytes: number } {
+  const ledger = scanTaskLedger(storeRoot, session, maxEntries);
+  if (ledger.state === 'no_ledger') {
+    throw new FcTasksRefusal('session ledger changed before the write transaction');
+  }
   if (ledger.state === 'unavailable' || ledger.issues.length > 0) {
-    const issues = ledger.state === 'unavailable' ? ledger.issues : ledger.issues;
+    const issues = ledger.issues;
     throw new FcTasksRefusal(`existing ledger is invalid: ${issues[0].code}: ${issues[0].detail}`);
   }
-  return ledger.entries;
+  return { entries: ledger.entries, totalBytes: ledger.totalBytes };
 }
 
 function validateProposedLedger(entries: readonly FcTaskEntry[]): void {
@@ -1172,17 +1522,20 @@ function verifyTaskLink(entry: FcTaskEntry, resolver?: FcTaskRunResolver): void 
 
 function writeTemporaryEntry(
   sessionPath: string,
-  entry: FcTaskEntry,
-  serializedEntry: unknown = entry,
+  sessionIdentity: DirectoryIdentity,
+  serializedEntry: string,
 ): string {
-  const temporaryPath = join(
-    sessionPath,
-    `.${entry.id}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
-  );
+  const temporaryPath = join(sessionPath, `.fc-task-${randomBytes(16).toString('hex')}.tmp`);
   let descriptor: number | undefined;
   try {
+    if (!sameDirectory(sessionPath, sessionIdentity)) {
+      throw new FcTasksRefusal('session ledger changed before the temporary write');
+    }
     descriptor = openSync(temporaryPath, 'wx', 0o600);
-    writeFileSync(descriptor, `${JSON.stringify(serializedEntry, null, 2)}\n`, 'utf-8');
+    if (!sameDirectory(sessionPath, sessionIdentity)) {
+      throw new FcTasksRefusal('session ledger changed during the temporary write');
+    }
+    writeFileSync(descriptor, serializedEntry, 'utf-8');
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
@@ -1197,13 +1550,163 @@ function writeTemporaryEntry(
 }
 
 function fsyncDirectory(path: string): void {
+  let descriptor: number | undefined;
   try {
-    const descriptor = openSync(path, 'r');
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-  } catch { /* not supported by every platform */ }
+    descriptor = openSync(path, 'r');
+    fsyncSync(descriptor);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    const unsupported = ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(code ?? '')
+      || (process.platform === 'win32' && ['EBADF', 'EISDIR', 'EPERM'].includes(code ?? ''));
+    if (!unsupported) throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function serializeLedgerEntry(value: unknown): { text: string; byteLength: number } {
+  let text: string;
+  try {
+    text = `${JSON.stringify(value, null, 2)}\n`;
+  } catch (error) {
+    throw new FcTasksRefusal(`entry cannot be serialized: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const byteLength = Buffer.byteLength(text, 'utf-8');
+  if (byteLength > MAX_LEDGER_ENTRY_BYTES) {
+    throw new FcTasksRefusal(`entry exceeds the ${MAX_LEDGER_ENTRY_BYTES}-byte file limit`);
+  }
+  return { text, byteLength };
+}
+
+interface LedgerLock {
+  path: string;
+  ownerPath: string;
+  token: string;
+  identity: { dev: number | bigint; ino: number | bigint };
+}
+
+function ledgerLockPath(storeRoot: string, session: string): string {
+  // A case-insensitive store can expose one session directory through multiple
+  // spellings. Serialize those aliases even on a case-sensitive host so the
+  // transaction identity never depends on the host's case-folding policy.
+  const canonicalSession = session.normalize('NFC').toLowerCase();
+  const digest = createHash('sha256').update(canonicalSession).digest('hex');
+  return join(storeRoot, `.fc-tasks-lock-${digest}`);
+}
+
+function acquireLedgerLock(storeRoot: string, session: string): LedgerLock {
+  const path = ledgerLockPath(storeRoot, session);
+  const ownerPath = join(path, 'owner');
+  const token = randomBytes(16).toString('hex');
+  const started = process.hrtime.bigint();
+  for (;;) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      try {
+        writeFileSync(ownerPath, `${JSON.stringify({ version: 1, pid: process.pid, token })}\n`, {
+          encoding: 'utf-8',
+          flag: 'wx',
+          mode: 0o600,
+        });
+      } catch (error) {
+        try { rmdirSync(path); } catch { /* fail-safe residue blocks another writer */ }
+        throw new FcTasksRefusal(`ledger lock owner cannot be recorded: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const stat = lstatSync(path);
+      return { path, ownerPath, token, identity: { dev: stat.dev, ino: stat.ino } };
+    } catch (error) {
+      if (error instanceof FcTasksRefusal) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new FcTasksRefusal(`ledger lock cannot be acquired: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (recoverDefinitelyStaleLedgerLock(path, ownerPath)) continue;
+      const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+      if (elapsedMs >= LEDGER_LOCK_WAIT_MS) {
+        throw new FcTasksRefusal('ledger lock is busy; retry after the concurrent writer finishes');
+      }
+      Atomics.wait(lockWaitCell, 0, 0, LEDGER_LOCK_POLL_MS);
+    }
+  }
+}
+
+function recoverDefinitelyStaleLedgerLock(path: string, ownerPath: string): boolean {
+  let identity: { dev: number | bigint; ino: number | bigint };
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    identity = { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return false;
+  }
+  const owner = readBoundedRegularFile(ownerPath, 4_096);
+  if (!owner.ok) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(owner.text) as unknown;
+  } catch {
+    return false;
+  }
+  if (!isObject(parsed)
+      || parsed.version !== 1
+      || !Number.isSafeInteger(parsed.pid)
+      || (parsed.pid as number) < 1
+      || typeof parsed.token !== 'string'
+      || !/^[a-f0-9]{32}$/u.test(parsed.token)) return false;
+  try {
+    process.kill(parsed.pid as number, 0);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false;
+  }
+  if (!sameDirectory(path, identity)) return false;
+  try {
+    unlinkSync(ownerPath);
+    rmdirSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseLedgerLock(lock: LedgerLock): void {
+  if (!sameDirectory(lock.path, lock.identity)) {
+    throw new FcTasksRefusal('ledger lock ownership was lost; reread the ledger before retrying');
+  }
+  const owner = readBoundedRegularFile(lock.ownerPath, 4_096);
+  if (!owner.ok) throw new FcTasksRefusal('ledger lock ownership was lost; reread the ledger before retrying');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(owner.text) as unknown;
+  } catch {
+    throw new FcTasksRefusal('ledger lock ownership was damaged; reread the ledger before retrying');
+  }
+  if (!isObject(parsed) || parsed.pid !== process.pid || parsed.token !== lock.token) {
+    throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
+  }
+  if (!sameDirectory(lock.path, lock.identity)) {
+    throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
+  }
+  try {
+    unlinkSync(lock.ownerPath);
+    rmdirSync(lock.path);
+  } catch (error) {
+    throw new FcTasksRefusal(
+      `ledger lock could not be released; publication outcome may be visible, reread the ledger before retrying: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function withLedgerLock<T>(storeRoot: string, session: string, action: () => T): T {
+  const lock = acquireLedgerLock(storeRoot, session);
+  try {
+    return action();
+  } finally {
+    releaseLedgerLock(lock);
+  }
 }
 
 export function createTaskEntry(options: LedgerWriteOptions): string {
+  const limit = writableMaxEntries(options.maxEntries);
   if (options.clearFlowcrewTaskLink) {
     throw new FcTasksRefusal('create cannot clear a FlowCrew task link');
   }
@@ -1213,28 +1716,53 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
     false,
   );
   verifyTaskLink(entry, options.taskRunResolver);
-  const sessionPath = assertWritableSession(options.storeRoot, options.session, true);
-  const existing = readWritableLedger(options.storeRoot, options.session, options.maxEntries);
-  if (existing.some(({ id }) => id === entry.id)) throw new FcTasksRefusal(`duplicate id ${entry.id}`);
-  validateProposedLedger([...existing, entry]);
+  const session = assertWritableSession(options.storeRoot, options.session, true);
+  const sessionPath = session.path;
+  return withLedgerLock(options.storeRoot, options.session, () => {
+    const writable = readWritableLedger(options.storeRoot, options.session, limit);
+    if (writable.entries.length >= limit) {
+      throw new FcTasksRefusal(`ledger entry limit ${limit} has been reached`);
+    }
+    if (writable.entries.some(({ id }) => id === entry.id)) {
+      throw new FcTasksRefusal(`duplicate id ${entry.id}`);
+    }
+    validateProposedLedger([...writable.entries, entry]);
+    const serialized = serializeLedgerEntry(entry);
+    if (writable.totalBytes + serialized.byteLength > MAX_LEDGER_TOTAL_BYTES) {
+      throw new FcTasksRefusal(`ledger would exceed the ${MAX_LEDGER_TOTAL_BYTES}-byte total limit`);
+    }
 
-  const targetPath = join(sessionPath, `${entry.id}.json`);
-  const temporaryPath = writeTemporaryEntry(sessionPath, entry);
-  try {
-    const publish = options.publication?.create ?? ((temporary, target) => linkSync(temporary, target));
-    publish(temporaryPath, targetPath);
-    fsyncDirectory(sessionPath);
-    return targetPath;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'EEXIST') throw new FcTasksRefusal(`duplicate target file for id ${entry.id}`);
-    throw new FcTasksRefusal(`atomic create refused: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    try { unlinkSync(temporaryPath); } catch { /* published link or already absent */ }
-  }
+    const targetPath = join(sessionPath, `${entry.id}.json`);
+    const temporaryPath = writeTemporaryEntry(sessionPath, session.identity, serialized.text);
+    let published = false;
+    try {
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed before create publication');
+      }
+      const publish = options.publication?.create ?? ((temporary, target) => linkSync(temporary, target));
+      publish(temporaryPath, targetPath);
+      published = true;
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed during create publication');
+      }
+      fsyncDirectory(sessionPath);
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed during create persistence');
+      }
+      return targetPath;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') throw new FcTasksRefusal(`duplicate target file for id ${entry.id}`);
+      const ambiguity = published ? '; publication may be visible, reread the ledger before retrying' : '';
+      throw new FcTasksRefusal(`atomic create refused${ambiguity}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      try { unlinkSync(temporaryPath); } catch { /* published link or already absent */ }
+    }
+  });
 }
 
 export function updateTaskEntry(options: LedgerUpdateOptions): string {
+  const limit = writableMaxEntries(options.maxEntries);
   if (!isSafePathSegment(options.id)) throw new FcTasksRefusal('update id must be a non-empty safe path segment');
   const completeEntry = isCompleteFcTaskEntry(options.entry)
     ? validateFcTaskEntry(options.entry, true)
@@ -1244,81 +1772,101 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
     throw new FcTasksRefusal(`entry id ${completeEntry.id} does not match update id ${options.id}`);
   }
 
-  const sessionPath = assertWritableSession(options.storeRoot, options.session, false);
-  const scanned = scanTaskLedger(options.storeRoot, options.session, options.maxEntries);
-  if (scanned.state === 'unavailable') {
-    const issue = scanned.issues[0];
-    throw new FcTasksRefusal(`existing ledger is invalid: ${issue.code}: ${issue.detail}`);
-  }
-  if (scanned.state === 'no_ledger') {
-    throw new FcTasksRefusal(`update requires exactly one existing id ${options.id}`);
-  }
-  const matches = scanned.sources.filter(
-    (source): source is ParsedTaskSource & { sourceRecord: Record<string, unknown> } => (
-      'sourceRecord' in source
-      && isObject(source.sourceRecord)
-      && source.sourceRecord.id === options.id
-    ),
-  );
-  if (matches.length > 1) {
-    throw new FcTasksRefusal(
-      `existing ledger is invalid: duplicate_id: id ${options.id} appears in ${matches.map(({ sourceName }) => sourceName).join(' and ')}`,
-    );
-  }
-  if (matches.length === 0) {
-    if (scanned.issues.length > 0) {
+  const session = assertWritableSession(options.storeRoot, options.session, false);
+  const sessionPath = session.path;
+  return withLedgerLock(options.storeRoot, options.session, () => {
+    const scanned = scanTaskLedger(options.storeRoot, options.session, limit);
+    if (scanned.state === 'unavailable') {
       const issue = scanned.issues[0];
       throw new FcTasksRefusal(`existing ledger is invalid: ${issue.code}: ${issue.detail}`);
     }
-    throw new FcTasksRefusal(`update requires exactly one existing id ${options.id}`);
-  }
-
-  const target = matches[0];
-  const sourceRecord = target.sourceRecord;
-  let entry = completeEntry ?? validateFcTaskEntry({
-    ...supportedTaskRecord(sourceRecord),
-    ...patch,
-  }, true);
-  if (completeEntry === undefined && entry.id !== options.id) {
-    throw new FcTasksRefusal(`entry id ${entry.id} does not match update id ${options.id}`);
-  }
-  entry = applyExplicitTaskLink(entry, options.flowcrewTaskId, Boolean(options.clearFlowcrewTaskLink));
-  if (entry.flowcrewTaskId === undefined
-      && !options.clearFlowcrewTaskLink
-      && Number.isSafeInteger(sourceRecord.flowcrewTaskId)
-      && (sourceRecord.flowcrewTaskId as number) > 0) {
-    entry = { ...entry, flowcrewTaskId: sourceRecord.flowcrewTaskId as number };
-  }
-  verifyTaskLink(entry, options.taskRunResolver);
-
-  let serializedEntry: unknown = entry;
-  if (completeEntry === undefined) {
-    const partialEntry: Record<string, unknown> = { ...sourceRecord, ...entry };
-    if (entry.flowcrewTaskId === undefined) delete partialEntry[FC_TASK_LINK_FIELD];
-    serializedEntry = partialEntry;
-  }
-  const proposed = validateLedgerSources(
-    scanned.sources.map((source) => source === target ? { ...source, sourceRecord: serializedEntry } : source),
-  );
-  if (proposed.issues.length > 0) {
-    const issue = proposed.issues[0];
-    throw new FcTasksRefusal(`proposed update leaves ledger invalid: ${issue.code}: ${issue.detail}`);
-  }
-
-  const targetPath = target.sourcePath;
-  const temporaryPath = writeTemporaryEntry(sessionPath, entry, serializedEntry);
-  try {
-    const publish = options.publication?.update ?? ((temporary, target) => renameSync(temporary, target));
-    publish(temporaryPath, targetPath);
-    fsyncDirectory(sessionPath);
-    return targetPath;
-  } catch (error) {
-    throw new FcTasksRefusal(`atomic update refused: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    if (existsSync(temporaryPath)) {
-      try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+    if (scanned.state === 'no_ledger') {
+      throw new FcTasksRefusal(`update requires exactly one existing id ${options.id}`);
     }
-  }
+    const matches = scanned.sources.filter(
+      (source): source is ParsedTaskSource & { sourceRecord: Record<string, unknown> } => (
+        'sourceRecord' in source
+        && isObject(source.sourceRecord)
+        && source.sourceRecord.id === options.id
+      ),
+    );
+    if (matches.length > 1) {
+      throw new FcTasksRefusal(
+        `existing ledger is invalid: duplicate_id: id ${options.id} appears in ${matches.map(({ sourceName }) => sourceName).join(' and ')}`,
+      );
+    }
+    if (matches.length === 0) {
+      if (scanned.issues.length > 0) {
+        const issue = scanned.issues[0];
+        throw new FcTasksRefusal(`existing ledger is invalid: ${issue.code}: ${issue.detail}`);
+      }
+      throw new FcTasksRefusal(`update requires exactly one existing id ${options.id}`);
+    }
+
+    const target = matches[0];
+    const sourceRecord = target.sourceRecord;
+    let entry = completeEntry ?? validateFcTaskEntry({
+      ...supportedTaskRecord(sourceRecord),
+      ...patch,
+    }, true);
+    if (completeEntry === undefined && entry.id !== options.id) {
+      throw new FcTasksRefusal(`entry id ${entry.id} does not match update id ${options.id}`);
+    }
+    entry = applyExplicitTaskLink(entry, options.flowcrewTaskId, Boolean(options.clearFlowcrewTaskLink));
+    if (entry.flowcrewTaskId === undefined
+        && !options.clearFlowcrewTaskLink
+        && Number.isSafeInteger(sourceRecord.flowcrewTaskId)
+        && (sourceRecord.flowcrewTaskId as number) > 0) {
+      entry = { ...entry, flowcrewTaskId: sourceRecord.flowcrewTaskId as number };
+    }
+    verifyTaskLink(entry, options.taskRunResolver);
+
+    let serializedEntry: unknown = entry;
+    if (completeEntry === undefined) {
+      const partialEntry: Record<string, unknown> = { ...sourceRecord, ...entry };
+      if (entry.flowcrewTaskId === undefined) delete partialEntry[FC_TASK_LINK_FIELD];
+      serializedEntry = partialEntry;
+    }
+    const proposed = validateLedgerSources(
+      scanned.sources.map((source) => source === target ? { ...source, sourceRecord: serializedEntry } : source),
+    );
+    if (proposed.issues.length > 0) {
+      const issue = proposed.issues[0];
+      throw new FcTasksRefusal(`proposed update leaves ledger invalid: ${issue.code}: ${issue.detail}`);
+    }
+    const serialized = serializeLedgerEntry(serializedEntry);
+    const proposedBytes = scanned.totalBytes - target.sourceBytes + serialized.byteLength;
+    if (proposedBytes > MAX_LEDGER_TOTAL_BYTES) {
+      throw new FcTasksRefusal(`ledger would exceed the ${MAX_LEDGER_TOTAL_BYTES}-byte total limit`);
+    }
+
+    const targetPath = target.sourcePath;
+    const temporaryPath = writeTemporaryEntry(sessionPath, session.identity, serialized.text);
+    let published = false;
+    try {
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed before update publication');
+      }
+      const publish = options.publication?.update ?? ((temporary, targetPathValue) => renameSync(temporary, targetPathValue));
+      publish(temporaryPath, targetPath);
+      published = true;
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed during update publication');
+      }
+      fsyncDirectory(sessionPath);
+      if (!sameDirectory(sessionPath, session.identity)) {
+        throw new FcTasksRefusal('session ledger changed during update persistence');
+      }
+      return targetPath;
+    } catch (error) {
+      const ambiguity = published ? '; publication may be visible, reread the ledger before retrying' : '';
+      throw new FcTasksRefusal(`atomic update refused${ambiguity}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (existsSync(temporaryPath)) {
+        try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
+      }
+    }
+  });
 }
 
 export function publicTaskEntries(result: LedgerReadResult): FcTaskEntry[] {

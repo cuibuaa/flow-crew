@@ -184,6 +184,12 @@ export class AttemptDeadlineController {
     });
   }
 
+  /** Observe monotonic expiry even when the timer callback was starved. */
+  observeSettlement(): boolean {
+    if (!this.signal.aborted && this.remainingMs() <= 0) this.abortAtDeadline();
+    return this.signal.aborted;
+  }
+
   dispose(): void {
     if (this.timer) this.clock.clearTimer(this.timer);
   }

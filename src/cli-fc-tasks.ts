@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   FcTasksRefusal,
@@ -23,6 +23,8 @@ export interface FcTasksCliDependencies {
   stderr?: Writer;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  stdinIsTTY?: boolean;
+  readStdin?: () => string;
   taskRunResolver?: FcTaskRunResolver;
 }
 
@@ -52,6 +54,9 @@ const WRITE_VALUE_OPTIONS = new Set([
   '--entry',
   '--flowcrew-task-id',
 ]);
+
+const MAX_CLI_INPUT_BYTES = 1024 * 1024;
+const stdinWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
 export function fcTasksUsage(): string {
   return [
@@ -103,10 +108,55 @@ function positiveInteger(value: string | undefined, name: string): number | unde
   return parsed;
 }
 
-function inputText(dependencies: FcTasksCliDependencies): string {
-  if (dependencies.stdin !== undefined) return dependencies.stdin;
-  if (process.stdin.isTTY) return '';
-  return readFileSync(0, 'utf-8');
+function inputText(
+  dependencies: FcTasksCliDependencies,
+  readFromTty = false,
+): string {
+  if (dependencies.stdin !== undefined) return boundedInputValue(dependencies.stdin);
+  const stdinIsTTY = dependencies.stdinIsTTY ?? Boolean(process.stdin.isTTY);
+  if (stdinIsTTY && !readFromTty) return '';
+  if (dependencies.readStdin) return boundedInputValue(dependencies.readStdin());
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let count: number;
+    try {
+      count = readSync(0, chunk, 0, chunk.length, null);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') throw error;
+      if (readFromTty && stdinIsTTY && total > 0) {
+        const candidate = Buffer.concat(chunks, total).toString('utf-8');
+        try {
+          JSON.parse(candidate);
+          return candidate;
+        } catch { /* wait for the rest of the JSON value */ }
+      }
+      Atomics.wait(stdinWaitCell, 0, 0, 10);
+      continue;
+    }
+    if (count === 0) break;
+    total += count;
+    if (total > MAX_CLI_INPUT_BYTES) {
+      throw new FcTasksRefusal(`stdin exceeds the ${MAX_CLI_INPUT_BYTES}-byte input limit`);
+    }
+    chunks.push(Buffer.from(chunk.subarray(0, count)));
+    if (readFromTty && stdinIsTTY) {
+      const candidate = Buffer.concat(chunks, total).toString('utf-8');
+      try {
+        JSON.parse(candidate);
+        return candidate;
+      } catch { /* a pretty-printed JSON value may need more terminal input */ }
+    }
+  }
+  return Buffer.concat(chunks, total).toString('utf-8');
+}
+
+function boundedInputValue(value: string): string {
+  if (Buffer.byteLength(value, 'utf-8') > MAX_CLI_INPUT_BYTES) {
+    throw new FcTasksRefusal(`input exceeds the ${MAX_CLI_INPUT_BYTES}-byte limit`);
+  }
+  return value;
 }
 
 function storeRoot(
@@ -145,9 +195,9 @@ function sessionPayload(
   stdinMayContainPayload: boolean,
 ): { provided: boolean; text: string } | undefined {
   const argument = parsed.values.get('--payload-arg');
-  if (argument !== undefined) return { provided: true, text: argument };
+  if (argument !== undefined) return { provided: true, text: boundedInputValue(argument) };
   if (!stdinMayContainPayload || parsed.values.has('--session')) return undefined;
-  const stdin = inputText(dependencies);
+  const stdin = inputText(dependencies, false);
   return stdin.trim() ? { provided: true, text: stdin } : undefined;
 }
 
@@ -169,7 +219,10 @@ function parseEntry(
   parsed: ParsedArguments,
   dependencies: FcTasksCliDependencies,
 ): unknown {
-  const text = parsed.values.get('--entry') ?? inputText(dependencies);
+  const argument = parsed.values.get('--entry');
+  const text = argument === undefined
+    ? inputText(dependencies, true)
+    : boundedInputValue(argument);
   if (!text.trim()) throw new FcTasksRefusal('entry JSON is required');
   try {
     return JSON.parse(text);
@@ -179,13 +232,31 @@ function parseEntry(
 }
 
 function writeUsageError(stdout: Writer, message: string): number {
-  stdout.write(`fc_tasks: usage error · ${message}\n`);
+  stdout.write(`fc_tasks: usage error · ${sanitizeDiagnostic(message)}\n`);
   return 2;
 }
 
 function writeRefusal(stderr: Writer, operation: string, error: unknown): number {
-  stderr.write(`fc_tasks: refused ${operation} · ${error instanceof Error ? error.message : String(error)}\n`);
+  stderr.write(
+    `fc_tasks: refused ${sanitizeDiagnostic(operation)} · ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}\n`,
+  );
   return 1;
+}
+
+function sanitizeDiagnostic(value: string): string {
+  const withoutControls = [...value].map((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f
+      || (codePoint >= 0x7f && codePoint <= 0x9f)
+      || codePoint === 0x061c
+      || codePoint === 0x200e
+      || codePoint === 0x200f
+      || (codePoint >= 0x202a && codePoint <= 0x202e)
+      || (codePoint >= 0x2066 && codePoint <= 0x2069)
+      ? ' '
+      : character;
+  }).join('');
+  return withoutControls.replace(/\s+/gu, ' ').trim();
 }
 
 export function cmdFcTasks(
@@ -280,7 +351,7 @@ export function cmdFcTasks(
         flowcrewTaskId: positiveInteger(parsed.values.get('--flowcrew-task-id'), '--flowcrew-task-id'),
         taskRunResolver: taskRunResolver(parsed, dependencies),
       });
-      stdout.write(`fc_tasks: created ${session.session}/${(entry as { id?: unknown }).id}\n`);
+      stdout.write(`fc_tasks: created ${sanitizeDiagnostic(`${session.session}/${String((entry as { id?: unknown }).id)}`)}\n`);
       return 0;
     } catch (error) {
       return writeRefusal(stderr, 'create', error);
@@ -308,7 +379,7 @@ export function cmdFcTasks(
         clearFlowcrewTaskLink: parsed.flags.has('--clear-flowcrew-task-link'),
         taskRunResolver: taskRunResolver(parsed, dependencies),
       });
-      stdout.write(`fc_tasks: updated ${session.session}/${parsed.positionals[0]}\n`);
+      stdout.write(`fc_tasks: updated ${sanitizeDiagnostic(`${session.session}/${parsed.positionals[0]}`)}\n`);
       return 0;
     } catch (error) {
       return writeRefusal(stderr, 'update', error);
