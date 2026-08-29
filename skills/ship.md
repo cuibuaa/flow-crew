@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 11 -->
+<!-- flowcrew-skill-revision: 12 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -318,8 +318,12 @@ human wrap-up is complete, or turn a terminal status into acceptance.
   body too and reports each as present or missing. So a sentence naming a path that was only ever an
   idea makes preflight demand a file by that name, while setup, correctly, never links it. A mention
   is exempt inside a fenced code block, under a heading whose words mark the section as output rather
-  than input, and when the reference is explicitly negated. To name something that is not an input,
-  use one of those, or do not write it in the shape of a path.
+  than input, and when the reference is explicitly negated. An `Out of scope` heading is none of
+  those, so a path named there as excluded is collected as required — and if it exists, setup then
+  tries to overlay the working copy of it onto the worktree and refuses on any uncommitted
+  difference. Naming a path costs something whether the path exists or not: absent, preflight
+  demands it; present, setup wants to overwrite it. To refer to something that is not an input, use
+  one of the exemptions, or do not write it in the shape of a path.
 - Declaring more than the target lacks has its own cost. Setup overlays declared inputs onto the
   worktree; naming something the worktree already carries asks it to overwrite that copy, which
   refuses on any uncommitted difference and can pull unrelated local work into the run.
