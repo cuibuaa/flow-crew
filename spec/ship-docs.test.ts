@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -188,6 +189,31 @@ describe('ship skill semantic contract', () => {
     ]) {
       expect(normalized, bar).toContain(bar);
     }
+  });
+
+  it('resolves every section cross-reference it makes', () => {
+    // A rule that points at another section is only usable while that section exists under that
+    // number. Renumbering is silent otherwise: the prose still reads correctly and sends the
+    // reader nowhere.
+    const headings = new Set(Array.from(ship.matchAll(/^#{2,4}\s+(\d+(?:\.\d+)*)/gm), (m) => m[1]));
+    const referenced = new Set(Array.from(ship.matchAll(/§(\d+(?:\.\d+)*)/g), (m) => m[1]));
+    expect(headings.size).toBeGreaterThan(0);
+    expect(referenced.size).toBeGreaterThan(0);
+    const dangling = [...referenced].filter((section) => !headings.has(section)).sort();
+    expect(dangling, `cross-references with no such section: ${dangling.join(', ')}`).toEqual([]);
+  });
+
+  it('carries a revision stamp that moves when the guidance moves', () => {
+    // skills-onboarding checks the stamp exists and that installed copies match it. Neither
+    // notices a stamp left behind by an edit, which is what makes an installed copy report
+    // itself current while carrying different guidance.
+    const stamp = /<!-- flowcrew-skill-revision: (\d+) -->/.exec(ship)?.[1];
+    expect(stamp, 'ship.md has no revision stamp').toBeDefined();
+    const body = ship.slice(ship.indexOf('-->') + 3);
+    const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
+    // Update both values together when the guidance changes: the digest names the bytes the
+    // stamp describes, so a mismatch means one of them was left behind.
+    expect({ revision: stamp, digest }).toEqual({ revision: '11', digest: '05bb0282caa9' });
   });
 
   it('contains no private measured case studies', () => {

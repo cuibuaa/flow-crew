@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 9 -->
+<!-- flowcrew-skill-revision: 11 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -78,15 +78,84 @@ decompose and parallelise inside it far better than a chain of tasks can be sequ
 Split only when the kinds genuinely differ — and then launch the pieces in parallel rather than in
 series, since a queue of related tasks is the shape that looks organised and finishes last.
 
-The planner does not receive this conversation. Write `docs/task_brief.md` so a capable practitioner
-who has never seen it knows the outcome, context, constraints, approach, success criteria, relevant
-paths, and exclusions. Never refer to “above”, “as discussed”, or an unstated plan.
+The planner does not receive this conversation, so the brief has to stand alone — but standing alone
+means naming what the run must **find**, not supplying what you would have concluded. Write
+`docs/task_brief.md` so a capable practitioner who has never seen it knows the outcome that would end
+the task, where the evidence lives, which constraints are real, and what its report must show. Never
+refer to “above”, “as discussed”, or an unstated plan.
+
+**Leave the approach out.** FlowCrew scouts a frontier, decomposes work, and chooses mechanisms
+better than a brief can specify them; a brief that names an approach converts that capability into
+instruction-following. Where the exact means genuinely *is* the requirement, say so explicitly
+(§2.1) — that is a different case, not the default one. An `Out of scope` list is read as complete,
+so put real constraints in it and nothing else; a dimension left unmentioned is treated as closed
+whether or not you meant to close it.
+
+**A fact you supply is used exactly as far as you supplied it.** A run given a figure will honour it
+precisely — turning it into a checkable obligation, which is what you want — and will not supply the
+half of it you left out. A minimum update count was obeyed to the letter while the batch size it
+implicitly depended on went unmentioned and unchanged, so the budget was raised without the
+experience behind it changing at all. Prohibitions and constraints behave the same way: what the
+brief lists is treated as the whole list. Where the brief cannot be sure its own enumeration is
+complete, say so and make the gap findable rather than hoping it does not matter:
+
+> The constraints and quantities here are the ones I could see. Before acting on any of them, say
+> what each depends on that this brief did not state, and whether that changes what it is worth.
+
+**Point at the artifact; do not summarise it.** A summary you write is a claim you assert, and a
+brief's claims are treated as settled. Compressing a prior report into three sentences drops
+whatever you did not think mattered — a campaign told to read one log never read the modules sitting
+beside it, and a baseline carried forward as a number arrived without the fact that it scored worse
+than changing nothing. Give the path and require the run to read it. Where a figure must appear
+because a disagreement would matter, supply it as a cross-check with the anti-anchoring fields,
+never as a premise.
+
+**Assert how a result must be produced and shown, not what it must be.** A criterion that fixes the
+process — reproduced before it was fixed, compared against a control varying one condition, audited
+by something other than what produced it, reported with its distribution and its direct exit code —
+constrains rigour without constraining method. A criterion that fixes the finding constrains the
+answer, and a run that cannot meet it will either fail honestly or reshape the work until it can.
+Process assertions still have to bite: pin each to a moment and a form of evidence — *after the last
+write*, not “at some point”; the direct exit code and totals, not “green”. A stage once reported a
+suite passing, truthfully, and then wrote the artifact that broke it.
+
+A brief written this way usually fits on one page: the outcome that decides whether the task is
+done; where the evidence lives, as paths rather than as what they say; the constraints that are
+real; what the report must show, numbered, each pinned to its moment and its evidence; and which
+artifact each terminal outcome writes. A section outside that list — an approach, a problem
+decomposition, a survey of what has been tried, an account of what the evidence means — is the
+operator doing the run's work in advance, and it is where wrong context enters.
 
 **Write the property, not the answer you derived by hand.** A figure you measured is measured in
 your environment, not the run's, and a brief that states it converts a check the run could perform
 into a fact it must accept. State what must be true and require the run to establish it in the
 target. Supply your figure only as a cross-check, alongside the anti-anchoring fields, so a
 disagreement surfaces instead of being reconciled silently.
+
+This applies to configured values too, and there it is easier to miss, because a setting feels like
+a decision rather than a claim. A number the run will be judged against — a baseline, a floor, a
+threshold — asserts *this is what a result must beat*, and it can be wrong the way a measurement
+can. Ask the run to confirm it on the same scale as the candidates, against whatever "changing
+nothing" means for the task: the incumbent's own score, the unmodified input, a constant output. A
+campaign once anchored on the best result so far without checking that the best result so far was
+worse than leaving the system alone, so every later round was scored against a reference no
+candidate needed to beat.
+
+**Ask what already exists before a round builds its own.** A round that writes its own harness,
+collector, or evaluator measures the thing it just wrote. That is the right choice when isolation
+demands it and the wrong one when the project already ships the same capability — and the two are
+indistinguishable in the report unless the brief asks. Where a round may build its own execution or
+measurement path, require it to name what the project already provides and why that does not serve.
+"I wrote a minimal driver so the comparison varies one condition" is a good answer; the answer this
+prevents is silence.
+
+**Find which bound binds before tuning one.** A limit raised in the brief may sit behind another the
+brief does not mention, and the run then behaves as though the raise never happened — a research
+budget of fifteen rounds never bound because the engine's iteration cap of five was reached first.
+Where a brief sets a limit, identify every limit on that same quantity, confirm the one being set is
+the one that binds first, and say what the run should do when it is reached. A loop that must also
+audit and report its own last round needs budget beyond the work itself, or the stop preempts the
+reporting.
 
 Follow the [canonical brief and file contract](https://github.com/cuibuaa/flow-crew/blob/main/guide/brief-contract.md)
 for frontmatter, research/program loops, Reality checks, approvals, verdicts, and terminal artifacts.
@@ -238,6 +307,22 @@ human wrap-up is complete, or turn a terminal status into acceptance.
   fact the executor cannot obtain or correction of the operator's error, not delayed scope. Repeated
   engineering guidance is evidence the brief was incomplete; research loops are different because
   steering on intermediate evidence is their purpose.
+- A prohibition written against an exact case is satisfied by the approximate one. A criterion barring
+  a result that is *identical* to some reference, or *exactly* some value, is obeyed truthfully by a
+  result that is neither quite identical nor quite that value and is substantively both. Where the
+  concern is that something did not really happen, pair the prohibition with a quantity that shows it
+  did — a count, a difference from the control, whether an interval excludes the null — so a report has
+  to exhibit the effect rather than only deny its absence.
+- Prose does not declare an input, but it is still read. §1.3's rule stands for setup, which links only
+  what the frontmatter declares; preflight is the other half — it collects path-shaped strings from the
+  body too and reports each as present or missing. So a sentence naming a path that was only ever an
+  idea makes preflight demand a file by that name, while setup, correctly, never links it. A mention
+  is exempt inside a fenced code block, under a heading whose words mark the section as output rather
+  than input, and when the reference is explicitly negated. To name something that is not an input,
+  use one of those, or do not write it in the shape of a path.
+- Declaring more than the target lacks has its own cost. Setup overlays declared inputs onto the
+  worktree; naming something the worktree already carries asks it to overwrite that copy, which
+  refuses on any uncommitted difference and can pull unrelated local work into the run.
 
 Guidance is a request, not an effect. It reaches a stage on the supervisor's next tick, which may
 be after that stage has already acted, and a stage can be overruled by an earlier instruction or by
