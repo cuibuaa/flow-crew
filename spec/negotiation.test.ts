@@ -33,6 +33,7 @@ import {
   type TechnicalRetryTerminalDecision,
 } from '../src/attempt-deadline.js';
 import { parseSupervisorVerdict } from '../src/supervisor.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import {
   constraintDecisionPath,
   negotiationIdentity,
@@ -131,14 +132,12 @@ function findArtifact(directory: string, prefix: string): string {
   return join(directory, name);
 }
 
-async function waitForDecision(directory: string, prefix: string, timeoutMs = 800): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+async function waitForDecision(directory: string, prefix: string): Promise<Record<string, unknown>> {
+  return waitForPathEvent(directory, () => {
     const name = readdirSync(directory).find((file) => file.startsWith(prefix) && file.endsWith('.json'));
     if (name) return readJson(join(directory, name));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for ${prefix}`);
+    return undefined;
+  });
 }
 
 describe('shared immutable negotiation protocol', () => {

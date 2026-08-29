@@ -92,23 +92,80 @@ function expectConstrainedLoader(heapMiB: number): void {
   expect(control.stdout).toBe('function');
 }
 
-async function waitFor(predicate: () => boolean, description: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
+interface ChildObservation {
+  ready: Promise<void>;
+  lockBoundary: Promise<'contended' | 'ready' | 'settled'>;
+  publicationOrSettlement: Promise<'ready' | 'settled'>;
+  settlement: Promise<{ code: number | null; stdout: string; stderr: string }>;
 }
 
-function collectChild(child: ChildProcess): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function observeChild(child: ChildProcess): ChildObservation {
   let stdout = '';
   let stderr = '';
-  child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf-8'); });
+  let contended = false;
+  let ready = false;
+  let boundaryObserved = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  let resolveLockBoundary!: (event: 'contended' | 'ready' | 'settled') => void;
+  let rejectLockBoundary!: (error: Error) => void;
+  let resolvePublicationOrSettlement!: (event: 'ready' | 'settled') => void;
+  let rejectPublicationOrSettlement!: (error: Error) => void;
+  const readyPromise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveReady = resolvePromise;
+    rejectReady = rejectPromise;
+  });
+  const lockBoundary = new Promise<'contended' | 'ready' | 'settled'>((resolvePromise, rejectPromise) => {
+    resolveLockBoundary = resolvePromise;
+    rejectLockBoundary = rejectPromise;
+  });
+  const publicationOrSettlement = new Promise<'ready' | 'settled'>((resolvePromise, rejectPromise) => {
+    resolvePublicationOrSettlement = resolvePromise;
+    rejectPublicationOrSettlement = rejectPromise;
+  });
+  void readyPromise.catch(() => undefined);
+  child.stdout?.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString('utf-8');
+    if (!contended && stdout.includes('CONTENDED\n')) {
+      contended = true;
+      boundaryObserved = true;
+      resolveLockBoundary('contended');
+    }
+    if (!ready && stdout.includes('READY\n')) {
+      ready = true;
+      resolveReady();
+      if (!boundaryObserved) {
+        boundaryObserved = true;
+        resolveLockBoundary('ready');
+      }
+      resolvePublicationOrSettlement('ready');
+    }
+  });
   child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf-8'); });
-  return new Promise((resolvePromise, rejectPromise) => {
-    child.once('error', rejectPromise);
+  const settlement = new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+    child.once('error', (error) => {
+      if (!ready) rejectReady(error);
+      rejectLockBoundary(error);
+      rejectPublicationOrSettlement(error);
+      rejectPromise(error);
+    });
+    child.once('close', () => {
+      if (!ready) rejectReady(new Error(`child settled before entering publication: ${stderr}`));
+      if (!boundaryObserved) {
+        boundaryObserved = true;
+        resolveLockBoundary('settled');
+      }
+      resolvePublicationOrSettlement('settled');
+    });
     child.once('close', (code) => resolvePromise({ code, stdout, stderr }));
   });
+  return { ready: readyPromise, lockBoundary, publicationOrSettlement, settlement };
+}
+
+function workerResult<T>(stdout: string): T {
+  const line = stdout.split('\n').find((value) => value.startsWith('RESULT '));
+  if (!line) throw new Error(`worker did not emit a result: ${stdout}`);
+  return JSON.parse(line.slice('RESULT '.length)) as T;
 }
 
 describe('session ledger publication regressions', () => {
@@ -218,8 +275,22 @@ describe('session ledger publication regressions', () => {
   it('F02 serializes same-id patches so two acknowledgements cannot lose either field', { timeout: 15_000 }, async () => {
     seed('session', 'shared.json', task('shared'));
     const workerSource = `
-      import { existsSync, renameSync, writeFileSync } from 'node:fs';
-      const [moduleUrl, storeRoot, field, value, readyPath, releasePath] = process.argv.slice(1);
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const [moduleUrl, storeRoot, field, value, releasePath] = process.argv.slice(1);
+      const originalMkdir = fs.mkdirSync;
+      let reportedContention = false;
+      fs.mkdirSync = (...args) => {
+        try { return originalMkdir(...args); }
+        catch (error) {
+          if (!reportedContention && error.code === 'EEXIST' && String(args[0]).includes('.fc-tasks-lock-')) {
+            reportedContention = true;
+            process.stdout.write('CONTENDED\\n');
+          }
+          throw error;
+        }
+      };
+      syncBuiltinESMExports();
       const { updateTaskEntry } = await import(moduleUrl);
       const wait = new Int32Array(new SharedArrayBuffer(4));
       try {
@@ -229,58 +300,47 @@ describe('session ledger publication regressions', () => {
           id: 'shared',
           entry: { [field]: value },
           publication: { update(temporary, target) {
-            writeFileSync(readyPath, 'ready');
-            while (!existsSync(releasePath)) Atomics.wait(wait, 0, 0, 10);
-            renameSync(temporary, target);
+            process.stdout.write('READY\\n');
+            while (!fs.existsSync(releasePath)) Atomics.wait(wait, 0, 0, 10);
+            fs.renameSync(temporary, target);
           } },
         });
-        process.stdout.write(JSON.stringify({ ok: true, field, value }));
+        process.stdout.write('RESULT ' + JSON.stringify({ ok: true, field, value }) + '\\n');
       } catch (error) {
-        process.stdout.write(JSON.stringify({ ok: false, field, value, error: error.message }));
+        process.stdout.write('RESULT ' + JSON.stringify({ ok: false, field, value, error: error.message }) + '\\n');
       }
     `;
-    const readySubject = join(root, 'ready-subject');
-    const readyDescription = join(root, 'ready-description');
     const releaseSubject = join(root, 'release-subject');
     const releaseDescription = join(root, 'release-description');
-    const child = (field: string, value: string, ready: string, release: string) => spawn(process.execPath, [
+    const child = (field: string, value: string, release: string) => observeChild(spawn(process.execPath, [
       '--import', 'tsx', '--input-type=module', '-e', workerSource,
-      fcTasksSourceUrl, root, field, value, ready, release,
+      fcTasksSourceUrl, root, field, value, release,
     ], {
       cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
-    });
-    const subjectChild = child('subject', 'subject-from-one', readySubject, releaseSubject);
-    const descriptionChild = child('description', 'description-from-two', readyDescription, releaseDescription);
-    const subjectResult = collectChild(subjectChild);
-    const descriptionResult = collectChild(descriptionChild);
+    }));
+    const subjectChild = child('subject', 'subject-from-one', releaseSubject);
+    await subjectChild.ready;
+    const descriptionChild = child('description', 'description-from-two', releaseDescription);
+    const secondBoundary = await descriptionChild.lockBoundary;
 
-    await waitFor(() => existsSync(readySubject) || existsSync(readyDescription), 'the first publisher');
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-    if (existsSync(readySubject) && existsSync(readyDescription)) {
-      writeFileSync(releaseSubject, 'release');
-      await subjectResult;
+    writeFileSync(releaseSubject, 'release');
+    await subjectChild.settlement;
+    const descriptionEvent = await descriptionChild.publicationOrSettlement;
+    if (descriptionEvent === 'ready') {
       writeFileSync(releaseDescription, 'release');
-    } else {
-      const subjectFirst = existsSync(readySubject);
-      writeFileSync(subjectFirst ? releaseSubject : releaseDescription, 'release');
-      await (subjectFirst ? subjectResult : descriptionResult);
-      await waitFor(
-        () => existsSync(subjectFirst ? readyDescription : readySubject),
-        'the serialized second publisher',
-      );
-      writeFileSync(subjectFirst ? releaseDescription : releaseSubject, 'release');
     }
 
-    const rawResults = await Promise.all([subjectResult, descriptionResult]);
+    const rawResults = await Promise.all([subjectChild.settlement, descriptionChild.settlement]);
+    expect(secondBoundary, 'writer two must reach the held ledger lock before writer one is released').toBe('contended');
     expect(rawResults.every(({ code }) => code === 0), JSON.stringify(rawResults)).toBe(true);
-    const results = rawResults.map(({ stdout }) => JSON.parse(stdout) as {
+    const results = rawResults.map(({ stdout }) => workerResult<{
       ok: boolean;
       field: 'subject' | 'description';
       value: string;
       error?: string;
-    });
+    }>(stdout));
     const final = JSON.parse(readFileSync(join(root, 'session', 'shared.json'), 'utf-8')) as FcTaskEntry;
     const successes = results.filter(({ ok }) => ok);
     if (successes.length === 2) {
@@ -353,11 +413,23 @@ describe('session ledger publication regressions', () => {
     const workerSource = `
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
-      const [moduleUrl, storeRoot, id, readyPath, releasePath] = process.argv.slice(1);
+      const [moduleUrl, storeRoot, id, releasePath] = process.argv.slice(1);
       const events = [];
       const opened = new Map();
       const originalOpen = fs.openSync;
       const originalFsync = fs.fsyncSync;
+      const originalMkdir = fs.mkdirSync;
+      let reportedContention = false;
+      fs.mkdirSync = (...args) => {
+        try { return originalMkdir(...args); }
+        catch (error) {
+          if (!reportedContention && error.code === 'EEXIST' && String(args[0]).includes('.fc-tasks-lock-')) {
+            reportedContention = true;
+            process.stdout.write('CONTENDED\\n');
+          }
+          throw error;
+        }
+      };
       fs.openSync = (...args) => { const fd = originalOpen(...args); opened.set(fd, String(args[0])); return fd; };
       fs.fsyncSync = (fd) => { events.push(['fsync', opened.get(fd) ?? 'unknown']); return originalFsync(fd); };
       syncBuiltinESMExports();
@@ -371,54 +443,45 @@ describe('session ledger publication regressions', () => {
           entry: { id, subject: id, description: id, activeForm: id, status: 'pending', blocks: [], blockedBy: [] },
           publication: { create(temporary, target) {
             events.push(['link', temporary, target]);
-            fs.writeFileSync(readyPath, 'ready');
+            process.stdout.write('READY\\n');
             while (!fs.existsSync(releasePath)) Atomics.wait(wait, 0, 0, 10);
             fs.linkSync(temporary, target);
           } },
         });
-        process.stdout.write(JSON.stringify({ ok: true, events }));
+        process.stdout.write('RESULT ' + JSON.stringify({ ok: true, events }) + '\\n');
       } catch (error) {
-        process.stdout.write(JSON.stringify({ ok: false, error: error.message, events }));
+        process.stdout.write('RESULT ' + JSON.stringify({ ok: false, error: error.message, events }) + '\\n');
       }
     `;
-    const ready = [join(root, 'ready-a'), join(root, 'ready-b')];
     const release = [join(root, 'release-a'), join(root, 'release-b')];
-    const children = ['a', 'b'].map((id, index) => spawn(process.execPath, [
+    const child = (id: string, index: number) => observeChild(spawn(process.execPath, [
       '--import', 'tsx', '--input-type=module', '-e', workerSource,
-      fcTasksSourceUrl, root, id, ready[index], release[index],
+      fcTasksSourceUrl, root, id, release[index],
     ], {
       cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
     }));
-    const settlements = children.map(collectChild);
+    const children = [child('a', 0)];
+    await children[0].ready;
+    children.push(child('b', 1));
+    const secondBoundary = await children[1].lockBoundary;
 
-    await waitFor(() => ready.some(existsSync), 'the first bounded create');
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-    const initiallyReady = ready.map(existsSync);
-    for (const [index, isReady] of initiallyReady.entries()) {
-      if (isReady) writeFileSync(release[index], 'release');
-    }
-    await Promise.all(initiallyReady.map((isReady, index) => isReady ? settlements[index] : Promise.resolve()));
-    for (const [index, isReady] of initiallyReady.entries()) {
-      if (isReady) continue;
-      const alreadySettled = await Promise.race([
-        settlements[index].then(() => true),
-        new Promise<boolean>((resolvePromise) => setTimeout(() => resolvePromise(false), 50)),
-      ]);
-      if (!alreadySettled) {
-        await waitFor(() => existsSync(ready[index]), `serialized create ${index}`);
-        writeFileSync(release[index], 'release');
-      }
+    writeFileSync(release[0], 'release');
+    await children[0].settlement;
+    const secondEvent = await children[1].publicationOrSettlement;
+    if (secondEvent === 'ready') {
+      writeFileSync(release[1], 'release');
     }
 
-    const raw = await Promise.all(settlements);
+    const raw = await Promise.all(children.map(({ settlement }) => settlement));
+    expect(secondBoundary, 'writer two must reach the held ledger lock before writer one is released').toBe('contended');
     expect(raw.every(({ code }) => code === 0), JSON.stringify(raw)).toBe(true);
-    const outcomes = raw.map(({ stdout }) => JSON.parse(stdout) as {
+    const outcomes = raw.map(({ stdout }) => workerResult<{
       ok: boolean;
       error?: string;
       events: string[][];
-    });
+    }>(stdout));
     expect(outcomes.filter(({ ok }) => ok)).toHaveLength(1);
     expect(outcomes.filter(({ ok }) => !ok)[0]?.error).toMatch(/limit|maximum|entries/iu);
     const ledger = readTaskLedger(root, 'bounded', 1);

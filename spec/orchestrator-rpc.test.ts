@@ -19,6 +19,7 @@ import {
   type RegisterRpcResponse,
 } from '../src/orchestrator-rpc.js';
 import type { CancellationResult } from '../src/run-control.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let tempDir: string;
 let socketPath: string;
@@ -214,25 +215,33 @@ describe('sendRpc delivery truth', () => {
   it('logs handler errors with command and stack even after the client disconnects', async () => {
     const logPath = join(tempDir, 'daemon.log');
     const marker = 'RPC_HANDLER_DISCONNECTED_MARKER';
+    let releaseHandler!: () => void;
+    const clientDisconnected = new Promise<void>((resolveDisconnected) => { releaseHandler = resolveDisconnected; });
     server = await startRpcServer(
       socketPath,
       async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
+        await clientDisconnected;
         throw new Error(marker);
       },
       { onHandlerError: createDaemonRpcErrorLogger(logPath, () => new Date('2026-07-31T12:00:00.000Z')) },
     );
 
     const client = net.createConnection(socketPath);
-    await new Promise<void>((resolve, reject) => {
-      client.once('error', reject);
-      client.once('connect', () => {
-        client.write(JSON.stringify({ cmd: 'status' }), () => {
-          client.destroy();
-          resolve();
+    const clientClosed = new Promise<void>((resolveClosed) => { client.once('close', () => resolveClosed()); });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once('error', reject);
+        client.once('connect', () => {
+          client.write(JSON.stringify({ cmd: 'status' }), () => {
+            client.destroy();
+            resolve();
+          });
         });
       });
-    });
+      await clientClosed;
+    } finally {
+      releaseHandler();
+    }
     await waitUntil(() => existsSync(logPath) && readFileSync(logPath, 'utf-8').includes(marker));
 
     const log = readFileSync(logPath, 'utf-8');
@@ -268,11 +277,7 @@ async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('timed out waiting for asynchronous RPC evidence');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await waitForPathEvent(tempDir, () => predicate() ? true : undefined);
 }
 
 class Capture {

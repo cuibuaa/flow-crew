@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -335,13 +335,19 @@ describe('KG realistic scenarios', () => {
     expect(kg.edges[0].to).toBe(nodes[2].id);
   });
 
-  it('writeKG updates the updatedAt timestamp', async () => {
-    const kg = readKG(projectDir, runId);
-    const before = kg.metadata.updatedAt;
-    await new Promise(r => setTimeout(r, 10));
-    writeKG(projectDir, runId, kg);
-    const kg2 = readKG(projectDir, runId);
-    expect(kg2.metadata.updatedAt).not.toBe(before);
+  it('writeKG updates the updatedAt timestamp on the logical clock', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-01T00:00:00.000Z'));
+      const kg = readKG(projectDir, runId);
+      const before = kg.metadata.updatedAt;
+      vi.setSystemTime(new Date('2026-08-01T00:00:00.001Z'));
+      writeKG(projectDir, runId, kg);
+      const kg2 = readKG(projectDir, runId);
+      expect(kg2.metadata.updatedAt).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('multiple addNode calls produce unique IDs', () => {

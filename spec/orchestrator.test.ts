@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   buildCommand,
@@ -24,6 +24,7 @@ import {
 } from '../src/run-lock.js';
 import { recordRequest, resolveRequest } from '../src/inbox.js';
 import { supervisionPaths } from '../src/supervision.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import {
   fcGlobalDir,
   initializeReservedRun,
@@ -1005,13 +1006,14 @@ describe('fallback stop binds the pid to a process identity', () => {
       const backend = new NodeSystemd(base, { shellPath: missingShell });
       await backend.runUnit({ unit: failedUnit, workingDirectory: base, command: "'ignored'" });
 
-      let record: Record<string, unknown> = {};
-      const deadline = Date.now() + 5_000;
-      while (Date.now() < deadline) {
-        try { record = JSON.parse(readFileSync(failedRecordPath, 'utf-8')) as Record<string, unknown>; } catch {}
-        if (record.state === 'failed') break;
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-      }
+      const record = await waitForPathEvent<Record<string, unknown>>(dirname(failedRecordPath), () => {
+        try {
+          const value = JSON.parse(readFileSync(failedRecordPath, 'utf-8')) as Record<string, unknown>;
+          return value.state === 'failed' ? value : undefined;
+        } catch {
+          return undefined;
+        }
+      });
       expect(record.state).toBe('failed');
       expect(String(record.reason)).toMatch(/fallback spawn failed:.*ENOENT/);
     } finally {

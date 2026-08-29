@@ -113,7 +113,9 @@ class FakeSystemd implements SupervisorBackend {
   isActiveHook?: (call: number) => Promise<void>;
   stopGate?: Promise<void>;
   stopError?: Error;
+  stopStarted?: () => void;
   afterStop?: () => void;
+  afterStopSettled?: () => void;
 
   async isActive(): Promise<UnitStatus> {
     this.isActiveCalls += 1;
@@ -128,9 +130,11 @@ class FakeSystemd implements SupervisorBackend {
     this.stopCalls += 1;
     if (this.stopError) throw this.stopError;
     this.state = { kind: 'deactivating' };
+    this.stopStarted?.();
     if (this.stopGate) await this.stopGate;
     this.afterStop?.();
     this.state = { kind: 'terminal', exitCode: 0 };
+    this.afterStopSettled?.();
   }
   async journalTail(): Promise<string> { return ''; }
 }
@@ -512,6 +516,9 @@ describe('cancel-and-confirm coordinator', () => {
     systemd.state = { kind: 'active' };
     let releaseStop!: () => void;
     systemd.stopGate = new Promise<void>((resolveStop) => { releaseStop = resolveStop; });
+    let reportStopStarted!: () => void;
+    const stopStarted = new Promise<void>((resolveStopStarted) => { reportStopStarted = resolveStopStarted; });
+    systemd.stopStarted = reportStopStarted;
     let schedulerAlive = true;
     systemd.afterStop = () => { schedulerAlive = false; };
     const sentSignals: string[] = [];
@@ -536,7 +543,8 @@ describe('cancel-and-confirm coordinator', () => {
     const byTask = coordinator.cancelTask(task.id);
     const byRun = coordinator.cancelRun(runId);
     expect(byRun).toBe(byTask);
-    await vi.waitFor(() => expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING));
+    await stopStarted;
+    expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING);
     expect({
       process: schedulerAlive,
       unit: systemd.state,
@@ -653,12 +661,13 @@ describe('cancel-and-confirm coordinator', () => {
       }
     };
     const launchSettled = new Promise<void>((resolveLaunch) => {
-      setTimeout(() => {
+      systemd.afterStopSettled = () => {
+        if (!launchInFlight) return;
         writeRun(runId, RUN_STATUS.RUNNING, LIVE_FIXTURE_PID);
         launchInFlight = false;
         systemd.state = { kind: 'active' };
         resolveLaunch();
-      }, 10);
+      };
     });
     const coordinator = new RunCancellationCoordinator({
       registry,

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -237,13 +237,19 @@ describe('Group D: KG Metadata Score Tracking', () => {
     expect(kg.metadata.metricName).toBe('accuracy');
   });
 
-  it('D3: updateMetadata refreshes updatedAt', async () => {
-    writeKG(projectDir, runId, emptyKG());
-    const before = readKG(projectDir, runId).metadata.updatedAt;
-    await new Promise(r => setTimeout(r, 15));
-    updateMetadata(projectDir, runId, 50, 'f1');
-    const after = readKG(projectDir, runId).metadata.updatedAt;
-    expect(after).not.toBe(before);
+  it('D3: updateMetadata refreshes updatedAt on the logical clock', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-01T00:00:00.000Z'));
+      writeKG(projectDir, runId, emptyKG());
+      const before = readKG(projectDir, runId).metadata.updatedAt;
+      vi.setSystemTime(new Date('2026-08-01T00:00:00.001Z'));
+      updateMetadata(projectDir, runId, 50, 'f1');
+      const after = readKG(projectDir, runId).metadata.updatedAt;
+      expect(after).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('D4: bestScore only updates when score improves (monotonic)', () => {
