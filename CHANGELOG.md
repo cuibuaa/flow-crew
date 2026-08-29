@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.8.2] - 2026-08-29
+
+No product source changed in this release. It repairs how the suite decides, and how a brief hands
+work over.
+
+### Fixed — a suite whose verdict depended on how fast the machine ran it
+
+A concurrency regression failed on a macOS runner and passed on a rerun of the same tree. The helper
+it failed in waited five wall-clock seconds for a spawned Node process to write a readiness file,
+which is a bet on machine speed rather than an assertion about the behaviour under test.
+
+- **Thirty-seven cases carried that shape and now wait on events.** Enumerating every collected test
+  found budgets a loaded runner can exceed and, more damagingly, path selectors: a fixed sleep of
+  250 ms, and others at 10, 15, 30 and 900 ms, after which the test branched on whichever party
+  happened to be ready. Those do not merely fail intermittently — they send fast and slow machines
+  down different code paths, so a green run on one does not say what a green run on the other said.
+  A shared `waitForPathEvent` helper observes atomic filesystem publication and checks on both sides
+  of watch installation, closing the usual check/subscription race.
+
+- **Forty-two cases remain intrinsically timed and say so.** Elapsed time is part of what they
+  assert. Each is listed with the budget it needs and why it needs it, so the distinction between a
+  necessary clock and an accidental one is visible rather than assumed.
+
+- **Every changed case carries three pieces of evidence:** it passes intact, it fails when the
+  production behaviour it guards is mutated, and it still passes under deliberate delay. The suite
+  goes in and comes out at 171 files and 1,851 cases with four skipped.
+
+### Changed — the `ship` skill asks what the run must find, not what you already concluded
+
+Every constraint a brief states is treated as settled, including the ones its author did not know
+they were stating. Naming the attributes of a problem closed the one that was never listed; naming a
+prior report closed the modules sitting beside it; carrying a baseline forward as a number carried it
+without the fact that nothing had to beat it; obeying a minimum update count left the batch size it
+depended on unmentioned and unchanged. None of those exclusions were written down — each was inferred
+from what the brief chose to enumerate.
+
+- The section no longer asks for the approach. It asks for the outcome, the paths where evidence
+  lives, the constraints that are real, and what the report must show.
+- A summary the author writes is a claim the author asserts, so a prior artifact is pointed at rather
+  than compressed; where a figure must appear, it appears as a cross-check with the anti-anchoring
+  fields rather than as a premise.
+- The anti-anchoring rule now covers configured values, which is where it was being skipped: a
+  baseline asserts what a result must beat and can be wrong the way a measurement can.
+- Criteria fix how a result is produced and shown rather than what it must be, each pinned to a
+  moment — after the last write, not at some point.
+- A path-shaped string in prose costs something whether the path exists or not: absent, preflight
+  demands it; present, setup wants to overlay the working copy of it. An `Out of scope` heading is
+  not an exemption.
+
+Two tests come with it, both independent of the wording, because the guidance itself is a hypothesis
+and a rule asserted into a test is harder to remove than to keep. Section cross-references must
+resolve, since renumbering is otherwise silent. The revision stamp is pinned to a digest of the
+guidance it describes, so an edit that leaves the stamp behind — and therefore leaves installed
+copies reporting themselves current while carrying different guidance — fails instead of passing.
+
 ## [0.8.1] - 2026-08-28
 
 **Breaking:** an unrecognised `research.policy` is refused instead of being silently coerced to
