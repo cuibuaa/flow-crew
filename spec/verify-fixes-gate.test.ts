@@ -18,6 +18,7 @@ import {
   resolveFcTaskRuns,
   type FcTaskEntry,
 } from '../src/fc-tasks.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const fcTasksSourceUrl = new URL('../src/fc-tasks.ts', import.meta.url).href;
@@ -36,12 +37,16 @@ function task(id: string, extra: Partial<FcTaskEntry> = {}): FcTaskEntry {
   };
 }
 
-async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
+async function waitForFileMarker(path: string, marker: string): Promise<void> {
+  await waitForFirstFileMarker(path, [marker]);
+}
+
+async function waitForFirstFileMarker(path: string, markers: string[]): Promise<string> {
+  return waitForPathEvent(dirname(path), () => {
+    if (!existsSync(path)) return undefined;
+    const lines = readFileSync(path, 'utf-8').split('\n');
+    return markers.find((marker) => lines.includes(marker));
+  });
 }
 
 describe('independent session-ledger release gate', () => {
@@ -285,13 +290,25 @@ describe('independent session-ledger release gate', () => {
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
       const originalRead = fs.readSync;
-      let signalled = false;
+      let started = false;
+      let completedReads = 0;
+      process.once('exit', () => {
+        fs.appendFileSync(process.env.FC_VERIFY_READ_MARKER, 'EXIT\n');
+      });
       fs.readSync = (descriptor, ...args) => {
-        if (descriptor === 0 && !signalled) {
-          signalled = true;
-          fs.writeFileSync(process.env.FC_VERIFY_READ_MARKER, 'ready');
+        if (descriptor === 0 && !started) {
+          started = true;
+          fs.appendFileSync(process.env.FC_VERIFY_READ_MARKER, 'START\n');
         }
-        return originalRead(descriptor, ...args);
+        if (descriptor === 0 && completedReads > 0) {
+          fs.appendFileSync(process.env.FC_VERIFY_READ_MARKER, 'NEXT\n');
+        }
+        const count = originalRead(descriptor, ...args);
+        if (descriptor === 0 && count > 0) {
+          completedReads++;
+          fs.appendFileSync(process.env.FC_VERIFY_READ_MARKER, 'DATA\n');
+        }
+        return count;
       };
       syncBuiltinESMExports();
     `);
@@ -328,20 +345,19 @@ describe('independent session-ledger release gate', () => {
     });
 
     try {
-      await waitForFile(marker);
+      await waitForFileMarker(marker, 'START');
       child.stdin.write(JSON.stringify(task('prefix')));
-      const early = await Promise.race([
-        closed.then((code) => ({ code })),
-        new Promise<undefined>((resolvePromise) => setTimeout(resolvePromise, 750)),
-      ]);
-      if (early === undefined) child.stdin.end(' trailing-junk');
-      const exitCode = early?.code ?? await closed;
+      await waitForFileMarker(marker, 'DATA');
+      const nextOrExit = await waitForFirstFileMarker(marker, ['NEXT', 'EXIT']);
+      expect(nextOrExit, `${stdout}\n${stderr}`).toBe('NEXT');
+      child.stdin.end(' trailing-junk');
+      const exitCode = await closed;
       const targetVisible = existsSync(join(root, 'session', 'prefix.json'));
 
       expect(
-        { closedBeforeEof: early !== undefined, exitCode, targetVisible },
+        { requestedAnotherReadBeforeEof: true, exitCode, targetVisible },
         `${stdout}\n${stderr}`,
-      ).toEqual({ closedBeforeEof: false, exitCode: 1, targetVisible: false });
+      ).toEqual({ requestedAnotherReadBeforeEof: true, exitCode: 1, targetVisible: false });
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL');
       rmSync(root, { recursive: true, force: true });

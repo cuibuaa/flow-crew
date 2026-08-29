@@ -13,6 +13,7 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let projectDir: string;
 let isolatedStateDir: string;
@@ -65,14 +66,12 @@ function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, any>;
 }
 
-async function waitForDecision(directory: string, timeoutMs = 1_000): Promise<Record<string, any>> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+async function waitForDecision(directory: string): Promise<Record<string, any>> {
+  return waitForPathEvent(directory, () => {
     const decision = readdirSync(directory).find((file) => file.startsWith('scope_revision_decision_') && file.endsWith('.json'));
     if (decision) return readJson(join(directory, decision));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for scope decision in ${directory}`);
+    return undefined;
+  });
 }
 
 function singleStageWorkflow(input: { gate: boolean; scopePresent: boolean; name: string }): { config: WorkflowConfig; yaml: string } {

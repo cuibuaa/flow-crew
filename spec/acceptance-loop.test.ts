@@ -14,6 +14,7 @@ import {
   type WorkflowConfig,
 } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const GATE_ID = 'release_gate';
 const FIX_ID = 'fix_release';
@@ -96,17 +97,15 @@ function writeSession(runDirPath: string, stageId: string, sessionId: string, ow
 }
 
 async function waitForScopeDecision(stagePath: string): Promise<void> {
-  const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline) {
+  await waitForPathEvent(stagePath, () => {
     const decision = readdirSync(stagePath).find((name) => name.startsWith('scope_revision_decision_'));
     if (decision) {
       const value = JSON.parse(readFileSync(join(stagePath, decision), 'utf-8')) as { accepted?: boolean };
       if (!value.accepted) throw new Error('E7 fixture scope revision was rejected');
-      return;
+      return true;
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('E7 fixture timed out waiting for its scope revision decision');
+    return undefined;
+  });
 }
 
 interface ScenarioOptions {

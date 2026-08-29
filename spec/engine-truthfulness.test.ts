@@ -23,6 +23,7 @@ import {
   writeStageStatus,
 } from '../src/store.js';
 import { Supervisor, type SupervisorAssessment } from '../src/supervisor.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let projectDir: string;
 let isolatedFcHome: string;
@@ -502,14 +503,8 @@ function scopeDecision(stagePath: string, requestId: string): ScopeRevisionDecis
   return undefined;
 }
 
-async function awaitScopeDecision(stagePath: string, requestId: string, timeoutMs = 800): Promise<ScopeRevisionDecision | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const decision = scopeDecision(stagePath, requestId);
-    if (decision) return decision;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return scopeDecision(stagePath, requestId);
+async function awaitScopeDecision(stagePath: string, requestId: string): Promise<ScopeRevisionDecision> {
+  return waitForPathEvent(stagePath, () => scopeDecision(stagePath, requestId));
 }
 
 async function runScopeRevisionScenario(input: {
@@ -526,6 +521,10 @@ async function runScopeRevisionScenario(input: {
   writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-original\n');
   let gateCalls = 0;
   let observedDecision: ScopeRevisionDecision | undefined;
+  let reportPeerStarted!: () => void;
+  const peerStarted = new Promise<void>((resolvePeerStarted) => { reportPeerStarted = resolvePeerStarted; });
+  let releasePeer!: () => void;
+  const peerMayFinish = new Promise<void>((resolvePeer) => { releasePeer = resolvePeer; });
   const requestId = `scope-${input.expectAcceptance ? 'accept' : 'reject'}`;
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
@@ -563,10 +562,12 @@ async function runScopeRevisionScenario(input: {
       }
       if (opts.stageId === 'peer_repair') {
         writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-active\n');
-        await new Promise((resolve) => setTimeout(resolve, 900));
-        return { output: 'peer complete', exitCode: 0, duration_ms: 900, writes: ['src/peer.ts'], writeAttribution: 'structured' };
+        reportPeerStarted();
+        await peerMayFinish;
+        return { output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' };
       }
       if (opts.stageId === 'repair_scope') {
+        if (input.peerConflict) await peerStarted;
         const stagePath = join(opts.runDir, 'stages', opts.stageId);
         mkdirSync(stagePath, { recursive: true });
         const request: ScopeRevisionRequest = {
@@ -578,7 +579,11 @@ async function runScopeRevisionScenario(input: {
           reason: input.reason,
         };
         writeFileSync(join(stagePath, 'scope_revision_request.json'), JSON.stringify(request, null, 2));
-        observedDecision = await awaitScopeDecision(stagePath, requestId);
+        try {
+          observedDecision = await awaitScopeDecision(stagePath, requestId);
+        } finally {
+          if (input.peerConflict) releasePeer();
+        }
         if (observedDecision?.accepted && input.requestedPath === 'src/store.ts') {
           writeFileSync(join(projectDir, 'src', 'store.ts'), 'audit fields\n');
         }
