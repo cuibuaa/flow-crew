@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.8.3] - 2026-08-31
+
+Thirteen failure classes observed across a day of real runs, each reproduced before it was changed.
+No public CLI command changed. Two compatibility tightenings are called out at the end.
+
+### Fixed — instructions addressed to one stage reaching another
+
+Supervisor and operator guidance was appended to a single run-level file and copied whole into every
+stage. A stage told to finalize a plan handoff received that instruction while it was supposed to be
+implementing a research round; it complied, finished in eighty-eight seconds, and reported that it
+had implemented nothing. Guidance is now a framed envelope carrying an explicit stage target, and a
+stage receives only entries addressed to it or to the run.
+
+### Fixed — gates that only a later stage could satisfy
+
+A reality check declared at planning time required exactly one terminal report to exist, while the
+only stage allowed to write one ran after the check. Verification and repair cycled four times
+against it. A measuring stage that also owned the terminal paths ended its own campaign after one
+round of a twelve-round budget, skipping its audit. An iterative finalizer told to write exactly one
+terminal artifact wrote an escalation for a campaign whose own audit said continue. Terminal
+ownership is now admitted before work starts: one owner, downstream of every mandatory stage, and a
+continuing campaign releases no terminal path.
+
+### Fixed — criteria and evidence that quietly went missing
+
+A numbered brief criterion could vanish between the brief and the stage that had to honour it.
+Criteria now carry stable identities bound to the admitted brief digest, and a dispatch that leaves
+one uncovered is rejected. Generated round tests that pinned a shared campaign file to one round, or
+required a terminal artifact to stay absent, made a legitimate campaign close look like a failure;
+those patterns are now rejected at attribution. A round with no acting candidate had no honest value
+for a two-field result file, so it now records a sidecar with explicit provenance instead of a zero
+indistinguishable from the baseline.
+
+### Fixed — blockage and quiet work that nothing counted
+
+Identical blockage recurred for iterations without escalating, because no durable mechanism
+fingerprinted the cause. A long command whose output was fully redirected was killed as idle by the
+Codex adapter's watchdog, which could see neither adapter output nor stage artifacts. Both are now
+observable: repeated identical causes escalate, and an active structured command suppresses idle
+inference without weakening deadlines.
+
+### Changed — guidance is steering, not a new contract
+
+`skills/ship.md` and the brief contract now state that mid-run guidance may clarify or repair a
+property but cannot erase a criterion, widen authority, substitute a named result, or invalidate a
+better conforming result. A real contract change requires new brief bytes and a fresh rehearsal.
+
+### Compatibility
+
+Malformed dynamic dispatch is refused rather than accepted. A non-empty existing target for a
+declared create-only output blocks preflight, rehearsal and setup unless it is declared as input or
+given an explicit disposition. Both refusals are intentional: each corresponds to a defect above
+that reached a run because nothing checked.
+
 ## [0.8.2] - 2026-08-29
 
 No product source changed in this release. It repairs how the suite decides, and how a brief hands
