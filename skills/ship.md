@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 13 -->
+<!-- flowcrew-skill-revision: 14 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -272,15 +272,25 @@ passed; capture the `Task #<id> registered` id. A foreground command blocks and 
 status, and exit code must be reported. Any non-zero launch or run exit is evidence to inspect, not an
 acceptance verdict.
 
-After any successful launch, use the front-end's persistent session task mechanism and record this
-exact sentence, replacing `<id>` with the registered task id:
+After any successful launch, create the persistent session entry through `fc_tasks` with
+`--flowcrew-task-id <id>`, or immediately add that verified link to an entry the front end already
+created:
+
+```bash
+flowcrew fc_tasks create --session <session-id> --flowcrew-task-id <id> --entry '<entry-json>'
+flowcrew fc_tasks update <entry-id> --session <session-id> --flowcrew-task-id <id> --entry '{}'
+```
+
+Keep both `<session-id>` and `<entry-id>` with the launch record; wrap-up needs them. The entry must
+record this exact sentence, replacing `<id>` with the registered task id:
 `FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`
 After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
 Record the exact brief digest and the governing baseline's failing identities beside it, so a later
 failure can be attributed without re-deriving them. Creating the entry is prompted by the launch;
 keeping it true is prompted by nothing, which is why an entry naming a cancelled id outlives the run
 it described. Close it when the wrap-up above is finished, not when the run reaches a terminal
-status — the run ending is what starts the work of accepting it.
+status — the run ending is what starts the work of accepting it. The verified explicit link is the
+normal path; the exact sentence remains required so legacy readers can recover the association.
 
 A launch you deliberately hold back has no launch to prompt the entry. When rehearsal has produced a
 digest you intend to use later — because a prerequisite round must land first, or because data must
@@ -430,6 +440,19 @@ git -C <mainrepo> branch -d <branch>
 
 If non-force removal refuses, investigate. Archive failed or invalid results unchanged with an
 `INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
+
+Once archive verification and the final successful reclaim commands are complete, the immediate
+next step is to close the retained session entry explicitly:
+
+```bash
+flowcrew fc_tasks update <entry-id> --session <session-id> --entry '{"status":"completed","description":"<existing description plus a closure note naming the accepted result, independent verification, archived output, reclaimed worktree, and branch disposition>"}'
+```
+
+This is a human acceptance step, not an automatic reaction to terminal run status. If non-force
+cleanup refuses or any wrap-up item remains, leave the entry open. If this workflow wording is
+missed, the renderer is the mechanical backstop: each later status-line render keeps the terminal
+link visible as `wrap-up-overdue` until a human completes the entry; the CLI also verifies explicit
+links before persisting them.
 
 Do not edit a project while its run is active; scope attribution can restore the edit as an unauthorized
 stage write. Permanent machine-independent tests belong in the tracked specification suite. One-off,

@@ -9,123 +9,38 @@ import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './rea
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
-
-/** Exact run lifecycle vocabulary. Semantic groups and guards below derive from it. */
-export const RUN_STATUS = {
-  PENDING: 'pending',
-  RUNNING: 'running',
-  PARKED: 'parked',
-  COMPLETE: 'complete',
-  FAILED: 'failed',
-  AWAITING_APPROVAL: 'awaiting_approval',
-  SHIPPED: 'shipped',
-  CEILING_HIT: 'ceiling_hit',
-  ESCALATED: 'escalated',
-  REALITY_GATE_FAILED: 'reality_gate_failed',
-  PHASE_COMPLETE: 'phase_complete',
-  STOPPED: 'stopped',
-  INCOMPLETE: 'incomplete',
-} as const;
-export type RunStatus = typeof RUN_STATUS[keyof typeof RUN_STATUS];
-
-export type RunLifecycleBucket =
-  | 'queued'
-  | 'executing'
-  | 'paused'
-  | 'legacy_approval'
-  | 'terminal';
-
-export interface RunStatusSemantics {
-  /** Exactly one lifecycle bucket; callers must not reconstruct this partition. */
-  lifecycle: RunLifecycleBucket;
-  /** Process-level success, including an honest research ceiling. */
-  successful: boolean;
-  /** Dashboard/history mutations must not race this lifecycle owner. */
-  mutationBlocked: boolean;
-}
-
-/**
- * Total semantic row for every known lifecycle status. A new RUN_STATUS member
- * cannot compile until its lifecycle, process outcome, and mutation behavior
- * are chosen explicitly. Required, non-optional fields prevent an empty row
- * from masquerading as consideration.
- */
-export const RUN_STATUS_SEMANTICS = {
-  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false },
-  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true },
-  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true },
-  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.AWAITING_APPROVAL]: { lifecycle: 'legacy_approval', successful: false, mutationBlocked: true },
-  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.PHASE_COMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.STOPPED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-} as const satisfies Record<RunStatus, RunStatusSemantics>;
-
-export type RunStatusResolution =
-  | {
-      kind: 'known';
-      status: RunStatus;
-      semantics: RunStatusSemantics;
-    }
-  | {
-      kind: 'unknown';
-      /** Original parsed JSON value. It is evidence and is never coerced. */
-      raw: unknown;
-      display: string;
-      reason: string;
-    };
-
-function displayUnknownRunStatus(value: unknown): string {
-  if (typeof value === 'string') return JSON.stringify(value);
-  if (value === undefined) return 'undefined';
-  try {
-    const encoded = JSON.stringify(value);
-    if (encoded !== undefined) return encoded;
-  } catch { /* fall through to a type-safe description */ }
-  return Object.prototype.toString.call(value);
-}
-
-/** Resolve untrusted run.json text without inventing a lifecycle meaning. */
-export function resolveRunStatus(value: unknown): RunStatusResolution {
-  if (typeof value === 'string'
-      && Object.prototype.hasOwnProperty.call(RUN_STATUS_SEMANTICS, value)) {
-    const status = value as RunStatus;
-    return { kind: 'known', status, semantics: RUN_STATUS_SEMANTICS[status] };
-  }
-  const display = displayUnknownRunStatus(value);
-  return {
-    kind: 'unknown',
-    raw: value,
-    display,
-    reason: `Unrecognized archived run status ${display}; lifecycle meaning was not inferred`,
-  };
-}
-
-export class UnknownRunStatusError extends Error {
-  readonly resolution: Extract<RunStatusResolution, { kind: 'unknown' }>;
-
-  constructor(value: unknown, action: string) {
-    const resolution = resolveRunStatus(value);
-    if (resolution.kind !== 'unknown') {
-      throw new Error(`UnknownRunStatusError requires an unrecognized status, received ${resolution.status}`);
-    }
-    super(`Refusing to ${action}: ${resolution.reason}`);
-    this.name = 'UnknownRunStatusError';
-    this.resolution = resolution;
-  }
-}
-
-/** Require known semantics before a consequential action. */
-export function requireKnownRunStatus(value: unknown, action: string): RunStatus {
-  const resolution = resolveRunStatus(value);
-  if (resolution.kind === 'unknown') throw new UnknownRunStatusError(value, action);
-  return resolution.status;
-}
+import {
+  UnknownRunStatusError,
+  isSuccessfulRunStatus,
+  isTerminalRunStatus,
+  requireKnownRunStatus,
+  resolveRunStatus,
+  type RunStatus,
+  type RunStatusResolution,
+} from './lifecycle-status.js';
+export {
+  PAUSED_STATUSES,
+  RUN_STATUS,
+  RUN_STATUS_SEMANTICS,
+  TERMINAL_STATUSES,
+  UnknownRunStatusError,
+  isActiveRunStatus,
+  isAwaitingApprovalRunStatus,
+  isPausedRunStatus,
+  isPendingRunStatus,
+  isRunMutationBlockedStatus,
+  isRunningRunStatus,
+  isSuccessfulRunStatus,
+  isTerminalRunStatus,
+  requireKnownRunStatus,
+  resolveRunStatus,
+} from './lifecycle-status.js';
+export type {
+  RunLifecycleBucket,
+  RunStatus,
+  RunStatusResolution,
+  RunStatusSemantics,
+} from './lifecycle-status.js';
 
 /** Stage execution is a separate state machine from the enclosing run. */
 export const STAGE_STATUS = {
@@ -721,103 +636,11 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
   appendFileSync(filePath, JSON.stringify(event) + '\n', 'utf-8');
 }
 
-/**
- * Single source of truth for terminal run statuses. The verdict contract and
- * phase-metadata field list below are exported from here and INJECTED into the
- * planner prompt at runtime (P2 of the Atom Architecture) — so the planner is never
- * a second, drift-prone copy of these vocabularies.
- */
-export const TERMINAL_STATUSES = [
-  ...Object.values(RUN_STATUS).filter((status) => (
-    RUN_STATUS_SEMANTICS[status].lifecycle === 'terminal'
-  )),
-] as readonly RunStatus[];
-
 /** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
 export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>)';
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';
-
-/** Single source of truth for "this run has reached a terminal state". */
-export function isTerminalRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'terminal';
-}
-
-/**
- * PAUSED — alive in the lifecycle, but no process is running and no verdict has
- * been reached. Today that means `parked`: the run suspended itself on an
- * approval request and exited, and it resumes (same runId, same DAG, same
- * iteration counter) once a human resolves the request.
- *
- * Deliberately NOT in TERMINAL_STATUSES: that array is stringified into every
- * agent's system prompt as the terminal vocabulary, so listing a paused status
- * there would teach agents to emit it as a verdict. It is also not 'running':
- * a parked run holds no pid, so the orphan reaper must not see it as alive and
- * the single-in-flight lock must not see it as busy.
- */
-export const PAUSED_STATUSES = [
-  ...Object.values(RUN_STATUS).filter((status) => (
-    RUN_STATUS_SEMANTICS[status].lifecycle === 'paused'
-  )),
-] as readonly RunStatus[];
-
-export function isPausedRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'paused';
-}
-
-/** A run has been admitted but execution has not begun. */
-export function isPendingRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'queued';
-}
-
-/** "The run is alive in the lifecycle" — running OR paused, i.e. not finished. */
-export function isActiveRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known'
-    && (resolution.semantics.lifecycle === 'executing' || resolution.semantics.lifecycle === 'paused');
-}
-
-/** A scheduler process is presently executing this run. Parked is deliberately false. */
-export function isRunningRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'executing';
-}
-
-/** Legacy plan approval transition; distinct from a parked approval-inbox suspension. */
-export function isAwaitingApprovalRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'legacy_approval';
-}
-
-/**
- * Dashboard mutations that rewrite run/stage history must wait while execution,
- * legacy plan approval, or a parked approval request still owns the run.
- */
-export function isRunMutationBlockedStatus(status: unknown): boolean {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'unknown' || resolution.semantics.mutationBlocked;
-}
-
-/**
- * Single source of truth for "this run finished successfully" (process exit 0).
- * A research run that exhausts its policy without a beat ends `ceiling_hit` — an
- * HONEST NEGATIVE is a valid deliverable, not a failure — and a shipped beat ends
- * `shipped`; both are successes alongside a plain `complete`. Anything else
- * (`failed`, `reality_gate_failed`, `escalated`, `stopped`, `incomplete`) is a
- * non-success exit. `incomplete` = budget/iteration exhausted mid-search WITHOUT a
- * clean exhaustive ceiling (distinct from `failed`=crash and `ceiling_hit`=honest
- * negative); it is terminal but not a success.
- * Used for the CLI exit code so a spawning parent (e.g. the campaign outer loop's
- * execSync) does not mistake a normal ceiling for a crash.
- */
-export function isSuccessfulRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.successful;
-}
 
 function isRealityGatedTerminal(status: string): boolean {
   return isSuccessfulRunStatus(status);

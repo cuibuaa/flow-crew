@@ -20,6 +20,7 @@ import {
   createTaskEntry,
   readTaskLedger,
   renderFcTasks,
+  resolveFcTaskRuns,
   updateTaskEntry,
   type FcTaskEntry,
   type RenderFcTasksResult,
@@ -50,6 +51,10 @@ function task(
     blockedBy: [],
     ...overrides,
   };
+}
+
+function canonicalLaunchSentence(taskId: number | string): string {
+  return `FlowCrew task ${taskId} is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`;
 }
 
 function writeEntry(session: string, filename: string, value: unknown): string {
@@ -301,6 +306,209 @@ describe('fc_tasks legacy ledger rendering', () => {
     expect(resolver.resolve({ ...task('missing', 'in_progress'), flowcrewTaskId: 11 }))
       .toMatchObject({ state: 'stale', taskId: 11 });
     expect(resolver.resolve(task('legacy'))).toEqual({ state: 'never_linked' });
+  });
+
+  it('recovers a canonical legacy link and marks both terminal runs as wrap-up overdue', () => {
+    const engineRoot = join(root, 'engine');
+    const inferredProject = join(root, 'inferred-target');
+    const explicitProject = join(root, 'explicit-target');
+    writeEngineTask(engineRoot, {
+      id: 12,
+      status: 'stuck',
+      projectDir: inferredProject,
+      run_id: 'terminal-complete',
+    });
+    writeEngineTask(engineRoot, {
+      id: 13,
+      status: 'failed',
+      projectDir: explicitProject,
+      run_id: 'terminal-escalated',
+    });
+    writeEngineRun(engineRoot, 'terminal-complete', {
+      runId: 'terminal-complete',
+      status: 'complete',
+      projectDir: inferredProject,
+    });
+    writeEngineRun(engineRoot, 'terminal-escalated', {
+      runId: 'terminal-escalated',
+      status: 'escalated',
+      projectDir: explicitProject,
+    });
+    const inferredEntry = task('inferred', 'in_progress', {
+      subject: 'Canonical legacy wrap-up',
+      description: canonicalLaunchSentence(12),
+      activeForm: 'Waiting on inferred FlowCrew task',
+    });
+    const explicitEntry = task('explicit', 'in_progress', {
+      subject: 'Explicit-link wrap-up',
+      description: canonicalLaunchSentence(13),
+      activeForm: 'Waiting on explicitly linked FlowCrew task',
+      flowcrewTaskId: 13,
+    });
+    const inferredPath = writeEntry('terminal-links', 'inferred.json', inferredEntry);
+    writeEntry('terminal-links', 'explicit.json', explicitEntry);
+    const inferredBytes = readFileSync(inferredPath);
+
+    const resolutions = resolveFcTaskRuns(
+      [inferredEntry, explicitEntry],
+      createEngineTaskRunResolver({ engineRoot }),
+    );
+    expect(resolutions).toMatchObject([
+      { state: 'resolved', taskId: 12, runStatus: 'complete' },
+      { state: 'resolved', taskId: 13, runStatus: 'escalated' },
+    ]);
+
+    const result = render('terminal-links', {
+      taskRunResolver: createEngineTaskRunResolver({ engineRoot }),
+    });
+    const rows = result.text.trimEnd().split('\n');
+
+    expect(rows[0]).toBe('fc_tasks: 2 wrap-up overdue · 2 running · 0 pending · 0 done');
+    expect(rows[1]).toContain('wrap-up-overdue:run:escalated:#13 [explicit]');
+    expect(rows[2]).toContain('wrap-up-overdue:run:complete:#12 [inferred]');
+    expect(result.text).not.toContain('stale:#');
+    expect(readFileSync(inferredPath)).toEqual(inferredBytes);
+    expect(JSON.parse(inferredBytes.toString('utf-8'))).not.toHaveProperty('flowcrewTaskId');
+  });
+
+  it('infers only one exact canonical launch sentence and keeps an explicit link authoritative', () => {
+    const engineRoot = join(root, 'engine');
+    for (const id of [42, 77]) {
+      writeEngineTask(engineRoot, {
+        id,
+        status: 'running',
+        projectDir: join(root, `target-${id}`),
+      });
+    }
+    const entries = [
+      task('exact', 'in_progress', {
+        description: `context\n${canonicalLaunchSentence(42)}\nmore context`,
+      }),
+      task('subject-only', 'in_progress', {
+        subject: canonicalLaunchSentence(42),
+        description: 'No task link in the description.',
+      }),
+      task('bare', 'in_progress', { description: 'Waiting for FlowCrew #42.' }),
+      task('embedded', 'in_progress', {
+        description: `prefix ${canonicalLaunchSentence(42)}`,
+      }),
+      task('unsafe', 'in_progress', {
+        description: canonicalLaunchSentence('9007199254740992'),
+      }),
+      task('ambiguous', 'in_progress', {
+        description: `${canonicalLaunchSentence(42)}\n${canonicalLaunchSentence(77)}`,
+      }),
+      task('unlinked', 'in_progress'),
+      task('explicit', 'in_progress', {
+        description: canonicalLaunchSentence(42),
+        flowcrewTaskId: 77,
+      }),
+    ];
+
+    const resolutions = resolveFcTaskRuns(
+      entries,
+      createEngineTaskRunResolver({ engineRoot }),
+    );
+
+    expect(resolutions.map(({ state }) => state)).toEqual([
+      'resolved',
+      'never_linked',
+      'never_linked',
+      'never_linked',
+      'never_linked',
+      'never_linked',
+      'never_linked',
+      'resolved',
+    ]);
+    expect(resolutions[0]).toMatchObject({ state: 'resolved', taskId: 42 });
+    expect(resolutions[7]).toMatchObject({ state: 'resolved', taskId: 77 });
+  });
+
+  it('keeps a running link, an unlinked entry, and a completed terminal link free of overdue noise', () => {
+    const engineRoot = join(root, 'engine');
+    const liveProject = join(root, 'live-target');
+    const doneProject = join(root, 'done-target');
+    writeEngineTask(engineRoot, {
+      id: 60,
+      status: 'running',
+      projectDir: liveProject,
+      run_id: 'live-run',
+    });
+    writeEngineRun(engineRoot, 'live-run', {
+      runId: 'live-run',
+      status: 'running',
+      projectDir: liveProject,
+    });
+    writeEngineTask(engineRoot, {
+      id: 61,
+      status: 'done',
+      projectDir: doneProject,
+      run_id: 'done-run',
+    });
+    writeEngineRun(engineRoot, 'done-run', {
+      runId: 'done-run',
+      status: 'complete',
+      projectDir: doneProject,
+    });
+    writeEntry('quiet-links', 'live.json', {
+      ...task('live', 'in_progress'),
+      flowcrewTaskId: 60,
+    });
+    writeEntry('quiet-links', 'unlinked.json', task('unlinked', 'pending'));
+    writeEntry('quiet-links', 'completed.json', {
+      ...task('completed', 'completed'),
+      flowcrewTaskId: 61,
+    });
+
+    const result = render('quiet-links', {
+      taskRunResolver: createEngineTaskRunResolver({ engineRoot }),
+    });
+
+    expect(result.text).toContain('run:running [live]');
+    expect(result.text).toContain('○ [unlinked] subject unlinked');
+    expect(result.text).not.toContain('wrap-up-overdue');
+    expect(result.text).not.toContain('stale');
+  });
+
+  it('uses a known terminal task status only when no run status is materialized', () => {
+    const engineRoot = join(root, 'engine');
+    const runningProject = join(root, 'running-target');
+    writeEngineTask(engineRoot, {
+      id: 70,
+      status: 'done',
+      projectDir: join(root, 'done-without-run'),
+    });
+    writeEngineTask(engineRoot, {
+      id: 71,
+      status: 'future-status',
+      projectDir: join(root, 'unknown-without-run'),
+    });
+    writeEngineTask(engineRoot, {
+      id: 72,
+      status: 'failed',
+      projectDir: runningProject,
+      run_id: 'still-running',
+    });
+    writeEngineRun(engineRoot, 'still-running', {
+      runId: 'still-running',
+      status: 'running',
+      projectDir: runningProject,
+    });
+    for (const id of [70, 71, 72]) {
+      writeEntry('lifecycle-source', `${id}.json`, {
+        ...task(String(id), 'in_progress'),
+        flowcrewTaskId: id,
+      });
+    }
+
+    const result = render('lifecycle-source', {
+      taskRunResolver: createEngineTaskRunResolver({ engineRoot }),
+    });
+
+    expect(result.text).toContain('1 wrap-up overdue');
+    expect(result.text).toContain('wrap-up-overdue:task:done:#70 [70]');
+    expect(result.text).toContain('task:future-status [71]');
+    expect(result.text).toContain('run:running [72]');
   });
 });
 

@@ -36,6 +36,10 @@ function task(id: string, status: FcTaskEntry['status'] = 'pending'): FcTaskEntr
   };
 }
 
+function canonicalLaunchSentence(taskId: number): string {
+  return `FlowCrew task ${taskId} is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`;
+}
+
 function seed(session: string, entry: FcTaskEntry): void {
   seedValue(session, `${entry.id}.json`, entry);
 }
@@ -414,6 +418,69 @@ describe('fc_tasks CLI detail and write paths', () => {
 
     expect(renderCode).toBe(0);
     expect(renderCapture.output).toContain('run:running [linked]');
+  });
+
+  it('surfaces a canonical legacy link whose terminal run now requires human wrap-up', () => {
+    const engineRoot = join(root, 'engine');
+    const projectDir = join(root, 'target');
+    const entry = {
+      ...task('legacy-link', 'in_progress'),
+      description: canonicalLaunchSentence(12),
+      activeForm: 'Waiting on the linked FlowCrew run',
+    };
+    seed('legacy-cli', entry);
+    seedEngineTask(engineRoot, {
+      id: 12,
+      status: 'stuck',
+      projectDir,
+      run_id: 'terminal-run',
+    });
+    seedEngineRun(engineRoot, 'terminal-run', {
+      runId: 'terminal-run',
+      status: 'complete',
+      projectDir,
+    });
+
+    const renderCapture = new Capture();
+    const renderCode = cmdFcTasks([
+      'fc_tasks',
+      'render',
+      '--session',
+      'legacy-cli',
+      '--store-root',
+      root,
+      '--engine-root',
+      engineRoot,
+    ], dependencies(renderCapture));
+
+    expect(renderCode).toBe(0);
+    expect(renderCapture.output).toContain('1 wrap-up overdue');
+    expect(renderCapture.output).toContain('wrap-up-overdue:run:complete:#12 [legacy-link]');
+
+    const listCapture = new Capture();
+    const listCode = cmdFcTasks([
+      'fc_tasks',
+      'list',
+      '--json',
+      '--session',
+      'legacy-cli',
+      '--store-root',
+      root,
+      '--engine-root',
+      engineRoot,
+    ], dependencies(listCapture));
+    const listed = JSON.parse(listCapture.output) as {
+      entries: FcTaskEntry[];
+      runLinks: Array<{ entryId: string; state: string; taskId?: number; runStatus?: string }>;
+    };
+
+    expect(listCode).toBe(0);
+    expect(listed.runLinks).toMatchObject([
+      { entryId: 'legacy-link', state: 'resolved', taskId: 12, runStatus: 'complete' },
+    ]);
+    expect(listed.entries[0]).not.toHaveProperty('flowcrewTaskId');
+    expect(JSON.parse(readFileSync(join(root, 'legacy-cli', 'legacy-link.json'), 'utf-8')))
+      .not.toHaveProperty('flowcrewTaskId');
   });
 
   it('refuses an engine task id that the explicit resolver root cannot verify', () => {

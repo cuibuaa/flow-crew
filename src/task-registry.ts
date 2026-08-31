@@ -18,42 +18,20 @@ import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { readJsonlFileWithDiagnostics } from './jsonl.js';
 import { fcGlobalDir } from './store.js';
+import { TASK_STATUS, isActiveTaskStatus, type TaskStatus } from './lifecycle-status.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
+export { TASK_STATUS, isActiveTaskStatus } from './lifecycle-status.js';
+export type { TaskStatus } from './lifecycle-status.js';
 
 // 'deferred' — admitted but intentionally NOT launched yet (the project has a
 // live run, or a backoff window is open). It is an ACTIVE state: the tick sweep
 // must keep visiting it or the task silently never launches. Distinct from
 // 'pending' (created, launch imminent) and from 'stuck' (needs a human).
-export const TASK_STATUS = {
-  PENDING: 'pending',
-  DEFERRED: 'deferred',
-  RUNNING: 'running',
-  CANCELLING: 'cancelling',
-  DONE: 'done',
-  STUCK: 'stuck',
-  NEEDS_SUMMARY: 'needs_summary',
-  CANCELLED: 'cancelled',
-  FAILED: 'failed',
-  REALITY_GATE_FAILED: 'reality_gate_failed',
-} as const;
-export type TaskStatus = typeof TASK_STATUS[keyof typeof TASK_STATUS];
-
 export const TASK_LIST_STATUS = {
   ACTIVE: 'active',
   ALL: 'all',
 } as const;
 export type TaskListStatus = TaskStatus | typeof TASK_LIST_STATUS[keyof typeof TASK_LIST_STATUS];
-
-const ACTIVE_TASK_STATUSES = [
-  TASK_STATUS.PENDING,
-  TASK_STATUS.DEFERRED,
-  TASK_STATUS.RUNNING,
-  TASK_STATUS.CANCELLING,
-] as const;
-
-export function isActiveTaskStatus(status: string): boolean {
-  return (ACTIVE_TASK_STATUSES as readonly string[]).includes(status);
-}
 export type TaskKind = 'quick' | 'campaign';
 export type TaskSummaryVerdict = 'PASS' | 'FAIL' | 'ESCALATE';
 

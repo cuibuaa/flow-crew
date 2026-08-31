@@ -19,6 +19,11 @@ import {
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import stringWidth from 'string-width';
+import {
+  isActiveTaskStatus,
+  isKnownTaskStatus,
+  isTerminalRunStatus,
+} from './lifecycle-status.js';
 
 export const FC_TASK_FIELDS = [
   'id',
@@ -232,7 +237,30 @@ const MAX_ENGINE_REGISTRY_SCAN_BYTES = MAX_LEDGER_TOTAL_BYTES;
 const LEDGER_LOCK_WAIT_MS = 5_000;
 const LEDGER_LOCK_POLL_MS = 10;
 const INVALID_SEGMENT_CHARACTERS = /[<>:"/\\|?*]/u;
+const CANONICAL_FLOWCREW_TASK_LINK = /^FlowCrew task ([1-9][0-9]*) is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch\.$/u;
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function effectiveFlowcrewTaskId(entry: FcTaskEntry): number | undefined {
+  if (entry.flowcrewTaskId !== undefined) return entry.flowcrewTaskId;
+
+  const inferred = new Set<number>();
+  for (const line of entry.description.split(/\r?\n/u)) {
+    const match = CANONICAL_FLOWCREW_TASK_LINK.exec(line);
+    if (!match) continue;
+    const taskId = Number(match[1]);
+    if (!Number.isSafeInteger(taskId) || taskId < 1) return undefined;
+    inferred.add(taskId);
+    if (inferred.size > 1) return undefined;
+  }
+  return inferred.size === 1 ? [...inferred][0] : undefined;
+}
+
+function withEffectiveTaskLink(entry: FcTaskEntry): FcTaskEntry {
+  const taskId = effectiveFlowcrewTaskId(entry);
+  return taskId !== undefined && entry.flowcrewTaskId === undefined
+    ? { ...entry, flowcrewTaskId: taskId }
+    : entry;
+}
 const lockWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
 export function defaultFcTasksRoot(): string {
@@ -784,28 +812,30 @@ export function createEngineTaskRunResolver(
     prepare(entries): void {
       requestedIds.clear();
       for (const entry of entries) {
-        if (entry.flowcrewTaskId !== undefined) requestedIds.add(entry.flowcrewTaskId);
+        const taskId = effectiveFlowcrewTaskId(entry);
+        if (taskId !== undefined) requestedIds.add(taskId);
       }
       snapshot = undefined;
       if (requestedIds.size > 0) loadSnapshot();
     },
     resolve(entry): FcTaskRunResolution {
-      if (entry.flowcrewTaskId === undefined) return { state: 'never_linked' };
-      if (!requestedIds.has(entry.flowcrewTaskId)) {
-        requestedIds.add(entry.flowcrewTaskId);
+      const taskId = effectiveFlowcrewTaskId(entry);
+      if (taskId === undefined) return { state: 'never_linked' };
+      if (!requestedIds.has(taskId)) {
+        requestedIds.add(taskId);
         snapshot = undefined;
       }
       const current = loadSnapshot();
       if (!current.ok) {
-        return { state: 'unavailable', taskId: entry.flowcrewTaskId, detail: current.detail };
+        return { state: 'unavailable', taskId, detail: current.detail };
       }
-      const rawTask = current.tasks.get(entry.flowcrewTaskId);
+      const rawTask = current.tasks.get(taskId);
       if (rawTask === undefined) {
-        return { state: 'stale', taskId: entry.flowcrewTaskId, detail: 'linked engine task no longer exists' };
+        return { state: 'stale', taskId, detail: 'linked engine task no longer exists' };
       }
-      const task = parseEngineTask(rawTask, entry.flowcrewTaskId);
+      const task = parseEngineTask(rawTask, taskId);
       if (!task) {
-        return { state: 'stale', taskId: entry.flowcrewTaskId, detail: 'linked engine task record is invalid' };
+        return { state: 'stale', taskId, detail: 'linked engine task record is invalid' };
       }
       return resolveEngineRun(task, runRoot);
     },
@@ -816,21 +846,22 @@ export function resolveFcTaskRun(
   entry: FcTaskEntry,
   resolver?: FcTaskRunResolver,
 ): FcTaskRunResolution {
-  if (entry.flowcrewTaskId === undefined) return { state: 'never_linked' };
+  const taskId = effectiveFlowcrewTaskId(entry);
+  if (taskId === undefined) return { state: 'never_linked' };
   if (!resolver) {
     return {
       state: 'unavailable',
-      taskId: entry.flowcrewTaskId,
+      taskId,
       detail: 'no engine task resolver was supplied',
     };
   }
   try {
-    const resolution = resolver.resolve(entry);
+    const resolution = resolver.resolve(withEffectiveTaskLink(entry));
     if (resolution.state === 'never_linked'
-        || resolution.taskId !== entry.flowcrewTaskId) {
+        || resolution.taskId !== taskId) {
       return {
         state: 'unavailable',
-        taskId: entry.flowcrewTaskId,
+        taskId,
         detail: 'engine task resolver returned a mismatched link identity',
       };
     }
@@ -838,7 +869,7 @@ export function resolveFcTaskRun(
   } catch (error) {
     return {
       state: 'unavailable',
-      taskId: entry.flowcrewTaskId,
+      taskId,
       detail: `engine task resolver failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
@@ -848,13 +879,14 @@ export function resolveFcTaskRuns(
   entries: readonly FcTaskEntry[],
   resolver?: FcTaskRunResolver,
 ): FcTaskRunResolution[] {
+  const effectiveEntries = entries.map(withEffectiveTaskLink);
   let preparationFailure: string | undefined;
   try {
-    resolver?.prepare?.(entries);
+    resolver?.prepare?.(effectiveEntries);
   } catch (error) {
     preparationFailure = `engine task resolver failed: ${error instanceof Error ? error.message : String(error)}`;
   }
-  return entries.map((entry) => {
+  return effectiveEntries.map((entry) => {
     if (entry.flowcrewTaskId === undefined) return { state: 'never_linked' };
     if (preparationFailure !== undefined) {
       return {
@@ -1245,14 +1277,35 @@ function boundRows(header: string, detailRows: string[], lines: number, columns:
   ];
 }
 
-function taskRunMarker(resolution: FcTaskRunResolution): string {
+function resolvedTaskHasStopped(
+  resolution: Extract<FcTaskRunResolution, { state: 'resolved' }>,
+): boolean {
+  if (resolution.runStatus !== undefined) return isTerminalRunStatus(resolution.runStatus);
+  return isKnownTaskStatus(resolution.taskStatus)
+    && !isActiveTaskStatus(resolution.taskStatus);
+}
+
+function wrapUpIsOverdue(entry: FcTaskEntry, resolution: FcTaskRunResolution): boolean {
+  return entry.status !== FC_TASK_STATUS.COMPLETED
+    && resolution.state === 'resolved'
+    && resolvedTaskHasStopped(resolution);
+}
+
+function taskRunMarker(entry: FcTaskEntry, resolution: FcTaskRunResolution): string {
   switch (resolution.state) {
     case 'never_linked':
       return '';
-    case 'resolved':
+    case 'resolved': {
+      if (wrapUpIsOverdue(entry, resolution)) {
+        const terminal = resolution.runStatus === undefined
+          ? `task:${resolution.taskStatus}`
+          : `run:${resolution.runStatus}`;
+        return `wrap-up-overdue:${terminal}:#${resolution.taskId}`;
+      }
       return resolution.runStatus === undefined
         ? `task:${resolution.taskStatus}`
         : `run:${resolution.runStatus}`;
+    }
     case 'stale':
       return `stale:#${resolution.taskId}`;
     case 'unavailable':
@@ -1311,6 +1364,9 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
       entry,
       resolution: runResolutionById.get(entry.id) ?? allRunResolutions[index],
     }));
+    const overdueCount = openWithRunState
+      .filter(({ entry, resolution }) => wrapUpIsOverdue(entry, resolution))
+      .length;
     const staleCount = allRunResolutions.filter((resolution) => resolution.state === 'stale').length;
     const unavailable = allRunResolutions
       .find((resolution): resolution is Extract<FcTaskRunResolution, { state: 'unavailable' }> => (
@@ -1329,13 +1385,14 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
     } else {
       summary = `${running.length} running · ${pending.length} pending · ${done} done`;
     }
+    if (overdueCount > 0) summary = `${overdueCount} wrap-up overdue · ${summary}`;
     if (staleCount > 0) summary = `${staleCount} stale · ${summary}`;
     const header = issueCodes.length > 0
       ? `fc_tasks: degraded[${issueCodes.join(',')}] · ${summary}`
       : `fc_tasks: ${summary}`;
 
     const detailRows = openWithRunState.map(({ entry, resolution }) => {
-      const marker = taskRunMarker(resolution);
+      const marker = taskRunMarker(entry, resolution);
       const prefix = marker ? `${marker} ` : '';
       if (entry.status === FC_TASK_STATUS.IN_PROGRESS) {
         return `▶ ${prefix}[${entry.id}] ${entry.activeForm || entry.subject}`;
