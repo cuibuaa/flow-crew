@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "source": {
+    "runId": "2026-08-31T07-48-55-cd7c66",
+    "plannerAttempt": 1,
+    "dispatchLocator": "stages/plan/live.log command output between __DISPATCH_HEAD__ and __REALITY__",
+    "dispatchSha256": "5bb646ffe09aa5c7957a784aa2ab82127ac77827d7b6f23090a2a937ef0d64c1",
+    "dispatchBytes": 7453
+  },
+  "terminalStates": {
+    "complete": {
+      "paths": [
+        "docs/diagram_shape/final_verification.md"
+      ],
+      "floor": {
+        "minWallMinutes": 10
+      }
+    },
+    "escalated": {
+      "paths": [
+        "docs/diagram_shape/escalation_note.md"
+      ]
+    }
+  },
+  "criteria": {
+    "version": 1,
+    "briefDigest": "f9ad02e6eca3893d71acddb1e3d85f99ac7d15d610894110793a6adbdaf8b483",
+    "criteria": [
+      {
+        "id": "criterion_acceptance_criteria_1_150e89f4",
+        "text": "**A diagram is seen, not read.** For system-design answers the backend produces, what reaches the answer surface conveys structure visually. Define what you are measuring — nodes, edges, grouping, labels — register it before measuring the result, and show the supplied notebook diagrams and the product's output measured on the same scale.",
+        "line": 60,
+        "section": "Acceptance criteria"
+      },
+      {
+        "id": "criterion_acceptance_criteria_2_636f5d0b",
+        "text": "**Nothing the backend expressed is lost on the way to the picture.** Every relation the answer states is present in what is shown. Measure it; do not assert it.",
+        "line": 64,
+        "section": "Acceptance criteria"
+      },
+      {
+        "id": "criterion_acceptance_criteria_3_88ab3bdc",
+        "text": "**It still fits and still reads.** The previous round's outcome holds, measured fresh: a typical answer's claim and beats are fully readable with nothing pressed; the overlay stays legible over any background with window opacity 1, an opaque local backing under every word, and zero contrast cost between 0% and 80% desktop visibility; no answer vanishes for being too long; panels replace the answer rather than clipping it.",
+        "line": 66,
+        "section": "Acceptance criteria"
+      },
+      {
+        "id": "criterion_acceptance_criteria_4_a7fe15fe",
+        "text": "**The candidate can still speak it.** A picture the operator cannot narrate is not an interview answer. Whatever you show, establish that the spoken form is still available and say where.",
+        "line": 71,
+        "section": "Acceptance criteria"
+      },
+      {
+        "id": "criterion_acceptance_criteria_5_d2d86fac",
+        "text": "**What it costs is stated.** Rendering a diagram costs something — bytes shipped, time before the answer appears, screen area taken from the beats. Measure each and say who pays.",
+        "line": 73,
+        "section": "Acceptance criteria"
+      },
+      {
+        "id": "criterion_report_requirements_distributions_6f03488e",
+        "text": "Distributions.: Every measurement carries observations, mean, median, the median's positional rank and spread; zero spread is stated explicitly when tied.",
+        "line": 80,
+        "section": "Report requirements"
+      },
+      {
+        "id": "criterion_report_requirements_aggregate_influence_3bef518b",
+        "text": "Aggregate influence.: Every aggregate carries per-item contribution, largest share, leave-one-out, and the smallest number of highest-contributing items whose removal flips the conclusion.",
+        "line": 82,
+        "section": "Report requirements"
+      },
+      {
+        "id": "criterion_report_requirements_before_and_after_4da37bca",
+        "text": "Before and after.: Rendered captures of the same answers before and after, in both languages.",
+        "line": 84,
+        "section": "Report requirements"
+      },
+      {
+        "id": "criterion_report_requirements_fail_before_shown_0dad26f6",
+        "text": "Fail-before shown.: For every test added for this task, its failure against unchanged source is shown, not asserted.",
+        "line": 85,
+        "section": "Report requirements"
+      },
+      {
+        "id": "criterion_report_requirements_baseline_quoted_first_30edc07a",
+        "text": "Baseline quoted first.: The governing ship-setup record's failing identities are quoted before any failure is attributed.",
+        "line": 87,
+        "section": "Report requirements"
+      },
+      {
+        "id": "criterion_report_requirements_validation_after_the_las_5f921888",
+        "text": "Validation after the last write.: The complete output and direct exit code of every declared validation command, taken after the last write of the run.",
+        "line": 89,
+        "section": "Report requirements"
+      }
+    ]
+  }
+}

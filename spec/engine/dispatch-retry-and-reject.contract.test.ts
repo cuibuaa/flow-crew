@@ -65,6 +65,68 @@ function setupPlainRun(): string {
   return created.runId;
 }
 
+function setupResearchAdmissionRun(): string {
+  const runId = setupPlainRun();
+  const rd = runDir(projectDir, runId);
+  const state = readRunState(projectDir, runId);
+  state.terminalStates = { shipped: { paths: ['docs/final.md'] } };
+  state.research = {
+    baseline: 0,
+    policy: 'best_of_n',
+    resultFile: 'docs/round.json',
+    reportDir: 'docs',
+    stop: { beat: 0.5, maxRounds: 2 },
+  };
+  writeRunState(projectDir, runId, state);
+  writeFileSync(join(rd, 'task_brief.md'), [
+    '---',
+    'terminal_states:',
+    '  shipped:',
+    '    paths: [docs/final.md]',
+    'research:',
+    '  baseline: 0',
+    '  policy: best_of_n',
+    '  result_file: docs/round.json',
+    '  report_dir: docs',
+    '  stop: {beat: 0.5, max_rounds: 2}',
+    '---',
+    '# Research admission retry fixture',
+  ].join('\n'));
+  return runId;
+}
+
+const measuringOwnerDispatch = [
+  'stages:',
+  '  - id: measure',
+  '    role: qa',
+  '    depends_on: []',
+  '    dependency_reasons: {}',
+  '    scope: [docs/round.json, docs/final.md]',
+  '    criterion_refs: []',
+  '    condition: research.decision != continue',
+  '    prompt_template: measure and finalize in one unsafe stage',
+].join('\n');
+
+const separatedResearchDispatch = [
+  'stages:',
+  '  - id: measure',
+  '    role: qa',
+  '    depends_on: []',
+  '    dependency_reasons: {}',
+  '    scope: [docs/round.json]',
+  '    criterion_refs: []',
+  '    prompt_template: measure one result',
+  '  - id: finalize',
+  '    role: qa',
+  '    depends_on: [measure]',
+  '    dependency_reasons:',
+  '      measure: consumes the framework-settled research result',
+  '    scope: [docs/final.md]',
+  '    criterion_refs: []',
+  '    condition: research.terminalPath == docs/final.md',
+  '    prompt_template: write only the selected terminal path',
+].join('\n');
+
 const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
 // =====================================================================================
@@ -197,6 +259,150 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(final.failureReason ?? '').toContain('wizard');        // names the specific unknown role
     expect(final.failureReason ?? '').not.toMatch(/Refine the task brief and try again\.?$/); // NOT the old generic punt
   });
+
+  it('archives an admission refusal, exposes its exact error on retry, and admits the repaired proposal', async () => {
+    const runId = setupResearchAdmissionRun();
+    const rd = runDir(projectDir, runId);
+    const agentsDir = writeRoles(['planner', 'qa']);
+    let planCalls = 0;
+    let measureCalls = 0;
+    const planPrompts: string[] = [];
+    const adapter = {
+      async run(prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
+        if (opts.stageId === 'plan') {
+          planCalls += 1;
+          planPrompts.push(prompt);
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+            ? measuringOwnerDispatch
+            : separatedResearchDispatch);
+          return ok(`planned attempt ${planCalls}`);
+        }
+        if (opts.stageId === 'measure') {
+          measureCalls += 1;
+          mkdirSync(join(projectDir, 'docs'), { recursive: true });
+          writeFileSync(join(projectDir, 'docs', 'round.json'), JSON.stringify({ label: 'repair_converged', result: 1 }));
+          return ok('measured');
+        }
+        if (opts.stageId === 'finalize') {
+          mkdirSync(join(projectDir, 'docs'), { recursive: true });
+          writeFileSync(join(projectDir, 'docs', 'final.md'), '# admitted terminal\n');
+          return ok('finalized');
+        }
+        return ok(`did ${opts.stageId}`);
+      },
+      async discuss(): Promise<RunResult> { return ok(''); },
+      spawnDiscuss() { throw new Error('unused'); },
+      async spawnInteractive() { throw new Error('unused'); },
+    } as unknown as Adapter;
+
+    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+
+    expect(planCalls).toBe(2);
+    expect(measureCalls).toBe(1);
+    expect(final.status).toBe('shipped');
+    expect(planPrompts[1]).toContain('research result producer path docs/round.json cannot be owned by a terminal writer');
+    expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
+    expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
+    expect(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8'))
+      .toBe(measuringOwnerDispatch);
+    const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: string[] };
+    expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
+  }, 60_000);
+
+  it('bounds repeated identical topology refusals and preserves every rejected attempt', async () => {
+    const runId = setupResearchAdmissionRun();
+    const rd = runDir(projectDir, runId);
+    const agentsDir = writeRoles(['planner', 'qa']);
+    let planCalls = 0;
+    const adapter = {
+      async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
+        if (opts.stageId === 'plan') {
+          planCalls += 1;
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), measuringOwnerDispatch);
+          return ok('repeated unchanged proposal');
+        }
+        return ok(`did ${opts.stageId}`);
+      },
+      async discuss(): Promise<RunResult> { return ok(''); },
+      spawnDiscuss() { throw new Error('unused'); },
+      async spawnInteractive() { throw new Error('unused'); },
+    } as unknown as Adapter;
+
+    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+
+    expect(planCalls).toBe(3);
+    expect(final.status).not.toBe('complete');
+    for (const attempt of [1, 2, 3]) {
+      expect(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8'))
+        .toBe(measuringOwnerDispatch);
+    }
+  }, 60_000);
+
+  it('rolls back a durable non-terminal delta from an admitted validation-capable finalizer', async () => {
+    const runId = setupPlainRun();
+    const rd = runDir(projectDir, runId);
+    const agentsDir = writeRoles(['planner', 'qa']);
+    const state = readRunState(projectDir, runId);
+    state.terminalStates = { complete: { paths: ['docs/final.md'] } };
+    writeRunState(projectDir, runId, state);
+    writeFileSync(join(rd, 'task_brief.md'), [
+      '---',
+      'terminal_states:',
+      '  complete:',
+      '    paths: [docs/final.md]',
+      '---',
+      '# Terminal validation-scope fixture',
+    ].join('\n'));
+    mkdirSync(join(projectDir, 'src'), { recursive: true });
+    writeFileSync(join(projectDir, 'src', 'generated.ts'), 'export const value = "before";\n');
+    let finalizerCalls = 0;
+    const adapter = {
+      async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
+        if (opts.stageId === 'plan') {
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            'stages:',
+            '  - id: finalize',
+            '    role: qa',
+            '    depends_on: []',
+            '    dependency_reasons: {}',
+            '    scope: [docs/final.md, src/generated.ts]',
+            '    criterion_refs: []',
+            '    prompt_template: validate and write the terminal report',
+          ].join('\n'));
+          return ok('planned');
+        }
+        if (opts.stageId === 'finalize') {
+          finalizerCalls += 1;
+          mkdirSync(join(projectDir, 'docs'), { recursive: true });
+          writeFileSync(join(projectDir, 'docs', 'final.md'), '# terminal candidate\n');
+          writeFileSync(join(projectDir, 'src', 'generated.ts'), 'export const value = "after gate";\n');
+          return {
+            ...ok('finalized with a forbidden durable delta'),
+            writes: ['docs/final.md', 'src/generated.ts'],
+            writeAttribution: 'structured',
+          };
+        }
+        return ok(`did ${opts.stageId}`);
+      },
+      async discuss(): Promise<RunResult> { return ok(''); },
+      spawnDiscuss() { throw new Error('unused'); },
+      async spawnInteractive() { throw new Error('unused'); },
+    } as unknown as Adapter;
+
+    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+
+    expect(finalizerCalls).toBeGreaterThan(0);
+    expect(final.status).not.toBe('complete');
+    expect(readFileSync(join(projectDir, 'src', 'generated.ts'), 'utf-8'))
+      .toBe('export const value = "before";\n');
+    expect(final.stages.finalize.error).toContain('terminal_scope_violation');
+    const audit = JSON.parse(readFileSync(join(rd, 'stages', 'finalize', `constraint_audit_attempt_${finalizerCalls}.json`), 'utf-8')) as {
+      rolledBackWrites: string[];
+      terminalDurableScope?: string[];
+    };
+    expect(audit.rolledBackWrites).toContain('src/generated.ts');
+    expect(audit.terminalDurableScope).toEqual(['docs/final.md']);
+  }, 60_000);
 });
 
 // =====================================================================================

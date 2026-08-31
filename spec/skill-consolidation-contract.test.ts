@@ -37,6 +37,8 @@ describe('skill-consolidation release contract', () => {
     const prompt = plannerPrompt();
     const gateScope = numberedRule(prompt, 6);
     const terminalPaths = numberedRule(prompt, 12);
+    const criterionTransport = numberedRule(prompt, 14);
+    const terminalOwnership = numberedRule(prompt, 16);
 
     expect(gateScope).toContain('For a gate, `scope: []` is valid only');
     expect(gateScope).toContain('strictly read-only');
@@ -50,6 +52,24 @@ describe('skill-consolidation release contract', () => {
     expect(terminalPaths).toContain('create or modify it');
     expect(terminalPaths).toContain('commits the terminal status');
     expect(terminalPaths).toContain('skips every stage still pending, including verification and repair');
+    expect(terminalPaths).toContain('Ownership is per declared path');
+    expect(terminalPaths).toContain('different guarded final sink stages');
+    expect(terminalPaths).toContain('round/result producer is never a terminal owner');
+
+    expect(criterionTransport).toContain('criterion assigned to ordinary work MUST also appear on a gate downstream');
+    expect(criterionTransport).toContain('only during terminal materialization');
+    expect(criterionTransport).toContain('needs no impossible post-terminal gate');
+    expect(criterionTransport).toContain('must be an ancestor of those writers');
+
+    expect(terminalOwnership).toContain('Each terminal path has exactly ONE scoped owner');
+    expect(terminalOwnership).toContain('multiple path-specific sinks');
+    expect(terminalOwnership).toContain('validation-only');
+    expect(terminalOwnership).toContain('restores and rejects any durable non-terminal delta');
+    expect(terminalOwnership).toContain('mechanically false on `continue`');
+    expect(terminalOwnership).toContain('`research.terminalPath == <that exact declared path>`');
+    expect(terminalOwnership).toContain('only terminal values the policy emits are `ship` and `stop_ceiling`');
+    expect(terminalOwnership).toContain('do not use run-status aliases such as `shipped` or `ceiling_hit`');
+    expect(terminalOwnership).toContain('Never use `research.decision == continue`');
   });
 
   it('retires terminal-path prose inference for level-two sections and declarations', () => {

@@ -1,0 +1,112 @@
+- id: run_round
+  role: coder
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/tech_solution.md if present, then run exactly one new HappyMJ incumbent-strengthening round under docs/happymj_incumbent/. First read the existing campaign reports and project toolchain configs. Freeze the single mechanism, gates, thresholds, and seeds before opening outcomes; avoid every ledger-closed mechanism. Write exactly one fresh round outcome: docs/happymj_incumbent/round_result.json for a measured candidate, or docs/happymj_incumbent/round_result.json.no_candidate.json for no servable candidate. Include the required round report, raw/auditable evidence, no-effect control, divergence metrics, distribution/tail summaries, dependencies of supplied quantities, and make build/test/lint exit codes and totals. Create temporary work only under the operating-system temporary root.
+  scope:
+    - happymj/**
+    - tests/**
+    - docs/happymj_incumbent/**
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+- id: audit_round
+  role: qa
+  prompt_template: |
+    Independently audit the round produced by run_round. Validate the yardstick, disjointness, frozen gates, no-effect control, candidate non-identity/departure evidence, mean/median/distribution/tail reporting, no-candidate handling if applicable, prior-art comparison, and make build/test/lint evidence. Run the project commands needed to reproduce the audit, using temporary work only under the operating-system temporary root. Write /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/verdict_audit_round.json with pass/fail, per-criterion evidence, and a Coverage Map.
+  scope: []
+  depends_on:
+    - run_round
+  dependency_reasons:
+    run_round: "The audit must inspect the round artifacts and project changes produced by run_round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  is_gate: true
+- id: fix_round
+  role: coder
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/verdict_audit_round.json and the audit stage output, then repair only the rejected round artifacts or code under the declared scope. Preserve the one-mechanism, one-outcome contract. Re-run the relevant project verification and update the round report with direct exit codes and totals. Create temporary work only under the operating-system temporary root.
+  scope:
+    - happymj/**
+    - tests/**
+    - docs/happymj_incumbent/**
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "The fix must consume audit_round's rejected verdict before correcting the round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  retry_to:
+    - audit_round
+- id: final_ship
+  role: doc_writer
+  prompt_template: |
+    After audit_round passes and the research policy reports a confirmed win, re-read /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/reality_checks.md if present and run each declared check directly. Write only docs/happymj_incumbent/ship_report.md, naming the confirmed policy, primary and confirmation intervals, audit identity, reality-check exit codes, and why no other terminal artifact is written.
+  scope:
+    - docs/happymj_incumbent/ship_report.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "The ship report can only rely on a round whose independent audit passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  condition: research.decision == shipped
+- id: final_ceiling
+  role: doc_writer
+  prompt_template: |
+    After audit_round passes and the research policy reports a ceiling, re-read /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/reality_checks.md if present and run each declared check directly. Write only docs/happymj_incumbent/ceiling_report.md, naming the fired stopping condition and count, measured attempts, audit identity, reality-check exit codes, and why no other terminal artifact is written.
+  scope:
+    - docs/happymj_incumbent/ceiling_report.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "The ceiling report can only rely on measured attempts whose independent audit passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  condition: research.decision == ceiling_hit
+- id: final_escalate
+  role: doc_writer
+  prompt_template: |
+    After audit_round passes and the research policy reports a blocker, re-read /home/qian/.fc/runs/2026-08-31T08-33-08-f1038e/reality_checks.md if present and run each declared check directly. Write only docs/happymj_incumbent/escalation_note.md, naming the blocker, attempted evidence, audit identity, reality-check exit codes, and why no other terminal artifact is written.
+  scope:
+    - docs/happymj_incumbent/escalation_note.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "The escalation note can only rely on a round whose independent audit passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  condition: research.decision == escalated

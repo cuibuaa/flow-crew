@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "source": {
+    "runId": "2026-08-31T08-33-08-f1038e",
+    "plannerAttempt": 3,
+    "dispatchLocator": "dispatch.yaml",
+    "dispatchSha256": "fb0f9fb5e5adab44a7be3114de0fde22f11bebf4e2aee4ac5c9d52abd85de0d8",
+    "dispatchBytes": 6793
+  },
+  "terminalStates": {
+    "shipped": {
+      "paths": [
+        "docs/happymj_incumbent/ship_report.md"
+      ]
+    },
+    "ceiling_hit": {
+      "paths": [
+        "docs/happymj_incumbent/ceiling_report.md"
+      ]
+    },
+    "escalated": {
+      "paths": [
+        "docs/happymj_incumbent/escalation_note.md"
+      ]
+    }
+  },
+  "research": {
+    "baseline": 0,
+    "policy": "greedy_stack",
+    "higherIsBetter": true,
+    "resultFile": "docs/happymj_incumbent/round_result.json",
+    "feasibility": {
+      "hardFloor": 2,
+      "rules": [
+        {
+          "label": "qualifying_members_per_frozen_rule",
+          "model": "not_computable",
+          "reason": "The qualifying-member count depends on the behavioural family and support counts each round defines for its own candidate, and rounds after the first are not chosen yet."
+        }
+      ]
+    },
+    "resultSchema": {
+      "type": "object",
+      "required": [
+        "label",
+        "result"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "result": {
+          "type": "number"
+        }
+      }
+    },
+    "confirm": {
+      "command": "python3 -m happymj.research_confirm --result docs/happymj_incumbent/round_result.json",
+      "requires": "The paired interval against three fixed HeuristicPolicyV1 opponents must lie entirely above zero on a disjoint sample, recomputed from preserved raw blocks rather than from the round's own summary.",
+      "timeoutSeconds": 3600
+    },
+    "stop": {
+      "beat": 0.05,
+      "maxRounds": 6,
+      "haltAfterNoImprovement": 4
+    }
+  },
+  "criteria": {
+    "version": 1,
+    "briefDigest": "3dfd57d1bca1ff3cfc4ce7d3d69827b4d667c1747c4b658e55cb43f8bd828759",
+    "criteria": [
+      {
+        "id": "criterion_what_each_round_s_report_1_5fc9f76a",
+        "text": "**What \"no effect\" measures in this round's own serving configuration**: a control behaviourally identical to the incumbent, same conditions and sample size, its interval reported beside the candidate's. Do not assume it is zero; establish it each round.",
+        "line": 101,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_2_9ba6299d",
+        "text": "**The candidate's decision-level difference from the incumbent** — how many decisions differ and on what fraction — beside its overall paired EV and its paired EV restricted to blocks where the two policies' outcomes actually diverged. A candidate that approaches the incumbent by seldom differing must not be recorded as an improvement.",
+        "line": 105,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_3_3f23df43",
+        "text": "**Every headline statistic reports its mean, its median, where the reported value sits in its own distribution, and how it moves as the most extreme blocks are removed from each end.** Prior rounds' positives were repeatedly tail artifacts; make that visible without being asked.",
+        "line": 110,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_4_dbb8d21e",
+        "text": "**Anything built is checked against what the package already provides.** Name the existing module considered and why it does not serve, before writing a new one.",
+        "line": 114,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_5_07fbe993",
+        "text": "**`make build`, `make test`, and `make lint` end green after the last write of each round**, each with its direct exit code and totals; never read the exit status after a pipe.",
+        "line": 117,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_6_d343aa91",
+        "text": "**Every test this task writes asserts properties that hold at every point in time.** No test may assert that a terminal artifact is absent, and none may assert that a shared campaign file names the round that wrote the test.",
+        "line": 120,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_7_06f94983",
+        "text": "**Each round's result is audited by something other than what produced it, before it counts**, with the audit's verdict and identity reported. No terminal artifact is written until that audit has run and passed for the round the terminal outcome rests on.",
+        "line": 124,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_8_054b9401",
+        "text": "**Say what each supplied quantity in this brief depends on that the brief did not state**, and whether that changes what it is worth.",
+        "line": 128,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_9_f4d0b217",
+        "text": "**Re-read the run's declared reality checks before each terminal write**, run each, report each exit code, and repair any check whose field names or paths do not match what the emitters actually produce, or which requires an artifact only a later stage writes. State such a check as the invariant that holds throughout — at most one terminal artifact, and no conflicting pair. Put the repair narrative in the report body, never inside a machine-read declaration.",
+        "line": 131,
+        "section": "What each round's report must show"
+      },
+      {
+        "id": "criterion_what_each_round_s_report_10_24e8ca77",
+        "text": "**Choose the terminal path by which outcome happened.** A confirmed win writes the ship report. A ceiling writes the ceiling report only when a configured stopping condition has actually fired, naming which one and the count that satisfies it. A blocker writes the escalation note. **A round whose audit concludes the campaign should continue is not a terminal outcome: write no terminal artifact and let the next round begin.** Write at most one, and only once the campaign itself has ended.",
+        "line": 137,
+        "section": "What each round's report must show"
+      }
+    ]
+  }
+}

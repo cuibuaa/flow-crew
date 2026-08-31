@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-08-31T08:41:40.250Z",
+  "errors": [
+    "terminal_states path docs/happymj_incumbent/ship_report.md: expected exactly one scoped owner, found 3 (run_round, fix_round, final_ship)",
+    "terminal_states path docs/happymj_incumbent/ceiling_report.md: expected exactly one scoped owner, found 3 (run_round, fix_round, final_ceiling)",
+    "terminal_states path docs/happymj_incumbent/escalation_note.md: expected exactly one scoped owner, found 3 (run_round, fix_round, final_escalate)"
+  ],
+  "terminalOwners": {},
+  "criterionGateRefs": {
+    "audit_round": [
+      "criterion_what_each_round_s_report_1_5fc9f76a",
+      "criterion_what_each_round_s_report_2_9ba6299d",
+      "criterion_what_each_round_s_report_3_3f23df43",
+      "criterion_what_each_round_s_report_4_dbb8d21e",
+      "criterion_what_each_round_s_report_5_07fbe993",
+      "criterion_what_each_round_s_report_6_d343aa91",
+      "criterion_what_each_round_s_report_7_06f94983",
+      "criterion_what_each_round_s_report_8_054b9401",
+      "criterion_what_each_round_s_report_9_f4d0b217",
+      "criterion_what_each_round_s_report_10_24e8ca77"
+    ]
+  },
+  "criteriaDigest": "3dfd57d1bca1ff3cfc4ce7d3d69827b4d667c1747c4b658e55cb43f8bd828759"
+}

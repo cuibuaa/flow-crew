@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": {
+    "runId": "2026-08-31T06-20-21-6ac554",
+    "plannerAttempt": 3,
+    "dispatchLocator": "dispatch.yaml",
+    "dispatchSha256": "967553eb3d71a709ed14627b61aa05f1ee98614273037dd30ebf1d207016fe58",
+    "dispatchBytes": 4482
+  },
+  "terminalStates": {
+    "complete": {
+      "paths": [
+        "docs/diagram_shape/final_verification.md"
+      ],
+      "floor": {
+        "minWallMinutes": 10
+      }
+    },
+    "escalated": {
+      "paths": [
+        "docs/diagram_shape/escalation_note.md"
+      ]
+    }
+  },
+  "criteria": {
+    "version": 1,
+    "briefDigest": "c96b7826b189edd02f33e5e032d66e9a04d2f02246cba8900a67e052c784b390",
+    "criteria": []
+  }
+}

@@ -165,7 +165,7 @@ describe('verification-owned orchestration edge probes', () => {
     expect(guidanceForStageFromText(ledger, 'implement')).toEqual([]);
   });
 
-  it('refuses a terminal finalizer that can also write new non-terminal work', () => {
+  it('classifies a terminal finalizer\'s conservative extra capability as validation-only', () => {
     const finalizer = parseDispatchedStageConfig({
       id: 'finalize',
       role: 'writer',
@@ -184,7 +184,10 @@ describe('verification-owned orchestration edge probes', () => {
       dispatchStageId: 'plan',
       terminalStates: { complete: { paths: ['docs/final.md'] } },
     });
-    expect(admission.errors.join('\n')).toContain('terminal finalizers may write only');
+    expect(admission.pass, admission.errors.join('\n')).toBe(true);
+    expect(admission.terminalValidationScopes).toEqual({
+      finalize: ['docs/new_measurement.json'],
+    });
   });
 
   it('rejects a hard check on the optional result even when a mandatory stage owns that path', () => {

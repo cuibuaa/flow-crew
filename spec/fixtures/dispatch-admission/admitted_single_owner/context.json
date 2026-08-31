@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "source": {
+    "runId": "2026-08-31T06-06-00-aeb5f5",
+    "plannerAttempt": 1,
+    "dispatchLocator": "dispatch.yaml",
+    "dispatchSha256": "a89920733552436a4a2b24aea772f014dd99168257e7b54f93d15e533eb1ac06",
+    "dispatchBytes": 6555
+  },
+  "terminalStates": {
+    "complete": {
+      "paths": [
+        "docs/task_ledger_staleness/final_verification.md"
+      ]
+    },
+    "escalated": {
+      "paths": [
+        "docs/task_ledger_staleness/escalation_note.md"
+      ]
+    }
+  },
+  "criteria": {
+    "version": 1,
+    "briefDigest": "322466858d5c51d84a465420a87de58e2d0cd362c79e470f58ddb0f9f10679e1",
+    "criteria": [
+      {
+        "id": "criterion_what_the_report_must_sho_1_cb65abca",
+        "text": "**Why the existing staleness state did not fire**, reproduced: show the two historical entries (or faithful copies under the OS temp root) rendering without a staleness signal before the change, and with one after. Explain the 182-versus-183 annotation inconsistency with the code path that produced each.",
+        "line": 57,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_2_cc742e79",
+        "text": "**Which parts are enforced mechanically and which rest on wording.** For anything that rests on ship.md wording, say what would catch it if the wording were ignored.",
+        "line": 62,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_3_fb0038f6",
+        "text": "**That a live entry is not falsely flagged**: an entry referencing a running task, and an entry referencing no task at all, both render without staleness noise. Show it.",
+        "line": 65,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_4_1c86a271",
+        "text": "**`npm run build`, `npm run test`, and `npm run lint` end green after the last write**, each with its direct exit code and totals. Establish the pre-change baseline yourself with both dependency trees installed as real directories; the recorded setup baseline may show `.tsx` spec failures that are a dependency-layout artifact, documented in `docs/orchestration_contract/final_verification.md` — read it rather than treating those as pre-existing defects.",
+        "line": 68,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_5_054b9401",
+        "text": "**Say what each supplied quantity in this brief depends on that the brief did not state**, and whether that changes what it is worth.",
+        "line": 75,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_6_f4d070de",
+        "text": "**Re-read the run's declared reality checks before the terminal write**, run each, report each exit code, and repair any check whose field names or paths do not match what the emitters actually produce, or which requires an artifact only a later stage writes. Put the repair narrative in the report body, never inside a machine-read declaration.",
+        "line": 78,
+        "section": "What the report must show"
+      },
+      {
+        "id": "criterion_what_the_report_must_sho_7_be7d01b3",
+        "text": "**Choose the terminal path by which outcome happened.** Work completed and verified writes the final verification report; anything that blocked you writes the escalation note. Write at most one.",
+        "line": 83,
+        "section": "What the report must show"
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-08-31T08:08:49.417Z",
+  "errors": [
+    "terminal owner finalize_report.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove dist/**",
+    "terminal owner finalize_report.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove dist/**"
+  ],
+  "terminalOwners": {
+    "docs/diagram_shape/final_verification.md": "finalize_report",
+    "docs/diagram_shape/escalation_note.md": "finalize_report"
+  },
+  "criterionGateRefs": {
+    "verify_diagram": [
+      "criterion_acceptance_criteria_1_150e89f4",
+      "criterion_acceptance_criteria_2_636f5d0b",
+      "criterion_acceptance_criteria_3_88ab3bdc",
+      "criterion_acceptance_criteria_4_a7fe15fe",
+      "criterion_acceptance_criteria_5_d2d86fac",
+      "criterion_report_requirements_distributions_6f03488e",
+      "criterion_report_requirements_aggregate_influence_3bef518b",
+      "criterion_report_requirements_before_and_after_4da37bca",
+      "criterion_report_requirements_fail_before_shown_0dad26f6",
+      "criterion_report_requirements_baseline_quoted_first_30edc07a",
+      "criterion_report_requirements_validation_after_the_las_5f921888"
+    ]
+  },
+  "criteriaDigest": "f9ad02e6eca3893d71acddb1e3d85f99ac7d15d610894110793a6adbdaf8b483"
+}

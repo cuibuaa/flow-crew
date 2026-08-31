@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "pass": true,
+  "checkedAt": "2026-08-31T06:20:51.239Z",
+  "errors": [],
+  "terminalOwners": {
+    "docs/task_ledger_staleness/final_verification.md": "finalize_outcome",
+    "docs/task_ledger_staleness/escalation_note.md": "finalize_outcome"
+  },
+  "criterionGateRefs": {
+    "verify_stale": [
+      "criterion_what_the_report_must_sho_1_cb65abca",
+      "criterion_what_the_report_must_sho_2_cc742e79",
+      "criterion_what_the_report_must_sho_3_fb0038f6",
+      "criterion_what_the_report_must_sho_4_1c86a271",
+      "criterion_what_the_report_must_sho_5_054b9401",
+      "criterion_what_the_report_must_sho_6_f4d070de",
+      "criterion_what_the_report_must_sho_7_be7d01b3"
+    ]
+  },
+  "criteriaDigest": "322466858d5c51d84a465420a87de58e2d0cd362c79e470f58ddb0f9f10679e1"
+}

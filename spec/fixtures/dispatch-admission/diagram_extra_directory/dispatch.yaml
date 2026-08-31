@@ -1,0 +1,53 @@
+- id: implement_diagram
+  role: coder
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T06-20-21-6ac554/tech_solution.md if present. Inspect the fixture README, all sixteen notebook diagrams, the current capture, package/config files, the role contract, dependencies, and existing answer harnesses before editing. Implement an explicit nodes/edges/groups/labels answer contract and deterministic local visual rendering while preserving a spoken form, CSP, isolation, fit, survival, and legibility. Add task-focused tests and headless bilingual capture/measurement probes under tests; preregister measures before outcomes, prove every new test fails on unchanged source using an OS-temporary clean copy, then iterate through targeted tests, npm run build, and node --test. Never modify declared inputs or load models in the default suite; remove stale probe output before each run.
+  scope:
+    - src/**
+    - tests/**
+    - dist/**
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs: []
+
+- id: audit_diagram
+  role: qa
+  prompt_template: |
+    Audit the produced implementation and tests without changing source or tests. On the first execution, examine every identified dimension, including risks not anticipated by the requirements; verify unchanged-source red evidence, relation preservation, visual structure, bilingual captures, narration, costs, CSP/isolation, fit/legibility/survival, notebook reachability conclusions, and the governing baseline identities. Run npm run build and node --test, comparing failures with that baseline and retaining the eight accepted live-microphone failures. Put temporary probes only under the OS temporary root and delete stale outputs first. End the stage output with a Coverage Map of aspect, reproducible evidence, conclusion, and unexamined items. On re-evaluation, reproduce every rejected item, both full mechanical commands, and every prior Coverage Map check touched by the repair. Write /home/qian/.fc/runs/2026-08-31T06-20-21-6ac554/verdict_audit_diagram.json with pass/fail, per-criterion evidence, and durable rejected-verdict references.
+  scope:
+    - dist/**
+  depends_on:
+    - implement_diagram
+  dependency_reasons:
+    implement_diagram: "The audit must inspect and exercise the implementation, tests, captures, and measurement path produced by implement_diagram."
+  criterion_refs: []
+  is_gate: true
+
+- id: repair_diagram
+  role: coder
+  prompt_template: |
+    Read the latest audit verdict, its stage output, and the scheduler-preserved rejected verdict. Correct every material rejection in the diagram contract, renderer, tests, or measurement probes without weakening thresholds, accepted baseline failures, CSP, isolation, or relation fidelity. Keep all one-off work under the OS temporary root, delete stale probe outputs before reruns, and iterate through the rejected reproductions plus npm run build and node --test. Do not write either terminal report path.
+  scope:
+    - src/**
+    - tests/**
+    - dist/**
+  depends_on:
+    - audit_diagram
+  dependency_reasons:
+    audit_diagram: "The repair must consume audit_diagram's concrete rejected findings and evidence before changing the implementation."
+  criterion_refs: []
+  retry_to:
+    - audit_diagram
+
+- id: finalize_diagram
+  role: coder
+  prompt_template: |
+    Consume the passed audit evidence and all stage outputs. Make no source or test changes. Generate the retained before/after bilingual captures, then run the declared npm run build and node --test commands after all implementation and capture writes, preserving their complete stdout/stderr and direct exit codes. Write exactly one terminal document: normally docs/diagram_shape/final_verification.md, or docs/diagram_shape/escalation_note.md only if work truly cannot proceed at all. The final report must pin evidence to production times and include distributions and aggregate sensitivity details, unchanged-source failures for every added test, governing baseline identities, relation coverage, narration location, notebook reuse conclusion, dependency/byte/latency/area costs, captures, and final validation output. Do not treat an honestly unmet measured property as grounds to omit the rest of the report.
+  scope:
+    - docs/diagram_shape/**
+    - dist/**
+  depends_on:
+    - audit_diagram
+  dependency_reasons:
+    audit_diagram: "The terminal report must consume audit_diagram's accepted implementation evidence and final baseline comparison."
+  criterion_refs: []

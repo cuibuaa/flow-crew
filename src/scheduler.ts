@@ -11,7 +11,7 @@ import {
   approvalArtifactPath,
   isValidApprovalRequestId,
 } from './approval-artifacts.js';
-import { evaluateCondition } from './condition.js';
+import { evaluateCondition, parseCondition } from './condition.js';
 import {
   enforceRealityGateBeforeTerminal,
   initializeReservedRun,
@@ -1112,6 +1112,33 @@ function admittedTerminalOwner(runDirPath: string, terminalPath: string): string
   }
 }
 
+function admittedTerminalDurableScope(
+  runDirPath: string,
+  stageId: string,
+  terminalStates: TerminalStatesConfig | undefined,
+): string[] | undefined {
+  try {
+    const admission = JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    if (!admission.pass || !(admission.terminalValidationScopes?.[stageId]?.length)) return undefined;
+    const allowed = new Set<string>();
+    for (const entry of Object.values(terminalStates ?? {})) {
+      const ownedPaths = entry.paths.filter((path) => admission.terminalOwners[path] === stageId);
+      for (const path of ownedPaths) allowed.add(path);
+      if (ownedPaths.length === 0 || entry.floor?.minAttemptedStages === undefined) continue;
+      if (entry.stageGlob) allowed.add(entry.stageGlob);
+      else {
+        const normalized = normalizedProjectPath(ownedPaths[0]);
+        if (!normalized) continue;
+        const directory = posix.dirname(normalized);
+        allowed.add(`${directory === '.' ? '' : `${directory}/`}stage_*_verdict.md`);
+      }
+    }
+    return [...allowed];
+  } catch {
+    return undefined;
+  }
+}
+
 function stageAttemptWroteProjectPath(
   projectDir: string,
   status: StageStatus | undefined,
@@ -1221,18 +1248,19 @@ export async function tryTerminateOnTerminalState(
           );
         }
       }
-      if (ownerIds.length === 1 && state.stages[ownerIds[0]]) {
-        state.stages[ownerIds[0]] = rependStageStatus(state.stages[ownerIds[0]], 0);
-        writeStageStatus(ctx.projectDir, ctx.runId, ownerIds[0], state.stages[ownerIds[0]]);
+      for (const ownerId of ownerIds) {
+        if (!state.stages[ownerId]) continue;
+        state.stages[ownerId] = rependStageStatus(state.stages[ownerId], 0);
+        writeStageStatus(ctx.projectDir, ctx.runId, ownerId, state.stages[ownerId]);
         appendSchedulerGuidanceOnce(
           ctx.runDirPath,
-          ownerIds[0],
-          `[ambiguous-terminal:${blockage?.occurrence.fingerprint ?? 'unknown'}]`,
+          ownerId,
+          `[ambiguous-terminal:${blockage?.occurrence.fingerprint ?? 'unknown'}:${ownerId}]`,
           `Terminal output rejected: ${detail}. Choose the single path matching the outcome that actually happened and write only that path.`,
           Object.keys(state.stages),
         );
-        writeRunState(ctx.projectDir, ctx.runId, state);
       }
+      if (ownerIds.some((ownerId) => state.stages[ownerId])) writeRunState(ctx.projectDir, ctx.runId, state);
       return { decision: 'deferred', reasons: [detail] };
     }
   }
@@ -2321,11 +2349,16 @@ export function buildRetryPreamble(
   // detail (parse error / unknown roles) is carried in the error string itself.
   if (prevError && prevError.startsWith(INVALID_DISPATCH_ERROR_PREFIX)) {
     const detail = prevError.slice(INVALID_DISPATCH_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
+    const admissionRefusal = detail.startsWith('dispatch admission rejected the complete proposal');
     return [
-      `RE-PLAN (attempt ${retries + 1}): your previous attempt exited cleanly but you failed to emit a valid dispatch.yaml — it produced ZERO usable stages.`,
+      admissionRefusal
+        ? `RE-PLAN (attempt ${retries + 1}): your previous dispatch.yaml was schema-valid but admission rejected its topology or coverage before any proposed work stage ran.`
+        : `RE-PLAN (attempt ${retries + 1}): your previous attempt exited cleanly but you failed to emit a valid dispatch.yaml — it produced ZERO usable stages.`,
       detail ? `Specific problem: ${detail}` : 'The file was missing, empty, unparseable, or contained no schema-valid stages.',
       DISPATCH_SCHEMA_REMINDER,
-      `Write ONLY the dispatch.yaml file (at ${runDirPath}/dispatch.yaml) with at least one schema-valid stage that uses a known role. Do not continue from any partial output; emit a fresh, complete file.`,
+      admissionRefusal
+        ? `Repair every named admission error in a fresh, complete proposal. Treat the archived proposal and report as read-only evidence, then write ONLY ${runDirPath}/dispatch.yaml; do not repeat the rejected topology unchanged.`
+        : `Write ONLY the dispatch.yaml file (at ${runDirPath}/dispatch.yaml) with at least one schema-valid stage that uses a known role. Do not continue from any partial output; emit a fresh, complete file.`,
     ].join('\n\n');
   }
   let cause: string;
@@ -2402,6 +2435,50 @@ export function diagnoseEmptyDispatch(
     };
   }
   return { detail: 'dispatch.yaml contained stages but none were schema-valid (check id/role/prompt_template fields).', unknownRoles: [], transient: true };
+}
+
+interface ArchivedDispatchRefusal {
+  report: DispatchAdmissionReport;
+  proposalPath: string;
+  admissionPath: string;
+}
+
+function archiveDispatchAdmissionRefusal(input: {
+  runDirPath: string;
+  stageId: string;
+  attemptIndex: number;
+  rawDispatchText: string;
+}): ArchivedDispatchRefusal | undefined {
+  const liveAdmissionPath = join(input.runDirPath, 'dispatch_admission.json');
+  let report: DispatchAdmissionReport;
+  try {
+    report = JSON.parse(readFileSync(liveAdmissionPath, 'utf-8')) as DispatchAdmissionReport;
+  } catch {
+    return undefined;
+  }
+  const proposalDigest = createHash('sha256').update(input.rawDispatchText, 'utf8').digest('hex');
+  if (report.pass || report.errors.length === 0 || report.proposalDigest !== proposalDigest) return undefined;
+
+  const relativeRoot = posix.join('dispatch_rejections', `attempt_${input.attemptIndex}`);
+  const archiveRoot = join(input.runDirPath, relativeRoot);
+  mkdirSync(archiveRoot, { recursive: true });
+  const proposalPath = posix.join(relativeRoot, 'dispatch.yaml');
+  const admissionPath = posix.join(relativeRoot, 'dispatch_admission.json');
+  const absoluteProposalPath = join(input.runDirPath, proposalPath);
+  const absoluteAdmissionPath = join(input.runDirPath, admissionPath);
+  if (!existsSync(absoluteProposalPath)) writeFileSync(absoluteProposalPath, input.rawDispatchText, 'utf-8');
+  if (!existsSync(absoluteAdmissionPath)) copyFileSync(liveAdmissionPath, absoluteAdmissionPath);
+  publishJsonCreateOnly(join(archiveRoot, 'rejection.json'), {
+    version: 1,
+    stageId: input.stageId,
+    attemptIndex: input.attemptIndex,
+    proposalDigest,
+    proposalPath,
+    admissionPath,
+    errors: report.errors,
+    archivedAt: new Date().toISOString(),
+  });
+  return { report, proposalPath, admissionPath };
 }
 
 /** Action the engine takes when a plan stage emits zero valid injected stages and
@@ -2864,6 +2941,39 @@ export const WorkflowConfigSchema = z.object({
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
+const RESEARCH_DECISION_STATUS_ALIASES = new Map<string, string>([
+  [RUN_STATUS.SHIPPED, 'ship'],
+  [RUN_STATUS.CEILING_HIT, 'stop_ceiling'],
+]);
+const EMITTED_RESEARCH_DECISIONS = new Set(RESEARCH_DECISION_STATUS_ALIASES.values());
+
+/**
+ * Early planner versions compared `research.decision` with terminal run
+ * statuses. The policy fact deliberately uses action verbs (`ship` and
+ * `stop_ceiling`), while the same framework-owned artifact publishes the
+ * selected terminal status. Preserve those recorded plans by translating the
+ * two policy aliases to emitted decisions and the escalation alias to the
+ * emitted status field; unknown values remain untouched so admission rejects
+ * them fail-closed.
+ */
+function normalizeResearchTerminalCondition(condition: string | undefined): string | undefined {
+  if (!condition?.trim()) return condition;
+  try {
+    const parsed = parseCondition(condition);
+    if (parsed.stageId === 'research'
+        && parsed.field === 'decision'
+        && parsed.op === '=='
+        && typeof parsed.value === 'string') {
+      const emittedDecision = RESEARCH_DECISION_STATUS_ALIASES.get(parsed.value);
+      if (emittedDecision) return `research.decision == ${JSON.stringify(emittedDecision)}`;
+      if (parsed.value === RUN_STATUS.ESCALATED) {
+        return `research.terminalStatus == ${JSON.stringify(RUN_STATUS.ESCALATED)}`;
+      }
+    }
+  } catch { /* admission reports malformed conditions; parsing stays fail-closed */ }
+  return condition;
+}
+
 /**
  * Dynamic plans describe the DAG, not scheduler recovery policy. Keep accepting
  * the historical field so an otherwise usable plan is not discarded, but strip
@@ -2872,6 +2982,7 @@ export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 export function parseDispatchedStageConfig(raw: unknown): StageConfig {
   const stage = StrictDispatchedStageConfigSchema.parse(raw);
   delete stage.max_retries;
+  stage.condition = normalizeResearchTerminalCondition(stage.condition);
   return stage;
 }
 
@@ -4044,9 +4155,13 @@ interface DispatchAdmissionReport {
   pass: boolean;
   checkedAt: string;
   errors: string[];
+  proposalDigest?: string;
   terminalOwners: Record<string, string>;
+  /** Declared finalizer capability that may be touched for validation but may not leave a durable delta. */
+  terminalValidationScopes?: Record<string, string[]>;
   criteriaDigest?: string;
   criterionGateRefs?: Record<string, string[]>;
+  criterionTerminalRefs?: Record<string, string[]>;
 }
 
 function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
@@ -4101,6 +4216,31 @@ function transitivelyDependsOn(stageId: string, ancestorId: string, byId: Readon
   return false;
 }
 
+function researchTerminalConditionExcludesContinue(
+  condition: string | undefined,
+  declaration: { status: string; path: string },
+): boolean {
+  if (!condition?.trim()) return false;
+  try {
+    const parsed = parseCondition(condition);
+    if (parsed.stageId !== 'research') return false;
+    if (parsed.field === 'decision') {
+      if (parsed.op === '!=' && parsed.value === 'continue') return true;
+      return parsed.op === '=='
+        && typeof parsed.value === 'string'
+        && EMITTED_RESEARCH_DECISIONS.has(parsed.value);
+    }
+    if (parsed.op !== '==' || typeof parsed.value !== 'string') return false;
+    if (parsed.field === 'terminalPath') {
+      return normalizedProjectPath(parsed.value) === normalizedProjectPath(declaration.path);
+    }
+    if (parsed.field === 'terminalStatus') return parsed.value === declaration.status;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function inspectDispatchAdmission(input: {
   dispatched: StageConfig[];
   baseStages: StageConfig[];
@@ -4150,6 +4290,8 @@ export function inspectDispatchAdmission(input: {
 
   const terminalOwners: Record<string, string> = {};
   const ownerIds = new Set<string>();
+  const terminalValidationScopeSets = new Map<string, Set<string>>();
+  const checkedResearchOwnerIds = new Set<string>();
   const terminalDeclarations = Object.entries(input.terminalStates ?? {})
     .flatMap(([status, entry]) => entry.paths.map((path) => ({ status, path })));
   const declaredTerminalPaths = new Set(terminalDeclarations
@@ -4188,8 +4330,8 @@ export function inspectDispatchAdmission(input: {
       errors.push(`terminal_states snapshot basename ${basename}: collides across ${paths.join(', ')}; terminal recovery requires unique basenames`);
     }
   }
-  for (const entry of Object.values(input.terminalStates ?? {})) {
-    for (const rawPath of entry.paths) {
+  for (const declaration of terminalDeclarations) {
+    const rawPath = declaration.path;
       const owners = input.dispatched.filter((stage) => stageScopeOwnsPath(stage, rawPath));
       if (owners.length !== 1) {
         errors.push(`terminal_states path ${rawPath}: expected exactly one scoped owner, found ${owners.length}${owners.length ? ` (${owners.map((stage) => stage.id).join(', ')})` : ''}`);
@@ -4210,12 +4352,28 @@ export function inspectDispatchAdmission(input: {
         });
       });
       if (nonTerminalScopes.length > 0) {
-        errors.push(`terminal owner ${owner.id}.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove ${nonTerminalScopes.join(', ')}`);
+        const existing = terminalValidationScopeSets.get(owner.id) ?? new Set<string>();
+        for (const scope of nonTerminalScopes) existing.add(scope);
+        terminalValidationScopeSets.set(owner.id, existing);
       }
       const dependents = input.dispatched.filter((stage) => stage.depends_on.includes(owner.id));
       if (dependents.length > 0) errors.push(`terminal owner ${owner.id}: must be a DAG sink; depended on by ${dependents.map((stage) => stage.id).join(', ')}`);
-      if (input.research && owner.condition?.replace(/\s+/g, ' ').trim() !== 'research.decision != continue') {
-        errors.push(`terminal owner ${owner.id}.condition: research finalizers must use "research.decision != continue" so policy continue cannot force a terminal write`);
+      if (input.research && !researchTerminalConditionExcludesContinue(owner.condition, declaration)) {
+        errors.push(`terminal owner ${owner.id}.condition: must be mechanically false when research.decision is continue; use research.terminalPath == ${JSON.stringify(rawPath)} (preferred), matching research.terminalStatus, or another narrow non-continue equality`);
+      }
+      if (input.research && !checkedResearchOwnerIds.has(owner.id)) {
+        checkedResearchOwnerIds.add(owner.id);
+        const resultFile = normalizedProjectPath(input.research.resultFile ?? 'docs/research_round_result.json');
+        const researchOutputs = [
+          resultFile,
+          resultFile ? `${resultFile}.no_candidate.json` : undefined,
+          normalizedProjectPath(join(input.research.reportDir ?? 'docs', 'run_manifest.json')),
+        ].filter((path): path is string => Boolean(path));
+        for (const researchOutput of researchOutputs) {
+          if (stageScopeOwnsPath(owner, researchOutput)) {
+            errors.push(`terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`);
+          }
+        }
       }
       for (const required of input.dispatched) {
         if (required.id === owner.id || required.condition?.trim() || (!required.is_gate && required.retry_to?.length)) continue;
@@ -4223,9 +4381,7 @@ export function inspectDispatchAdmission(input: {
           errors.push(`terminal owner ${owner.id}.depends_on: mandatory stage ${required.id} is not an ancestor`);
         }
       }
-    }
   }
-  if (ownerIds.size > 1) errors.push(`terminal_states: all terminal paths must share one owner stage; found ${[...ownerIds].join(', ')}`);
 
   const criteria = input.criteria?.criteria ?? [];
   const criterionIds = new Set(criteria.map((criterion) => criterion.id));
@@ -4234,13 +4390,29 @@ export function inspectDispatchAdmission(input: {
       if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);
     }
   }
+  const criterionTerminalRefs = new Map<string, string[]>();
   for (const criterion of criteria) {
     const workers = input.dispatched.filter((stage) => !stage.is_gate && !stage.retry_to?.length && stage.criterion_refs.includes(criterion.id));
+    const terminalWorkers = workers.filter((stage) => ownerIds.has(stage.id));
+    const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
     const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
     if (workers.length === 0) errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
-    if (gates.length === 0) errors.push(`criterion ${criterion.id}: not assigned to a gate`);
-    else if (workers.length > 0 && !gates.some((gate) => workers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
+    for (const owner of terminalWorkers) {
+      const refs = criterionTerminalRefs.get(owner.id) ?? [];
+      refs.push(criterion.id);
+      criterionTerminalRefs.set(owner.id, refs);
+    }
+    if (ordinaryWorkers.length > 0 && gates.length === 0) {
+      errors.push(`criterion ${criterion.id}: not assigned to a gate`);
+    } else if (ordinaryWorkers.length > 0 && !gates.some((gate) => ordinaryWorkers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
       errors.push(`criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`);
+    } else if (ordinaryWorkers.length === 0 && terminalWorkers.length > 0 && gates.length > 0) {
+      for (const gate of gates) {
+        const unreachableOwners = terminalWorkers.filter((owner) => !transitivelyDependsOn(owner.id, gate.id, byId));
+        if (unreachableOwners.length > 0) {
+          errors.push(`criterion ${criterion.id}: assigned gate ${gate.id} must be an ancestor of terminal owner(s) ${unreachableOwners.map((owner) => owner.id).join(', ')}`);
+        }
+      }
     }
   }
 
@@ -4250,11 +4422,15 @@ export function inspectDispatchAdmission(input: {
     checkedAt: new Date().toISOString(),
     errors,
     terminalOwners,
+    terminalValidationScopes: Object.fromEntries(
+      [...terminalValidationScopeSets].map(([ownerId, scopes]) => [ownerId, [...scopes]]),
+    ),
     criterionGateRefs: Object.fromEntries(
       input.dispatched
         .filter((stage) => stage.is_gate && stage.criterion_refs.length > 0)
         .map((stage) => [stage.id, [...stage.criterion_refs]]),
     ),
+    criterionTerminalRefs: Object.fromEntries(criterionTerminalRefs),
     ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
   };
 }
@@ -4402,11 +4578,28 @@ function injectDispatchedStages(
   const dispatchPath = join(runDirPath, 'dispatch.yaml');
   if (!existsSync(dispatchPath)) return [];
 
+  let rawDispatchText: string;
+  try {
+    rawDispatchText = readFileSync(dispatchPath, 'utf-8');
+  } catch {
+    return [];
+  }
+  const proposalDigest = createHash('sha256').update(rawDispatchText, 'utf8').digest('hex');
+
   let items: unknown;
   try {
-    items = parseYaml(readFileSync(dispatchPath, 'utf-8'));
-  } catch { /* non-critical */
-    log.warn('Failed to parse dispatch.yaml');
+    items = parseYaml(rawDispatchText);
+  } catch (error) {
+    const report: DispatchAdmissionReport = {
+      version: 1,
+      pass: false,
+      checkedAt: new Date().toISOString(),
+      errors: [`dispatch.yaml could not be parsed as YAML (${error instanceof Error ? error.message : String(error)})`],
+      proposalDigest,
+      terminalOwners: {},
+    };
+    writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    log.warn({ errors: report.errors }, 'Failed to parse dispatch.yaml');
     return [];
   }
   // Accept both bare list and {stages: [...]} wrapper
@@ -4458,6 +4651,7 @@ function injectDispatchedStages(
       pass: false,
       checkedAt: new Date().toISOString(),
       errors: skippedReasons.length > 0 ? skippedReasons : ['dispatch contains no stages'],
+      proposalDigest,
       terminalOwners: {},
     };
     writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
@@ -4475,6 +4669,7 @@ function injectDispatchedStages(
       pass: false,
       checkedAt: new Date().toISOString(),
       errors: [error instanceof Error ? error.message : String(error)],
+      proposalDigest,
       terminalOwners: {},
     };
     writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
@@ -4488,6 +4683,7 @@ function injectDispatchedStages(
     research: state.research,
     criteria,
   });
+  admission.proposalDigest = proposalDigest;
   if (admission.pass) {
     const checksPath = join(runDirPath, 'reality_checks.md');
     if (existsSync(checksPath)) {
@@ -7723,6 +7919,7 @@ function reconcileStageScope(input: {
   runId: string;
   context: ScopeBatchContext;
   attemptIndex: number;
+  terminalDurableScope?: string[];
 }): { status: StageStatus; violation: boolean } {
   const status = readStageStatus(input.projectDir, input.runId, input.stage.id);
   const attempt = status.attempts?.find((candidate) => candidate.index === input.attemptIndex);
@@ -7754,7 +7951,15 @@ function reconcileStageScope(input: {
   // declaration still grants nothing in the negotiation path, so a request can only ever
   // authorize the exact paths it names.
   const negotiated = attemptContext.decisionPaths.size > 0 || attemptContext.mismatchPaths.size > 0;
-  const governedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
+  const ordinaryGovernedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
+  // A terminal finalizer may declare generated/report-support paths so it can
+  // rerun validation after authoring the terminal candidate. Those paths are
+  // touch-only: a content/type/mode delta would be new work performed after
+  // the last gate. Reconcile against the terminal/evidence subset so any such
+  // durable delta is restored from the pre-attempt snapshot and fails the
+  // attempt before terminal evaluation.
+  const governedScope: string[] | null = input.terminalDurableScope ?? ordinaryGovernedScope;
+  const terminalValidationOnly = input.terminalDurableScope !== undefined;
   const enforcement = enforceStageScopeWrites({
     projectDir: input.projectDir,
     snapshot: input.context.snapshot,
@@ -7774,8 +7979,12 @@ function reconcileStageScope(input: {
       certainty: definitelyAttributed ? 'definite' : 'unverified',
       reason: definitelyAttributed
         ? enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
-          ? 'adapter attributed an unauthorized project write; enforcement restored its preimage before durable apply'
-          : 'adapter attributed a project write outside the accepted effective scope'
+          ? terminalValidationOnly
+            ? 'terminal finalizer left a durable non-terminal validation-scope delta; enforcement restored its preimage before terminal evaluation'
+            : 'adapter attributed an unauthorized project write; enforcement restored its preimage before durable apply'
+          : terminalValidationOnly
+            ? 'terminal finalizer left a durable non-terminal validation-scope delta that could not be restored'
+            : 'adapter attributed a project write outside the accepted effective scope'
         : enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
           ? 'snapshot observed a change outside the complete batch capability; enforcement restored its preimage while ownership remains unverified'
           : 'snapshot observed a change outside effective scope but cannot prove ownership',
@@ -7843,6 +8052,7 @@ function reconcileStageScope(input: {
     scopeApprover: 'scheduler-policy',
     declaredScope,
     effectiveScope,
+    ...(terminalValidationOnly ? { terminalDurableScope: input.terminalDurableScope } : {}),
     decisionPaths: decisions,
     mismatchPaths: mismatches,
     decisions: decisionRecords,
@@ -7875,7 +8085,9 @@ function reconcileStageScope(input: {
     rejectedDigestCount: planningDigests.length,
   };
   const error = definite.length > 0
-    ? `scope_violation: ${definite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope`
+    ? terminalValidationOnly
+      ? `terminal_scope_violation: ${definite.map((violation) => violation.path).join(', ')} left a durable non-terminal delta after the finalizer's gates`
+      : `scope_violation: ${definite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope`
     : undefined;
   return {
     status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, summary, error),
@@ -7888,6 +8100,7 @@ function reconcileCompletedStageAttempts(input: {
   projectDir: string;
   runId: string;
   context: ScopeBatchContext;
+  terminalDurableScope?: string[];
 }): { status: StageStatus; violation: boolean } {
   let status = readStageStatus(input.projectDir, input.runId, input.stage.id);
   let violation = false;
@@ -8680,7 +8893,30 @@ async function executeIteration(
             const dispatchExists = existsSync(dispatchPath);
             let rawDispatchText: string | null = null;
             if (dispatchExists) { try { rawDispatchText = readFileSync(dispatchPath, 'utf-8'); } catch { /* best effort */ } }
-            const diagnosis = diagnoseEmptyDispatch(dispatchExists, rawDispatchText, [...roleRegistry.keys()]);
+            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
+            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
+            const structuralDiagnosis = diagnoseEmptyDispatch(dispatchExists, rawDispatchText, [...roleRegistry.keys()]);
+            const archivedRefusal = dispatchExists && rawDispatchText !== null && structuralDiagnosis.transient
+              ? archiveDispatchAdmissionRefusal({
+                  runDirPath,
+                  stageId: stage.id,
+                  attemptIndex: retriesUsed + 1,
+                  rawDispatchText,
+                })
+              : undefined;
+            const diagnosis = archivedRefusal
+              ? {
+                  transient: true,
+                  unknownRoles: [],
+                  detail: [
+                    'dispatch admission rejected the complete proposal before stage injection.',
+                    'Exact admission errors:',
+                    ...archivedRefusal.report.errors.map((error) => `- ${error}`),
+                    `Durable rejected proposal: ${join(runDirPath, archivedRefusal.proposalPath)}`,
+                    `Durable admission report: ${join(runDirPath, archivedRefusal.admissionPath)}`,
+                  ].join('\n'),
+                }
+              : structuralDiagnosis;
             const blockage = observeStableBlockage({
               runDirPath,
               kind: 'planner_dispatch_refusal',
@@ -8696,8 +8932,6 @@ async function executeIteration(
                 projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1,
               }) ?? state;
             }
-            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
-            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
             const decision = decideEmptyDispatchAction(diagnosis, retriesUsed, maxPlanRetries);
 
             if (decision.action === 'retry') {
@@ -9034,7 +9268,13 @@ async function executeIteration(
     ordinaryBatchComplete = true;
     await ordinaryScopeMonitor;
     for (const item of results) {
-      const reconciled = reconcileCompletedStageAttempts({ stage: item.stage, projectDir, runId, context: ordinaryScopeContext });
+      const reconciled = reconcileCompletedStageAttempts({
+        stage: item.stage,
+        projectDir,
+        runId,
+        context: ordinaryScopeContext,
+        terminalDurableScope: admittedTerminalDurableScope(runDirPath, item.stage.id, state.terminalStates),
+      });
       if (reconciled.violation) {
         item.result.exitCode = 1;
         item.result.timedOut = false;

@@ -1,0 +1,84 @@
+- id: implement_stale
+  role: coder
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T06-06-00-aeb5f5/tech_solution.md and reality_checks.md. Before any project write, make a real clone below the OS temporary root, copy both root and UI node_modules as real directories, and record direct build/test/lint baseline exits and totals. Implement the strict canonical legacy-link fallback, open-terminal wrap-up-overdue rendering, ship launch linking, and reclaim-bound human closure trigger in the scoped files; never touch the real ledger or auto-close. Add substantive existing-suite specs for historical 182/183 before/current output, live and unlinked negatives, completed entries, malformed prose, and CLI integration. Run the targeted specs and all three package scripts after the last write, iterating until green. Handoff exact outputs, totals, and the dependency audit for every supplied quantity.
+  scope:
+    - src/fc-tasks.ts
+    - spec/fc-tasks.test.ts
+    - spec/cli-fc-tasks.test.ts
+    - skills/ship.md
+    - "dist/**"
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_the_report_must_sho_1_cb65abca
+    - criterion_what_the_report_must_sho_2_cc742e79
+    - criterion_what_the_report_must_sho_3_fb0038f6
+    - criterion_what_the_report_must_sho_4_1c86a271
+    - criterion_what_the_report_must_sho_5_054b9401
+    - criterion_what_the_report_must_sho_6_f4d070de
+    - criterion_what_the_report_must_sho_7_be7d01b3
+
+- id: verify_stale
+  role: qa
+  prompt_template: |
+    Read the implementation, its tests, tech_solution.md, and stage handoff. Treat the named ledger and task/run records as read-only; put faithful copies, probes, clones, and logs only below the OS temporary root. Audit the tests for substantive criterion coverage and the code for lifecycle-source drift, false legacy inference, false live/completed warnings, hidden auto-close/write paths, bounded rendering, CLI/status-line integration, and truthful ship wording. Independently reproduce base versus current 182/183 output in real temp clones with both dependency trees, then run targeted specs plus build, full test, and lint with direct exits/totals. On the first audit, examine every additional risk you identify and end output.md with a Coverage Map; on re-evaluation, reproduce every rejected item, all full suites, and prior map checks touched by the complete repair diff only. Write verdict_verify_stale.json with pass, reason, outcome complete|escalated, and a criteria map for every assigned ID. Fixable gaps are pass:false; pass:true/outcome:escalated requires a concrete in-scope-unresolvable blocker, never mere retry exhaustion.
+  scope: []
+  depends_on:
+    - implement_stale
+  dependency_reasons:
+    implement_stale: "The gate must inspect and independently exercise the implementation, permanent tests, baseline, and report evidence produced by implement_stale."
+  criterion_refs:
+    - criterion_what_the_report_must_sho_1_cb65abca
+    - criterion_what_the_report_must_sho_2_cc742e79
+    - criterion_what_the_report_must_sho_3_fb0038f6
+    - criterion_what_the_report_must_sho_4_1c86a271
+    - criterion_what_the_report_must_sho_5_054b9401
+    - criterion_what_the_report_must_sho_6_f4d070de
+    - criterion_what_the_report_must_sho_7_be7d01b3
+  is_gate: true
+
+- id: repair_stale
+  role: coder
+  prompt_template: |
+    Read the scheduler-injected durable rejected verdict, the QA output, and the complete repair diff context; do not cite the reusable live verdict as durable evidence. Fix only the rejected root causes in the scoped files, preserving unrelated work and never writing the operator ledger. Keep all clones and probes below the OS temporary root. Run the targeted fc-task specs, build, full test, and lint after the last repair, with direct exits/totals, and update the handoff evidence needed for re-evaluation. If a truly in-scope-unresolvable blocker remains, document concrete evidence; do not convert retry exhaustion into acceptance.
+  scope:
+    - src/fc-tasks.ts
+    - spec/fc-tasks.test.ts
+    - spec/cli-fc-tasks.test.ts
+    - skills/ship.md
+    - "dist/**"
+  depends_on:
+    - verify_stale
+  dependency_reasons:
+    verify_stale: "The repair must consume verify_stale's durable rejected findings before changing the implementation."
+  criterion_refs:
+    - criterion_what_the_report_must_sho_1_cb65abca
+    - criterion_what_the_report_must_sho_2_cc742e79
+    - criterion_what_the_report_must_sho_3_fb0038f6
+    - criterion_what_the_report_must_sho_4_1c86a271
+    - criterion_what_the_report_must_sho_5_054b9401
+    - criterion_what_the_report_must_sho_6_f4d070de
+    - criterion_what_the_report_must_sho_7_be7d01b3
+  retry_to:
+    - verify_stale
+
+- id: finalize_outcome
+  role: coder
+  prompt_template: |
+    Read the settled verify_stale verdict, all stage evidence, tech_solution.md, and the actual diff. Immediately before any terminal write, re-read reality_checks.md, verify its paths/fields against emitters and dispatch, repair only run-local declaration drift, and execute every check with direct exit codes; put any repair narrative only in the human report. For outcome complete, prepare the full evidence report including before/after rendering, enforcement boundary, live/unlinked negatives, dependency-correct baseline, final direct totals, and every supplied-quantity dependency. Validate a byte-identical candidate in an OS-temp real clone with both dependency trees, write only final_verification.md, then rerun build/test/lint and the checks after that last project write without later project mutation. If any result fails/mismatches, remove only your fresh candidate and write only escalation_note.md. For accepted outcome escalated or a new blocker, write only escalation_note.md. Never touch the ledger, release, tag, commit, or push.
+  scope:
+    - docs/task_ledger_staleness/final_verification.md
+    - docs/task_ledger_staleness/escalation_note.md
+  depends_on:
+    - verify_stale
+  dependency_reasons:
+    verify_stale: "The sole terminal writer needs verify_stale's settled complete-or-escalated outcome and per-criterion evidence to choose exactly one truthful terminal artifact."
+  criterion_refs:
+    - criterion_what_the_report_must_sho_1_cb65abca
+    - criterion_what_the_report_must_sho_2_cc742e79
+    - criterion_what_the_report_must_sho_3_fb0038f6
+    - criterion_what_the_report_must_sho_4_1c86a271
+    - criterion_what_the_report_must_sho_5_054b9401
+    - criterion_what_the_report_must_sho_6_f4d070de
+    - criterion_what_the_report_must_sho_7_be7d01b3

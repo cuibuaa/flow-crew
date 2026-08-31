@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-08-31T06:47:42.237Z",
+  "errors": [
+    "terminal owner finalize_diagram.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove docs/diagram_shape/**, dist/**",
+    "terminal owner finalize_diagram.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove docs/diagram_shape/**, dist/**"
+  ],
+  "terminalOwners": {
+    "docs/diagram_shape/final_verification.md": "finalize_diagram",
+    "docs/diagram_shape/escalation_note.md": "finalize_diagram"
+  },
+  "criterionGateRefs": {},
+  "criteriaDigest": "c96b7826b189edd02f33e5e032d66e9a04d2f02246cba8900a67e052c784b390"
+}

@@ -1,0 +1,108 @@
+- id: implement_diagram
+  role: coder
+  scope:
+    - src/main/codex.ts
+    - src/renderer/renderer.ts
+    - src/renderer/style.css
+    - tests/diagram-shape*.mjs
+    - tests/verify-diagram-shape-gate.mjs
+    - tests/answer-*.mjs
+    - tests/verify-legible-gate.mjs
+    - dist/**
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T07-48-55-cd7c66/tech_solution.md. First add the frozen graph registry and every new test, while src still matches HEAD; run each new test and the verifier and retain full named fail-before output before any src edit. Then implement the validated graph DIAGRAM contract, dependency-free local SVG renderer, derived narration/detail route, legacy text compatibility, and graph/hostile-render/cost probes. Reuse existing measurement helpers and headless-Chrome approach. Iterate through targeted tests, npm run build, the graph verifier, and processed node --test baseline comparison. Write no docs; put all transient JSON/PNGs under os.tmpdir(), deleting stale output first. Do not alter inputs, packages, CSP, security boundaries, or accepted microphone failures.
+
+- id: verify_diagram
+  role: qa
+  scope:
+    - dist/**
+  depends_on:
+    - implement_diagram
+  dependency_reasons:
+    implement_diagram: "Verification must inspect the implementation, preregistration, tests, captures, and fail-before evidence produced by implement_diagram."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  is_gate: true
+  prompt_template: |
+    Audit the implementation and coder tests without editing project source/tests. Confirm the fail-before chronology covers every added test and that metrics were frozen first; independently inspect fixture parsing, production SVG hooks/pixels, edge/group/label fidelity, narration, bilingual captures, fit/legibility/survival, measured costs, legacy/security/CSP behavior, and model-free/network-free execution. Run npm run build, targeted tests, the verifier, and node --test; quote the governing branch+target ship baseline before comparing exact failure identities. On first execution audit exhaustively, including risks not named here, and end output with a Coverage Map. On reevaluation reproduce every rejection, all mechanical suites, and each prior Coverage Map check touched by the repair diff. Use os.tmpdir() for probes and delete stale output. Write per-criterion evidence and verdict to /home/qian/.fc/runs/2026-08-31T07-48-55-cd7c66/verdict_verify_diagram.json; cite injected durable gate_reevaluation paths for rejected attempts.
+
+- id: repair_diagram
+  role: coder
+  scope:
+    - src/main/codex.ts
+    - src/renderer/renderer.ts
+    - src/renderer/style.css
+    - tests/diagram-shape*.mjs
+    - tests/verify-diagram-shape-gate.mjs
+    - tests/answer-*.mjs
+    - tests/verify-legible-gate.mjs
+    - dist/**
+  depends_on:
+    - verify_diagram
+  dependency_reasons:
+    verify_diagram: "The repair must consume verify_diagram's rejected verdict, durable evidence, and Coverage Map before changing the candidate."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  retry_to:
+    - verify_diagram
+  prompt_template: |
+    Read the live verdict, its scheduler-injected durable rejected-verdict copy, and /home/qian/.fc/runs/2026-08-31T07-48-55-cd7c66/stages/verify_diagram/output.md. Fix only the rejected product or evidence defects, preserve accepted behavior, and rerun targeted tests, build, verifier, and processed baseline comparison. If any task test is added or materially changed, replay it against immutable HEAD in an os.tmpdir() baseline subject and retain its named failure before relying on it. Write no docs or inputs; delete stale probe output before each run.
+
+- id: finalize_report
+  role: coder
+  scope:
+    - dist/**
+    - docs/diagram_shape/final_verification.md
+    - docs/diagram_shape/escalation_note.md
+  depends_on:
+    - verify_diagram
+  dependency_reasons:
+    verify_diagram: "The sole terminal writer needs verify_diagram's final per-criterion verdict and independently reproduced evidence before reporting an outcome."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  prompt_template: |
+    Read the final gate evidence and /home/qian/.fc/runs/2026-08-31T07-48-55-cd7c66/tech_solution.md. Do not change src/tests. Delete stale temp probe output, rerun the graph verifier and captures, and assemble the sole evidence report with timestamps, complete distributions/influence, fixture-vs-product scale, relation fidelity, bilingual paired before/after PNGs embedded in Markdown, narration location, and measured byte/paint/area costs. Quote the exact governing baseline identities before attributing failures. Hash the final src/tests state, then run npm run build and node --test and include their complete untruncated output and direct exit codes. Write only docs/diagram_shape/final_verification.md if every property and baseline criterion passes; if a fundamental blocker makes the task impossible, write only docs/diagram_shape/escalation_note.md. Never write both or claim a green suite.
