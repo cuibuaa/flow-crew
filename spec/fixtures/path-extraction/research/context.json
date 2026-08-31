@@ -1,0 +1,86 @@
+{
+  "source": {
+    "runId": "2026-08-31T12-22-45-2200a0",
+    "rejectionAttempt": "attempt_2",
+    "dispatchBytes": 8489,
+    "dispatchSha256": "b682448b1fa6c415785292c6db90dee4bd1f92c719b9386220192b1aba94feec",
+    "recordedAdmissionBytes": 3135,
+    "recordedAdmissionSha256": "88824333480273e38fee3bbf7b3b9005c571b5d91cb8e66b5fe4c36c883ef675",
+    "realityChecksBytes": 1848,
+    "realityChecksSha256": "3dca1b9207eef14147e79b7ea2038ef93747db8b950a66d140aca16bb68fbcdb"
+  },
+  "dispatchStageId": "plan",
+  "baseStages": [
+    {
+      "id": "plan",
+      "role": "planner",
+      "scope": [],
+      "depends_on": [],
+      "dependency_reasons": {},
+      "prompt_template": "",
+      "skills": [],
+      "dynamic_dispatch": true,
+      "is_gate": false,
+      "criterion_refs": []
+    }
+  ],
+  "terminalStates": {
+    "shipped": {
+      "paths": [
+        "docs/happymj_incumbent/ship_report.md"
+      ]
+    },
+    "ceiling_hit": {
+      "paths": [
+        "docs/happymj_incumbent/ceiling_report.md"
+      ]
+    },
+    "escalated": {
+      "paths": [
+        "docs/happymj_incumbent/escalation_note.md"
+      ]
+    }
+  },
+  "research": {
+    "baseline": 0,
+    "policy": "greedy_stack",
+    "higherIsBetter": true,
+    "resultFile": "docs/happymj_incumbent/round_result.json",
+    "feasibility": {
+      "hardFloor": 2,
+      "rules": [
+        {
+          "label": "qualifying_members_per_frozen_rule",
+          "model": "not_computable",
+          "reason": "The qualifying-member count depends on the behavioural family and support counts each round defines for its own candidate, and rounds after the first are not chosen yet."
+        }
+      ]
+    },
+    "resultSchema": {
+      "type": "object",
+      "required": [
+        "label",
+        "result"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "result": {
+          "type": "number"
+        }
+      }
+    },
+    "confirm": {
+      "command": "python3 -m happymj.research_confirm --result docs/happymj_incumbent/round_result.json",
+      "requires": "The paired interval against three fixed HeuristicPolicyV1 opponents must lie entirely above zero on a disjoint sample, recomputed from preserved raw blocks rather than from the round's own summary.",
+      "timeoutSeconds": 3600
+    },
+    "stop": {
+      "beat": 0.05,
+      "maxRounds": 6,
+      "haltAfterNoImprovement": 4
+    }
+  },
+  "existingPaths": []
+}

@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-08-31T16:40:58.374Z",
+  "errors": [
+    "reality check \"Renderer CSP still permits only local self assets\" references absent fs.readFileSync, but no admitted stage or framework emitter owns it",
+    "reality check \"Renderer CSP still permits only local self assets\" references absent html.match, but no admitted stage or framework emitter owns it",
+    "reality check \"Renderer CSP still permits only local self assets\" references absent content.replace, but no admitted stage or framework emitter owns it",
+    "reality check \"Renderer CSP still permits only local self assets\" references absent .trim, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete report embeds the four required bilingual before-after captures\" references absent fs.readFileSync, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete report embeds the four required bilingual before-after captures\" references absent report.match, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete report embeds the four required bilingual before-after captures\" references absent images.length, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent JSON.parse, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent fs.readFileSync, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent baseline.branch, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent path.resolve, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent baseline.targetDir, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent process.cwd, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent baseline.validationBaseline.results.find, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent entry.role, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent recorded.failureIdentifiers.length, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent process.execPath, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent .map, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent .replace, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent run.status, but no admitted stage or framework emitter owns it",
+    "reality check \"Complete state retains exactly the field-selected eight-failure baseline\" references absent JSON.stringify, but no admitted stage or framework emitter owns it"
+  ],
+  "terminalOwners": {
+    "docs/diagram_shape/final_verification.md": "write_final",
+    "docs/diagram_shape/escalation_note.md": "write_escalation"
+  },
+  "terminalValidationScopes": {
+    "write_final": [
+      "dist/**"
+    ]
+  },
+  "criterionGateRefs": {
+    "verify_diagram": [
+      "criterion_acceptance_criteria_1_150e89f4",
+      "criterion_acceptance_criteria_2_636f5d0b",
+      "criterion_acceptance_criteria_3_88ab3bdc",
+      "criterion_acceptance_criteria_4_a7fe15fe",
+      "criterion_acceptance_criteria_5_d2d86fac",
+      "criterion_report_requirements_distributions_6f03488e",
+      "criterion_report_requirements_aggregate_influence_3bef518b",
+      "criterion_report_requirements_before_and_after_4da37bca",
+      "criterion_report_requirements_fail_before_shown_0dad26f6",
+      "criterion_report_requirements_baseline_quoted_first_30edc07a",
+      "criterion_report_requirements_validation_after_the_las_5f921888"
+    ]
+  },
+  "criterionTerminalRefs": {
+    "write_final": [
+      "criterion_acceptance_criteria_1_150e89f4",
+      "criterion_acceptance_criteria_2_636f5d0b",
+      "criterion_acceptance_criteria_3_88ab3bdc",
+      "criterion_acceptance_criteria_4_a7fe15fe",
+      "criterion_acceptance_criteria_5_d2d86fac",
+      "criterion_report_requirements_distributions_6f03488e",
+      "criterion_report_requirements_aggregate_influence_3bef518b",
+      "criterion_report_requirements_before_and_after_4da37bca",
+      "criterion_report_requirements_fail_before_shown_0dad26f6",
+      "criterion_report_requirements_baseline_quoted_first_30edc07a",
+      "criterion_report_requirements_validation_after_the_las_5f921888"
+    ]
+  },
+  "criteriaDigest": "f9ad02e6eca3893d71acddb1e3d85f99ac7d15d610894110793a6adbdaf8b483",
+  "proposalDigest": "b33b7cf6b7c3100ee3df8ff7d89efaa62a8fcb6faa15f2c75f7a3836fb89e27f"
+}

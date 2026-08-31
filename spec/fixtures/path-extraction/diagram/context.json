@@ -1,0 +1,45 @@
+{
+  "source": {
+    "runId": "2026-08-31T16-13-14-b19796",
+    "rejectionAttempt": "attempt_1",
+    "dispatchBytes": 7844,
+    "dispatchSha256": "b33b7cf6b7c3100ee3df8ff7d89efaa62a8fcb6faa15f2c75f7a3836fb89e27f",
+    "recordedAdmissionBytes": 5693,
+    "recordedAdmissionSha256": "6b456cb6393957bdfdbb757822e7669495fc8419e9df3af29d447f7ad7f42500",
+    "realityChecksBytes": 3508,
+    "realityChecksSha256": "9348d9784f89926419d0a7b903e258029edf4a418b7c7ad56e1b257d0666cecf"
+  },
+  "dispatchStageId": "plan",
+  "baseStages": [
+    {
+      "id": "plan",
+      "role": "planner",
+      "scope": [],
+      "depends_on": [],
+      "dependency_reasons": {},
+      "prompt_template": "",
+      "skills": [],
+      "dynamic_dispatch": true,
+      "is_gate": false,
+      "criterion_refs": []
+    }
+  ],
+  "terminalStates": {
+    "complete": {
+      "paths": [
+        "docs/diagram_shape/final_verification.md"
+      ],
+      "floor": {
+        "minWallMinutes": 10
+      }
+    },
+    "escalated": {
+      "paths": [
+        "docs/diagram_shape/escalation_note.md"
+      ]
+    }
+  },
+  "existingPaths": [
+    "src/renderer/index.html"
+  ]
+}

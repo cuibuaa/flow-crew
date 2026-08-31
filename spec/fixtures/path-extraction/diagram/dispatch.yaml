@@ -1,0 +1,109 @@
+- id: build_diagram
+  role: coder
+  scope:
+    - src/main/codex.ts
+    - src/renderer/renderer.ts
+    - src/renderer/style.css
+    - tests/answer-legible-harness.mjs
+    - tests/diagram-shape-registry.mjs
+    - tests/diagram-shape-contract.test.mjs
+    - tests/diagram-shape-render.probe.mjs
+    - tests/final-diagram-shape-verification.mjs
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T16-13-14-b19796/tech_solution.md completely. First name and inspect the existing geometry/legibility probes; create the frozen registry and new tests before product edits. Delete a run-specific os.tmpdir() evidence root, overlay the new tests into a clean `git archive HEAD` export there, attach read-only node_modules and tmp-diagram-shape links, and save raw failure output/exit codes proving every new test and probe fails unchanged source. Then implement the validated graph DIAGRAM contract, dependency-free local SVG, exact relation signatures, and mechanically derived paged walkthrough; preserve legacy text only for history. Add no package or report. Run typecheck and focused tests/probe, iterating until they pass. Never write temporary work inside the project.
+- id: verify_diagram
+  role: qa
+  scope:
+    - dist/**
+  depends_on:
+    - build_diagram
+  dependency_reasons:
+    build_diagram: "Verification must inspect and exercise the graph contract, renderer, registry, tests, and final verifier produced by build_diagram."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  is_gate: true
+  prompt_template: |
+    On first execution, audit the implementation and coder tests exhaustively against the full brief, including risks it did not anticipate. Reject prose-only success, lost edges, mocked primitive counts, tests passing unchanged HEAD, weakened security, project-temp probes, model loading, or a changed failure family. Delete old os.tmpdir() outputs; run npm build, focused tests, graph/final-verifier dry run, prior fit/survival probes, and full node --test, comparing exact baseline identities. Verify all measurement/influence/cost/capture fields from raw evidence. End with per-ID evidence and a validator-owned Coverage Map. On re-evaluation, cite the scheduler-provided durable rejected-verdict path, reproduce every rejection, run full mechanical suites, and repeat only prior Coverage Map checks touched by the complete repair diff. Write /home/qian/.fc/runs/2026-08-31T16-13-14-b19796/verdict_verify_diagram.json.
+- id: repair_diagram
+  role: coder
+  scope:
+    - src/main/codex.ts
+    - src/renderer/renderer.ts
+    - src/renderer/style.css
+    - tests/answer-legible-harness.mjs
+    - tests/diagram-shape-registry.mjs
+    - tests/diagram-shape-contract.test.mjs
+    - tests/diagram-shape-render.probe.mjs
+    - tests/final-diagram-shape-verification.mjs
+  depends_on:
+    - verify_diagram
+  dependency_reasons:
+    verify_diagram: "The repair must consume verify_diagram's rejected evidence and Coverage Map before changing the implementation or tests."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+  retry_to:
+    - verify_diagram
+  prompt_template: |
+    Read the live verdict, the latest durable rejected-verdict evidence under gate_reevaluation, and verify_diagram's Coverage Map. Fix every rejected item without weakening the frozen registry, relation conservation, legacy survival, CSP, or accepted microphone baseline. If any test is added or materially split, prove each new test fails unchanged HEAD in a freshly deleted os.tmpdir() evidence root. Re-run focused checks; create no report or project-local temporary output.
+- id: write_final
+  role: doc_writer
+  scope:
+    - dist/**
+    - docs/diagram_shape/final_verification.md
+  depends_on:
+    - verify_diagram
+  dependency_reasons:
+    verify_diagram: "The final report may materialize only from verify_diagram's passed implementation audit and per-criterion evidence."
+  criterion_refs:
+    - criterion_acceptance_criteria_1_150e89f4
+    - criterion_acceptance_criteria_2_636f5d0b
+    - criterion_acceptance_criteria_3_88ab3bdc
+    - criterion_acceptance_criteria_4_a7fe15fe
+    - criterion_acceptance_criteria_5_d2d86fac
+    - criterion_report_requirements_distributions_6f03488e
+    - criterion_report_requirements_aggregate_influence_3bef518b
+    - criterion_report_requirements_before_and_after_4da37bca
+    - criterion_report_requirements_fail_before_shown_0dad26f6
+    - criterion_report_requirements_baseline_quoted_first_30edc07a
+    - criterion_report_requirements_validation_after_the_las_5f921888
+  condition: verify_diagram.status == passed
+  prompt_template: |
+    Read tech_solution.md and verify_diagram's evidence. Edit no source or tests. Delete the final os.tmpdir() evidence root, then run the final verifier fresh: graph/notebook measurements, bilingual HEAD/current captures, previous fit/legibility/survival matrices, clean-HEAD/current byte costs, and timing/area costs. Run npm run build as the last generated-product write, then node --test; capture complete output and direct exit codes and require exact governing eight failures. Atomically create only /home/qian/code/offerdi-diagram-shape/docs/diagram_shape/final_verification.md, embedding four captures and compressed raw evidence. Quote the baseline identities before current failure attribution; include chronology, all distributions/influence, spoken route, notebook reach/reuse conclusion, costs/payers, and limitations. Audit the embedded report with the verifier before finishing; never create a second project document.
+- id: write_escalation
+  role: doc_writer
+  scope:
+    - docs/diagram_shape/escalation_note.md
+  depends_on:
+    - verify_diagram
+    - repair_diagram
+  dependency_reasons:
+    verify_diagram: "Escalation is permitted only after verify_diagram remains failed after its repair loop and supplies the repeated blocking evidence."
+    repair_diagram: "Escalation must wait until repair_diagram has consumed the rejection and exhausted the planned in-scope repair attempt."
+  criterion_refs: []
+  condition: verify_diagram.status == failed
+  prompt_template: |
+    Read the final rejected gate evidence and repair history. Write /home/qian/code/offerdi-diagram-shape/docs/diagram_shape/escalation_note.md only if they establish that the task cannot proceed at all; do not misclassify a measurable unmet property or the intentionally unreachable real Electron desktop as a blocker. Quote the field-selected governing baseline first, identify the repeated blocking condition and exhausted safe alternatives, and state what authority or external change is required. Do not create the complete report or modify source/tests.

@@ -4435,43 +4435,294 @@ export function inspectDispatchAdmission(input: {
   };
 }
 
-function addRealityCheckLiteralPath(value: string, out: Set<string>): void {
-  const candidate = normalizedProjectPath(value);
-  if (candidate
-      && !/[\s$<>{}|;&]/.test(value)
-      && (candidate.includes('/') || /\.[A-Za-z0-9]{1,12}$/.test(candidate))) {
-    out.add(candidate);
+const REALITY_CHECK_PATH_FIELDS = new Set([
+  'archive_paths',
+  'file',
+  'files',
+  'from_manifest',
+  'glob',
+  'globs',
+  'json_file',
+  'path',
+  'paths',
+]);
+
+const REALITY_CHECK_FILE_TEST_OPERATORS = new Set([
+  '-b', '-c', '-d', '-e', '-f', '-g', '-h', '-k', '-L', '-O', '-p', '-r', '-s', '-S', '-w', '-x',
+]);
+
+const REALITY_CHECK_PATH_VARIABLE = /(?:path|file|dir|artifact|report|manifest|input|output)/i;
+
+const REALITY_CHECK_FILE_INTERPRETERS = new Set([
+  'bash', 'node', 'perl', 'python', 'python3', 'ruby', 'sh',
+]);
+
+const REALITY_CHECK_DIRECT_FILE_COMMANDS = new Set(['.', 'cat', 'source']);
+
+const REALITY_CHECK_SHELL_CONTROL_WORDS = new Set([
+  'do', 'elif', 'else', 'if', 'then', 'time', 'until', 'while', '!',
+]);
+
+function addRealityCheckLiteralPath(
+  value: string,
+  out: Set<string>,
+  context: 'explicit-file' | 'generic-literal',
+): void {
+  const raw = value.trim();
+  if (!raw
+      || /[\0\r\n$<>{}|;&]/.test(raw)
+      || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)
+      || (context === 'generic-literal' && /\s/.test(raw))) return;
+  const candidate = normalizedProjectPath(raw);
+  if (!candidate) return;
+  if (context === 'generic-literal' && !/[\\/]/.test(raw)) return;
+  out.add(candidate);
+}
+
+interface RealityCheckShellToken {
+  value: string;
+  operator: boolean;
+}
+
+function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
+  const tokens: RealityCheckShellToken[] = [];
+  let word = '';
+  const flush = (): void => {
+    if (word) tokens.push({ value: word, operator: false });
+    word = '';
+  };
+  for (let index = 0; index < script.length;) {
+    const character = script[index];
+    if (character === '\\' && index + 1 < script.length) {
+      word += script[index + 1];
+      index += 2;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      const quote = character;
+      if (quote === '`') word += '$';
+      index += 1;
+      while (index < script.length && script[index] !== quote) {
+        if (script[index] === '\\' && quote !== "'" && index + 1 < script.length) {
+          word += script[index + 1];
+          index += 2;
+        } else {
+          word += script[index];
+          index += 1;
+        }
+      }
+      if (index < script.length) index += 1;
+      continue;
+    }
+    if (character === '#' && !word) {
+      while (index < script.length && script[index] !== '\n') index += 1;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      flush();
+      if (character === '\n') tokens.push({ value: '\n', operator: true });
+      index += 1;
+      continue;
+    }
+    if (';|&<>()'.includes(character)) {
+      flush();
+      let operator = character;
+      while (index + operator.length < script.length
+          && script[index + operator.length] === character
+          && operator.length < 3) operator += character;
+      tokens.push({ value: operator, operator: true });
+      index += operator.length;
+      continue;
+    }
+    word += character;
+    index += 1;
+  }
+  flush();
+  return tokens;
+}
+
+function realityCheckShellWithoutHeredocs(script: string): string {
+  const shellLines: string[] = [];
+  let delimiter: string | undefined;
+  let stripTabs = false;
+  for (const line of script.split(/\r?\n/)) {
+    if (delimiter) {
+      const candidate = stripTabs ? line.replace(/^\t+/, '') : line;
+      if (candidate === delimiter) {
+        delimiter = undefined;
+        stripTabs = false;
+      }
+      continue;
+    }
+    shellLines.push(line);
+    const heredoc = /<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(line);
+    if (heredoc) {
+      stripTabs = heredoc[1] === '-';
+      delimiter = heredoc[2] ?? heredoc[3] ?? heredoc[4];
+    }
+  }
+  return shellLines.join('\n');
+}
+
+function realityCheckScriptWithoutComments(script: string): string {
+  let result = '';
+  let quote: '"' | "'" | '`' | undefined;
+  for (let index = 0; index < script.length;) {
+    const character = script[index];
+    if (quote) {
+      result += character;
+      if (character === '\\' && index + 1 < script.length) {
+        result += script[index + 1];
+        index += 2;
+        continue;
+      }
+      if (character === quote) quote = undefined;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      result += character;
+      index += 1;
+      continue;
+    }
+    if (character === '/' && script[index + 1] === '/') {
+      result += '  ';
+      index += 2;
+      while (index < script.length && script[index] !== '\n') {
+        result += ' ';
+        index += 1;
+      }
+      continue;
+    }
+    if (character === '/' && script[index + 1] === '*') {
+      result += '  ';
+      index += 2;
+      while (index < script.length) {
+        if (script[index] === '*' && script[index + 1] === '/') {
+          result += '  ';
+          index += 2;
+          break;
+        }
+        result += script[index] === '\n' ? '\n' : ' ';
+        index += 1;
+      }
+      continue;
+    }
+    if (character === '#' && (index === 0 || /\s/.test(script[index - 1]))) {
+      result += ' ';
+      index += 1;
+      while (index < script.length && script[index] !== '\n') {
+        result += ' ';
+        index += 1;
+      }
+      continue;
+    }
+    result += character;
+    index += 1;
+  }
+  return result;
+}
+
+function realityCheckStaticFileArguments(script: string, out: Set<string>): void {
+  const fileCall = /\b(?:access|accessSync|createReadStream|existsSync|lstat|lstatSync|open|openSync|opendir|opendirSync|readFile|readFileSync|readJsonFile|readdir|readdirSync|realpath|realpathSync|stat|statSync)\s*\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`)/g;
+  for (const match of script.matchAll(fileCall)) {
+    addRealityCheckLiteralPath(match[1] ?? match[2] ?? match[3] ?? '', out, 'explicit-file');
+  }
+  const pathAssignment = /\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`)/g;
+  for (const match of script.matchAll(pathAssignment)) {
+    if (REALITY_CHECK_PATH_VARIABLE.test(match[1] ?? '')) {
+      addRealityCheckLiteralPath(match[2] ?? match[3] ?? match[4] ?? '', out, 'explicit-file');
+    }
+  }
+}
+
+function realityCheckDirectFileArguments(
+  tokens: RealityCheckShellToken[],
+  commandIndex: number,
+  command: string,
+  out: Set<string>,
+): void {
+  const allOperandsAreFiles = command === 'cat';
+  for (let cursor = commandIndex + 1; cursor < tokens.length; cursor += 1) {
+    const operand = tokens[cursor];
+    if (operand.operator) {
+      if (['\n', ';', '&&', '||', '|', '&', '(', ')'].includes(operand.value)) return;
+      if (['<', '>', '>>', '<<'].includes(operand.value)) cursor += 1;
+      continue;
+    }
+    if (operand.value.startsWith('-')) continue;
+    addRealityCheckLiteralPath(operand.value, out, 'explicit-file');
+    if (!allOperandsAreFiles) return;
   }
 }
 
 function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void {
-  // Shell scripts commonly leave simple file operands unquoted (`test -s
-  // docs/report.json`). Tokenize only literal words: quoted values are handled
-  // separately below, and anything containing expansion syntax stays dynamic.
-  for (const rawToken of script.split(/[\s;|&()<>]+/)) {
-    if (!rawToken) continue;
-    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(rawToken);
-    const token = (assignment?.[1] ?? rawToken)
-      .replace(/^["'`]+|["'`,:]+$/g, '');
-    if (!token
-        || !/^(?:\.\.?\/)?[A-Za-z0-9_.@%+-]+(?:\/[A-Za-z0-9_.@%+-]+)*$/.test(token)
-        || /[$*?[\]]/.test(token)
-        || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(token)) continue;
-    addRealityCheckLiteralPath(token, out);
+  // A quoted literal remains available to the extractor, but quoting alone is
+  // not file semantics. Only separator-bearing literals are unambiguous here;
+  // slashless names need a structured field, file test, redirection, or static
+  // file-API call below.
+  const scriptWithoutComments = realityCheckScriptWithoutComments(script);
+  for (const match of scriptWithoutComments.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
+    addRealityCheckLiteralPath(match[1] ?? match[2] ?? match[3] ?? '', out, 'generic-literal');
+  }
+  realityCheckStaticFileArguments(scriptWithoutComments, out);
+
+  // Shell-token scanning deliberately excludes heredoc bodies. Embedded
+  // JavaScript property chains are code, while the surrounding shell still
+  // carries literal test operands and paths.
+  const tokens = realityCheckShellTokens(realityCheckShellWithoutHeredocs(script));
+  for (const token of tokens) {
+    if (!token.operator) addRealityCheckLiteralPath(token.value, out, 'generic-literal');
+  }
+  let commandStart = true;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.operator) {
+      if (['\n', ';', '&&', '||', '|', '(', ')'].includes(token.value)) commandStart = true;
+    } else if (commandStart && REALITY_CHECK_SHELL_CONTROL_WORDS.has(token.value)) {
+      continue;
+    } else if (commandStart && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) {
+      // Environment assignments may prefix a command without consuming its
+      // command position.
+    } else if (commandStart) {
+      commandStart = false;
+      const command = token.value.split('/').at(-1) ?? token.value;
+      const operand = tokens[index + 1];
+      if (REALITY_CHECK_DIRECT_FILE_COMMANDS.has(command)) {
+        realityCheckDirectFileArguments(tokens, index, command, out);
+      } else if (operand && !operand.operator && !operand.value.startsWith('-')
+          && REALITY_CHECK_FILE_INTERPRETERS.has(command)) {
+        addRealityCheckLiteralPath(operand.value, out, 'explicit-file');
+      }
+    }
+    if (!token.operator) {
+      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(token.value);
+      if (assignment && REALITY_CHECK_PATH_VARIABLE.test(assignment[1])) {
+        addRealityCheckLiteralPath(assignment[2], out, 'explicit-file');
+      }
+    }
+    if (token.value === 'test' || token.value === '[') {
+      for (let cursor = index + 1; cursor < tokens.length && !['\n', ';', '&&', '||', '|'].includes(tokens[cursor].value); cursor += 1) {
+        if (!REALITY_CHECK_FILE_TEST_OPERATORS.has(tokens[cursor].value)) continue;
+        const operand = tokens[cursor + 1];
+        if (operand && !operand.operator) addRealityCheckLiteralPath(operand.value, out, 'explicit-file');
+      }
+    }
+    if (['<', '>', '>>'].includes(token.value)) {
+      const target = tokens[index + 1];
+      if (target && !target.operator) addRealityCheckLiteralPath(target.value, out, 'explicit-file');
+    }
   }
 }
 
 function realityCheckLiteralPaths(value: unknown, out: Set<string>, field?: string): void {
   if (typeof value === 'string') {
-    addRealityCheckLiteralPath(value, out);
-    // Exec checks carry their paths inside a script string rather than a
-    // structured `file:` field. Extract only literal quote/assignment tokens;
-    // variables, substitutions, commands, and prose remain deliberately
-    // uninterpreted so reachability never guesses a dynamic path.
-    for (const match of value.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
-      addRealityCheckLiteralPath(match[1] ?? match[2] ?? match[3] ?? '', out);
-    }
     if (field === 'script') realityCheckScriptLiteralPaths(value, out);
+    else if (field === 'args') addRealityCheckLiteralPath(value, out, 'generic-literal');
+    else if (field && REALITY_CHECK_PATH_FIELDS.has(field)) {
+      addRealityCheckLiteralPath(value, out, 'explicit-file');
+    }
     return;
   }
   if (Array.isArray(value)) {
