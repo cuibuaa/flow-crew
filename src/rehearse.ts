@@ -19,10 +19,11 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
+import { extractBriefCriteria } from './brief-criteria.js';
 import { routeLogsToFile } from './logging.js';
-import { extractBriefPathMentions } from './ship-inputs.js';
+import { extractBriefPathMentions, inspectBriefOutputs } from './ship-inputs.js';
 import { resolveRunStatus, RUN_STATUS, type RunStatus } from './store.js';
 
 export { lintInstrumentCriteria } from './brief-preflight.js';
@@ -206,6 +207,14 @@ async function runRehearsal(argv: string[]): Promise<void> {
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')
       + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : ''));
   }
+  const outputInventory = inspectBriefOutputs(brief, projectDir);
+  for (const entry of outputInventory.blocking) {
+    add('fail', `Declared output ${entry.path} is already occupied (${entry.entryType}${entry.size === undefined ? '' : `, ${entry.size} bytes`}): ${entry.reason}`
+      + '\n  Declare an explicit on_existing disposition only when the existing artifact is intentionally consumed; otherwise choose a fresh path.');
+  }
+  if (outputInventory.entries.length > 0 && outputInventory.blocking.length === 0) {
+    add('ok', `Declared output inventory: ${outputInventory.entries.length} path(s), no implicit overwrite`);
+  }
   add('ok', `Exact brief digest: ${preflight.digest}`);
   const fm = scheduler.parseBriefFrontmatter(brief);
   const rc = fm.research;
@@ -229,6 +238,7 @@ async function runRehearsal(argv: string[]): Promise<void> {
       simulationPhase = 'scheduler';
 
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
+      const criterionIds = extractBriefCriteria(brief).criteria.map((criterion) => criterion.id);
       mkdirSync(join(tempProject, dirname(resultRel)), { recursive: true });
 
       const hib = rc.higherIsBetter !== false;
@@ -275,10 +285,59 @@ async function runRehearsal(argv: string[]): Promise<void> {
         return JSON.stringify(payload);
       };
       const script: Record<string, import('./adapters/scripted.js').StageScript> = {
-        plan: seq.map((r, i) => ({
-          runFiles: { 'dispatch.yaml': `- id: measure_${i + 1}\n  role: researcher\n  prompt_template: |\n    rehearsal round ${r.label}\n` },
-        })),
+        plan: seq.map((r, i) => {
+          const measureId = `measure_${i + 1}`;
+          const finalDependency = criterionIds.length > 0 ? 'rehearsal_gate' : measureId;
+          const stages: Array<Record<string, unknown>> = [
+            {
+              id: measureId,
+              role: 'researcher',
+              depends_on: [],
+              dependency_reasons: {},
+              scope: [resultRel, `${resultRel}.no_candidate.json`],
+              criterion_refs: criterionIds,
+              prompt_template: `rehearsal round ${r.label}`,
+            },
+          ];
+          if (criterionIds.length > 0) {
+            stages.push({
+              id: 'rehearsal_gate',
+              role: 'qa',
+              depends_on: [measureId],
+              dependency_reasons: { [measureId]: 'verify the synthetic round against every canonical criterion' },
+              scope: [],
+              is_gate: true,
+              criterion_refs: criterionIds,
+              prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
+            });
+          }
+          stages.push({
+            id: 'research_finalize',
+            role: 'researcher',
+            depends_on: [finalDependency],
+            dependency_reasons: { [finalDependency]: 'commit only the settled policy outcome' },
+            scope: [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))],
+            condition: 'research.decision != continue',
+            prompt_template: 'write only the terminal path selected by research_decision.json',
+          });
+          return { runFiles: { 'dispatch.yaml': JSON.stringify(stages, null, 2) } };
+        }),
       };
+      if (criterionIds.length > 0) {
+        script.rehearsal_gate = {
+          runFiles: {
+            'verdict_rehearsal_gate.json': JSON.stringify({
+              pass: true,
+              reason: 'synthetic rehearsal evidence is structurally complete',
+              criteria: Object.fromEntries(criterionIds.map((id) => [id, {
+                status: 'judgement',
+                evidence: 'The scripted rehearsal proves transport and settlement; semantic satisfaction remains a real gate responsibility.',
+              }])),
+            }),
+          },
+          output: 'rehearsal criterion transport verified',
+        };
+      }
       seq.forEach((r, i) => {
         script[`measure_${i + 1}`] = {
           projectFiles: { [resultRel]: roundPayload(r.label, r.result) },
@@ -290,7 +349,43 @@ async function runRehearsal(argv: string[]): Promise<void> {
       const { config, raw } = scheduler.loadWorkflow(join(import.meta.dirname ?? '.', '..', 'config', 'workflows', 'research.yaml'));
       config.defaults.max_iterations = seq.length + 3;
 
-      const adapter = new ScriptedAdapter(script);
+      const scriptedAdapter = new ScriptedAdapter(script);
+      const declaredTerminalPaths = new Set(
+        Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []),
+      );
+      const adapter: import('./adapters/base.js').Adapter = {
+        async run(prompt, role, opts) {
+          if (opts.stageId !== 'research_finalize') {
+            return scriptedAdapter.run(prompt, role, opts);
+          }
+          let terminalPath = '';
+          let terminalStatus = '';
+          try {
+            const decision = JSON.parse(readFileSync(join(opts.runDir, 'research_decision.json'), 'utf-8')) as {
+              terminalPath?: unknown;
+              terminalStatus?: unknown;
+            };
+            terminalPath = typeof decision.terminalPath === 'string' ? decision.terminalPath : '';
+            terminalStatus = typeof decision.terminalStatus === 'string' ? decision.terminalStatus : '';
+          } catch {
+            return { output: 'research decision is missing', exitCode: 1, duration_ms: 1 };
+          }
+          const target = resolve(opts.workDir, terminalPath);
+          const rel = relative(resolve(opts.workDir), target);
+          if (!declaredTerminalPaths.has(terminalPath) || rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+            return { output: `invalid rehearsal terminal path: ${terminalPath}`, exitCode: 1, duration_ms: 1 };
+          }
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, `# Rehearsal ${terminalStatus}\n\nSelected mechanically by the simulated research policy.\n`, 'utf-8');
+          return {
+            output: `wrote ${terminalPath}`,
+            exitCode: 0,
+            duration_ms: 1,
+            writes: [terminalPath],
+            writeAttribution: 'structured',
+          };
+        },
+      };
       const t0 = Date.now();
       const state = await scheduler.runWorkflow(
         config, raw, tempProject, adapter, new Map(), undefined, agentsDir,

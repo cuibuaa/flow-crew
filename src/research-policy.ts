@@ -41,7 +41,16 @@ export const ResearchPolicySchema = z.enum(['greedy_stack', 'best_of_n', 'replac
 
 export interface ResearchRound {
   label: string;
-  result: number;
+  /** Present only for a measured round. No-candidate rounds deliberately omit
+   * it so the journal never presents the configured baseline as an observation. */
+  result?: number;
+  /** A round may legitimately discover that there is no safe acting candidate.
+   * It consumes budget and counts as no improvement without fabricating a
+   * measurement equal to the baseline. */
+  outcome?: 'measured' | 'no_candidate';
+  reason?: string;
+  /** Optional structured evidence copied from the no-candidate sidecar. */
+  evidence?: unknown;
   /** Cross-run standard error of this round's result (from result_std), if reported.
    *  Used to require an improvement to clear the measurement noise before it counts. */
   resultStd?: number;
@@ -96,7 +105,7 @@ function applyPolicy(
     let best = baseline;
     let bestLabel: string | null = null;
     for (const r of rounds) {
-      if (r.confirmFailed) {
+      if (r.confirmFailed || r.outcome === 'no_candidate' || typeof r.result !== 'number') {
         perRoundKept.push(false);
         continue;
       }
@@ -116,7 +125,7 @@ function applyPolicy(
   // gains accumulate.
   let runningBest = baseline;
   for (const r of rounds) {
-    if (r.confirmFailed) {
+    if (r.confirmFailed || r.outcome === 'no_candidate' || typeof r.result !== 'number') {
       perRoundKept.push(false);
       continue;
     }
@@ -178,7 +187,9 @@ export function evaluateResearch(config: ResearchConfig, rounds: ResearchRound[]
   const stop = config.stop ?? {};
 
   // 1. Breakthrough: running-best beats the headline target → ship.
-  if (stop.beat !== undefined && (higherIsBetter ? runningBest >= stop.beat : runningBest <= stop.beat)) {
+  if (keptLabels.length > 0
+      && stop.beat !== undefined
+      && (higherIsBetter ? runningBest >= stop.beat : runningBest <= stop.beat)) {
     return { runningBest, keptLabels, latestKept, consecutiveNoImprovement, decision: 'ship', reason: `running-best ${runningBest} beats target ${stop.beat}` };
   }
 

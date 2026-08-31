@@ -2,7 +2,9 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   statSync,
@@ -34,6 +36,8 @@ import {
 } from './project-validation.js';
 import {
   verifyBriefInputs,
+  inspectBriefOutputs,
+  type BriefOutputInventory,
   type BriefInputAssertionResult,
   type ShipInputStat,
   type UnresolvedBriefInputDeclaration,
@@ -75,6 +79,8 @@ export interface ShipPreflightDependencies {
   exists?: (path: string) => boolean;
   readable?: (path: string) => boolean;
   realpath?: (path: string) => string;
+  lstat?: (path: string) => ShipInputStat;
+  readlink?: (path: string) => string;
   readGitCommonDir?: (projectDir: string) => string;
   readCampaignEntries?: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
@@ -94,6 +100,8 @@ interface ResolvedDependencies {
   exists: (path: string) => boolean;
   readable: (path: string) => boolean;
   realpath: (path: string) => string;
+  lstat: (path: string) => ShipInputStat;
+  readlink: (path: string) => string;
   readGitCommonDir: (projectDir: string) => string;
   readCampaignEntries: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
@@ -172,6 +180,11 @@ export interface ShipPreflightReport {
     unresolvedInputs: UnresolvedBriefInputDeclaration[];
     unboundAssertions: BriefInputAssertionResult[];
   };
+  outputInventory: {
+    state: 'checked' | 'not_requested';
+    briefPath?: string;
+    inventory: BriefOutputInventory;
+  };
   validationBaseline: ProjectValidationBaseline;
 }
 
@@ -248,6 +261,8 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
       }
     }),
     realpath: overrides.realpath ?? ((path) => realpathSync.native(path)),
+    lstat: overrides.lstat ?? ((path) => lstatSync(path)),
+    readlink: overrides.readlink ?? ((path) => readlinkSync(path)),
     readGitCommonDir: overrides.readGitCommonDir ?? ((projectDir) => execFileSync(
       'git',
       ['rev-parse', '--git-common-dir'],
@@ -711,9 +726,39 @@ function inspectBriefInputs(
     readBytes: deps.readBytes,
     readDirectory: deps.readDirectory,
     stat: deps.stat,
+    lstat: deps.lstat,
+    readlink: deps.readlink,
     realpath: deps.realpath,
   });
   return { state: 'checked', briefPath, ...verification };
+}
+
+function inspectOutputInventory(
+  project: string,
+  briefArgument: string | undefined,
+  deps: ResolvedDependencies,
+): ShipPreflightReport['outputInventory'] {
+  if (!briefArgument) return { state: 'not_requested', inventory: { declarations: [], entries: [], blocking: [] } };
+  const briefPath = resolve(isAbsolute(briefArgument) ? briefArgument : join(project, briefArgument));
+  let brief: string;
+  try { brief = deps.readText(briefPath); } catch (error) {
+    throw new Error(`Cannot read requested brief ${briefPath}: ${errorMessage(error)}`, { cause: error });
+  }
+  return {
+    state: 'checked',
+    briefPath,
+    inventory: inspectBriefOutputs(brief, project, {
+      exists: deps.exists,
+      readable: deps.readable,
+      readText: deps.readText,
+      readBytes: deps.readBytes,
+      readDirectory: deps.readDirectory,
+      stat: deps.stat,
+      lstat: deps.lstat,
+      readlink: deps.readlink,
+      realpath: deps.realpath,
+    }),
+  };
 }
 export async function collectShipPreflight(
   args: string[],
@@ -730,6 +775,7 @@ export async function collectShipPreflight(
   const [daemonToDist] = await Promise.all([deps.probeDaemon(distDir)]);
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
   const briefInputs = inspectBriefInputs(canonicalProject.path, parsed.brief, deps);
+  const outputInventory = inspectOutputInventory(canonicalProject.path, parsed.brief, deps);
   const validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
     fs: { exists: deps.exists, readText: deps.readText },
     ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
@@ -749,6 +795,7 @@ export async function collectShipPreflight(
       campaign,
       daemonFreshness: { daemonToDist, sourceToDist, caveat: DAEMON_CAVEAT },
       briefInputs,
+      outputInventory,
       validationBaseline,
     },
   };
@@ -820,6 +867,18 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     writer.write(`  NOT_CHECKABLE ${assertion.kind} at line ${assertion.line} — ${assertion.reason}\n`);
   }
 
+  if (report.outputInventory.state === 'not_requested') {
+    writer.write('Declared outputs: not checked (pass --brief <path>)\n');
+  } else if (report.outputInventory.inventory.entries.length === 0) {
+    writer.write('Declared outputs: no structured output paths detected\n');
+  } else {
+    writer.write(`Declared outputs: ${report.outputInventory.inventory.entries.length}; blocking ${report.outputInventory.inventory.blocking.length}\n`);
+    for (const entry of report.outputInventory.inventory.entries) {
+      const state = entry.blocking ? 'BLOCKED' : entry.exists ? 'EXISTS-ALLOWED' : 'ABSENT';
+      writer.write(`  ${state} ${entry.path} (${entry.entryType}, on_existing=${entry.disposition})${entry.size === undefined ? '' : ` size=${entry.size}`}${entry.reason ? ` — ${entry.reason}` : ''}\n`);
+    }
+  }
+
   writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
   for (const result of report.validationBaseline.results) {
     const exit = result.exitCode === undefined ? '' : ` exit=${result.exitCode}`;
@@ -833,7 +892,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
 function usage(): string {
   return [
     'Usage: flowcrew ship-preflight [--json] [--project <path>] [--campaign <name>] [--brief <path>]',
-    'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/assertions, and the untouched validation baseline.',
+    'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and the untouched validation baseline.',
   ].join('\n');
 }
 

@@ -954,6 +954,8 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
 const WORK_DISPATCH = [
   '- id: work',
   '  role: coder',
+  '  depends_on: [plan]',
+  '  dependency_reasons: {plan: "write the sole declared terminal report"}',
   '  scope: [docs/final.md]',
   '  prompt_template: Write the declared terminal report.',
 ].join('\n');
@@ -1147,7 +1149,7 @@ describe('planner check admission boundary', () => {
 
     expect(adapter.calls.filter(({ stageId }) => stageId === 'plan')).toHaveLength(3);
     expect(adapter.calls.some(({ stageId }) => stageId === 'work')).toBe(false);
-    expect(final.status).toBe('failed');
+    expect(final.status).toBe('escalated');
     expect(final.failureReason).toContain('hard_check_cannot_fail');
   });
 });

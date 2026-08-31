@@ -23,6 +23,11 @@ import type { SupervisorConfig } from './config.js';
 import { appendTraceEvent } from './trace.js';
 import { ABORT_SIGNAL_VERSION, type AbortSignalSource, type StageAbortSignal } from './abort-signal.js';
 import { createLogger } from './logging.js';
+import {
+  appendGuidanceEnvelope,
+  renderGuidanceEnvelope,
+  RUN_WIDE_GUIDANCE_TARGET,
+} from './guidance.js';
 
 const log = createLogger({ name: 'supervisor' });
 
@@ -192,6 +197,8 @@ export interface StageExecutionFacts {
   handoffObserved: boolean;
   commitObserved: boolean;
   artifactProgressThisTick: boolean;
+  activeCommandCount: number;
+  commandActivityValid: boolean;
   finalizing: boolean;
   protectedFromIdleAbort: boolean;
 }
@@ -254,9 +261,35 @@ export function inspectStageExecutionFacts(input: {
   const outputObserved = belongsToAttempt(outputPath);
   const handoffObserved = belongsToAttempt(handoffPath);
   const commitObserved = input.commitObserved === true;
+  let activeCommandCount = 0;
+  let commandActivityValid = false;
+  if (attempt) {
+    try {
+      const activity = JSON.parse(readFileSync(join(stageRoot, 'command_activity.json'), 'utf-8')) as Record<string, unknown>;
+      const active = Array.isArray(activity.active) ? activity.active : undefined;
+      const updatedAtMs = typeof activity.updatedAt === 'string' ? Date.parse(activity.updatedAt) : Number.NaN;
+      commandActivityValid = activity.version === 1
+        && activity.stageId === input.stageId
+        && activity.attemptIndex === attempt.index
+        && activity.attemptStartedAt === attempt.startedAt
+        && activity.streamClosed === false
+        && active !== undefined
+        && Number.isFinite(updatedAtMs)
+        && updatedAtMs >= attemptStartedMs;
+      if (commandActivityValid) {
+        activeCommandCount = active!.filter((record) => {
+          if (!record || typeof record !== 'object') return false;
+          const value = record as Record<string, unknown>;
+          const startedAtMs = typeof value.startedAt === 'string' ? Date.parse(value.startedAt) : Number.NaN;
+          return typeof value.id === 'string' && value.id.length > 0
+            && Number.isFinite(startedAtMs) && startedAtMs >= attemptStartedMs;
+        }).length;
+      }
+    } catch { /* missing/malformed activity never grants protection */ }
+  }
 
   const internalNames = new Set([
-    'live.log', 'status.json', 'input.md', 'guidance.md', 'guidance_consumed.md',
+    'live.log', 'status.json', 'input.md', 'guidance.md', 'guidance_consumed.md', 'command_activity.json',
   ]);
   let stageArtifactChanged = false;
   const walk = (dir: string, depth: number): void => {
@@ -277,7 +310,7 @@ export function inspectStageExecutionFacts(input: {
     || changedThisTick(handoffPath)
     || commitObserved;
   const finalizing = outputObserved && !verdictObserved;
-  const protectedFromIdleAbort = verdictObserved || handoffObserved || commitObserved || finalizing;
+  const protectedFromIdleAbort = verdictObserved || handoffObserved || commitObserved || finalizing || activeCommandCount > 0;
   return {
     stageId: input.stageId,
     attemptIndex: attempt?.index,
@@ -287,6 +320,8 @@ export function inspectStageExecutionFacts(input: {
     handoffObserved,
     commitObserved,
     artifactProgressThisTick,
+    activeCommandCount,
+    commandActivityValid,
     finalizing,
     protectedFromIdleAbort,
   };
@@ -300,6 +335,9 @@ export function describeStageExecutionFacts(facts: StageExecutionFacts): string 
     facts.outputObserved ? 'final output observed' : 'no final output observed',
     facts.handoffObserved ? 'handoff observed' : 'no handoff observed',
     facts.commitObserved ? 'commit observed' : 'no current-attempt commit observed',
+    facts.activeCommandCount > 0
+      ? `${facts.activeCommandCount} active command${facts.activeCommandCount === 1 ? '' : 's'} observed`
+      : facts.commandActivityValid ? 'no active command observed' : 'no valid command activity record',
     facts.finalizing ? 'finalization window active' : 'finalization window inactive',
   ].join('; ');
 }
@@ -895,13 +933,26 @@ export class Supervisor {
 
     // Check for user input
     const userInput = this.readUserInput();
+    const addressedOperatorTarget = (() => {
+      if (!userInput) return undefined;
+      const targets = [...userInput.matchAll(/(?:^|\n)\s*\[([a-z][a-z0-9_]{0,19}|all|\*)\]\s*:/g)]
+        .map((match) => match[1] === 'all' ? RUN_WIDE_GUIDANCE_TARGET : match[1]);
+      return new Set(targets).size === 1 ? targets[0] : undefined;
+    })();
     if (userInput) {
       this.observations.push(`User guidance received: "${userInput.slice(0, 100)}"`);
-      // Write as run-level guidance for next stage
-      const runGuidancePath = join(this.runDir(), 'supervisor_guidance.md');
-      const existing = existsSync(runGuidancePath) ? readFileSync(runGuidancePath, 'utf-8') : '';
-      writeFileSync(runGuidancePath, existing + `\n\n[user]: ${userInput}`, 'utf-8');
-      log.info({ runId: this.runId }, 'User input received and applied as guidance');
+      // Preserve the operator's exact text in the audit ledger, but quarantine
+      // it until the supervisor has selected a concrete target. Delivering it
+      // run-wide here races the later targeted decision and leaks stage-specific
+      // instructions to every concurrently running worker.
+      appendGuidanceEnvelope({
+        runDir: this.runDir(),
+        target: null,
+        body: `[user]: ${userInput}`,
+        source: 'operator',
+        knownStageIds: Object.keys(state.stages),
+      });
+      log.info({ runId: this.runId }, 'User input received and queued for targeted guidance routing');
       this.writeProgress();
     }
 
@@ -1063,7 +1114,7 @@ export class Supervisor {
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
     const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
     const assessmentStartedAt = Date.now();
-    const assessment = await this.assess(prompt);
+    let assessment = await this.assess(prompt);
     this.accumulatedOutputBytes = 0;
     this.pendingTails.clear();
     this.pendingArtifacts.clear();
@@ -1085,6 +1136,18 @@ export class Supervisor {
       }
       this.writeProgress();
       return;
+    }
+    if (userInput && addressedOperatorTarget && assessment.verdict === 'GUIDE') {
+      const targetIsKnown = addressedOperatorTarget === RUN_WIDE_GUIDANCE_TARGET
+        || Object.hasOwn(state.stages, addressedOperatorTarget);
+      assessment = targetIsKnown
+        ? { ...assessment, targetStage: addressedOperatorTarget }
+        : {
+            verdict: 'WAIT',
+            targetStage: null,
+            guidance: null,
+            reason: `Operator guidance remains quarantined because addressed stage ${addressedOperatorTarget} is not admitted in this run.`,
+          };
     }
     // Recovered: a successful assessment clears the degraded state.
     if (this.consecutiveAssessFailures > 0) {
@@ -1428,7 +1491,7 @@ export class Supervisor {
   private async act(
     assessment: SupervisorAssessment,
     progressSinceMs = Date.now(),
-    _source: 'supervisor' | 'operator' = 'supervisor',
+    source: 'supervisor' | 'operator' = 'supervisor',
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
 
@@ -1438,13 +1501,20 @@ export class Supervisor {
 
       case 'GUIDE':
         if (assessment.targetStage && assessment.guidance) {
-          const guidancePath = join(this.runDir(), 'stages', assessment.targetStage, 'guidance.md');
-          mkdirSync(join(this.runDir(), 'stages', assessment.targetStage), { recursive: true });
-          writeFileSync(guidancePath, assessment.guidance, 'utf-8');
-          // Also write run-level guidance for subsequent stages
-          const runGuidancePath = join(this.runDir(), 'supervisor_guidance.md');
-          const existing = existsSync(runGuidancePath) ? readFileSync(runGuidancePath, 'utf-8') : '';
-          writeFileSync(runGuidancePath, existing + `\n\n[${assessment.targetStage}]: ${assessment.guidance}`, 'utf-8');
+          let knownStageIds: string[] = [];
+          try { knownStageIds = Object.keys(readRunState(this.projectDir, this.runId).stages); } catch { /* quarantine below */ }
+          const envelope = appendGuidanceEnvelope({
+            runDir: this.runDir(),
+            target: assessment.targetStage,
+            body: assessment.guidance,
+            source,
+            knownStageIds,
+          });
+          if (!envelope.quarantined && assessment.targetStage !== RUN_WIDE_GUIDANCE_TARGET) {
+            const guidancePath = join(this.runDir(), 'stages', assessment.targetStage, 'guidance.md');
+            mkdirSync(join(this.runDir(), 'stages', assessment.targetStage), { recursive: true });
+            appendFileSync(guidancePath, `${existsSync(guidancePath) ? '\n\n' : ''}${renderGuidanceEnvelope(envelope)}\n`, 'utf-8');
+          }
         }
         this.lastActionTime = Date.now();
         return assessment;

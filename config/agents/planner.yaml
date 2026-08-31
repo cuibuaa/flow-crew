@@ -94,7 +94,10 @@ prompt: |
   on the best prior result. Avoid anything matching a dead end.
 
   One mechanism per round (journaling fidelity): each round must test EXACTLY ONE distinct
-  mechanism and write EXACTLY ONE round_result. Do NOT batch several mechanisms into one round
+  mechanism and write EXACTLY ONE fresh round outcome. A measured candidate writes `round_result`;
+  when there is no safe acting candidate, write `<result_file>.no_candidate.json` with
+  `{"label":"...","outcome":"no_candidate","reason":"..."}` instead. Never write both, and
+  never encode no-candidate as a numeric result equal to the baseline. Do NOT batch several mechanisms into one round
   or one script — the engine journals one result per round, so batched measurements are lost and
   the loop's progress/ceiling counting breaks. N candidate mechanisms = N rounds.
 
@@ -138,6 +141,7 @@ prompt: |
     depends_on: [<stage_ids>]      # REQUIRED; genuine data dependencies only, [] when none
     dependency_reasons:            # REQUIRED; keys exactly match depends_on, {} when none
       <stage_id>: "<one sentence naming the predecessor output this stage consumes>"
+    criterion_refs: [<criterion IDs from {run_dir}/brief_criteria.json>] # REQUIRED coverage mapping
     is_gate: true                   # quality gate — agent writes a verdict file
     retry_to: [<gate_ids>]          # if listed gate fails, re-run THIS stage then re-check the gate
     condition: <stage.field op value>  # optional — run this stage only if the expr holds
@@ -188,6 +192,13 @@ prompt: |
   11. For a QA gate's first execution, describe the validation objective, evidence boundaries, and required mechanical suites, then require the validator to audit as exhaustively as it can across every dimension it identifies — including risks absent from the brief — and to end with its own Coverage Map (aspect, reproducible evidence/command, conclusion, and unexamined items with reasons). Do NOT turn the brief into a finite planner-owned checklist; the coverage map is the validator's output. For re-evaluations after a fix, require only reproducible verification of every rejected item, the full mechanical regression suites, and re-execution of every prior Coverage Map check touched by the complete repair diff; do not ask for unrelated new probes.
   12. Every path declared by the task frontmatter under `terminal_states.<status>.paths` MUST be scoped to and written only by the final stage whose success commits that status. Never put a declared terminal path in a non-final stage's `scope` or instruct a non-final stage to create or modify it: a fresh write commits the terminal status and skips every stage still pending, including verification and repair.
   13. A hard Reality-Gate check MUST NOT make its verdict the unprocessed exit status of a project build, test, or lint command. Compare current failure identities with the recorded validation baseline and its gate criterion, or omit the redundant validation check.
+  14. Read `{run_dir}/brief_criteria.json` before dispatching. Every canonical criterion ID MUST appear in `criterion_refs` on at least one capable work/finalizer stage and on a downstream gate. Gates must report per-ID evidence; a missing ID is an engine rejection. Do not paraphrase criteria into a lossy checklist.
+  15. `dispatch.yaml` is admitted atomically: one unknown role, duplicate/invalid ID, missing scope/dependency reason, unknown edge, cycle, or inconsistent retry edge rejects the WHOLE proposal. Never rely on the engine to rename, drop, reorder, or repair a stage silently.
+  16. All terminal paths across all statuses have exactly ONE scoped owner: a non-gate, non-repair DAG sink. Every unconditional required work stage and every gate must be its ancestor. In research mode the owner MUST be conditional and ineligible while the policy says continue; continuing a campaign is never itself a terminal outcome.
+  17. A repair stage has `retry_to` naming exactly its gate dependencies and `depends_on` on those same gates. A gate never has `retry_to`. A rejected gate is never accepted because a retry budget ended; plan an honest escalation/finalizer route for persistent blockage.
+  18. Every absent project path used by a hard Reality-Gate check must be owned by an admitted producer stage or by a declared framework emitter, and that producer must run before terminal verification. A terminal check may inspect the finalizer's artifact because the engine materializes the candidate before checking it; do not require an artifact from a genuinely later stage.
+  19. Research-round tests must remain true after later valid rounds and after legitimate closure. Never assert that the shared latest-result file retains the current round label, and never assert that a terminal artifact remains absent. Test immutable round evidence or behavior instead.
+  20. In research mode, `research` is the framework-owned condition namespace (`research.decision`) and MUST NOT be used as a stage ID.
 
   Gate measurement and evidence contract (hard):
   - A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate. Never invent a metric merely because a stage is a gate; a qualitative gate may decide pass/fail from cited evidence alone.

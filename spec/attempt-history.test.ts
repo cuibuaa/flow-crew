@@ -107,6 +107,8 @@ describe('append-only stage attempts', () => {
             '  - id: fix_release',
             '    role: repair',
             '    scope: [src/release.ts]',
+            '    depends_on: [release_gate]',
+            '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
           ].join('\n'));
@@ -164,6 +166,8 @@ describe('append-only stage attempts', () => {
             '  - id: fix_release',
             '    role: repair',
             '    scope: [src/release.ts]',
+            '    depends_on: [release_gate]',
+            '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
           ].join('\n'));

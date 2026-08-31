@@ -379,8 +379,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
           'stages:',
-          '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]', '    is_gate: true', '    task: review',
-          '  - id: repair', '    role: repair', '    scope: [src/declared.ts]', '    retry_to: [review_gate]',
+          '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
+          '    dependency_reasons: {plan: "review the planned repair"}', '    is_gate: true', '    task: review',
+          '  - id: repair', '    role: repair', '    scope: [src/declared.ts]', '    depends_on: [review_gate]',
+          '    dependency_reasons: {review_gate: "repair only after an explicit rejection"}', '    retry_to: [review_gate]',
           '    max_retries: 1', '    task: repair',
         ].join('\n'));
         return { output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
@@ -495,11 +497,16 @@ describe('gate verdict facts and repair eligibility', () => {
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
           'stages:',
-          '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]', '    is_gate: true', '    task: review',
-          '  - id: implement', '    role: coder', '    scope: [src/impl.ts]', '    depends_on: [review_gate]', '    task: implement',
-          '  - id: release_gate', '    role: qa', '    scope: []', '    depends_on: [implement]', '    is_gate: true', '    task: release',
-          '  - id: fix_review', '    role: repair', '    scope: [src/review.ts]', '    retry_to: [review_gate]', '    task: fix review',
-          '  - id: fix_release', '    role: repair', '    scope: [src/release.ts]', '    retry_to: [release_gate]', '    task: fix release',
+          '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
+          '    dependency_reasons: {plan: "review the planned work"}', '    is_gate: true', '    task: review',
+          '  - id: implement', '    role: coder', '    scope: [src/impl.ts]', '    depends_on: [review_gate]',
+          '    dependency_reasons: {review_gate: "implement only after review passes"}', '    task: implement',
+          '  - id: release_gate', '    role: qa', '    scope: []', '    depends_on: [implement]',
+          '    dependency_reasons: {implement: "release audit follows implementation"}', '    is_gate: true', '    task: release',
+          '  - id: fix_review', '    role: repair', '    scope: [src/review.ts]', '    depends_on: [review_gate]',
+          '    dependency_reasons: {review_gate: "repair only the rejected review"}', '    retry_to: [review_gate]', '    task: fix review',
+          '  - id: fix_release', '    role: repair', '    scope: [src/release.ts]', '    depends_on: [release_gate]',
+          '    dependency_reasons: {release_gate: "repair only the rejected release"}', '    retry_to: [release_gate]', '    task: fix release',
         ].join('\n'));
       } else if (opts.stageId === 'review_gate') {
         reviewCalls++;

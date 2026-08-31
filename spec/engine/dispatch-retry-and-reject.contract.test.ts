@@ -160,7 +160,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
             return ok('planned (empty — flake)');
           }
           // Retry: emit a valid single stage.
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    task: do the work'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n'));
           return ok('planned (valid)');
         }
         return ok(`did ${opts.stageId}`);
@@ -211,21 +211,21 @@ describe('FIX 2 — REJECT is a first-class supervisor verdict', () => {
   });
 });
 
-describe('FIX 2 (pure) — decideRejectAction re-works under budget, then accepts (no infinite loop)', () => {
+describe('FIX 2 (pure) — decideRejectAction re-works under budget, then escalates (no silent acceptance)', () => {
   const sig = { targetStage: 'work', reason: 'verdict says pass but the cited metric shows fail' };
   it('under budget → REWORK the named stage', () => {
     const d = decideRejectAction(sig, 'work', 0, 2);
     expect(d.action).toBe('rework');
     if (d.action === 'rework') { expect(d.targetStage).toBe('work'); expect(d.nextCount).toBe(1); }
   });
-  it('at budget → ACCEPT (avoid infinite reject loop)', () => {
+  it('at budget → ESCALATE (avoid infinite loop without accepting rejected work)', () => {
     const d = decideRejectAction(sig, 'work', 2, 2);
-    expect(d.action).toBe('accept');
-    if (d.action === 'accept') expect(d.reason).toMatch(/budget exhausted/i);
+    expect(d.action).toBe('escalate');
+    if (d.action === 'escalate') expect(d.reason).toMatch(/budget exhausted/i);
   });
-  it('no resolvable target → ACCEPT (cannot mechanically force re-work)', () => {
+  it('no resolvable target → ESCALATE (cannot mechanically force re-work)', () => {
     const d = decideRejectAction({ targetStage: null, reason: 'x' }, null, 0, 2);
-    expect(d.action).toBe('accept');
+    expect(d.action).toBe('escalate');
   });
 });
 
@@ -237,7 +237,7 @@ describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    task: produce the deliverable'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
           return ok('planned');
         }
         if (opts.stageId === 'work') {
@@ -278,7 +278,7 @@ describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    task: produce the deliverable'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
           return ok('planned');
         }
         if (opts.stageId === 'work') {
@@ -299,7 +299,7 @@ describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT
     const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
     // It must NOT loop forever: bounded by default_supervisor_max_rejects (2) per
     // iteration × iterations. Terminates and does not hang.
-    expect(['complete', 'failed', 'escalated', 'ceiling_hit', 'stopped']).toContain(final.status);
+    expect(['complete', 'failed', 'escalated', 'ceiling_hit', 'incomplete', 'stopped']).toContain(final.status);
     expect(workCalls).toBeLessThan(50); // sanity: not an unbounded loop
   });
 });

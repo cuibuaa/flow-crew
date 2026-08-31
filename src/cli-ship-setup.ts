@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -33,6 +34,8 @@ import {
 } from './project-validation.js';
 import {
   verifyBriefInputs,
+  inspectBriefOutputs,
+  type BriefOutputInventory,
   type BriefInputAssertionResult,
   type BriefInputVerification,
   type ShipInputFileSystem,
@@ -95,6 +98,8 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   readBytes: (path) => readFileSync(path),
   readDirectory: (path) => readdirSync(path),
   stat: (path) => statSync(path),
+  lstat: (path) => lstatSync(path),
+  readlink: (path) => readlinkSync(path),
   realpath: (path) => realpathSync.native(path),
   entryExists: nodeEntryExists,
   createDirectory: (path) => mkdirSync(path, { recursive: true }),
@@ -298,7 +303,9 @@ interface ShipSetupFacts {
   links: ShipSetupLink[];
   copies: ShipSetupCopy[];
   sourceVerification: BriefInputVerification;
+  sourceOutputInventory: BriefOutputInventory;
   targetVerification?: BriefInputVerification;
+  targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
   validationBaseline?: ProjectValidationBaseline;
   blockers: ShipSetupBlocker[];
@@ -605,6 +612,7 @@ function setupFacts(
   briefDigest: string,
   parsed: ParsedShipSetupArgs,
   sourceVerification: BriefInputVerification,
+  sourceOutputInventory: BriefOutputInventory,
 ): Omit<ShipSetupFacts, 'blockers'> {
   return {
     version: 1,
@@ -618,6 +626,7 @@ function setupFacts(
     links: [],
     copies: [],
     sourceVerification,
+    sourceOutputInventory,
   };
 }
 
@@ -1291,6 +1300,7 @@ export async function runShipSetup(
   const brief = measuredBrief.text;
   const declaredValidation = parseBriefValidationCommands(brief, briefPath);
   const sourceVerification = verifyBriefInputs(brief, projectDir, deps.fs);
+  const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs);
   let facts = setupFacts(
     projectDir,
     targetDir,
@@ -1298,12 +1308,21 @@ export async function runShipSetup(
     measuredBrief.digest,
     parsed,
     sourceVerification,
+    sourceOutputInventory,
   );
   if (declaredValidation.error) {
     return refused(facts, [{ phase: 'validation', reason: declaredValidation.error }]);
   }
   const sourceBlockers = verificationBlockers('source', sourceVerification);
   if (sourceBlockers.length > 0) return refused(facts, sourceBlockers);
+  if (sourceOutputInventory.blocking.length > 0) {
+    return refused(facts, sourceOutputInventory.blocking.map((entry) => ({
+      phase: 'source' as const,
+      input: entry.path,
+      reason: entry.reason ?? 'Declared output path is already occupied',
+      repair: `Choose a fresh output path, or declare an explicit on_existing disposition when the existing ${entry.entryType} is intentionally consumed.`,
+    })));
+  }
   if (deps.fs.entryExists(targetDir)) {
     return refused(facts, [{
       phase: 'worktree',
@@ -1360,9 +1379,18 @@ export async function runShipSetup(
   if (reconciled.blockers.length > 0) return refused(facts, reconciled.blockers);
 
   const targetVerification = verifyBriefInputs(brief, targetDir, deps.fs);
-  facts = { ...facts, targetVerification };
+  const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs);
+  facts = { ...facts, targetVerification, targetOutputInventory };
   const targetBlockers = verificationBlockers('target', targetVerification);
   if (targetBlockers.length > 0) return refused(facts, targetBlockers);
+  if (targetOutputInventory.blocking.length > 0) {
+    return refused(facts, targetOutputInventory.blocking.map((entry) => ({
+      phase: 'target' as const,
+      input: entry.path,
+      reason: entry.reason ?? 'Declared output path is already occupied in the target worktree',
+      repair: `Choose a fresh output path, or declare an explicit on_existing disposition when the target ${entry.entryType} is intentionally updated.`,
+    })));
+  }
 
   const populationComparison = await compareTestPopulations(
     projectDir,
@@ -1497,9 +1525,18 @@ function renderInputVerification(label: string, verification: BriefInputVerifica
   }
 }
 
+function renderOutputInventory(label: string, inventory: BriefOutputInventory, writer: Writer): void {
+  writer.write(`${label} outputs: ${inventory.entries.length} checked; ${inventory.blocking.length} blocking\n`);
+  for (const entry of inventory.entries) {
+    writer.write(`  ${entry.blocking ? 'BLOCKED' : entry.exists ? 'EXISTS-ALLOWED' : 'ABSENT'} ${entry.path} (${entry.entryType}, on_existing=${entry.disposition})${entry.size === undefined ? '' : ` size=${entry.size}`}\n`);
+  }
+}
+
 function renderVerification(report: ShipSetupReport, writer: Writer): void {
   renderInputVerification('Source', report.sourceVerification, writer);
+  renderOutputInventory('Source', report.sourceOutputInventory, writer);
   if (report.targetVerification) renderInputVerification('Target', report.targetVerification, writer);
+  if (report.targetOutputInventory) renderOutputInventory('Target', report.targetOutputInventory, writer);
   for (const link of report.links) writer.write(`  LINK ${link.path} -> ${link.source}\n`);
   for (const copy of report.copies) writer.write(`  COPY ${copy.path} <- ${copy.source}\n`);
 }

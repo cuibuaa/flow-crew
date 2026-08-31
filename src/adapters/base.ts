@@ -31,6 +31,9 @@ export interface RunOpts {
   workDir: string;
   runDir: string;
   stageId: string;
+  /** Current scheduler attempt identity for durable adapter activity facts. */
+  attemptIndex?: number;
+  attemptStartedAt?: string;
   /** Resume only this explicit UUID; global-most-recent selection is forbidden. */
   resumeSessionId?: string;
   /** Stage whose isolated adapter home owns resumeSessionId. */
@@ -239,7 +242,7 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
 export function execWithTimeout(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; abortSignal?: AbortSignal },
+  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; onStdout?: (text: string) => void; abortSignal?: AbortSignal },
 ): Promise<RunResult> {
   return execChild(cmd, args, opts);
 }

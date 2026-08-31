@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { readStageOutput } from './store.js';
 import { readStageStatus } from './store.js';
 import { getDefaultTimeout } from './config.js';
+import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 
 const MAX_CONTEXT_CHARS = 8000;
 const SKILLS_DIR = 'config/skills';
@@ -29,6 +30,7 @@ interface HandoffOpts {
   taskDescription?: string;
   isGate?: boolean;
   stageId?: string;
+  criterionRefs?: string[];
 }
 
 /**
@@ -126,35 +128,47 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     default_timeout_ms: readDefaultTimeout(opts.projectDir),
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
+  const criterionBlock = (() => {
+    if (!opts.criterionRefs?.length) return '';
+    try {
+      const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf-8')) as {
+        criteria?: Array<{ id?: string; text?: string }>;
+      };
+      const byId = new Map((artifact.criteria ?? [])
+        .filter((criterion): criterion is { id: string; text: string } => typeof criterion.id === 'string' && typeof criterion.text === 'string')
+        .map((criterion) => [criterion.id, criterion.text]));
+      const rows = opts.criterionRefs.map((id) => `- [${id}] ${byId.get(id) ?? '(missing canonical criterion — dispatch admission should have refused this stage)'}`);
+      return `## Canonical brief criteria assigned to this stage\n${rows.join('\n')}`;
+    } catch {
+      return '## Canonical brief criteria assigned to this stage\nThe criterion artifact is unreadable; stop and report the contract failure.';
+    }
+  })();
   const context = opts.dependsOn.length > 0 ? buildDependencyContext(opts) : '';
   const skillsContent = loadSkills(opts.skillNames || [], opts.projectDir);
   const anchor = skillsContent
     ? '\n\n---\nThe skill below provides methodology guidance for HOW to approach your task. Do NOT let it change WHAT you are doing — the task above takes absolute priority.\n'
     : '';
-  // Inject supervisor guidance if present (high priority)
-  const guidanceParts: string[] = [];
-  const runGuidancePath = join(opts.runDir, 'supervisor_guidance.md');
-  if (existsSync(runGuidancePath)) {
-    try { const g = readFileSync(runGuidancePath, 'utf-8').trim(); if (g) guidanceParts.push(g); } catch { /* ignore */ }
-  }
-  if (opts.stageId) {
-    const stageGuidancePath = join(opts.runDir, 'stages', opts.stageId, 'guidance.md');
-    if (existsSync(stageGuidancePath)) {
-      try { const g = readFileSync(stageGuidancePath, 'utf-8').trim(); if (g) guidanceParts.push(g); } catch { /* ignore */ }
-    }
-  }
-  const guidanceBlock = guidanceParts.length > 0
-    ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${guidanceParts.join('\n\n')}\n\n`
+  // Delivery is stage-addressed. The run-level file remains an audit ledger,
+  // but entries for another stage never enter this prompt.
+  const guidanceDelivery = opts.stageId
+    ? renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId))
+    : '';
+  const guidanceBlock = guidanceDelivery
+    ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${guidanceDelivery}\n\n`
+      + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.\n\n'
     : '';
 
-  const parts = [guidanceBlock, context, body, anchor, skillsContent].filter(Boolean);
+  const parts = [guidanceBlock, context, body, criterionBlock, anchor, skillsContent].filter(Boolean);
   const prompt = parts.join('\n\n');
   const handoffSuffix = substituteTemplate(HANDOFF_SUFFIX, vars);
 
   // For gate stages: inject the verdict file path
   if (opts.isGate && opts.stageId) {
     const verdictPath = `${opts.runDir}/verdict_${opts.stageId}.json`;
-    const verdictInstruction = `\n\nIMPORTANT: After your review, write your verdict to ${verdictPath}:\n{"pass": true} or {"pass": false, "reason": "specific reason"}\nThis file determines whether the workflow proceeds or retries.`;
+    const criterionEvidence = opts.criterionRefs?.length
+      ? `\nFor every assigned criterion ID, include a "criteria" map entry with {"status":"pass"|"fail"|"judgement","evidence":"non-empty checked evidence or why it is not mechanically decidable"}. Missing entries are an effective gate rejection.`
+      : '';
+    const verdictInstruction = `\n\nIMPORTANT: After your review, write your verdict to ${verdictPath}:\n{"pass": true} or {"pass": false, "reason": "specific reason"}\nThis file determines whether the workflow proceeds or retries.${criterionEvidence}`;
     return prompt + verdictInstruction + handoffSuffix;
   }
 

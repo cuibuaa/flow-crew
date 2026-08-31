@@ -104,12 +104,12 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   };
 }
 
-function dispatchYaml(includeUnrelatedRejectedGate = false): string {
+function dispatchYaml(includeUnrelatedRejectedGate = false, includeTerminalOwner = false): string {
   return [
     'stages:',
     `  - id: ${GATE_ID}`,
     '    role: qa',
-    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, checks/e18-gate-retry-entry.test.ts, docs/final_verification.md]',
+    '    scope: [src/scheduler.ts, spec/e18-gate-retry-entry.test.ts, checks/e18-gate-retry-entry.test.ts]',
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "audit the planned E18 change"}',
     '    is_gate: true',
@@ -130,6 +130,14 @@ function dispatchYaml(includeUnrelatedRejectedGate = false): string {
     `    dependency_reasons: {${GATE_ID}: "repair only an explicit E18 rejection"}`,
     `    retry_to: [${GATE_ID}]`,
     '    task: repair E18',
+    ...(includeTerminalOwner ? [
+      '  - id: terminal_finalize',
+      '    role: repair',
+      '    scope: [docs/final_verification.md]',
+      `    depends_on: [${GATE_ID}]`,
+      `    dependency_reasons: {${GATE_ID}: "write the terminal report only after the repaired gate passes"}`,
+      '    task: write the selected terminal report',
+    ] : []),
   ].join('\n');
 }
 
@@ -161,7 +169,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
       if (opts.stageId === 'plan') {
         writeFileSync(
           join(opts.runDir, 'dispatch.yaml'),
-          dispatchYaml(options.includeUnrelatedRejectedGate),
+          dispatchYaml(options.includeUnrelatedRejectedGate, options.terminalArtifactOnPass),
         );
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
@@ -183,14 +191,21 @@ async function runScenario(options: ScenarioOptions): Promise<{
             passing: JSON.stringify(metricArtifact(true)),
           });
         }
-        if (pass && options.terminalArtifactOnPass) {
-          mkdirSync(join(projectDir, 'docs'), { recursive: true });
-          writeFileSync(
-            join(projectDir, 'docs', 'final_verification.md'),
-            '# Synthetic final verification\n\nThe declared outcome is complete.\n',
-          );
-        }
         return { output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      if (opts.stageId === 'terminal_finalize') {
+        mkdirSync(join(projectDir, 'docs'), { recursive: true });
+        writeFileSync(
+          join(projectDir, 'docs', 'final_verification.md'),
+          '# Synthetic final verification\n\nThe declared outcome is complete.\n',
+        );
+        return {
+          output: 'terminal report written by its admitted owner',
+          exitCode: 0,
+          duration_ms: 1,
+          writes: ['docs/final_verification.md'],
+          writeAttribution: 'structured',
+        };
       }
       if (opts.stageId === UNRELATED_GATE_ID) {
         writeFileSync(
@@ -302,7 +317,7 @@ describe('gate retry loop entry', () => {
     ))).toBe(false);
   });
 
-  it('re-evaluates a declared terminal artifact written by the repaired gate', async () => {
+  it('re-evaluates a declared terminal artifact written by the downstream terminal owner', async () => {
     const result = await runScenario({
       gatePasses: [false, true],
       terminalArtifactOnPass: true,
@@ -314,6 +329,7 @@ describe('gate retry loop entry', () => {
     expect(result.final.status).toBe(RUN_STATUS.COMPLETE);
     expect(result.final.terminalArtifact).toBe('final_verification.md');
     expect(Object.values(result.final.stages).map((stage) => stage.status)).toEqual([
+      'complete',
       'complete',
       'complete',
       'complete',

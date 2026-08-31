@@ -330,7 +330,9 @@ function renderRoundsSection(data: ResearchData): string {
   const kept = new Set(data.decision?.keptLabels ?? []);
   const MAX = 25;
   const shown = data.rounds.slice(-MAX);
-  const lines = shown.map((r) => `- ${r.label}: ${fmtNum(r.result)}${kept.has(r.label) ? ' ✓ kept' : ''}`);
+  const lines = shown.map((r) => r.outcome === 'no_candidate'
+    ? `- ${r.label}: no candidate${r.reason ? ` — ${r.reason}` : ''}`
+    : `- ${r.label}: ${typeof r.result === 'number' ? fmtNum(r.result) : 'invalid measurement'}${kept.has(r.label) ? ' ✓ kept' : ''}`);
   let out = `## Rounds (${data.rounds.length})\n${lines.join('\n')}`;
   if (data.rounds.length > MAX) out = `## Rounds (${data.rounds.length}, showing last ${MAX})\n${lines.join('\n')}`;
   return out;

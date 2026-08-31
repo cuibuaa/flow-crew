@@ -378,6 +378,35 @@ describe('ship-preflight validation baseline fact', () => {
 });
 
 describe('ship-preflight declared brief inputs fact', () => {
+  it('surfaces a nonempty declared output as blocking with its observed size', async () => {
+    mkdirSync(join(fixture.project, 'docs'), { recursive: true });
+    writeFileSync(join(fixture.project, 'docs', 'research-result.json'), 'x'.repeat(286 * 1024));
+    writeFileSync(join(fixture.project, 'brief.md'), [
+      '---',
+      'research:',
+      '  baseline: 0',
+      '  policy: best_of_n',
+      '  result_file: docs/research-result.json',
+      '---',
+      '# Goal',
+      'Measure a result.',
+    ].join('\n'), 'utf-8');
+
+    const result = await collectShipPreflight(
+      ['ship-preflight', '--brief', 'brief.md'],
+      commonDeps(),
+    );
+
+    expect(result.report.outputInventory).toMatchObject({
+      state: 'checked',
+      inventory: {
+        blocking: [expect.objectContaining({
+          path: 'docs/research-result.json', blocking: true, size: 286 * 1024,
+        })],
+      },
+    });
+  });
+
   it('keeps leading declarations distinct from neutral path mentions', () => {
     const brief = [
       '---',

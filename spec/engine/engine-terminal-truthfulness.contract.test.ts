@@ -33,7 +33,7 @@ const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
 function writeRoles(): string {
   const agentsDir = join(projectDir, 'config', 'agents');
   mkdirSync(agentsDir, { recursive: true });
-  for (const role of ['planner', 'researcher', 'qa']) {
+  for (const role of ['planner', 'researcher', 'qa', 'repair']) {
     writeFileSync(join(agentsDir, `${role}.yaml`), [`name: ${role}`, 'description: test role', 'model: default', 'reasoning_effort: default', 'tools: []', 'prompt: test'].join('\n'));
   }
   return agentsDir;
@@ -69,7 +69,12 @@ function loopAdapter(results: number[]): Adapter {
   return {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]', '    task: measure this round'].join('\n'));
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
+          '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
+          '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
+          '    task: measure this round',
+        ].join('\n'));
         return ok('planned a round');
       }
       if (opts.stageId === 'measure') {
@@ -137,6 +142,88 @@ describe('FIX B — integrity-rejected round count is surfaced in the terminal r
     expect(completed).toBeDefined();
     expect(String(completed.detail)).toMatch(/integrity-rejected rounds:\s*\d+/);
     expect(String(completed.detail)).toMatch(/noop:\d+/);
+  });
+});
+
+describe('rejected research rounds settle their repair before the journal advances', () => {
+  it('runs repair and gate re-evaluation before banking the measured round', async () => {
+    const runId = setupRun({ beat: 99, max_rounds: 2 }, { baseline: 0, maxIterations: 1 });
+    const taskRunDir = runDir(projectDir, runId);
+    const order: string[] = [];
+    let gateCalls = 0;
+    const adapter: Adapter = {
+      async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+        if (opts.stageId === 'plan') {
+          order.push('plan');
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            'stages:',
+            '  - id: measure',
+            '    role: researcher',
+            '    depends_on: [plan]',
+            '    dependency_reasons: {plan: "measure only after planning"}',
+            '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
+            '    task: measure the current round',
+            '  - id: audit_round',
+            '    role: qa',
+            '    depends_on: [measure]',
+            '    dependency_reasons: {measure: "audit the measured round"}',
+            '    scope: []',
+            '    is_gate: true',
+            '    task: audit the current round',
+            '  - id: repair_round',
+            '    role: repair',
+            '    depends_on: [audit_round]',
+            '    dependency_reasons: {audit_round: "repair an explicit audit rejection"}',
+            '    scope: [docs/repair_marker.txt]',
+            '    retry_to: [audit_round]',
+            '    task: repair the rejected round',
+          ].join('\n'));
+          return ok('planned measured, audited, and repairable work');
+        }
+        if (opts.stageId === 'measure') {
+          order.push('measure');
+          mkdirSync(join(projectDir, 'docs'), { recursive: true });
+          writeFileSync(join(projectDir, 'docs', 'research_round_result.json'), JSON.stringify({ label: 'round_1', result: 0.5 }));
+          return ok('measured round 1');
+        }
+        if (opts.stageId === 'audit_round') {
+          gateCalls++;
+          order.push(`audit_${gateCalls}`);
+          expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
+          writeFileSync(join(opts.runDir, 'verdict_audit_round.json'), JSON.stringify({
+            pass: gateCalls > 1,
+            reason: gateCalls > 1 ? 'repair verified' : 'repair required',
+          }));
+          return ok(`audit ${gateCalls}`);
+        }
+        if (opts.stageId === 'repair_round') {
+          order.push('repair');
+          expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
+          writeFileSync(join(projectDir, 'docs', 'repair_marker.txt'), 'repaired\n');
+          return ok('repaired round 1');
+        }
+        return ok(`noop ${opts.stageId}`);
+      },
+      async discuss(): Promise<RunResult> { return ok(''); },
+      spawnDiscuss() { throw new Error('unused'); },
+      async spawnInteractive() { throw new Error('unused'); },
+    } as unknown as Adapter;
+
+    const final = await runWorkflow(
+      researchWorkflow.config,
+      researchWorkflow.yaml,
+      projectDir,
+      adapter,
+      new Map(),
+      undefined,
+      writeRoles(),
+      runId,
+    );
+
+    expect(order).toEqual(['plan', 'measure', 'audit_1', 'repair', 'audit_2']);
+    const journal = JSON.parse(readFileSync(join(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: unknown[] };
+    expect(journal.rounds).toHaveLength(1);
+    expect(final.currentIteration).toBe(1);
   });
 });
 

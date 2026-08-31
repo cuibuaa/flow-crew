@@ -606,9 +606,38 @@ function namedStageAssignment(brief: string): { line: number; excerpt: string } 
   const body = briefBody(brief);
   const offset = bodyLineOffset(brief);
   const lines = body.split(/\r\n|\n|\r/);
+  let inFence = false;
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
-    if (/^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+).*(?:\bstage\s+(?:\d+|[A-Za-z][\w-]*)|\b(?:implementation|verification|verify|qa|reality|final)\s+(?:stage|gate|phase))\b/i.test(trimmed)) {
+    if (/^```|^~~~/.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || !trimmed || /^>/.test(trimmed)) continue;
+    // A stage assignment must be syntactically authored as a stage label. A
+    // heading or evidence bullet that merely discusses "a stage" is prose,
+    // not an assignment (the prior broad substring search warned on briefs
+    // whose subject was orchestration itself).
+    const headingLabel = trimmed.replace(/^#{1,6}\s+/, '');
+    const headingAssignment = trimmed !== headingLabel && (
+      /^stage\s+(?:\d+|[A-Za-z][\w-]*)\s*(?:$|(?::|—|->|-)\s*\S)/i.test(headingLabel)
+      || /^(?:implementation|verification|verify|qa|reality|final|repair|audit|plan(?:ning)?)\s+(?:stage|gate|phase)\s*(?:$|(?::|—|->|-)\s*\S)/i.test(headingLabel)
+    );
+    const listAssignment = /^(?:[-*+]\s+|\d+[.)]\s+)(?:(?:stage\s+(?:\d+|[A-Za-z][\w-]*))|(?:(?:implementation|verification|verify|qa|reality|final|repair|audit|plan(?:ning)?)\s+(?:stage|gate|phase)))\s*(?::|—|->)\s*\S/i.test(trimmed);
+    // Also recognize grammatical assignments such as "The QA stage must write
+    // docs/report.md". Requiring a named subject, an obligation modal, and a
+    // write/scope predicate keeps descriptive prose ("guidance is delivered to
+    // another stage") out. Negated rules are constraints, not assignments.
+    const namedSubject = /\b(?:the\s+)?(?:(?:stage\s+(?:\d+|[A-Za-z][\w-]*))|(?:(?:implementation|verification|verify|qa|reality|final|repair|audit|plan(?:ning)?)\s+(?:stage|gate|phase)))\b/i;
+    const obligation = /\b(?:must|shall|is\s+(?:responsible|assigned)\s+(?:for|to))\b/i;
+    const writePredicate = /\b(?:write|writes|edit|edits|create|creates|produce|produces|emit|emits|own|owns|writable\s+paths?|write\s+scope)\b/i;
+    const negated = /\b(?:must|shall)\s+not\b/i.test(trimmed)
+      || /\b(?:no|neither)\s+(?:named\s+)?(?:stage|gate|phase)\b/i.test(trimmed);
+    const proseAssignment = !negated
+      && namedSubject.test(trimmed)
+      && obligation.test(trimmed)
+      && writePredicate.test(trimmed);
+    if (headingAssignment || listAssignment || proseAssignment) {
       return { line: offset + index + 1, excerpt: trimmed };
     }
   }

@@ -75,11 +75,13 @@ function dispatch(workId: string, gateId: string): string {
     '    role: builder',
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "execute this iteration"}',
+    '    scope: [docs/final.md]',
     '    task: produce non-empty implementation evidence',
     `  - id: ${gateId}`,
     '    role: qa',
     `    depends_on: [${workId}]`,
     `    dependency_reasons: {${workId}: "verify this iteration"}`,
+    '    scope: []',
     '    is_gate: true',
     '    task: decide whether to re-plan',
   ].join('\n');

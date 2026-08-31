@@ -98,8 +98,8 @@ afterEach(() => {
 
 describe('terminal final contract workflow behavior', () => {
   it('runs retry_to for an ordinary final-gate failure and only completes after the rerun passes', async () => {
-    const gateId = 'btc_transfer_multiphase_gate';
-    const fixId = 'fix_final_transfer_gate';
+    const gateId = 'btc_transfer_gate';
+    const fixId = 'fix_transfer_gate';
     const { config, yaml } = workflow(2);
     const runId = createCampaignRun(yaml);
     const agentsDir = writeRoleConfigs();
@@ -115,10 +115,15 @@ describe('terminal final contract workflow behavior', () => {
             `  - id: ${gateId}`,
             '    role: qa',
             '    depends_on: [plan]',
+            '    dependency_reasons: {plan: "evaluate the planned final transfer evidence"}',
+            '    scope: []',
             '    is_gate: true',
             '    task: evaluate final transfer gate',
             `  - id: ${fixId}`,
             '    role: repair',
+            `    depends_on: [${gateId}]`,
+            `    dependency_reasons: {${gateId}: "repair the rejected final gate"}`,
+            '    scope: []',
             `    retry_to: [${gateId}]`,
             '    task: repair final gate evidence',
           ].join('\n'));
@@ -149,8 +154,8 @@ describe('terminal final contract workflow behavior', () => {
   });
 
   it('replans after a phase continuation gate instead of treating it as terminal final completion', async () => {
-    const phaseGate = 'qa_phase3_adaptation_protocols';
-    const finalGate = 'btc_transfer_multiphase_gate';
+    const phaseGate = 'qa_phase3_protocols';
+    const finalGate = 'btc_transfer_gate';
     const { config, yaml } = workflow(3);
     const runId = createCampaignRun(yaml);
     const agentsDir = writeRoleConfigs();
@@ -168,6 +173,8 @@ describe('terminal final contract workflow behavior', () => {
                 `  - id: ${phaseGate}`,
                 '    role: qa',
                 '    depends_on: [plan]',
+                '    dependency_reasons: {plan: "verify the current campaign phase"}',
+                '    scope: []',
                 '    is_gate: true',
                 '    task: verify phase progress',
               ].join('\n')
@@ -176,6 +183,8 @@ describe('terminal final contract workflow behavior', () => {
                 `  - id: ${finalGate}`,
                 '    role: qa',
                 '    depends_on: [plan]',
+                '    dependency_reasons: {plan: "verify final campaign evidence"}',
+                '    scope: []',
                 '    is_gate: true',
                 '    task: verify final transfer gate',
               ].join('\n'));
@@ -228,7 +237,7 @@ describe('terminal final contract workflow behavior', () => {
 
   it('normalizes historical campaign rows from terminal run evidence without converting model failure into model success', () => {
     const runId = 'historical-' + randomBytes(4).toString('hex');
-    const gateId = 'btc_transfer_multiphase_gate';
+    const gateId = 'btc_transfer_gate';
     mkdirSync(runDir(projectDir, runId), { recursive: true });
     mkdirSync(join(projectDir, '.fc', 'campaigns'), { recursive: true });
     writeJson(join(runDir(projectDir, runId), `verdict_${gateId}.json`), terminalVerdict(88.5));

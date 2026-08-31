@@ -101,16 +101,23 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\`yaml
 - id: literature_survey
   role: researcher
+  depends_on: []
+  dependency_reasons: {}
+  scope: []
   prompt_template: "Survey papers on foundation models for anomaly detection. Focus on: (1) pre-trained transformers adapted for AD, (2) self-supervised contrastive methods, (3) reconstruction-based FM approaches. Produce a ranked list of top 3 candidates."
 
 - id: research_report
   role: coder
   depends_on: [literature_survey]
+  dependency_reasons: {literature_survey: "compile the completed survey"}
+  scope: [docs/phase1_research.md]
   prompt_template: "Compile the research findings into a structured report at docs/phase1_research.md. Include: approach name, paper reference, key idea, feasibility score, expected performance."
 
 - id: phase1_gate
   role: qa
   depends_on: [research_report]
+  dependency_reasons: {research_report: "verify the completed phase 1 report"}
+  scope: []
   is_gate: true
   prompt_template: "Verify the research report exists, contains at least 3 ranked approaches, and includes feasibility analysis. Write phase metadata: phase=phase_1, phaseComplete=true, nextPhase=phase_2."
 \`\`\``;
@@ -206,16 +213,23 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\`yaml
 - id: implement_fm
   role: coder
+  depends_on: []
+  dependency_reasons: {}
+  scope: []
   prompt_template: "Implement the chosen FM approach (approach #1 from phase1_research.md) on ADBench datasets. Set up evaluation pipeline."
 
 - id: run_benchmarks
   role: coder
   depends_on: [implement_fm]
+  dependency_reasons: {implement_fm: "benchmark the implemented model"}
+  scope: []
   prompt_template: "Run benchmarks against SOTA baselines (DeepSVDD, DAGMM). Report scores per ADBench category."
 
 - id: phase2_gate
   role: qa
   depends_on: [run_benchmarks]
+  dependency_reasons: {run_benchmarks: "verify the completed benchmark"}
+  scope: []
   is_gate: true
   prompt_template: "Check if FM beats SOTA on at least 3/5 ADBench categories. Write phase metadata."
 \`\`\``;
@@ -281,16 +295,23 @@ Injecting research to explore alternative approaches.
 \`\`\`yaml
 - id: pivot_research
   role: researcher
+  depends_on: []
+  dependency_reasons: {}
+  scope: []
   prompt_template: "The transformer-based FM approach failed to beat SOTA on ADBench. Research alternative approaches: (1) graph neural networks for AD, (2) diffusion models for OOD detection, (3) ensemble of specialized models. Find the most promising alternative."
 
-- id: implement_alternative
+- id: implement_pivot
   role: coder
   depends_on: [pivot_research]
+  dependency_reasons: {pivot_research: "implement the selected pivot"}
+  scope: []
   prompt_template: "Implement the best alternative approach identified by the researcher."
 
 - id: pivot_gate
   role: qa
-  depends_on: [implement_alternative]
+  depends_on: [implement_pivot]
+  dependency_reasons: {implement_pivot: "benchmark the implemented alternative"}
+  scope: []
   is_gate: true
   prompt_template: "Benchmark the alternative approach. Check if it beats SOTA on 3/5 categories."
 \`\`\``;

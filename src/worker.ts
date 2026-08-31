@@ -1,5 +1,5 @@
 // Module: worker
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { loadAdapterByName } from './adapters/loader.js';
@@ -28,6 +28,7 @@ import {
   AttemptDeadlineController,
   type AttemptDeadlineClock,
 } from './attempt-deadline.js';
+import { guidanceForStageFromText, readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -60,6 +61,7 @@ export interface StageOpts {
   ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
+  criterionRefs?: string[];
   resumeSessionId?: string;
   sessionOwnerStageId?: string;
   preserveSession?: boolean;
@@ -215,6 +217,7 @@ export async function runStage(
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
     isGate: opts.isGate,
+    criterionRefs: opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
     handoffVisibility: opts.role.handoff_visibility,
@@ -225,6 +228,8 @@ export async function runStage(
   const runningStatus = beginStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries);
   const attemptIndex = runningStatus.attempts?.at(-1)?.index;
   if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an attempt index`);
+  const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
+  if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an attempt start timestamp`);
 
   // Auto-prepend task brief to the role's system prompt so the brief sits in
   // a stable prefix position across stages. This:
@@ -261,11 +266,8 @@ export async function runStage(
     }
   } catch { /* non-critical */ }
 
-  // Bug ② fix — planner-only: inject the most-recent archived supervisor
-  // guidance from a prior iteration so cross-iteration GUIDE signals still
-  // reach the planner even after the iteration-boundary archive in
-  // scheduler.ts emptied `supervisor_guidance.md`. Safe by default: missing
-  // history dir or empty archive file results in no injection.
+  // Planner-only history remains target-filtered. An archived instruction for
+  // an implementation or gate stage must not become a planner instruction.
   if (opts.role.name === 'planner') {
     try {
       const historyDir = join(opts.runDir, 'guidance_history');
@@ -279,25 +281,23 @@ export async function runStage(
           });
         if (archives.length > 0) {
           const latest = archives[archives.length - 1];
-          const prev = readFileSync(join(historyDir, latest), 'utf-8').trim();
-          if (prev) {
-            resolvedSystemPrompt = `# Previous iteration's supervisor guidance (cumulative)\n\nThe lines below were emitted by the supervisor across the prior iteration. They represent observations and course-corrections from before this re-plan. Use them to inform this iteration's plan — especially any "do not do X" constraints.\n\n${prev}\n\n---\n\n${resolvedSystemPrompt}`;
+          const prev = readFileSync(join(historyDir, latest), 'utf-8');
+          const targeted = renderGuidanceDelivery(guidanceForStageFromText(prev, opts.stageId));
+          if (targeted) {
+            resolvedSystemPrompt = `# Previous iteration's targeted supervisor guidance\n\n${targeted}\n\n---\n\n${resolvedSystemPrompt}`;
           }
         }
       }
     } catch { /* non-critical */ }
   }
 
-  // Snapshot the current run-level supervisor guidance (if any) into this
-  // stage's directory so we have an audit trail of what the stage saw when
-  // it started, even if the live file is later appended to or archived.
+  // Receipt is exactly the filtered delivery for this stage, never a copy of
+  // the global audit ledger.
   try {
-    const guidancePath = join(opts.runDir, 'supervisor_guidance.md');
-    if (existsSync(guidancePath)) {
-      const stageDirPath = join(opts.runDir, 'stages', opts.stageId);
-      mkdirSync(stageDirPath, { recursive: true });
-      copyFileSync(guidancePath, join(stageDirPath, 'guidance_consumed.md'));
-    }
+    const delivered = renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId));
+    const stageDirPath = join(opts.runDir, 'stages', opts.stageId);
+    mkdirSync(stageDirPath, { recursive: true });
+    writeFileSync(join(stageDirPath, 'guidance_consumed.md'), delivered ? `${delivered}\n` : '', 'utf-8');
   } catch { /* non-critical */ }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
@@ -592,6 +592,8 @@ export async function runStage(
         workDir: opts.projectDir,
         runDir: opts.runDir,
         stageId: opts.stageId,
+        attemptIndex,
+        attemptStartedAt,
         resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined,
         sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
         preserveSession: opts.preserveSession,

@@ -161,4 +161,42 @@ describe('rehearsal Git isolation', () => {
     expect(output).not.toContain('at cmdRehearse');
     expect(output).not.toMatch(/\n\s+at\s+/);
   });
+
+  it('simulates a research brief with canonical numbered criteria through a criterion-aware gate', { timeout: 100_000 }, () => {
+    const fixture = rehearsalFixture();
+    const brief = join(fixture.project, 'criteria-research.md');
+    const source = readFileSync(helloBrief, 'utf-8').replace(
+      '## Round contract',
+      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+    );
+    writeFileSync(brief, source, 'utf-8');
+
+    const result = runRehearsal(fixture, brief, { PROJECT_DIR: fixture.project });
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, output).toBe(0);
+    expect(output).toContain('✅ Contract ready');
+    expect(output).toContain('0 tokens');
+    expect(output).not.toContain('criterion_');
+    expect(output).not.toContain('dispatch');
+  });
+
+  it('rejects an occupied declared output before simulation', { timeout: 100_000 }, () => {
+    const fixture = rehearsalFixture();
+    const brief = join(fixture.project, 'occupied-output.md');
+    const resultPath = join(fixture.project, 'docs', 'hello-research', 'round_result.json');
+    mkdirSync(join(fixture.project, 'docs', 'hello-research'), { recursive: true });
+    writeFileSync(resultPath, 'x'.repeat(286 * 1024));
+    writeFileSync(brief, readFileSync(helloBrief, 'utf-8'), 'utf-8');
+
+    const result = runRehearsal(fixture, brief, { PROJECT_DIR: fixture.project });
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, output).toBe(1);
+    expect(output).toContain('Declared output docs/hello-research/round_result.json is already occupied');
+    expect(output).toContain(`${286 * 1024} bytes`);
+    expect(output).toContain('❌');
+  });
 });

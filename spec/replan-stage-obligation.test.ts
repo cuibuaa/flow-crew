@@ -80,15 +80,21 @@ function firstPlan(): string {
     '  - id: phase4_work',
     '    role: builder',
     '    depends_on: [plan]',
+    '    dependency_reasons: {plan: "execute phase 4"}',
+    '    scope: []',
     '    task: complete phase 4 work',
     '  - id: gate_phase4',
     '    role: qa',
     '    depends_on: [phase4_work]',
+    '    dependency_reasons: {phase4_work: "verify phase 4"}',
+    '    scope: []',
     '    is_gate: true',
     '    task: check phase 4',
     '  - id: phase5_ci_docs',
     '    role: builder',
     '    depends_on: [gate_phase4]',
+    '    dependency_reasons: {gate_phase4: "continue only after phase 4 acceptance"}',
+    '    scope: []',
     '    task: run phase 5 CI and documentation',
   ].join('\n');
 }
@@ -99,6 +105,8 @@ function passingReplacementPlan(gateId = 'replacement_gate'): string {
     `  - id: ${gateId}`,
     '    role: qa',
     '    depends_on: [plan]',
+    '    dependency_reasons: {plan: "verify the replacement plan"}',
+    '    scope: []',
     '    is_gate: true',
     '    task: accept the replacement plan',
   ].join('\n');
@@ -186,10 +194,14 @@ describe('engine-owned unresolved stage obligations', () => {
                   '  - id: phase5_ci_docs',
                   '    role: builder',
                   '    depends_on: [plan]',
+                  '    dependency_reasons: {plan: "discharge the carried phase 5 obligation"}',
+                  '    scope: []',
                   '    task: finally run phase 5 CI and documentation',
                   '  - id: final_gate',
                   '    role: qa',
                   '    depends_on: [phase5_ci_docs]',
+                  '    dependency_reasons: {phase5_ci_docs: "verify the discharged obligation"}',
+                  '    scope: []',
                   '    is_gate: true',
                   '    task: accept the fully discharged plan',
                 ].join('\n');
@@ -244,10 +256,14 @@ describe('engine-owned unresolved stage obligations', () => {
                 '  - id: phase5_ci_docs',
                 '    role: builder',
                 '    depends_on: [plan]',
+                '    dependency_reasons: {plan: "discharge the carried phase 5 obligation"}',
+                '    scope: []',
                 '    task: discharge the forgotten stage',
                 '  - id: final_gate',
                 '    role: qa',
                 '    depends_on: [phase5_ci_docs]',
+                '    dependency_reasons: {phase5_ci_docs: "verify the discharged obligation"}',
+                '    scope: []',
                 '    is_gate: true',
                 '    task: accept after discharge',
               ].join('\n'));
@@ -347,6 +363,8 @@ describe('engine-owned unresolved stage obligations', () => {
             '  - id: terminal_writer',
             '    role: builder',
             '    depends_on: [plan]',
+            '    dependency_reasons: {plan: "write the sole declared terminal artifact"}',
+            '    scope: [docs/explicit-terminal.md]',
             '    task: write the explicit terminal artifact',
           ].join('\n'));
           return result('planned terminal writer');
@@ -354,7 +372,11 @@ describe('engine-owned unresolved stage obligations', () => {
         expect(opts.stageId).toBe('terminal_writer');
         mkdirSync(join(projectDir, 'docs'), { recursive: true });
         writeFileSync(join(projectDir, 'docs', 'explicit-terminal.md'), '# Explicitly complete\n');
-        return result('wrote the explicit terminal artifact');
+        return {
+          ...result('wrote the explicit terminal artifact'),
+          writes: ['docs/explicit-terminal.md'],
+          writeAttribution: 'structured',
+        };
       },
     } as Adapter;
 

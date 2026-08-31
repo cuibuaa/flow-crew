@@ -64,7 +64,12 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
   const adapter = {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]', '    task: measure this round'].join('\n'));
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
+          '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
+          '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
+          '    task: measure this round',
+        ].join('\n'));
         return ok('planned a round');
       }
       if (opts.stageId === 'measure') {
@@ -130,7 +135,11 @@ describe('loop engine — research behavior (mock-driven)', () => {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           plans++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    is_gate: true', '    task: close out'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
+            '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
+            '    is_gate: true', '    task: close out',
+          ].join('\n'));
           return ok('planned (no round)');
         }
         if (opts.stageId === 'closeout') {

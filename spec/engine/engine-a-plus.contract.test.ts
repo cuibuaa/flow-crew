@@ -211,14 +211,18 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     return created.runId;
   }
 
-  it('a gate that never passes exhausts the budget → `incomplete` (terminal, not a success, not a crash)', async () => {
+  it('a gate that never passes unchanged reaches repeated-blockage escalation (terminal, not a success, not a crash)', async () => {
     const runId = setupPlainRun();
     const agentsDir = join(projectDir, 'config', 'agents');
     // Every iteration: plan a gate stage that writes a FAILING verdict, so gates never pass.
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    is_gate: true', '    task: gate'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
+            '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
+            '    is_gate: true', '    task: gate',
+          ].join('\n'));
           return ok('planned a gate');
         }
         if (opts.stageId === 'check') {
@@ -233,7 +237,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     } as unknown as Adapter;
 
     const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('incomplete');          // A+(c): budget exhausted mid-search
+    expect(final.status).toBe('escalated');           // unchanged rejection crossed repeated-failure threshold
     expect(final.status).not.toBe('failed');          // no longer the unconditional 'failed' clobber
     expect(isTerminalRunStatus(final.status)).toBe(true);
     expect(isSuccessfulRunStatus(final.status)).toBe(false);

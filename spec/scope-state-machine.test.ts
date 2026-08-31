@@ -412,8 +412,10 @@ describe('rejected digest handoff across planner iterations', () => {
           if (planCalls === 1) {
             writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
               'stages:',
-              '  - id: work_1', '    role: coder', '    depends_on: [plan]', '    task: produce one rejected scope digest',
+              '  - id: work_1', '    role: coder', '    scope: []', '    depends_on: [plan]',
+              '    dependency_reasons: {plan: "consume the first planner iteration"}', '    task: produce one rejected scope digest',
               '  - id: review_gate_1', '    role: qa', '    scope: []', '    depends_on: [work_1]',
+              '    dependency_reasons: {work_1: "review the first iteration work"}',
               '    is_gate: true', '    task: first iteration gate',
             ].join('\n'));
           } else {
@@ -430,8 +432,10 @@ describe('rejected digest handoff across planner iterations', () => {
               '  defer:',
               ...(disposition === 'defer' ? [`    - ${observedDigest}`] : []),
               'stages:',
-              '  - id: work_2', '    role: coder', scopeLine, '    depends_on: [plan]', '    task: disposition consumer',
+              '  - id: work_2', '    role: coder', scopeLine, '    depends_on: [plan]',
+              '    dependency_reasons: {plan: "consume the second planner iteration"}', '    task: disposition consumer',
               '  - id: review_gate_2', '    role: qa', '    scope: []', '    depends_on: [work_2]',
+              '    dependency_reasons: {work_2: "review the disposition consumer"}',
               '    is_gate: true', '    task: second iteration gate',
             ].join('\n'));
           }

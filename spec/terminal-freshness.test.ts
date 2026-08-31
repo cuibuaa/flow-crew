@@ -74,9 +74,16 @@ async function run(
   return { state, guidance, adapter };
 }
 
-const dispatch = (id: string) => ({
+const dispatch = (id: string, scope = ['docs/task_summary.md']) => ({
   runFiles: {
-    'dispatch.yaml': `- id: ${id}\n  role: coder\n  prompt_template: do the work\n`,
+    'dispatch.yaml': [
+      `- id: ${id}`,
+      '  role: coder',
+      '  depends_on: [plan]',
+      '  dependency_reasons: {plan: "execute the planned terminal work"}',
+      `  scope: [${scope.join(', ')}]`,
+      '  prompt_template: do the work',
+    ].join('\n') + '\n',
   },
 });
 
@@ -118,7 +125,10 @@ terminal_states:
         ...dispatch('execute_work'),
         projectFiles: { 'docs/task_summary.md': '# written during planning, not yet earned\n' },
       },
-      execute_work: { output: 'real work completed' },
+      execute_work: {
+        output: 'real work completed',
+        projectFiles: { 'docs/task_summary.md': '# fresh result committed by terminal owner\n' },
+      },
     });
 
     expect(state.status).toBe('shipped');
@@ -150,10 +160,15 @@ ${stageGlobLine}    floor:
 # Glob freshness fixture
 `, {
       plan: {
-        ...dispatch('refresh_verdicts'),
+        ...dispatch('refresh_verdicts', ['docs/task_summary.md', ...Object.keys(verdicts)]),
         projectFiles: { 'docs/task_summary.md': '# terminal artifact written by plan\n' },
       },
-      refresh_verdicts: { projectFiles: verdicts },
+      refresh_verdicts: {
+        projectFiles: {
+          ...verdicts,
+          'docs/task_summary.md': '# terminal artifact committed after fresh stage evidence\n',
+        },
+      },
     });
 
     expect(state.status).toBe('shipped');
@@ -174,7 +189,7 @@ terminal_states:
 ---
 # Bug 7 regression fixture
 `, {
-      plan: dispatch('deliver'),
+      plan: dispatch('deliver', ['docs/task_summary.md', 'docs/stage_1_verdict.md']),
       deliver: {
         projectFiles: {
           'docs/task_summary.md': '# legitimate terminal result\n',

@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 12 -->
+<!-- flowcrew-skill-revision: 13 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -29,11 +29,14 @@ Run `flowcrew ship-preflight` from the source project before drafting, then run 
 `--brief docs/task_brief.md` once the draft exists. Add `--campaign <name>` only for an explicit
 campaign choice. It reports the canonical project, prior runs, campaign resolution and hygiene,
 daemon/build freshness, declared inputs and assertions, and the configuration-discovered build,
-test, and lint baseline.
+test, and lint baseline. With `--brief`, it also inventories structured output paths, their current
+entry type/size/digest, and whether the brief explicitly authorizes use of existing content.
 
 Exit 0 means those facts were gathered; it does not mean they are favorable. Invalid arguments,
 an unreadable requested brief, or a collection failure exit non-zero. Missing or unproven input
-evidence and stale code are launch blockers. Adverse history or a red baseline is information to
+evidence and stale code are launch blockers. An existing non-empty create-only output or any symlink
+at a declared output path is also a blocker; use a fresh path unless the brief explicitly declares
+the existing artifact as input or says `on_existing: update|append|replace`. Adverse history or a red baseline is information to
 understand and encode as a delta, not a result about the task's subject.
 
 The command cannot decide what prior state means. Route it deliberately:
@@ -163,6 +166,11 @@ Do not duplicate those schemas here.
 
 Declare every source input in a leading frontmatter `inputs:` block. A path in prose or a table is
 only a reference, not a declaration; declare gitignored inputs there so setup can link and verify them.
+
+Declare concrete outputs structurally in frontmatter. They are create-only by default. When existing
+content is intentionally part of the task, put that path in `inputs:` or attach an explicit
+`on_existing: update`, `append`, or `replace` disposition. Preflight, rehearsal, and setup must agree
+on the inventory before launch; a large unrelated file is not made safe by being at the requested path.
 
 The planner owns planner-created stages. Its hard rules reserve every declared terminal path for the
 status-committing final stage and give any gate that may write tests, probes, snapshots, reports, or
@@ -328,11 +336,14 @@ human wrap-up is complete, or turn a terminal status into acceptance.
   worktree; naming something the worktree already carries asks it to overwrite that copy, which
   refuses on any uncommitted difference and can pull unrelated local work into the run.
 
-Guidance is a request, not an effect. It reaches a stage on the supervisor's next tick, which may
-be after that stage has already acted, and a stage can be overruled by an earlier instruction or by
-a scope the engine enforces mechanically. Check the artifact you asked to change rather than the
-fact that you sent the message: a correction that silently did not land looks exactly like one that
-was ignored on purpose.
+Guidance is a targeted request, not an amendment to the admitted contract. It may supply a missing
+fact or explain how a brief property was violated, but it cannot replace a required property with a
+required result, invalidate a better brief-conforming result, erase a criterion, or widen scope. If
+the desired change would do any of those things, stop the run and revise/rehearse a new brief digest;
+do not smuggle the amendment through `flowcrew guide`. Guidance reaches only its named stage (or an
+explicit run-wide target) on the supervisor's next tick, which may be after that stage has acted.
+Check the addressed stage's `guidance_consumed.md` and the artifact you asked it to change rather than
+the fact that the message was sent.
 
 ### 2.2 Demand decision-grade evidence
 

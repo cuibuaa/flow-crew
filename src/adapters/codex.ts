@@ -5,6 +5,7 @@ import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 import { execWithTimeout } from './base.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
+import { CommandActivityTracker } from '../command-activity.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -360,13 +361,26 @@ export class CodexAdapter implements Adapter {
       let diagnosis: Diagnosis = { fix: 'none', friendly: '', matched: '' };
       for (;;) {
         writeCodexConfig(codexHome, effectiveRole);
-        result = await execWithTimeout('codex', args, {
-          cwd: opts.workDir,
-          timeout_ms: opts.timeout_ms,
-          liveLogPath,
-          env: { CODEX_HOME: codexHome },
-          abortSignal: opts.abortSignal,
-        });
+        const commandActivity = opts.attemptIndex !== undefined && opts.attemptStartedAt
+          ? new CommandActivityTracker({
+              runDir: opts.runDir,
+              stageId: opts.stageId,
+              attemptIndex: opts.attemptIndex,
+              attemptStartedAt: opts.attemptStartedAt,
+            })
+          : undefined;
+        try {
+          result = await execWithTimeout('codex', args, {
+            cwd: opts.workDir,
+            timeout_ms: opts.timeout_ms,
+            liveLogPath,
+            env: { CODEX_HOME: codexHome },
+            onStdout: (chunk) => commandActivity?.feed(chunk),
+            abortSignal: opts.abortSignal,
+          });
+        } finally {
+          commandActivity?.close();
+        }
         if (result.exitCode === 0) break;
         diagnosis = diagnoseAdapterFailure(result.output, result.exitCode);
         if (diagnosis.fix === 'none' || applied.has(diagnosis.fix) || applied.size >= 2) break;

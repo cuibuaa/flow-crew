@@ -3,7 +3,9 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   statSync,
@@ -72,6 +74,8 @@ export interface BriefInputVerification {
 export interface ShipInputStat {
   isDirectory(): boolean;
   isFile?(): boolean;
+  isSymbolicLink?(): boolean;
+  size?: number;
 }
 
 export interface ShipInputFileSystem {
@@ -81,6 +85,8 @@ export interface ShipInputFileSystem {
   readBytes(path: string): Uint8Array;
   readDirectory(path: string): string[];
   stat(path: string): ShipInputStat;
+  lstat?(path: string): ShipInputStat;
+  readlink?(path: string): string;
   realpath?(path: string): string;
 }
 
@@ -98,8 +104,40 @@ export const nodeShipInputFileSystem: ShipInputFileSystem = {
   readBytes: (path) => readFileSync(path),
   readDirectory: (path) => readdirSync(path),
   stat: (path) => statSync(path),
+  lstat: (path) => lstatSync(path),
+  readlink: (path) => readlinkSync(path),
   realpath: (path) => realpathSync.native(path),
 };
+
+export type BriefOutputDisposition = 'create' | 'update' | 'append' | 'replace' | 'input';
+
+export interface BriefOutputDeclaration {
+  path: string;
+  line: number;
+  source: string;
+  disposition: BriefOutputDisposition;
+  /** The declared filesystem shape. File is the fail-closed default; only an
+   * explicit directory declaration (for example `report_dir`) admits a
+   * pre-existing directory. */
+  expectedType: 'file' | 'directory';
+}
+
+export interface BriefOutputInventoryEntry extends BriefOutputDeclaration {
+  resolvedPath: string;
+  exists: boolean;
+  entryType: 'absent' | 'file' | 'directory' | 'symlink' | 'other';
+  size?: number;
+  sha256?: string;
+  symlinkTarget?: string;
+  blocking: boolean;
+  reason?: string;
+}
+
+export interface BriefOutputInventory {
+  declarations: BriefOutputDeclaration[];
+  entries: BriefOutputInventoryEntry[];
+  blocking: BriefOutputInventoryEntry[];
+}
 
 const PATH_EXTENSION = /\.(?:[cm]?[jt]sx?|py|rs|go|java|rb|php|sh|bash|ya?ml|json|jsonl|toml|md|txt|csv|tsv|parquet|db|sqlite|html|css|svg|png|jpe?g|webp|pdf|arrow)$/i;
 const INPUT_DIRECTIVE = /\b(?:input|inputs|read|reads|consume|consumes|load|loads|source|sources|dataset|datasets|fixture|fixtures|requires|required)\b/i;
@@ -922,4 +960,163 @@ export function verifyBriefInputs(
     unresolvedInputs: parsed.unresolvedInputs,
     unboundAssertions: parsed.unboundAssertions,
   };
+}
+
+function outputDisposition(value: unknown): BriefOutputDisposition {
+  if (typeof value !== 'string') return 'create';
+  const normalized = value.trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === 'update' || normalized === 'append' || normalized === 'replace') return normalized;
+  return 'create';
+}
+
+/** Extract only structurally declared output paths from frontmatter. Prose path
+ * mentions remain handled as input evidence and cannot accidentally authorize
+ * replacement of an existing output. */
+export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclaration[] {
+  const frontmatter = leadingFrontmatter(brief);
+  if (!frontmatter) return [];
+  let parsed: unknown;
+  try { parsed = parseYaml(frontmatter.yaml); } catch { return []; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  const declarations: BriefOutputDeclaration[] = [];
+  const add = (
+    raw: unknown,
+    source: string,
+    disposition: BriefOutputDisposition,
+    expectedType: BriefOutputDeclaration['expectedType'] = 'file',
+  ): void => {
+    if (typeof raw !== 'string') return;
+    const normalized = normalizedBriefInputPath(raw, true);
+    if (!normalized.path) return;
+    declarations.push({
+      path: normalized.path,
+      line: lineForPath(brief, raw),
+      source,
+      disposition,
+      expectedType,
+    });
+  };
+  const collectOutputValue = (
+    value: unknown,
+    source: string,
+    inheritedDisposition: BriefOutputDisposition,
+    inheritedType: BriefOutputDeclaration['expectedType'] = 'file',
+  ): void => {
+    if (typeof value === 'string') {
+      add(value, source, inheritedDisposition, inheritedType);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectOutputValue(item, source, inheritedDisposition, inheritedType);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const record = value as Record<string, unknown>;
+    const disposition = outputDisposition(record.on_existing ?? record.onExisting ?? inheritedDisposition);
+    const declaredType = typeof (record.type ?? record.kind) === 'string'
+      && /^(?:dir|directory)$/i.test(String(record.type ?? record.kind).trim())
+      ? 'directory'
+      : inheritedType;
+    for (const key of ['path', 'file', 'output', 'artifact', 'result_file', 'report_file', 'report_path']) {
+      if (key in record) add(record[key], `${source}.${key}`, disposition, declaredType);
+    }
+    if ('paths' in record) collectOutputValue(record.paths, `${source}.paths`, disposition, declaredType);
+  };
+
+  const root = parsed as Record<string, unknown>;
+  const walk = (record: Record<string, unknown>, prefix: string): void => {
+    const inheritedDisposition = outputDisposition(record.on_existing ?? record.onExisting);
+    for (const [key, value] of Object.entries(record)) {
+      const source = prefix ? `${prefix}.${key}` : key;
+      if (/^(?:result_file|output_file|report_file|report_path|report_dir)$/.test(key)) {
+        add(value, source, inheritedDisposition, key === 'report_dir' ? 'directory' : 'file');
+        continue;
+      }
+      if (/^(?:outputs?|deliverables?|artifacts?)$/.test(key)) {
+        collectOutputValue(value, source, inheritedDisposition);
+        continue;
+      }
+      if (key === 'terminal_states' && value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [status, terminal] of Object.entries(value as Record<string, unknown>)) {
+          collectOutputValue(terminal, `${source}.${status}`, inheritedDisposition);
+        }
+        continue;
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) walk(value as Record<string, unknown>, source);
+    }
+  };
+  walk(root, '');
+
+  const explicitInputs = new Set(parseBriefInputs(brief).references.map((reference) => reference.path));
+  const deduped = new Map<string, BriefOutputDeclaration>();
+  for (const declaration of declarations) {
+    const disposition = explicitInputs.has(declaration.path) ? 'input' : declaration.disposition;
+    const prior = deduped.get(declaration.path);
+    if (!prior || (prior.disposition === 'create' && disposition !== 'create')) {
+      deduped.set(declaration.path, { ...declaration, disposition });
+    }
+  }
+  return [...deduped.values()];
+}
+
+/** Inventory declared outputs before setup copies a worktree. A non-empty file
+ * or any symlink is closed by default: the brief must explicitly declare how
+ * existing content is consumed or updated. */
+export function inspectBriefOutputs(
+  brief: string,
+  projectRoot: string,
+  fs: ShipInputFileSystem = nodeShipInputFileSystem,
+): BriefOutputInventory {
+  const root = resolve(projectRoot);
+  const declarations = extractBriefOutputDeclarations(brief);
+  const entries = declarations.map((declaration): BriefOutputInventoryEntry => {
+    const resolvedPath = resolve(root, declaration.path);
+    if (!within(root, resolvedPath)) {
+      return { ...declaration, resolvedPath, exists: false, entryType: 'other', blocking: true, reason: 'Declared output escapes the project root' };
+    }
+    let stat: ShipInputStat | undefined;
+    try { stat = fs.lstat ? fs.lstat(resolvedPath) : fs.exists(resolvedPath) ? fs.stat(resolvedPath) : undefined; } catch { /* absent */ }
+    if (!stat) return { ...declaration, resolvedPath, exists: false, entryType: 'absent', blocking: false };
+    const symlink = stat.isSymbolicLink?.() === true;
+    const entryType: BriefOutputInventoryEntry['entryType'] = symlink
+      ? 'symlink'
+      : stat.isDirectory() ? 'directory'
+        : stat.isFile?.() === true ? 'file' : 'other';
+    const size = typeof stat.size === 'number' ? stat.size : undefined;
+    const permitted = declaration.disposition !== 'create';
+    const shapeMismatch = (declaration.expectedType === 'file' && entryType === 'directory')
+      || (declaration.expectedType === 'directory' && entryType === 'file');
+    const blocking = symlink
+      || entryType === 'other'
+      || shapeMismatch
+      || (entryType === 'file' && (size === undefined || size > 0) && !permitted);
+    let sha256: string | undefined;
+    if (entryType === 'file') {
+      try { sha256 = createHash('sha256').update(fs.readBytes(resolvedPath)).digest('hex'); } catch { /* unreadable is visible through missing digest */ }
+    }
+    let symlinkTarget: string | undefined;
+    if (symlink && fs.readlink) {
+      try { symlinkTarget = fs.readlink(resolvedPath); } catch { /* retain type */ }
+    }
+    return {
+      ...declaration,
+      resolvedPath,
+      exists: true,
+      entryType,
+      ...(size !== undefined ? { size } : {}),
+      ...(sha256 ? { sha256 } : {}),
+      ...(symlinkTarget ? { symlinkTarget } : {}),
+      blocking,
+      ...(blocking ? {
+        reason: symlink
+          ? 'Declared output is already occupied by a symlink; replacement is never implicit'
+          : shapeMismatch
+            ? `Declared ${declaration.expectedType} output is occupied by a ${entryType}`
+          : entryType === 'file'
+            ? 'Declared create-only output already contains data; add an explicit on_existing disposition or choose a fresh path'
+            : 'Declared output is occupied by an unsupported entry type',
+      } : {}),
+    };
+  });
+  return { declarations, entries, blocking: entries.filter((entry) => entry.blocking) };
 }

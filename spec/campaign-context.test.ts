@@ -326,6 +326,8 @@ class PromptCaptureAdapter implements Adapter {
         '- id: implement',
         '  role: coder',
         '  depends_on: [plan]',
+        '  dependency_reasons: {plan: "perform the newly planned implementation"}',
+        '  scope: []',
         '  prompt_template: Perform the fresh implementation.',
       ].join('\n') + '\n', 'utf-8');
     }

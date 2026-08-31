@@ -6,9 +6,9 @@
  *   Scenario A (research loop): confirm-fail must EXCLUDE the candidate and
  *   CONTINUE (fix 1a), a premature ceiling must be DEFERRED by the declared
  *   floor (fix 1b), the engine-initiated terminal must write the declared
- *   artifact path (fix 2), and a planner-authored reality check referencing
- *   the engine-consumed round_result.json must still pass at terminal time
- *   (fix 4: consumed-result restore).
+ *   artifact path (fix 2), a planner-authored reality check may rely on the
+ *   framework-owned run manifest, and the engine-consumed round_result.json
+ *   must still be restored at terminal time (fix 4).
  *
  *   Scenario B (unified terminal gate): an agent writing ship_report.md
  *   directly must be REJECTED by the confirm gate (hole 5), the run must end
@@ -89,9 +89,54 @@ async function runScenario(
   return { state, projectDir, runDirPath, readRun, readProj, allGuidance, adapter };
 }
 
-const dispatchOf = (id: string) => ({
+interface ScriptedDispatchStage {
+  id: string;
+  dependsOn?: string[];
+  condition?: string;
+  scope?: string[];
+  maxRetries?: number;
+}
+
+const DEFAULT_RESEARCH_SCOPE = [
+  'research/val/round_result.json',
+  'research/val/round_result.json.no_candidate.json',
+  'research/val/confirm_flag',
+  'research/val/stage_*_verdict.md',
+];
+
+function strictResearchDispatch(
+  stages: ScriptedDispatchStage[],
+  terminalPaths = ['research/val/ship_report.md'],
+): string {
+  const rows = stages.map((stage) => {
+    const dependencies = stage.dependsOn ?? [];
+    return {
+      id: stage.id,
+      role: 'researcher',
+      depends_on: dependencies,
+      scope: stage.scope ?? DEFAULT_RESEARCH_SCOPE,
+      dependency_reasons: Object.fromEntries(dependencies.map((dependency) => [dependency, `scripted dependency on ${dependency}`])),
+      ...(stage.condition ? { condition: stage.condition } : {}),
+      ...(stage.maxRetries !== undefined ? { max_retries: stage.maxRetries } : {}),
+      prompt_template: 'scripted stage',
+    };
+  });
+  const mandatory = stages.filter((stage) => !stage.condition).map((stage) => stage.id);
+  rows.push({
+    id: 'research_finalize',
+    role: 'researcher',
+    depends_on: mandatory,
+    scope: terminalPaths,
+    dependency_reasons: Object.fromEntries(mandatory.map((dependency) => [dependency, `terminal decision follows ${dependency}`])),
+    condition: 'research.decision != continue',
+    prompt_template: 'write only the terminal path selected by research_decision.json',
+  });
+  return JSON.stringify(rows, null, 2);
+}
+
+const dispatchOf = (id: string, terminalPaths = ['research/val/ship_report.md', 'research/val/ceiling_report.md']) => ({
   runFiles: {
-    'dispatch.yaml': `- id: ${id}\n  role: researcher\n  prompt_template: |\n    scripted stage\n`,
+    'dispatch.yaml': strictResearchDispatch([{ id }], terminalPaths),
   },
 });
 
@@ -141,12 +186,12 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
               '## Reality checks',
               '```yaml',
               'checks:',
-              '  - name: result_file_present',
+              '  - name: run_manifest_present',
               '    type: exec-script-exit-zero',
               '    params:',
               '      timeout_seconds: 30',
               '      script: |',
-              '        test -f research/val/round_result.json',
+              '        test -f research/val/run_manifest.json',
               '```',
             ].join('\n'),
           } },
@@ -160,6 +205,9 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
       measure_r3: round('r3_flat', 0.4),
       measure_r4: round('r4_flat', 0.3),
       measure_r5: round('r5_flat', 0.2),
+      research_finalize: {
+        projectFiles: { 'research/val/ceiling_report.md': '# Ceiling\npolicy-selected terminal report' },
+      },
     });
 
     // Fix 1a: the decoy was excluded, run did NOT die at round 2.
@@ -182,8 +230,9 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
     expect(existsSync(join(projectDir, 'research/val/ceiling_report.md'))).toBe(true);
     expect(state.terminalArtifact).toBe('ceiling_report.md');
 
-    // Fix 4: planner-authored check referencing the consumed round_result.json
-    // passed at terminal time (engine restored the last consumed result).
+    // Fix 4: the hard check uses the always-emitted manifest, while the direct
+    // assertion keeps covering restoration of the optional consumed result.
+    expect(existsSync(join(projectDir, 'research/val/round_result.json'))).toBe(true);
     const gate = JSON.parse(readRun('.reality-gate.json')) as { pass: boolean };
     expect(gate.pass).toBe(true);
   }, 60000);
@@ -213,67 +262,37 @@ research:
     beat: 9.0
     max_rounds: 6
 ---
-# Scenario B — direct ship_report.md must be rejected; pending stages swept
+# Scenario B — a measuring stage must not share terminal ownership
 `;
 
-describe('Scenario B: ship-bypass rejection + pending sweep (hole 5, fix 3)', () => {
-  it('agent-authored ship file is rejected by confirm; run ends non-shipped; leftover stage skipped', async () => {
-    // The floor's realness filter ignores files under MIN_STAGE_VERDICT_BYTES
-    // (40) — verdicts must carry substantive content to count.
-    const verdicts: Record<string, string> = {};
-    for (let i = 1; i <= 4; i++) {
-      verdicts[`research/val/stage_${i}_verdict.md`] = `# Verdict ${i}\n\nDirection ${i} measured via the harness; no candidate passed the gate.\n`;
-    }
-
-    const { state, readRun, allGuidance } = await runScenario(BRIEF_B, {
+describe('Scenario B: terminal-owner admission closes the ship bypass', () => {
+  it('refuses the entire DAG before a measuring stage can run with a terminal path', async () => {
+    const { state, readRun, projectDir, adapter } = await runScenario(BRIEF_B, {
       plan: [{
         runFiles: {
-          'dispatch.yaml': [
-            '- id: bait',
-            '  role: researcher',
-            '  prompt_template: |',
-            '    scripted',
-            '- id: tail',
-            '  role: researcher',
-            '  depends_on: [bait]',
-            '  prompt_template: |',
-            '    scripted',
-            '- id: never_runs',
-            '  role: researcher',
-            '  depends_on: [tail]',
-            '  prompt_template: |',
-            '    scripted',
-          ].join('\n'),
+          // `bait` and the mandatory finalizer both claim ship_report.md. The
+          // pre-change scheduler accepted this and let bait terminate the run.
+          'dispatch.yaml': strictResearchDispatch([{
+            id: 'bait',
+            scope: [...DEFAULT_RESEARCH_SCOPE, 'research/val/ship_report.md'],
+          }], ['research/val/ship_report.md', 'research/val/ceiling_report.md']),
         },
       }],
-      // The bait: writes a ship claim DIRECTLY at the declared shipped path,
-      // with a failing confirm flag — the pre-fix engine would commit 'shipped'
-      // without ever running confirm.
       bait: {
         projectFiles: {
           'research/val/ship_report.md': '# Ship!\ntrain 9.9 — mission accomplished',
           'research/val/confirm_flag': 'FAIL',
         },
       },
-      // Honest fallback the agent writes after the rejection guidance.
-      tail: {
-        projectFiles: {
-          ...verdicts,
-          'research/val/ceiling_report.md': '# Ceiling\nno candidate passed confirm',
-        },
-      },
     });
 
-    // Hole 5: never shipped; rejection recorded with the terminal-file trigger.
     expect(state.status).not.toBe('shipped');
-    expect(state.status).toBe('ceiling_hit');
-    expect(allGuidance()).toContain('shipped-confirm');
-    const confirm = JSON.parse(readRun('research_confirm.json')) as { pass: boolean; trigger?: string };
-    expect(confirm.pass).toBe(false);
-    expect(confirm.trigger).toContain('ship_report.md');
-
-    // Fix 3: the stage that never got to run was swept to 'skipped', not left pending.
-    expect(state.stages['never_runs']?.status).toBe('skipped');
+    expect(['failed', 'escalated']).toContain(state.status);
+    const admission = JSON.parse(readRun('dispatch_admission.json')) as { pass: boolean; errors: string[] };
+    expect(admission.pass).toBe(false);
+    expect(admission.errors.join('\n')).toContain('expected exactly one scoped owner');
+    expect(adapter.calls.some((call) => call.stageId === 'bait')).toBe(false);
+    expect(existsSync(join(projectDir, 'research/val/ship_report.md'))).toBe(false);
   }, 60000);
 });
 
@@ -318,6 +337,9 @@ describe('Scenario C: budget-exhausted terminal honesty (bug #7)', () => {
       measure_c3: round('c3', 0.6),   // improvement — streak resets
       measure_c4: round('c4', 0.5),   // streak 1
       measure_c5: round('c5', 0.7),   // improvement — streak resets
+      research_finalize: {
+        projectFiles: { 'research/val/ceiling_report.md': '# Ceiling\nbudget-exhausted terminal report' },
+      },
     }, /* maxIterations */ 5);
 
     expect(state.status).toBe('ceiling_hit');
@@ -360,7 +382,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
   it('parks on an agent-written request, records it durably, and does NOT finish the run', async () => {
     const inbox = await import('../src/inbox.js');
     const { state, runDirPath, projectDir } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': '- id: act\n  role: researcher\n  prompt_template: |\n    s\n' } }],
+      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
       act: REQUEST('deploy-1'),
     });
 
@@ -392,8 +414,9 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     expect(inbox.foldItems(state.runId!).get('deploy-1')?.state).toBe('approved');
 
     const resumed = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': '- id: finish\n  role: researcher\n  prompt_template: |\n    s\n' } }],
+      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'finish' }]) } }],
       finish: { projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'after_approval', result: 9.5 }) } },
+      research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\napproved result' } },
     }, 8, { projectDir, runId: state.runId! });
 
     expect(resumed.state.runId).toBe(state.runId);
@@ -407,7 +430,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
   it('first resolution wins — a second, contradictory decision cannot land', async () => {
     const inbox = await import('../src/inbox.js');
     const { state, projectDir } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': '- id: act\n  role: researcher\n  prompt_template: |\n    s\n' } }],
+      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
       act: REQUEST('race-1'),
     });
     const first = inbox.resolveRequest(projectDir, state.runId!, 'race-1', 'approve', { by: 'alice' });
@@ -428,11 +451,12 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     });
 
     const { state } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': '- id: act\n  role: researcher\n  prompt_template: |\n    s\n' } }],
+      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
       act: {
         ...REQUEST('auto-1'),
         projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'auto', result: 9.9 }) },
       },
+      research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\nauto-approved result' } },
     }, 8, { projectDir });
 
     expect(state.status).not.toBe('parked');
@@ -470,20 +494,11 @@ research:
 # Scenario E — iteration-two approval resume preserves the same DAG
 `;
 
-const ITERATION_TWO_DISPATCH = [
-  '- id: safe_before',
-  '  role: researcher',
-  '  prompt_template: safe preparation',
-  '- id: finish_after',
-  '  role: researcher',
-  '  depends_on: [approved_action]',
-  '  prompt_template: finish after approval',
-  '- id: approved_action',
-  '  role: researcher',
-  '  depends_on: [safe_before]',
-  '  prompt_template: request approval before action',
-  '',
-].join('\n');
+const ITERATION_TWO_DISPATCH = strictResearchDispatch([
+  { id: 'safe_before' },
+  { id: 'approved_action', dependsOn: ['safe_before'] },
+  { id: 'finish_after', dependsOn: ['approved_action'] },
+]);
 
 describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
   it('preserves dispatch, completed stages, prior guidance, and executes the approved action once', async () => {
@@ -492,8 +507,8 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
       plan: [
         {
           runFiles: {
-            'dispatch.yaml': '- id: round_one\n  role: researcher\n  prompt_template: first round\n',
-            'supervisor_guidance.md': 'iteration-one-guidance\n',
+            'dispatch.yaml': strictResearchDispatch([{ id: 'round_one' }]),
+            'supervisor_guidance.md': '[*]: iteration-one-guidance\n',
           },
         },
         { runFiles: { 'dispatch.yaml': ITERATION_TWO_DISPATCH } },
@@ -521,6 +536,9 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
         projectFiles: {
           'research/val/round_result.json': JSON.stringify({ label: 'after-approval', result: 9.5 }),
         },
+      },
+      research_finalize: {
+        projectFiles: { 'research/val/ship_report.md': '# Ship\nafter approved action' },
       },
     };
     const adapter = new ScriptedAdapter(script);
@@ -682,19 +700,11 @@ describe('Scenario F: daemon reconciles the same bound run after approval (C2)',
 describe('Approval request ingestion: isolated slots and failed batches (M3/L2)', () => {
   it('records every valid parallel request even when a peer fails and rejects unsafe ids', async () => {
     const inbox = await import('../src/inbox.js');
-    const dispatch = [
-      '- id: req_a',
-      '  role: researcher',
-      '  max_retries: 0',
-      '  prompt_template: first request',
-      '- id: req_b',
-      '  role: researcher',
-      '  prompt_template: second request',
-      '- id: req_bad',
-      '  role: researcher',
-      '  prompt_template: unsafe request',
-      '',
-    ].join('\n');
+    const dispatch = strictResearchDispatch([
+      { id: 'req_a', maxRetries: 0 },
+      { id: 'req_b' },
+      { id: 'req_bad' },
+    ]);
     const result = await runScenario(BRIEF_D, {
       plan: [{ runFiles: { 'dispatch.yaml': dispatch } }],
       req_a: {

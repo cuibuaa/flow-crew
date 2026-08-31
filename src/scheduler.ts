@@ -1,6 +1,6 @@
 import { readFileSync, readlinkSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
@@ -60,7 +60,7 @@ import {
   type ApprovalRisk,
 } from './inbox.js';
 import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
-import { listCheckTypes, runAllChecks } from './reality-gate/index.js';
+import { listCheckTypes, parseChecksFromMarkdown, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, ResearchPolicySchema, type ResearchRound } from './research-policy.js';
 import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
 import { summarizeContext } from './context-inventory.js';
@@ -111,6 +111,13 @@ import {
   type RealityCheckPreflightReport,
 } from './reality-check-preflight.js';
 import { readShipSetupReadyValidationBaseline } from './ship-setup-record.js';
+import { writeBriefCriteriaArtifact, type BriefCriteriaArtifact } from './brief-criteria.js';
+import {
+  appendGuidanceEnvelope,
+  RUN_WIDE_GUIDANCE_TARGET,
+} from './guidance.js';
+import { recordBlockageOccurrence } from './blockage-ledger.js';
+import { inspectTemporalResearchTests } from './temporal-test-guard.js';
 
 const log = createLogger({ name: 'scheduler' });
 const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
@@ -884,15 +891,121 @@ function writeApprovalDecision(runDirPath: string, requestId: string, decision: 
  * and this note is the human-readable breadcrumb.
  */
 function appendApprovalGuidance(runDirPath: string, requestId: string, title: string): void {
-  try {
-    const guidancePath = join(runDirPath, 'supervisor_guidance.md');
-    const marker = `[approval-parked:${requestId}]`;
-    const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-    if (prior.includes(marker)) return;
-    writeFileSync(guidancePath, prior + `\n\n${marker}\nThis run PARKED awaiting human approval for: ${title}.\n`
+  appendSchedulerGuidanceOnce(
+    runDirPath,
+    RUN_WIDE_GUIDANCE_TARGET,
+    `[approval-parked:${requestId}]`,
+    `This run PARKED awaiting human approval for: ${title}.\n`
       + `When you resume, read approvals/${requestId}.decision.json FIRST. If decision is "deny", do NOT perform the action — `
-      + `record the denial and continue with the remaining work (or write an honest terminal artifact explaining what the denial blocks).\n`, 'utf-8');
+      + 'record the denial and continue with the remaining work (or write an honest terminal artifact explaining what the denial blocks).',
+  );
+}
+
+/** Append a scheduler-authored instruction to the immutable audit ledger once.
+ * Every instruction carries an explicit target; the run-wide target is a
+ * deliberate broadcast rather than an unaddressed legacy entry. */
+function appendSchedulerGuidanceOnce(
+  runDirPath: string,
+  target: string,
+  marker: string,
+  body: string,
+  knownStageIds: readonly string[] = [],
+): void {
+  try {
+    const ledgerPath = join(runDirPath, 'supervisor_guidance.md');
+    const prior = existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf-8') : '';
+    if (prior.includes(marker)) return;
+    appendGuidanceEnvelope({
+      runDir: runDirPath,
+      target,
+      source: 'scheduler',
+      body: `${marker}\n${body}`,
+      knownStageIds,
+    });
   } catch { /* non-critical */ }
+}
+
+function observeStableBlockage(input: {
+  runDirPath: string;
+  kind: string;
+  detail: string;
+  stageId?: string;
+  evidenceDigest?: string;
+  repairDigest?: string;
+  threshold?: number;
+}): ReturnType<typeof recordBlockageOccurrence> | undefined {
+  try {
+    const observed = recordBlockageOccurrence({
+      runDir: input.runDirPath,
+      kind: input.kind,
+      detail: input.detail,
+      stageId: input.stageId,
+      evidenceDigest: input.evidenceDigest,
+      repairDigest: input.repairDigest,
+      threshold: input.threshold,
+    });
+    if (!observed.escalatedNow) return observed;
+    const signalsDir = join(input.runDirPath, 'signals');
+    mkdirSync(signalsDir, { recursive: true });
+    writeFileSync(join(signalsDir, 'repeated_blockage.json'), `${JSON.stringify({
+      version: 1,
+      ...observed.occurrence,
+      action: 'escalate',
+    }, null, 2)}\n`, 'utf-8');
+    appendSchedulerGuidanceOnce(
+      input.runDirPath,
+      RUN_WIDE_GUIDANCE_TARGET,
+      `[repeated-blockage:${observed.occurrence.fingerprint}]`,
+      `The same blockage has recurred ${observed.occurrence.consecutive} consecutive times without a state change: ${input.detail}. Stop repeating the same repair. Route the run through its declared escalation/finalizer outcome and name the external change needed.`,
+    );
+    return observed;
+  } catch { /* non-critical */ }
+  return undefined;
+}
+
+function concludeRepeatedBlockage(
+  state: StoreState,
+  ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
+): StoreState | null {
+  const signalPath = join(ctx.runDirPath, 'signals', 'repeated_blockage.json');
+  if (!existsSync(signalPath)) return null;
+  let signal: Record<string, unknown>;
+  try {
+    signal = JSON.parse(readFileSync(signalPath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (signal.action !== 'escalate') return null;
+  const detail = typeof signal.detail === 'string' ? signal.detail : 'unchanged structured blockage';
+  const consecutive = typeof signal.consecutive === 'number' ? signal.consecutive : 3;
+  const stageId = typeof signal.stageId === 'string' ? signal.stageId : undefined;
+  const reason = `Escalated after ${consecutive} consecutive observations of the same blockage${stageId ? ` at ${stageId}` : ''}: ${detail}. A different repair/evidence state or external intervention is required.`;
+  state.status = RUN_STATUS.ESCALATED;
+  state.failureReason = reason;
+  state.completedAt = new Date().toISOString();
+  markLeftoverStagesSkipped(state, reason);
+  const escalationPath = state.terminalStates?.[RUN_STATUS.ESCALATED]?.paths?.[0];
+  const terminalOwner = escalationPath ? admittedTerminalOwner(ctx.runDirPath, escalationPath) : undefined;
+  if (terminalOwner) {
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      terminalOwner,
+      `[repeated-blockage-final:${String(signal.fingerprint ?? 'unknown')}]`,
+      `${reason} The run has stopped; any resumption must write only the declared escalation evidence at ${escalationPath}.`,
+      Object.keys(state.stages),
+    );
+  }
+  writeRunState(ctx.projectDir, ctx.runId, state);
+  writeCampaignEntry(ctx.projectDir, state);
+  recordRunEvent(ctx.projectDir, ctx.runId, {
+    type: 'run_completed',
+    runId: ctx.runId,
+    timestamp: state.completedAt,
+    iteration: ctx.iteration,
+    ...(stageId ? { stageId } : {}),
+    detail: reason,
+  });
+  return state;
 }
 
 function appendApprovalRequestContract(prompt: string, runDirPath: string, stageId: string): string {
@@ -990,7 +1103,66 @@ type TerminalEvaluation =
   | { decision: 'matched'; state: StoreState; reasons: string[] }
   | { decision: 'deferred' | 'not_matched'; reasons: string[] };
 
-async function tryTerminateOnTerminalState(
+function admittedTerminalOwner(runDirPath: string, terminalPath: string): string | undefined {
+  try {
+    const admission = JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    return admission.pass ? admission.terminalOwners[terminalPath] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stageAttemptWroteProjectPath(
+  projectDir: string,
+  status: StageStatus | undefined,
+  terminalPath: string,
+): boolean {
+  if (status?.status !== STAGE_STATUS.COMPLETE) return false;
+  const attempt = status.attempts?.at(-1);
+  const writes = attempt?.writes ?? status.writes ?? status.artifacts ?? [];
+  const wanted = posix.normalize(terminalPath.replace(/\\/g, '/'));
+  return writes.some((raw) => {
+    const normalized = raw.replace(/\\/g, '/');
+    const projectRelative = isAbsolute(normalized)
+      ? relative(projectDir, normalized).replace(/\\/g, '/')
+      : normalized.replace(/^\.\//, '');
+    return posix.normalize(projectRelative) === wanted;
+  });
+}
+
+interface ResearchTerminalSelection {
+  terminalStatus: string;
+  terminalPath: string;
+}
+
+function readResearchTerminalSelection(runDirPath: string): ResearchTerminalSelection | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(runDirPath, 'research_decision.json'), 'utf-8')) as Record<string, unknown>;
+    if (parsed.decision === 'continue') return undefined;
+    if (typeof parsed.terminalStatus !== 'string' || typeof parsed.terminalPath !== 'string') return undefined;
+    return { terminalStatus: parsed.terminalStatus, terminalPath: parsed.terminalPath };
+  } catch {
+    return undefined;
+  }
+}
+
+function quarantineTerminalCandidate(runDirPath: string, sourcePath: string, label: string): string | undefined {
+  if (!existsSync(sourcePath)) return undefined;
+  const safeLabel = label.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  for (let suffix = 0; suffix < 1000; suffix += 1) {
+    const target = join(runDirPath, `${safeLabel}${suffix === 0 ? '' : `_${suffix}`}`);
+    if (existsSync(target)) continue;
+    try {
+      renameSync(sourcePath, target);
+      return target;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+export async function tryTerminateOnTerminalState(
   state: StoreState,
   ctx: TerminalEvaluationContext,
 ): Promise<TerminalEvaluation> {
@@ -999,6 +1171,71 @@ async function tryTerminateOnTerminalState(
   }
   const notMatchedReasons: string[] = [];
   const deferredReasons: string[] = [];
+  const researchSelection = state.research
+    ? readResearchTerminalSelection(ctx.runDirPath)
+    : undefined;
+  if (!researchSelection) {
+    const startedAtMs = Date.parse(state.startedAt);
+    const freshLogicalCandidates = Object.entries(state.terminalStates).flatMap(([terminalStatus, entry]) => (
+      entry.paths.flatMap((path) => {
+        const projectPath = join(ctx.projectDir, path);
+        const snapshotPath = join(ctx.runDirPath, `terminal_${path.split('/').pop()}`);
+        const sources = [projectPath, snapshotPath].filter((candidate) => {
+          try {
+            return existsSync(candidate)
+              && Number.isFinite(startedAtMs)
+              && statSync(candidate).mtimeMs >= startedAtMs;
+          } catch { return false; }
+        });
+        return sources.length > 0 ? [{ terminalStatus, path, sources }] : [];
+      })
+    ));
+    if (freshLogicalCandidates.length > 1) {
+      const evidence = createHash('sha256');
+      for (const candidate of freshLogicalCandidates.sort((left, right) => left.path.localeCompare(right.path))) {
+        evidence.update(`${candidate.terminalStatus}:${candidate.path}\n`, 'utf8');
+        try { evidence.update(readFileSync(candidate.sources[0])); } catch { evidence.update('<unreadable>', 'utf8'); }
+      }
+      const ownerIds = [...new Set(freshLogicalCandidates
+        .map((candidate) => admittedTerminalOwner(ctx.runDirPath, candidate.path))
+        .filter((owner): owner is string => Boolean(owner)))];
+      const detail = `multiple fresh terminal outcomes exist: ${freshLogicalCandidates.map((candidate) => `${candidate.terminalStatus}=${candidate.path}`).join(', ')}`;
+      const blockage = observeStableBlockage({
+        runDirPath: ctx.runDirPath,
+        kind: 'ambiguous_terminal_outcome',
+        stageId: ownerIds.length === 1 ? ownerIds[0] : undefined,
+        detail,
+        evidenceDigest: evidence.digest('hex'),
+        threshold: state.campaignTriggers?.repeatedFailureAfter,
+      });
+      if (blockage?.escalatedNow) {
+        const escalated = concludeRepeatedBlockage(state, ctx);
+        if (escalated) return { decision: 'matched', state: escalated, reasons: [] };
+      }
+      for (const candidate of freshLogicalCandidates) {
+        for (const source of candidate.sources) {
+          quarantineTerminalCandidate(
+            ctx.runDirPath,
+            source,
+            `ambiguous_terminal_${candidate.terminalStatus}_${candidate.path.split('/').pop() ?? 'artifact'}`,
+          );
+        }
+      }
+      if (ownerIds.length === 1 && state.stages[ownerIds[0]]) {
+        state.stages[ownerIds[0]] = rependStageStatus(state.stages[ownerIds[0]], 0);
+        writeStageStatus(ctx.projectDir, ctx.runId, ownerIds[0], state.stages[ownerIds[0]]);
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          ownerIds[0],
+          `[ambiguous-terminal:${blockage?.occurrence.fingerprint ?? 'unknown'}]`,
+          `Terminal output rejected: ${detail}. Choose the single path matching the outcome that actually happened and write only that path.`,
+          Object.keys(state.stages),
+        );
+        writeRunState(ctx.projectDir, ctx.runId, state);
+      }
+      return { decision: 'deferred', reasons: [detail] };
+    }
+  }
   for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
     for (const path of entry.paths) {
       // Detect the artifact at its project path, OR — if a prior detection
@@ -1025,32 +1262,80 @@ async function tryTerminateOnTerminalState(
         const reason = Number.isFinite(startedAtMs)
           ? `${path} exists but predates this run start: newest mtime ${new Date(newestMtime).toISOString()} < startedAt ${state.startedAt}`
           : `${path} exists, but run startedAt '${state.startedAt}' is invalid; freshness cannot be proven`;
-        try {
-          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-          if (!prior.includes(hintMarker)) {
-            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\nTerminal artifact rejected: ${reason}. Continue planned work and produce a fresh terminal artifact after a non-plan stage completes.\n`, 'utf-8');
-          }
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          RUN_WIDE_GUIDANCE_TARGET,
+          hintMarker,
+          `Terminal artifact rejected: ${reason}. Continue planned work and produce a fresh terminal artifact after a non-plan stage completes.`,
+        );
         log.warn({ runId: ctx.runId, terminalStatus, path, reason }, 'Terminal-state file exists but is stale — NOT terminating');
         notMatchedReasons.push(`${terminalStatus}: ${reason}`);
         continue;
       }
       const sourcePath = source.path;
-      const floorCheck = evaluateTerminalFloor(state, entry, ctx.projectDir);
+      const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
+      if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path)) {
+        const marker = `[scheduler-hint:${terminalStatus}:${path}:owner]`;
+        const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no completed-attempt write attribution for the path`;
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          admittedOwner,
+          marker,
+          `Terminal artifact rejected: ${reason}. The owner must run after its declared ancestors and write the terminal path itself.`,
+          Object.keys(state.stages),
+        );
+        log.warn({ runId: ctx.runId, terminalStatus, path, admittedOwner }, 'Terminal-state file rejected because its admitted owner did not produce it');
+        deferredReasons.push(`${terminalStatus}: ${reason}`);
+        continue;
+      }
+      if (researchSelection
+          && (researchSelection.terminalStatus !== terminalStatus || researchSelection.terminalPath !== path)) {
+        const reason = `${path} declares '${terminalStatus}', but the settled research policy selected '${researchSelection.terminalStatus}' via ${researchSelection.terminalPath}`;
+        if (sourcePath === projPath && admittedOwner) {
+          quarantineTerminalCandidate(
+            ctx.runDirPath,
+            sourcePath,
+            `wrong_terminal_${terminalStatus}_${path.split('/').pop() ?? 'artifact'}`,
+          );
+        }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          admittedOwner ?? RUN_WIDE_GUIDANCE_TARGET,
+          `[scheduler-hint:${terminalStatus}:${path}:research-selection]`,
+          `Terminal artifact rejected: ${reason}. Read research_decision.json and write only its terminalPath.`,
+          Object.keys(state.stages),
+        );
+        deferredReasons.push(`${terminalStatus}: ${reason}`);
+        continue;
+      }
+      // Research floors count settled research rounds. Reapplying the generic
+      // file-glob floor after the admitted finalizer writes would impose a
+      // second, different contract (`stage_*_verdict.md`) that the research
+      // policy never emitted and can make an already-settled ceiling impossible.
+      const floorCheck = state.research && admittedOwner && terminalStatus === RUN_STATUS.CEILING_HIT
+        ? (() => {
+            let measuredRounds = 0;
+            try {
+              const journal = JSON.parse(readFileSync(join(ctx.runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
+              measuredRounds = Array.isArray(journal.rounds) ? journal.rounds.length : 0;
+            } catch { /* missing/corrupt journal fails the floor as zero rounds */ }
+            const startedAtMs = Date.parse(state.startedAt);
+            const elapsedMinutes = Number.isFinite(startedAtMs) ? (Date.now() - startedAtMs) / 60000 : 0;
+            return evaluateResearchCeilingFloor(entry.floor, measuredRounds, elapsedMinutes);
+          })()
+        : evaluateTerminalFloor(state, entry, ctx.projectDir);
       if (!floorCheck.passed) {
         // Floor unmet — don't terminate. Write a one-time hint to
         // supervisor_guidance.md so the NEXT iteration sees a clear directive,
         // and log loudly so this isn't a silent "run completed without firing
         // hook" mystery (cf. Phase D bug #5, misplaced stage_glob).
         const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
-        try {
-          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-          if (!prior.includes(hintMarker)) {
-            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} exists but does not meet the floor for terminal status '${terminalStatus}': ${floorCheck.reason}. Continue planned work OR write escalation_note with a clear blocker plus 2-3 candidate options.\n`, 'utf-8');
-          }
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          RUN_WIDE_GUIDANCE_TARGET,
+          hintMarker,
+          `${path} exists but does not meet the floor for terminal status '${terminalStatus}': ${floorCheck.reason}. Continue planned work OR write escalation_note with a clear blocker plus 2-3 candidate options.`,
+        );
         log.warn(
           { runId: ctx.runId, terminalStatus, path, reason: floorCheck.reason, stageGlob: entry.stageGlob },
           'Terminal-state file exists but floor unmet — NOT terminating (check stage_glob / floor config)',
@@ -1063,13 +1348,12 @@ async function tryTerminateOnTerminalState(
           && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.FAILED));
       if (!hasSettledNonPlanStage) {
         const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:non-plan-complete]`;
-        try {
-          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-          if (!prior.includes(hintMarker)) {
-            writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} is fresh, but terminal status '${terminalStatus}' requires at least one non-plan stage to complete during this run (a failed non-plan stage that reached execution also counts as settled proof). Continue planned work; the plan stage alone is not proof of execution.\n`, 'utf-8');
-          }
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          RUN_WIDE_GUIDANCE_TARGET,
+          hintMarker,
+          `${path} is fresh, but terminal status '${terminalStatus}' requires at least one non-plan stage to complete during this run (a failed non-plan stage that reached execution also counts as settled proof). Continue planned work; the plan stage alone is not proof of execution.`,
+        );
         log.warn({ runId: ctx.runId, terminalStatus, path }, 'Fresh terminal-state file exists before any non-plan stage settled — NOT terminating');
         deferredReasons.push(`${terminalStatus}: ${path} is fresh, but no non-plan stage has settled as complete or failed`);
         continue;
@@ -1094,13 +1378,12 @@ async function tryTerminateOnTerminalState(
         if (!confirmReport.pass) {
           const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
           const hintMarker = `[scheduler-hint:shipped-confirm:${path}]`;
-          try {
-            const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-            const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-            if (!prior.includes(hintMarker)) {
-              writeFileSync(guidancePath, prior + `\n\n${hintMarker}\n${path} declares a ship but the brief's confirm gate REJECTED it: ${detail}. A ship claim must pass confirm — remove/replace the premature ship artifact and either continue measuring or write an honest ceiling/escalation.\n`, 'utf-8');
-            }
-          } catch { /* non-critical */ }
+          appendSchedulerGuidanceOnce(
+            ctx.runDirPath,
+            RUN_WIDE_GUIDANCE_TARGET,
+            hintMarker,
+            `${path} declares a ship but the brief's confirm gate REJECTED it: ${detail}. A ship claim must pass confirm — remove/replace the premature ship artifact and either continue measuring or write an honest ceiling/escalation.`,
+          );
           log.warn({ runId: ctx.runId, terminalStatus, path, detail }, 'Shipped terminal file REJECTED by confirm gate — NOT terminating');
           deferredReasons.push(`${terminalStatus}: ${path} was rejected by research confirm: ${detail}`);
           continue;
@@ -1121,7 +1404,16 @@ async function tryTerminateOnTerminalState(
         if (sourcePath !== snapPath) copyFileSync(sourcePath, snapPath);
       } catch { /* non-critical */ }
       const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-      if (!gate.allowed) return { decision: 'matched', state: gate.state, reasons: [] };
+      if (!gate.allowed) {
+        if (sourcePath === projPath && admittedOwner) {
+          quarantineTerminalCandidate(
+            ctx.runDirPath,
+            sourcePath,
+            `reality_rejected_${terminalStatus}_${path.split('/').pop() ?? 'terminal_candidate'}`,
+          );
+        }
+        return { decision: 'matched', state: gate.state, reasons: [] };
+      }
       writeRunState(ctx.projectDir, ctx.runId, state);
       writeCampaignEntry(ctx.projectDir, state);
       recordRunEvent(ctx.projectDir, ctx.runId, {
@@ -1269,7 +1561,7 @@ async function concludeDeclaredTerminalAtQuiescence(
  * budget (rc.stop.maxRounds) so a run can't ceiling "by being right". */
 const INTEGRITY_REJECTION_CEILING = 30;
 
-async function tryAdvanceResearch(
+export async function tryAdvanceResearch(
   state: StoreState,
   ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number; adapter: Adapter },
 ): Promise<StoreState | null> {
@@ -1277,31 +1569,114 @@ async function tryAdvanceResearch(
   if (!rc) return null;
   const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
   const resultAbs = join(ctx.projectDir, resultRel);
-  if (!existsSync(resultAbs)) return null;
+  const noCandidateAbs = `${resultAbs}.no_candidate.json`;
   // Only count a result file freshly written during this run. A result_file
   // left over from a previous run (e.g. on relaunch) would otherwise be
   // journaled as round 1 with ~0 wall time, burning a no-improvement slot
   // before the agent does any new work and forcing a premature ceiling.
   const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
+  const fresh = (path: string): boolean => {
+    try { return existsSync(path) && statSync(path).mtimeMs >= startedMs; } catch { return false; }
+  };
+  const freshResult = fresh(resultAbs);
+  const freshNoCandidate = fresh(noCandidateAbs);
+  if (!freshResult && !freshNoCandidate) return null;
+  const digestSources = (paths: readonly string[]): string => {
+    const hash = createHash('sha256');
+    for (const path of [...paths].sort()) {
+      hash.update(path === resultAbs ? resultRel : `${resultRel}.no_candidate.json`, 'utf8');
+      try { hash.update(readFileSync(path)); } catch { hash.update('<unreadable>', 'utf8'); }
+    }
+    return hash.digest('hex');
+  };
+  const rejectRoundInput = (kind: string, detail: string, sources: readonly string[]): null => {
+    const evidenceDigest = digestSources(sources);
+    try {
+      writeFileSync(join(ctx.runDirPath, 'research_round_input_error.json'), `${JSON.stringify({
+        error: detail,
+        kind,
+        resultFile: resultRel,
+        noCandidateFile: `${resultRel}.no_candidate.json`,
+        evidenceDigest,
+      }, null, 2)}\n`, 'utf-8');
+    } catch { /* non-critical */ }
+    observeStableBlockage({
+      runDirPath: ctx.runDirPath,
+      kind: 'research_round_input',
+      detail: kind,
+      evidenceDigest,
+      threshold: state.campaignTriggers?.repeatedFailureAfter,
+    });
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      RUN_WIDE_GUIDANCE_TARGET,
+      `[research-round-input:${kind}:${evidenceDigest}]`,
+      `${detail} Correct or replace the named round artifact; the framework will not invent missing fields or silently choose between conflicting files.`,
+    );
+    return null;
+  };
+  if (freshResult && freshNoCandidate) {
+    return rejectRoundInput(
+      'ambiguous_measured_and_no_candidate',
+      'Ambiguous research round: both the measured result and no-candidate sidecar are fresh.',
+      [resultAbs, noCandidateAbs],
+    );
+  }
+  const sourceAbs = freshNoCandidate ? noCandidateAbs : resultAbs;
+  let round: { label?: string; result?: number; outcome?: string; reason?: string; evidence?: unknown };
   try {
-    if (statSync(resultAbs).mtimeMs < startedMs) return null;
-  } catch { return null; }
-  let round: { label?: string; result?: number };
-  try { round = JSON.parse(readFileSync(resultAbs, 'utf-8')); } catch { return null; }
-  if (typeof round.result !== 'number') return null;
+    round = JSON.parse(readFileSync(sourceAbs, 'utf-8'));
+  } catch {
+    return rejectRoundInput('malformed_json', `Research round artifact ${sourceAbs} is not valid JSON.`, [sourceAbs]);
+  }
+  const noCandidate = freshNoCandidate;
+  if (typeof round.label !== 'string' || !round.label.trim()) {
+    return rejectRoundInput('missing_label', 'Research round artifacts require a non-empty string label.', [sourceAbs]);
+  }
+  if (noCandidate) {
+    if (round.outcome !== 'no_candidate' || typeof round.reason !== 'string' || !round.reason.trim()) {
+      return rejectRoundInput(
+        'invalid_no_candidate_shape',
+        'The no-candidate sidecar requires outcome="no_candidate", a non-empty label, and a non-empty reason.',
+        [sourceAbs],
+      );
+    }
+  } else if (typeof round.result !== 'number' || !Number.isFinite(round.result)) {
+    return rejectRoundInput('invalid_measured_result', 'A measured research result requires a finite numeric result.', [sourceAbs]);
+  }
+  const measuredResult = noCandidate ? undefined : round.result;
+  const sourceEvidenceDigest = digestSources([sourceAbs]);
 
   // Journal lives in the run dir (framework-owned, agent-unreachable).
   const journalPath = join(ctx.runDirPath, 'research_journal.json');
-  let journal: { rounds: ResearchRound[] } = { rounds: [] };
+  const journal: { rounds: ResearchRound[] } = { rounds: [] };
   if (existsSync(journalPath)) {
     try {
       const parsed = JSON.parse(readFileSync(journalPath, 'utf-8'));
       if (parsed && Array.isArray(parsed.rounds)) journal.rounds = parsed.rounds;
     } catch { /* reset on corruption */ }
   }
-  const label = (typeof round.label === 'string' && round.label) ? round.label : `round_${journal.rounds.length + 1}`;
-  // Dedupe: skip if this exact (label,result) was already journaled.
-  if (journal.rounds.some((r) => r.label === label && r.result === round.result)) return null;
+  const label = round.label.trim();
+  // A shared latest-result path is mutable, but journal labels are immutable
+  // round identities. Re-submitting an already-journaled identity is a stable
+  // blockage, not another budget-consuming round.
+  const duplicate = journal.rounds.some((r) => r.label === label);
+  if (duplicate) {
+    observeStableBlockage({
+      runDirPath: ctx.runDirPath,
+      kind: 'research_round_duplicate',
+      detail: `duplicate research round label ${label}`,
+      evidenceDigest: sourceEvidenceDigest,
+      threshold: state.campaignTriggers?.repeatedFailureAfter,
+    });
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      RUN_WIDE_GUIDANCE_TARGET,
+      `[research-round-duplicate:${label}]`,
+      `Research round label ${JSON.stringify(label)} is already journaled and is an immutable identity. Use a fresh label for a genuinely new measurement; do not rewrite an earlier round by changing the shared result file.`,
+    );
+    return null;
+  }
 
   // Integrity gates — reject rounds that look like no-ops / noise / overflow before
   // they pollute the journal. DOMAIN-AGNOSTIC: the engine has NO built-in field or
@@ -1324,22 +1699,61 @@ async function tryAdvanceResearch(
     rejData[reason] = (rejData[reason] || 0) + 1;
     const totalRej = Object.values(rejData).reduce((s, n) => s + (n || 0), 0);
     try { writeFileSync(rejPath, JSON.stringify(rejData, null, 2), 'utf-8'); } catch { /* non-critical */ }
-    try { unlinkSync(resultAbs); } catch { /* non-critical */ }
-    try {
-      const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-      const marker = `[research-integrity:${reason}:${label}=${round.result}]`;
-      const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-      if (!prior.includes(marker)) {
-        writeFileSync(guidancePath, prior + `\n\n${marker}\n${message}\n`, 'utf-8');
-      }
-    } catch { /* non-critical */ }
-    log.warn({ runId: ctx.runId, reason, label, result: round.result, total_rejections: totalRej }, 'Research round rejected by integrity gate');
+    observeStableBlockage({
+      runDirPath: ctx.runDirPath,
+      kind: 'research_integrity',
+      detail: `research integrity rejection: ${reason}`,
+      evidenceDigest: sourceEvidenceDigest,
+      threshold: state.campaignTriggers?.repeatedFailureAfter,
+    });
+    try { unlinkSync(sourceAbs); } catch { /* non-critical */ }
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      RUN_WIDE_GUIDANCE_TARGET,
+      `[research-integrity:${reason}:${label}=${measuredResult}]`,
+      message,
+    );
+    log.warn({ runId: ctx.runId, reason, label, result: measuredResult, total_rejections: totalRej }, 'Research round rejected by integrity gate');
     // Integrity-rejection budget is SEPARATE from the research round budget
     // (rc.stop.maxRounds): a run shouldn't hit "ceiling" at the same count as
     // legitimate journaled rounds just because some results tripped a gate — that
     // would let a run terminate "by being right". Use a dedicated, independent cap.
     const maxRej = Math.max(rc.stop?.maxRounds ?? 24, INTEGRITY_REJECTION_CEILING);
     if (totalRej >= maxRej) {
+      const terminalPath = state.terminalStates?.[RUN_STATUS.CEILING_HIT]?.paths?.[0];
+      const terminalOwner = terminalPath
+        ? admittedTerminalOwner(ctx.runDirPath, terminalPath)
+        : undefined;
+      if (terminalPath && terminalOwner) {
+        const terminalReason = `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})`;
+        writeFileSync(join(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
+          version: 1,
+          decision: 'stop_ceiling',
+          terminalStatus: RUN_STATUS.CEILING_HIT,
+          terminalPath,
+          terminalOwner,
+          reason: terminalReason,
+          integrityRejectionCeiling: true,
+        }, null, 2)}\n`, 'utf-8');
+        mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
+        writeFileSync(join(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+          version: 1,
+          decision: 'stop_ceiling',
+          terminalStatus: RUN_STATUS.CEILING_HIT,
+          terminalPath,
+          terminalOwner,
+          reason: terminalReason,
+        }, null, 2)}\n`, 'utf-8');
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          terminalOwner,
+          `[research-terminal-ready:integrity-${totalRej}]`,
+          `The mechanically settled research decision is stop_ceiling after ${totalRej} integrity rejections. Read research_decision.json and write exactly ${terminalPath}; do not write any other terminal path.`,
+          Object.keys(state.stages),
+        );
+        recordConfirmNotRun(ctx.runDirPath, rc.confirm, RUN_STATUS.CEILING_HIT);
+        return null;
+      }
       state.status = 'ceiling_hit';
       // FIX D — non-ship terminal: record any brief-declared confirm as not-run (observability).
       recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
@@ -1369,7 +1783,7 @@ async function tryAdvanceResearch(
   // Gate #0: output-contract — round_result must match the brief's declared research.result_schema.
   // Single-sourced: the SAME schema is injected to the planner ({result_schema}); the engine treats
   // it as an opaque JSON Schema. This is what stops plan-time checks and execute-time output drifting.
-  if (rc.resultSchema) {
+  if (rc.resultSchema && !noCandidate) {
     const schemaErrs = validateResultSchema(round, rc.resultSchema, '$');
     if (schemaErrs.length) {
       return rejectGate('schema_mismatch',
@@ -1378,44 +1792,44 @@ async function tryAdvanceResearch(
   }
 
   // Gate #1: no-op (result == baseline within tolerance) — generic; on unless disabled.
-  if (ig?.noop !== false) {
+  if (ig?.noop !== false && !noCandidate) {
     const noopEps = Math.max(1e-4, Math.abs(rc.baseline) * 1e-5);
-    if (Math.abs(round.result - rc.baseline) <= noopEps) {
+    if (Math.abs(measuredResult! - rc.baseline) <= noopEps) {
       return rejectGate('noop',
-        `Rejected '${label}' = ${round.result}: equals baseline (${rc.baseline}) within tolerance — the change did nothing (no-op/proxy). Implement a direction that genuinely alters behavior and re-measure.`);
+        `Rejected '${label}' = ${measuredResult}: equals baseline (${rc.baseline}) within tolerance — the change did nothing (no-op/proxy). Implement a direction that genuinely alters behavior and re-measure.`);
     }
   }
 
   // Gate #2: cross-run variance (result_std/|mean| too high → unstable/lucky). Generic, default 0.30.
   const stdField = (round as { result_std?: number }).result_std;
-  const meanReference = round.result;  // round.result IS the mean by convention
+  const meanReference = measuredResult;  // measured result is the mean by convention
   const maxStdRatio = ig?.maxStdRatio ?? 0.30;
-  if (typeof stdField === 'number' && Math.abs(meanReference) > 1e-6) {
-    const stdRatio = Math.abs(stdField) / Math.abs(meanReference);
+  if (!noCandidate && typeof stdField === 'number' && Math.abs(meanReference!) > 1e-6) {
+    const stdRatio = Math.abs(stdField) / Math.abs(meanReference!);
     if (stdRatio > maxStdRatio) {
       const r = await rejectGate('unstable',
-        `Rejected '${label}' = ${round.result}: result_std/mean = ${stdRatio.toFixed(2)} > ${maxStdRatio} — cross-run variance too high to trust the mean. Reduce variance (more seeds/runs) before reporting.`);
+        `Rejected '${label}' = ${measuredResult}: result_std/mean = ${stdRatio.toFixed(2)} > ${maxStdRatio} — cross-run variance too high to trust the mean. Reduce variance (more seeds/runs) before reporting.`);
       if (r) return r; else return null;
     }
   }
 
   // Gate #3: brief-declared numeric floors. The engine knows nothing about the field
   // names; a brief declares e.g. field_floors: { worst_case_score: 50 }.
-  for (const [field, min] of Object.entries(ig?.fieldFloors ?? {})) {
+  for (const [field, min] of Object.entries(noCandidate ? {} : (ig?.fieldFloors ?? {}))) {
     const v = roundFields[field];
     if (typeof v === 'number' && v < min) {
       const r = await rejectGate(`field_floor_${field}`,
-        `Rejected '${label}' = ${round.result}: ${field} = ${v} < ${min} (brief-declared floor).`);
+        `Rejected '${label}' = ${measuredResult}: ${field} = ${v} < ${min} (brief-declared floor).`);
       if (r) return r; else return null;
     }
   }
 
   // Gate #4: brief-declared "must be zero" fields, e.g. reject_if_positive: [failure_count].
-  for (const field of ig?.rejectIfPositive ?? []) {
+  for (const field of noCandidate ? [] : (ig?.rejectIfPositive ?? [])) {
     const v = roundFields[field];
     if (typeof v === 'number' && v > 0) {
       const r = await rejectGate(`nonzero_${field}`,
-        `Rejected '${label}' = ${round.result}: ${field} = ${v} > 0 (brief mandates 0 for this field).`);
+        `Rejected '${label}' = ${measuredResult}: ${field} = ${v} > 0 (brief mandates 0 for this field).`);
       if (r) return r; else return null;
     }
   }
@@ -1426,14 +1840,24 @@ async function tryAdvanceResearch(
   const baseAbs = Math.abs(rc.baseline);
   const higherIsBetter = rc.higherIsBetter !== false;
   const outlierFactor = ig?.outlierFactor ?? 5;
-  const tooGood = higherIsBetter ? round.result > baseAbs * outlierFactor : round.result < -(baseAbs * outlierFactor);
-  if (baseAbs > 1e-9 && tooGood) {
+  const tooGood = !noCandidate && (higherIsBetter
+    ? measuredResult! > baseAbs * outlierFactor
+    : measuredResult! < -(baseAbs * outlierFactor));
+  if (!noCandidate && baseAbs > 1e-9 && tooGood) {
     const r = await rejectGate('outlier_too_high',
-      `Rejected '${label}' = ${round.result}: implausibly far beyond ${outlierFactor}× baseline (${rc.baseline}) in the improving direction — likely numerical explosion, data leakage, overfit, or a units bug. Verify the calculation and reproduce before trusting.`);
+      `Rejected '${label}' = ${measuredResult}: implausibly far beyond ${outlierFactor}× baseline (${rc.baseline}) in the improving direction — likely numerical explosion, data leakage, overfit, or a units bug. Verify the calculation and reproduce before trusting.`);
     if (r) return r; else return null;
   }
 
-  journal.rounds.push({ label, result: round.result, resultStd: (round as { result_std?: number }).result_std, wallHoursCumulative: (Date.now() - startedMs) / 3600000 });
+  journal.rounds.push({
+    label,
+    outcome: noCandidate ? 'no_candidate' : 'measured',
+    ...(noCandidate
+      ? { reason: round.reason!.trim(), ...(round.evidence === undefined ? {} : { evidence: round.evidence }) }
+      : { result: measuredResult! }),
+    resultStd: (round as { result_std?: number }).result_std,
+    wallHoursCumulative: (Date.now() - startedMs) / 3600000,
+  });
   try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
   // Project-relative mirror of the round record (the journal lives in the run dir, which a
   // planner's project-relative reality check can't reach). The planner is told to reference
@@ -1449,23 +1873,30 @@ async function tryAdvanceResearch(
   try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
 
   // Consume the round result so the next iteration doesn't re-process it.
-  try { renameSync(resultAbs, join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`)); } catch { /* non-critical */ }
+  try {
+    renameSync(
+      sourceAbs,
+      join(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`),
+    );
+  } catch { /* non-critical */ }
 
-  log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: round.result, runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
+  log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
+  const roundSummary = noCandidate
+    ? `Research round '${label}' reported no acting candidate (${round.reason})`
+    : `Research round '${label}' = ${measuredResult}`;
 
   if (evalResult.decision === 'continue') {
     // Steer the next iteration: tell the agent the running-best + kept set and
     // ask for the next direction. Idempotent marker per round.
     const marker = `[research-advance:round-${journal.rounds.length}]`;
-    try {
-      const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-      const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-      if (!prior.includes(marker)) {
-        const nextRound = journal.rounds.length + 1;
-        writeFileSync(guidancePath, prior + `\n\n${marker}\nResearch round '${label}' = ${round.result} (running-best ${evalResult.runningBest}, kept: ${evalResult.keptLabels.join(', ') || 'none'}). Decision: CONTINUE.\n`
-          + `▶ START ROUND ${nextRound} — a NEW, genuinely DIFFERENT mechanism. Do NOT reuse, rename, or lightly re-tune the previous round's plan or candidate; a within-noise tweak will NOT count as an improvement (it must beat running-best by more than its standard error) and will burn the ceiling budget. Build on the kept stack, implement the new direction, then write its measured result to ${resultRel}.\n`, 'utf-8');
-      }
-    } catch { /* non-critical */ }
+    const nextRound = journal.rounds.length + 1;
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      RUN_WIDE_GUIDANCE_TARGET,
+      marker,
+      `${roundSummary} (running-best ${evalResult.runningBest}, kept: ${evalResult.keptLabels.join(', ') || 'none'}). Decision: CONTINUE.\n`
+        + `▶ START ROUND ${nextRound} — a NEW, genuinely DIFFERENT mechanism. Do NOT reuse, rename, or lightly re-tune the previous round's plan or candidate; a within-noise tweak will NOT count as an improvement (it must beat running-best by more than its standard error) and will burn the ceiling budget. Build on the kept stack, implement the new direction, then write its measured result to ${resultRel}.`,
+    );
     // Signal the outer iteration loop to re-plan the next round instead of
     // falling through to allDone completion. The signal is consumed (deleted)
     // by the outer loop when it continues, so a stuck iteration that produces
@@ -1517,14 +1948,13 @@ async function tryAdvanceResearch(
       try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       if (finalEval.decision === 'continue') {
         const marker = `[research-confirm-fail:round-${journal.rounds.length}]`;
-        try {
-          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-          if (!prior.includes(marker)) {
-            writeFileSync(guidancePath, prior + `\n\n${marker}\nRound '${label}' = ${round.result} FAILED the confirm gate: ${detail}. The candidate is UNCONFIRMED and has been excluded from the kept stack (running-best ${finalEval.runningBest}).\n`
-              + `▶ START ROUND ${journal.rounds.length + 1} — a NEW, genuinely DIFFERENT mechanism (do not re-tune the failed candidate; fix what the confirm gate named only if a distinct mechanism addresses it). Write its measured result to ${resultRel}.\n`, 'utf-8');
-          }
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          RUN_WIDE_GUIDANCE_TARGET,
+          marker,
+          `Round '${label}' = ${measuredResult} FAILED the confirm gate: ${detail}. The candidate is UNCONFIRMED and has been excluded from the kept stack (running-best ${finalEval.runningBest}).\n`
+            + `▶ START ROUND ${journal.rounds.length + 1} — a NEW, genuinely DIFFERENT mechanism (do not re-tune the failed candidate; fix what the confirm gate named only if a distinct mechanism addresses it). Write its measured result to ${resultRel}.`,
+        );
         try {
           mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
           writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, confirmFailed: label, timestamp: new Date().toISOString() }), 'utf-8');
@@ -1554,18 +1984,21 @@ async function tryAdvanceResearch(
         && (stop.maxWallHours === undefined || (elapsedMinutes / 60) < stop.maxWallHours);
       if (budgetRemains) {
         const marker = `[research-floor:round-${journal.rounds.length}]`;
-        try {
-          const guidancePath = join(ctx.runDirPath, 'supervisor_guidance.md');
-          const prior = existsSync(guidancePath) ? readFileSync(guidancePath, 'utf-8') : '';
-          if (!prior.includes(marker)) {
-            writeFileSync(guidancePath, prior + `\n\n${marker}\nA ceiling was proposed (${finalEval.reason}) but the brief's ceiling floor is unmet: ${floorCheck.reason}.\n`
-              + `▶ START ROUND ${journal.rounds.length + 1} — a NEW direction from the brief's portfolio. Write its measured result to ${resultRel}.\n`, 'utf-8');
-          }
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          ctx.runDirPath,
+          RUN_WIDE_GUIDANCE_TARGET,
+          marker,
+          `A ceiling was proposed (${finalEval.reason}) but the brief's ceiling floor is unmet: ${floorCheck.reason}.\n`
+            + `▶ START ROUND ${journal.rounds.length + 1} — a NEW direction from the brief's portfolio. Write its measured result to ${resultRel}.`,
+        );
         try {
           mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
           writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, floorDeferred: floorCheck.reason, timestamp: new Date().toISOString() }), 'utf-8');
         } catch { /* non-critical */ }
+        // The floor owns the effective decision. Leaving a durable
+        // `stop_ceiling` fact here makes the conditional finalizer eligible at
+        // the start of the next iteration, before the extra round just required.
+        finalEval.decision = 'continue';
         finalEval.reason = `${finalEval.reason} | ceiling deferred: floor unmet (${floorCheck.reason})`;
         try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
         log.warn({ runId: ctx.runId, reason: floorCheck.reason }, 'Ceiling floor unmet — NOT terminating; steering next research round');
@@ -1575,7 +2008,52 @@ async function tryAdvanceResearch(
     }
   }
 
-  state.status = terminalDecision === 'ship' ? 'shipped' : 'ceiling_hit';
+  const policyTerminalStatus = terminalDecision === 'ship' ? RUN_STATUS.SHIPPED : RUN_STATUS.CEILING_HIT;
+  const policyTerminalPath = state.terminalStates?.[policyTerminalStatus]?.paths?.[0];
+  const policyTerminalOwner = policyTerminalPath
+    ? admittedTerminalOwner(ctx.runDirPath, policyTerminalPath)
+    : undefined;
+  if (policyTerminalOwner) {
+    // Dynamic runs commit terminal state through their admitted owner stage.
+    // Publish the settled policy fact, then let that conditional DAG sink write
+    // exactly one matching artifact. The terminal detector will verify its
+    // write attribution and reality checks before committing run state.
+    try {
+      writeFileSync(join(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
+        ...finalEval,
+        decision: terminalDecision,
+        terminalStatus: policyTerminalStatus,
+        terminalPath: policyTerminalPath,
+        terminalOwner: policyTerminalOwner,
+      }, null, 2)}\n`, 'utf-8');
+      mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
+      writeFileSync(join(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+        version: 1,
+        decision: terminalDecision,
+        terminalStatus: policyTerminalStatus,
+        terminalPath: policyTerminalPath,
+        terminalOwner: policyTerminalOwner,
+        reason: finalEval.reason,
+      }, null, 2)}\n`, 'utf-8');
+      const lastRound = journal.rounds.at(-1);
+      const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
+      if (lastRound?.outcome !== 'no_candidate' && !existsSync(resultAbs) && existsSync(lastConsumed)) {
+        copyFileSync(lastConsumed, resultAbs);
+      }
+    } catch { /* terminal owner will expose missing decision evidence */ }
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      policyTerminalOwner,
+      `[research-terminal-ready:${journal.rounds.length}:${terminalDecision}]`,
+      `The mechanically settled research decision is ${terminalDecision}. Read research_decision.json and write exactly the matching declared terminal artifact ${policyTerminalPath}; do not write any other terminal path.`,
+      Object.keys(state.stages),
+    );
+    return null;
+  }
+
+  // Legacy/static workflows without an admitted terminal owner retain the
+  // framework-authored terminal path for compatibility.
+  state.status = policyTerminalStatus;
   // FIX D — if confirm was declared but this is a non-ship terminal, record that it was not run
   // (the confirm gate above only writes research_confirm.json on a ship). Observability only.
   if (terminalDecision !== 'ship') recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
@@ -1602,10 +2080,56 @@ async function tryAdvanceResearch(
     const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
     if (!existsSync(resultAbs) && existsSync(lastConsumed)) copyFileSync(lastConsumed, resultAbs);
   } catch { /* non-critical */ }
+
+  // Materialize the terminal candidate before evaluating reality checks. The
+  // old order asked checks to prove an artifact that the framework only wrote
+  // after those checks passed, creating an unsatisfiable gate. These writes are
+  // candidates, not a committed terminal state; a rejected candidate is moved
+  // into the run directory for audit and removed from the live project path.
+  const reportDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
+  const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
+  const reportAbs = join(reportDir, reportName);
+  const reportBody = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
+    + `Decision: ${terminalDecision}\n`
+    + `Running-best: ${finalEval.runningBest}\n`
+    + `Baseline: ${rc.baseline}\n`
+    + `Kept directions: ${finalEval.keptLabels.join(', ') || 'none'}\n`
+    + `Reason: ${finalEval.reason}\n\n`
+    + `## Rounds\n` + journal.rounds.map((r) => r.outcome === 'no_candidate'
+      ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
+      : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n') + '\n';
+  let wroteReportCandidate = false;
+  let wroteDeclaredCandidate = false;
+  try {
+    mkdirSync(reportDir, { recursive: true });
+    if (!existsSync(reportAbs)) {
+      writeFileSync(reportAbs, reportBody, 'utf-8');
+      wroteReportCandidate = true;
+    }
+    if (declaredPath) {
+      const declaredAbs = join(ctx.projectDir, declaredPath);
+      if (!existsSync(declaredAbs)) {
+        mkdirSync(dirname(declaredAbs), { recursive: true });
+        writeFileSync(declaredAbs, `> Engine-authored terminal candidate; acceptance remains subject to the declared reality checks.\n\n${reportBody}`, 'utf-8');
+        wroteDeclaredCandidate = true;
+      }
+    }
+  } catch (error) {
+    log.warn({ runId: ctx.runId, error }, 'Could not materialize the research terminal candidate before reality verification');
+  }
   const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
   // GAP-1: write a campaign jsonl row on the reality_gate_failed downgrade too, so the
   // outer loop sees the truthful terminal status (not a silent return with no envelope).
-  if (!gate.allowed) { writeCampaignEntry(ctx.projectDir, gate.state); return gate.state; }
+  if (!gate.allowed) {
+    const quarantine = (source: string, label: string): void => {
+      if (!existsSync(source)) return;
+      try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
+    };
+    if (wroteReportCandidate) quarantine(reportAbs, reportName);
+    if (wroteDeclaredCandidate && declaredPath) quarantine(join(ctx.projectDir, declaredPath), declaredPath.split('/').pop() ?? 'terminal_candidate');
+    writeCampaignEntry(ctx.projectDir, gate.state);
+    return gate.state;
+  }
   writeRunState(ctx.projectDir, ctx.runId, state);
   writeCampaignEntry(ctx.projectDir, state);
   recordRunEvent(ctx.projectDir, ctx.runId, {
@@ -1615,30 +2139,6 @@ async function tryAdvanceResearch(
     iteration: ctx.iteration,
     detail: `Research ${terminalDecision}: ${finalEval.reason}`,
   });
-  // Write a program report (framework-owned location, in project for visibility).
-  // Use terminalDecision (not finalEval.decision) so a confirm-gate downgrade is
-  // reported as a ceiling, not a ship.
-  try {
-    const reportDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
-    mkdirSync(reportDir, { recursive: true });
-    const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
-    const body = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
-      + `Decision: ${terminalDecision}\n`
-      + `Running-best: ${finalEval.runningBest}\n`
-      + `Baseline: ${rc.baseline}\n`
-      + `Kept directions: ${finalEval.keptLabels.join(', ') || 'none'}\n`
-      + `Reason: ${finalEval.reason}\n\n`
-      + `## Rounds\n` + journal.rounds.map((r) => `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n') + '\n';
-    writeFileSync(join(reportDir, reportName), body, 'utf-8');
-    if (declaredPath) {
-      const declaredAbs = join(ctx.projectDir, declaredPath);
-      if (!existsSync(declaredAbs)) {
-        const declaredDir = declaredPath.includes('/') ? join(ctx.projectDir, declaredPath.substring(0, declaredPath.lastIndexOf('/'))) : ctx.projectDir;
-        mkdirSync(declaredDir, { recursive: true });
-        writeFileSync(declaredAbs, `> Engine-authored terminal artifact (research loop terminated the run; the declared path is part of the brief's terminal contract).\n\n${body}`, 'utf-8');
-      }
-    }
-  } catch { /* non-critical */ }
   log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: finalEval.runningBest }, 'Research loop terminated');
   await generateRunSummary(ctx.projectDir, ctx.runId, ctx.adapter).catch(() => { /* non-critical */ });
   return state;
@@ -1779,8 +2279,9 @@ const DISPATCH_SCHEMA_REMINDER = [
   '    prompt_template: |',
   '      <short, stage-specific instructions>',
   '    scope: [<project-relative file paths or globs>]',
-  '    depends_on: [<stage_ids>]   # optional',
+  '    depends_on: [<stage_ids>]   # required; [] is an explicit root',
   '    dependency_reasons: {<stage_id>: <one-sentence reason>}   # required for each dependency',
+  '    criterion_refs: [<canonical criterion IDs from brief_criteria.json>]',
   '    is_gate: true               # optional — quality gate (writes a verdict file)',
   '    retry_to: [<gate_ids>]      # optional',
 ].join('\n');
@@ -2011,15 +2512,12 @@ export interface SupervisorRejectSignal {
   reason: string;
 }
 
-/** Decision for a supervisor REJECT (FIX 2). Pure + exported for unit testing.
- * Honors a bounded reject budget so a mis-firing supervisor cannot trap a run in
- * an infinite reject loop. Generic mechanism — the engine never judges deliverable
- * quality itself (that is the supervisor's call, grounded in the brief); it only
- * mechanically re-works the named stage or, once the budget is spent, accepts and
- * proceeds. */
+/** Decision for a supervisor REJECT. A bounded budget prevents an infinite
+ * repair loop, but exhausting it can never turn rejected work into accepted
+ * work; the only safe fallback is an explicit escalation. */
 export type RejectDecision =
   | { action: 'rework'; targetStage: string; nextCount: number; reason: string }
-  | { action: 'accept'; reason: string };
+  | { action: 'escalate'; targetStage?: string; reason: string };
 
 export function decideRejectAction(
   signal: SupervisorRejectSignal,
@@ -2028,15 +2526,13 @@ export function decideRejectAction(
   maxRejects: number,
 ): RejectDecision {
   if (!resolvedTargetStage) {
-    // No stage to re-work (run-level reject with no resolvable target) — cannot
-    // mechanically force re-work, so accept and proceed (the supervisor's prose
-    // is still recorded for the operator).
-    return { action: 'accept', reason: `REJECT had no resolvable target stage; proceeding. (${signal.reason})` };
+    return { action: 'escalate', reason: `REJECT had no resolvable target stage; rejected work cannot be accepted. (${signal.reason})` };
   }
   if (rejectsUsedForStage >= maxRejects) {
     return {
-      action: 'accept',
-      reason: `REJECT budget exhausted for stage "${resolvedTargetStage}" (${maxRejects} re-work${maxRejects === 1 ? '' : 's'} already forced); accepting the deliverable to avoid an infinite reject loop. Last reason: ${signal.reason}`,
+      action: 'escalate',
+      targetStage: resolvedTargetStage,
+      reason: `REJECT budget exhausted for stage "${resolvedTargetStage}" (${maxRejects} re-work${maxRejects === 1 ? '' : 's'} already forced); rejected work remains unsatisfied. Last reason: ${signal.reason}`,
     };
   }
   return {
@@ -2054,7 +2550,9 @@ function readPendingRejectSignal(runDirPath: string): { path: string; signal: Su
   const signalsDir = join(runDirPath, 'signals');
   let entries: string[];
   try { entries = readdirSync(signalsDir); } catch { return null; }
-  const perStage = entries.filter((f) => /^reject_.+\.json$/.test(f)).sort();
+  const perStage = entries
+    .filter((file) => file !== 'reject_counts.json' && /^reject_.+\.json$/.test(file))
+    .sort();
   const pick = perStage.length > 0 ? perStage[0] : (entries.includes('reject.json') ? 'reject.json' : null);
   if (!pick) return null;
   const path = join(signalsDir, pick);
@@ -2089,7 +2587,7 @@ function writeRejectCounts(runDirPath: string, counts: Record<string, number>): 
  * false to let the run proceed (no reject pending, budget exhausted, or no
  * resolvable target). The signal is one-shot (deleted on consume).
  */
-function consumeSupervisorReject(
+export function consumeSupervisorReject(
   state: StoreState,
   sorted: StageConfig[],
   iterationDispatchedIds: string[],
@@ -2119,12 +2617,51 @@ function consumeSupervisorReject(
   const usedForStage = resolved ? (counts[resolved] ?? 0) : 0;
   const maxRejects = Math.max(0, Math.floor(Number(loadDefaults(ctx.projectDir).supervisor_max_rejects)));
   const decision = decideRejectAction(pending.signal, resolved, usedForStage, maxRejects);
+  const targetConfig = decision.targetStage
+    ? sorted.find((stage) => stage.id === decision.targetStage)
+    : undefined;
+  const rejectedEvidencePath = decision.targetStage
+    ? targetConfig?.is_gate
+      ? join(ctx.runDirPath, `verdict_${decision.targetStage}.json`)
+      : join(ctx.runDirPath, 'stages', decision.targetStage, 'output.md')
+    : pending.path;
+  let rejectedEvidenceDigest: string | undefined;
+  try {
+    rejectedEvidenceDigest = createHash('sha256').update(readFileSync(rejectedEvidencePath)).digest('hex');
+  } catch { /* absence is still represented by the structured target/cause */ }
+  const blockage = observeStableBlockage({
+    runDirPath: ctx.runDirPath,
+    kind: 'supervisor_reject',
+    stageId: decision.targetStage,
+    detail: pending.signal.reason,
+    evidenceDigest: rejectedEvidenceDigest,
+    threshold: state.campaignTriggers?.repeatedFailureAfter,
+  });
 
   // Consume the signal (one-shot) regardless of outcome.
   try { unlinkSync(pending.path); } catch { /* already gone */ }
 
-  if (decision.action === 'accept') {
-    log.info({ runId: ctx.runId, iteration: ctx.iteration, reason: decision.reason }, 'Supervisor REJECT not actioned — proceeding');
+  if (blockage?.escalatedNow) {
+    concludeRepeatedBlockage(state, ctx);
+    return false;
+  }
+
+  if (decision.action === 'escalate') {
+    state.status = RUN_STATUS.ESCALATED;
+    state.failureReason = decision.reason;
+    state.completedAt = new Date().toISOString();
+    markLeftoverStagesSkipped(state, `supervisor rejection escalated: ${decision.reason}`);
+    writeRunState(ctx.projectDir, ctx.runId, state);
+    writeCampaignEntry(ctx.projectDir, state);
+    recordRunEvent(ctx.projectDir, ctx.runId, {
+      type: 'run_completed',
+      runId: ctx.runId,
+      timestamp: state.completedAt,
+      iteration: ctx.iteration,
+      ...(decision.targetStage ? { stageId: decision.targetStage } : {}),
+      detail: decision.reason,
+    });
+    log.warn({ runId: ctx.runId, iteration: ctx.iteration, reason: decision.reason }, 'Supervisor REJECT escalated; rejected work was not accepted');
     return false;
   }
 
@@ -2139,18 +2676,74 @@ function consumeSupervisorReject(
     const m = join(ctx.runDirPath, 'stages', id, 'metric.json');
     try { if (existsSync(m)) unlinkSync(m); } catch { /* ignore */ }
   };
-  repend(decision.targetStage);
-  for (const s of sorted) {
-    if (s.is_gate && (s.depends_on ?? []).includes(decision.targetStage)) repend(s.id);
-  }
-  // Inject the rejection reason as guidance so the re-work knows what to fix.
-  try {
-    appendFileSync(
-      join(ctx.runDirPath, 'supervisor_guidance.md'),
-      `⚠️ DELIVERABLE REJECTED (supervisor REJECT) — stage "${decision.targetStage}": ${decision.reason}\nThe previous deliverable did NOT meet its declared work/criteria. Re-do this stage and produce a deliverable that actually satisfies the stated criteria; do not re-submit the same result.\n`,
-      'utf-8',
+  if (targetConfig?.is_gate) {
+    const repairStages = sorted.filter((stage) => !stage.is_gate && stage.retry_to?.includes(targetConfig.id));
+    if (repairStages.length === 0) {
+      state.status = RUN_STATUS.ESCALATED;
+      state.failureReason = `Supervisor rejected gate '${targetConfig.id}', but the admitted dispatch has no retry_to repair route: ${decision.reason}`;
+      state.completedAt = new Date().toISOString();
+      markLeftoverStagesSkipped(state, state.failureReason);
+      writeRunState(ctx.projectDir, ctx.runId, state);
+      writeCampaignEntry(ctx.projectDir, state);
+      recordRunEvent(ctx.projectDir, ctx.runId, {
+        type: 'run_completed', runId: ctx.runId, timestamp: state.completedAt,
+        iteration: ctx.iteration, stageId: targetConfig.id, detail: state.failureReason,
+      });
+      return false;
+    }
+    // Preserve the accepted gate evidence before converting the supervisor's
+    // rejection into the same authoritative pass:false fact consumed by the
+    // normal bounded retry loop.
+    const verdictPath = join(ctx.runDirPath, `verdict_${targetConfig.id}.json`);
+    const archiveDir = join(
+      ctx.runDirPath,
+      'supervisor_rejections',
+      targetConfig.id,
+      `reject_${decision.nextCount}`,
     );
-  } catch { /* non-critical */ }
+    mkdirSync(archiveDir, { recursive: true });
+    try { if (existsSync(verdictPath)) copyFileSync(verdictPath, join(archiveDir, 'verdict_before.json')); } catch { /* audit best effort */ }
+    writeFileSync(join(archiveDir, 'decision.json'), `${JSON.stringify({
+      version: 1,
+      targetStage: targetConfig.id,
+      reason: decision.reason,
+      rejectedAt: new Date().toISOString(),
+    }, null, 2)}\n`, 'utf-8');
+    writeFileSync(verdictPath, `${JSON.stringify({
+      pass: false,
+      outcome: 'repair-required',
+      reason: `Supervisor REJECT: ${decision.reason}`,
+      source: 'supervisor_reject',
+    }, null, 2)}\n`, 'utf-8');
+    for (const repair of repairStages) {
+      state.stages[repair.id] = rependStageStatus(state.stages[repair.id], 0);
+      appendSchedulerGuidanceOnce(
+        ctx.runDirPath,
+        repair.id,
+        `[supervisor-reject:${targetConfig.id}:${decision.nextCount}]`,
+        `Gate "${targetConfig.id}" was rejected by the supervisor: ${decision.reason}\nRun this admitted repair route, change the rejected evidence, and let ${targetConfig.id} re-evaluate it.`,
+        sorted.map((stage) => stage.id),
+      );
+    }
+    for (const dependentId of collectTransitiveDependents(targetConfig.id, sorted)) {
+      const dependent = sorted.find((stage) => stage.id === dependentId);
+      if (dependent && !dependent.retry_to?.includes(targetConfig.id)) repend(dependent.id);
+    }
+  } else {
+    repend(decision.targetStage);
+    for (const s of sorted) {
+      if (s.is_gate && (s.depends_on ?? []).includes(decision.targetStage)) repend(s.id);
+    }
+    // Inject the rejection reason only into the target stage's delivery.
+    appendSchedulerGuidanceOnce(
+      ctx.runDirPath,
+      decision.targetStage,
+      `[supervisor-reject:${decision.targetStage}:${decision.nextCount}]`,
+      `⚠️ DELIVERABLE REJECTED (supervisor REJECT) — stage "${decision.targetStage}": ${decision.reason}\n`
+        + 'The previous deliverable did NOT meet its declared work/criteria. Re-do this stage and produce a deliverable that actually satisfies the stated criteria; do not re-submit the same result.',
+      sorted.map((stage) => stage.id),
+    );
+  }
 
   counts[decision.targetStage] = decision.nextCount;
   writeRejectCounts(ctx.runDirPath, counts);
@@ -2217,6 +2810,43 @@ export const StageConfigSchema = z.object({
   dynamic_dispatch: z.boolean().optional().default(false),
   is_gate: z.boolean().optional().default(false),
   retry_to: z.array(z.string()).optional(),
+  /** Canonical IDs from the run-local brief_criteria.json artifact. */
+  criterion_refs: z.array(z.string()).optional().default([]),
+});
+
+const StrictDispatchedStageConfigSchema = StageConfigSchema.extend({
+  id: z.string().regex(/^[a-z][a-z0-9_]{0,19}$/, 'must be snake_case and at most 20 characters'),
+  depends_on: z.array(z.string()),
+  scope: z.array(z.string()),
+  dependency_reasons: z.record(z.string(), z.string()),
+}).superRefine((stage, context) => {
+  const dependencies = new Set(stage.depends_on);
+  const reasons = new Set(Object.keys(stage.dependency_reasons));
+  for (const dependency of dependencies) {
+    if (!stage.dependency_reasons[dependency]?.trim()) {
+      context.addIssue({
+        code: 'custom',
+        path: ['dependency_reasons', dependency],
+        message: 'must contain one non-empty reason for this depends_on edge',
+      });
+    }
+  }
+  for (const reason of reasons) {
+    if (!dependencies.has(reason)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['dependency_reasons', reason],
+        message: 'has no matching depends_on edge',
+      });
+    }
+  }
+  if (stage.is_gate && stage.retry_to?.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['retry_to'],
+      message: 'gate stages cannot declare retry_to; repairs own retry_to edges',
+    });
+  }
 });
 
 export const WorkflowConfigSchema = z.object({
@@ -2239,8 +2869,8 @@ export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
  * the historical field so an otherwise usable plan is not discarded, but strip
  * it before the stage reaches state, workflow persistence, or execution.
  */
-function parseDispatchedStageConfig(raw: unknown): StageConfig {
-  const stage = StageConfigSchema.parse(raw);
+export function parseDispatchedStageConfig(raw: unknown): StageConfig {
+  const stage = StrictDispatchedStageConfigSchema.parse(raw);
   delete stage.max_retries;
   return stage;
 }
@@ -3340,16 +3970,18 @@ export function parseDispatchBlock(
   if (!Array.isArray(items)) return [];
   const stages: StageConfig[] = [];
   const seenIds = new Set<string>();
+  let refused = false;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (!item || typeof item !== 'object') continue;
-    if (!item.id) item.id = `dispatch_${i}`;
+    if (!item || typeof item !== 'object') { refused = true; continue; }
     if (seenIds.has(item.id)) {
       log.warn({ id: item.id }, 'Duplicate stage ID in DISPATCH block, skipping');
+      refused = true;
       continue;
     }
     if (!roleRegistry.has(item.role)) {
       log.warn({ role: item.role, id: item.id }, 'Unknown role in DISPATCH block, skipping');
+      refused = true;
       continue;
     }
     try {
@@ -3360,36 +3992,20 @@ export function parseDispatchBlock(
       }
       stages.push(parseDispatchedStageConfig(item));
       seenIds.add(item.id);
-    } catch { /* non-critical */
-      log.warn({ id: item.id }, 'Invalid stage in DISPATCH block, skipping');
+    } catch (error) { /* non-critical */
+      refused = true;
+      log.warn({ id: item.id, diagnostic: formatDispatchStageSchemaFailure(error) }, 'Invalid stage in DISPATCH block');
     }
   }
-  return normalizeRetryGateRelationships(stages);
+  return refused ? [] : stages;
 }
 
-export function resolveDispatchDependencies(dispatched: StageConfig[], dispatchStageId: string): void {
-  const plannedDependents = new Set(
-    dispatched.filter((s) => s.depends_on.includes('__planned__')).map((s) => s.id),
-  );
-  const nonPlannedIds = dispatched.filter((s) => !plannedDependents.has(s.id)).map((s) => s.id);
-
-  for (const s of dispatched) {
-    s.dependency_reasons ??= {};
-    if (s.depends_on.length === 0) {
-      s.depends_on = [dispatchStageId];
-      s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
-    }
-    if (s.depends_on.includes('__planned__')) {
-      const plannedReason = s.dependency_reasons.__planned__ ?? 'Consumes the outputs of all planned work stages.';
-      s.depends_on = [...new Set(s.depends_on.filter((d) => d !== '__planned__').concat(nonPlannedIds))];
-      delete s.dependency_reasons.__planned__;
-      for (const id of nonPlannedIds) s.dependency_reasons[id] ??= plannedReason;
-      if (s.depends_on.length === 0) {
-        s.depends_on = [dispatchStageId];
-        s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
-      }
-    }
-  }
+export function resolveDispatchDependencies(dispatched: StageConfig[], _dispatchStageId: string): void {
+  // Compatibility export retained for callers compiled against older builds.
+  // Dynamic dependencies are now admitted exactly as authored; the framework
+  // no longer expands pseudo-edges or inserts planner edges behind the plan's
+  // back. Strict parsing/admission reports malformed or unknown dependencies.
+  void dispatched;
 }
 
 /** Collect all stage IDs that transitively depend on the given stage */
@@ -3421,6 +4037,351 @@ export function formatDispatchStageSchemaFailure(error: unknown): string {
     : [error instanceof Error ? error.message : String(error)];
   const omitted = error instanceof z.ZodError ? error.issues.length - issues.length : 0;
   return `invalid schema at ${issues.join('; ')}${omitted > 0 ? ` (+${omitted} more)` : ''}; fix the named fields and regenerate dispatch.yaml`;
+}
+
+interface DispatchAdmissionReport {
+  version: 1;
+  pass: boolean;
+  checkedAt: string;
+  errors: string[];
+  terminalOwners: Record<string, string>;
+  criteriaDigest?: string;
+  criterionGateRefs?: Record<string, string[]>;
+}
+
+function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
+  const path = join(runDirPath, 'brief_criteria.json');
+  if (!existsSync(path)) return undefined;
+  const parsed = JSON.parse(readFileSync(path, 'utf-8')) as BriefCriteriaArtifact;
+  if (parsed.version !== 1 || typeof parsed.briefDigest !== 'string' || !Array.isArray(parsed.criteria)) {
+    throw new Error('brief_criteria.json has an invalid shape');
+  }
+  const briefPath = join(runDirPath, 'task_brief.md');
+  if (existsSync(briefPath)) {
+    const currentDigest = createHash('sha256').update(readFileSync(briefPath, 'utf-8'), 'utf8').digest('hex');
+    if (currentDigest !== parsed.briefDigest) throw new Error('brief_criteria.json digest does not match task_brief.md');
+  }
+  return parsed;
+}
+
+function dispatchGlobRegex(raw: string): RegExp | undefined {
+  const normalized = normalizedProjectPath(raw);
+  if (!normalized) return undefined;
+  const globstarSentinel = '__FLOWCREW_GLOBSTAR__';
+  const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, globstarSentinel)
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replaceAll(globstarSentinel, '.*');
+  try { return new RegExp(`^${escaped}$`); } catch { return undefined; }
+}
+
+function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean {
+  const path = normalizedProjectPath(rawPath);
+  if (!path || !stage.scope) return false;
+  return stage.scope.some((rawScope) => {
+    const scope = parseDeclaredScope(rawScope);
+    if (scope.kind === 'exact') return scope.value === path;
+    if (scope.kind === 'tree') return scope.value === path || path.startsWith(`${scope.value}/`);
+    if (scope.kind === 'glob') return dispatchGlobRegex(rawScope)?.test(path) === true;
+    return false;
+  });
+}
+
+function transitivelyDependsOn(stageId: string, ancestorId: string, byId: ReadonlyMap<string, StageConfig>): boolean {
+  const seen = new Set<string>();
+  const queue = [...(byId.get(stageId)?.depends_on ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current === ancestorId) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    queue.push(...(byId.get(current)?.depends_on ?? []));
+  }
+  return false;
+}
+
+export function inspectDispatchAdmission(input: {
+  dispatched: StageConfig[];
+  baseStages: StageConfig[];
+  dispatchStageId: string;
+  terminalStates?: TerminalStatesConfig;
+  research?: ResearchConfig;
+  criteria?: BriefCriteriaArtifact;
+}): DispatchAdmissionReport {
+  const errors: string[] = [];
+  const all = [...input.baseStages, ...input.dispatched];
+  const byId = new Map(all.map((stage) => [stage.id, stage]));
+  const knownIds = new Set(byId.keys());
+
+  for (const stage of input.dispatched) {
+    if (input.research && stage.id === 'research') {
+      errors.push(`${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`);
+    }
+    for (const [index, scope] of (stage.scope ?? []).entries()) {
+      const parsed = parseDeclaredScope(scope);
+      if (parsed.kind === 'unknown') errors.push(`${stage.id}.scope.${index}: ${parsed.reason}`);
+    }
+    for (const dependency of stage.depends_on) {
+      if (dependency === stage.id) errors.push(`${stage.id}.depends_on: self dependency is forbidden`);
+      else if (!knownIds.has(dependency)) {
+        errors.push(`${stage.id}.depends_on: unknown stage ${JSON.stringify(dependency)}`);
+      }
+    }
+    if (stage.retry_to?.length) {
+      const retrySet = new Set(stage.retry_to);
+      for (const gateId of retrySet) {
+        const gate = byId.get(gateId);
+        if (!gate) errors.push(`${stage.id}.retry_to: unknown gate ${JSON.stringify(gateId)}`);
+        else if (gate.is_gate !== true) errors.push(`${stage.id}.retry_to: ${gateId} is not declared is_gate: true`);
+        if (!stage.depends_on.includes(gateId)) errors.push(`${stage.id}.depends_on: missing retry gate ${gateId}`);
+      }
+      const retryGateDeps = stage.depends_on.filter((dependency) => byId.get(dependency)?.is_gate === true);
+      for (const gateId of retryGateDeps) {
+        if (!retrySet.has(gateId)) errors.push(`${stage.id}.retry_to: missing gate dependency ${gateId}`);
+      }
+    }
+  }
+
+  // Refuse cycles instead of rewriting their edges.
+  for (const stage of input.dispatched) {
+    if (transitivelyDependsOn(stage.id, stage.id, byId)) errors.push(`${stage.id}.depends_on: dependency cycle detected`);
+  }
+
+  const terminalOwners: Record<string, string> = {};
+  const ownerIds = new Set<string>();
+  const terminalDeclarations = Object.entries(input.terminalStates ?? {})
+    .flatMap(([status, entry]) => entry.paths.map((path) => ({ status, path })));
+  const declaredTerminalPaths = new Set(terminalDeclarations
+    .map((entry) => normalizedProjectPath(entry.path))
+    .filter((path): path is string => Boolean(path)));
+  const declaredTerminalEvidenceGlobs = Object.values(input.terminalStates ?? {}).flatMap((entry) => {
+    if (entry.floor?.minAttemptedStages === undefined) return [];
+    if (entry.stageGlob) return [entry.stageGlob];
+    const first = entry.paths[0];
+    if (!first) return [];
+    const normalized = normalizedProjectPath(first);
+    if (!normalized) return [];
+    const directory = posix.dirname(normalized);
+    return [`${directory === '.' ? '' : `${directory}/`}stage_*_verdict.md`];
+  });
+  const declarationsByPath = new Map<string, Array<{ status: string; path: string }>>();
+  const declarationsByBasename = new Map<string, Array<{ status: string; path: string }>>();
+  for (const declaration of terminalDeclarations) {
+    const normalized = normalizedProjectPath(declaration.path) ?? declaration.path;
+    const pathRows = declarationsByPath.get(normalized) ?? [];
+    pathRows.push(declaration);
+    declarationsByPath.set(normalized, pathRows);
+    const basename = posix.basename(normalized.replace(/\\/g, '/'));
+    const basenameRows = declarationsByBasename.get(basename) ?? [];
+    basenameRows.push(declaration);
+    declarationsByBasename.set(basename, basenameRows);
+  }
+  for (const [path, declarations] of declarationsByPath) {
+    if (declarations.length > 1) {
+      errors.push(`terminal_states path ${path}: declared more than once (${declarations.map((item) => item.status).join(', ')}); one path cannot encode multiple outcomes`);
+    }
+  }
+  for (const [basename, declarations] of declarationsByBasename) {
+    const paths = [...new Set(declarations.map((item) => normalizedProjectPath(item.path) ?? item.path))];
+    if (paths.length > 1) {
+      errors.push(`terminal_states snapshot basename ${basename}: collides across ${paths.join(', ')}; terminal recovery requires unique basenames`);
+    }
+  }
+  for (const entry of Object.values(input.terminalStates ?? {})) {
+    for (const rawPath of entry.paths) {
+      const owners = input.dispatched.filter((stage) => stageScopeOwnsPath(stage, rawPath));
+      if (owners.length !== 1) {
+        errors.push(`terminal_states path ${rawPath}: expected exactly one scoped owner, found ${owners.length}${owners.length ? ` (${owners.map((stage) => stage.id).join(', ')})` : ''}`);
+        continue;
+      }
+      const owner = owners[0];
+      terminalOwners[rawPath] = owner.id;
+      ownerIds.add(owner.id);
+      if (owner.is_gate || owner.retry_to?.length) errors.push(`terminal owner ${owner.id}: must be a non-gate, non-repair stage`);
+      const nonTerminalScopes = (owner.scope ?? []).filter((scope) => {
+        const normalized = normalizedProjectPath(scope);
+        if (!normalized || declaredTerminalPaths.has(normalized)) return !normalized;
+        return !declaredTerminalEvidenceGlobs.some((glob) => {
+          const normalizedGlob = normalizedProjectPath(glob);
+          if (!normalizedGlob) return false;
+          if (normalized === normalizedGlob) return true;
+          return !/[?*]/.test(normalized) && dispatchGlobRegex(glob)?.test(normalized) === true;
+        });
+      });
+      if (nonTerminalScopes.length > 0) {
+        errors.push(`terminal owner ${owner.id}.scope: terminal finalizers may write only exact declared terminal paths or declared floor-evidence paths; remove ${nonTerminalScopes.join(', ')}`);
+      }
+      const dependents = input.dispatched.filter((stage) => stage.depends_on.includes(owner.id));
+      if (dependents.length > 0) errors.push(`terminal owner ${owner.id}: must be a DAG sink; depended on by ${dependents.map((stage) => stage.id).join(', ')}`);
+      if (input.research && owner.condition?.replace(/\s+/g, ' ').trim() !== 'research.decision != continue') {
+        errors.push(`terminal owner ${owner.id}.condition: research finalizers must use "research.decision != continue" so policy continue cannot force a terminal write`);
+      }
+      for (const required of input.dispatched) {
+        if (required.id === owner.id || required.condition?.trim() || (!required.is_gate && required.retry_to?.length)) continue;
+        if (!transitivelyDependsOn(owner.id, required.id, byId)) {
+          errors.push(`terminal owner ${owner.id}.depends_on: mandatory stage ${required.id} is not an ancestor`);
+        }
+      }
+    }
+  }
+  if (ownerIds.size > 1) errors.push(`terminal_states: all terminal paths must share one owner stage; found ${[...ownerIds].join(', ')}`);
+
+  const criteria = input.criteria?.criteria ?? [];
+  const criterionIds = new Set(criteria.map((criterion) => criterion.id));
+  for (const stage of input.dispatched) {
+    for (const ref of stage.criterion_refs ?? []) {
+      if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);
+    }
+  }
+  for (const criterion of criteria) {
+    const workers = input.dispatched.filter((stage) => !stage.is_gate && !stage.retry_to?.length && stage.criterion_refs.includes(criterion.id));
+    const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
+    if (workers.length === 0) errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
+    if (gates.length === 0) errors.push(`criterion ${criterion.id}: not assigned to a gate`);
+    else if (workers.length > 0 && !gates.some((gate) => workers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
+      errors.push(`criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`);
+    }
+  }
+
+  return {
+    version: 1,
+    pass: errors.length === 0,
+    checkedAt: new Date().toISOString(),
+    errors,
+    terminalOwners,
+    criterionGateRefs: Object.fromEntries(
+      input.dispatched
+        .filter((stage) => stage.is_gate && stage.criterion_refs.length > 0)
+        .map((stage) => [stage.id, [...stage.criterion_refs]]),
+    ),
+    ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
+  };
+}
+
+function addRealityCheckLiteralPath(value: string, out: Set<string>): void {
+  const candidate = normalizedProjectPath(value);
+  if (candidate
+      && !/[\s$<>{}|;&]/.test(value)
+      && (candidate.includes('/') || /\.[A-Za-z0-9]{1,12}$/.test(candidate))) {
+    out.add(candidate);
+  }
+}
+
+function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void {
+  // Shell scripts commonly leave simple file operands unquoted (`test -s
+  // docs/report.json`). Tokenize only literal words: quoted values are handled
+  // separately below, and anything containing expansion syntax stays dynamic.
+  for (const rawToken of script.split(/[\s;|&()<>]+/)) {
+    if (!rawToken) continue;
+    const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(.+)$/.exec(rawToken);
+    const token = (assignment?.[1] ?? rawToken)
+      .replace(/^["'`]+|["'`,:]+$/g, '');
+    if (!token
+        || !/^(?:\.\.?\/)?[A-Za-z0-9_.@%+-]+(?:\/[A-Za-z0-9_.@%+-]+)*$/.test(token)
+        || /[$*?[\]]/.test(token)
+        || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(token)) continue;
+    addRealityCheckLiteralPath(token, out);
+  }
+}
+
+function realityCheckLiteralPaths(value: unknown, out: Set<string>, field?: string): void {
+  if (typeof value === 'string') {
+    addRealityCheckLiteralPath(value, out);
+    // Exec checks carry their paths inside a script string rather than a
+    // structured `file:` field. Extract only literal quote/assignment tokens;
+    // variables, substitutions, commands, and prose remain deliberately
+    // uninterpreted so reachability never guesses a dynamic path.
+    for (const match of value.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
+      addRealityCheckLiteralPath(match[1] ?? match[2] ?? match[3] ?? '', out);
+    }
+    if (field === 'script') realityCheckScriptLiteralPaths(value, out);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) realityCheckLiteralPaths(item, out, field);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    realityCheckLiteralPaths(nested, out, key);
+  }
+}
+
+/** A hard reality check may reference an absent future artifact only when an
+ * admitted stage or framework output contract can produce it before terminal
+ * verification. */
+export function inspectRealityCheckReachability(input: {
+  markdown: string;
+  projectDir: string;
+  stages: StageConfig[];
+  terminalStates?: TerminalStatesConfig;
+  research?: ResearchConfig;
+}): string[] {
+  const allowedFrameworkPaths = new Set<string>();
+  const optionalResearchResultPath = input.research
+    ? normalizedProjectPath(input.research.resultFile ?? 'docs/research_round_result.json')
+    : undefined;
+  if (input.research) {
+    allowedFrameworkPaths.add(normalizedProjectPath(join(input.research.reportDir ?? 'docs', 'run_manifest.json')) ?? '');
+  }
+  const terminalPaths = new Set(
+    Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths)
+      .map((path) => normalizedProjectPath(path))
+      .filter((path): path is string => Boolean(path)),
+  );
+  const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
+  const terminalOwners = [...terminalPaths].flatMap((path) => {
+    const owners = input.stages.filter((stage) => stageScopeOwnsPath(stage, path));
+    return owners.length === 1 ? owners : [];
+  });
+  const errors: string[] = [];
+  for (const check of parseChecksFromMarkdown(input.markdown)) {
+    if (check.kind === 'invalid' || check.advisory === true) continue;
+    const paths = new Set<string>();
+    realityCheckLiteralPaths(check.params, paths);
+    for (const path of paths) {
+      const producers = input.stages.filter((stage) => stageScopeOwnsPath(stage, path));
+      if (optionalResearchResultPath === path) {
+        // Stage reachability cannot make this artifact mandatory: the admitted
+        // research protocol lets the same stage emit only the no-candidate
+        // sidecar. Hard checks must target the framework's always-emitted
+        // manifest instead of assuming which branch the stage will take.
+        errors.push(`reality check ${JSON.stringify(check.name)} references mutable optional result path ${path}; a valid no-candidate round writes only its sidecar, so check the framework-emitted run_manifest.json instead`);
+        continue;
+      }
+      if (allowedFrameworkPaths.has(path) || existsSync(join(input.projectDir, path))) continue;
+      if (producers.length === 0) {
+        errors.push(`reality check ${JSON.stringify(check.name)} references absent ${path}, but no admitted stage or framework emitter owns it`);
+        continue;
+      }
+      if (terminalPaths.has(path)) {
+        // The unified terminal evaluator materializes the finalizer's candidate
+        // before running hard checks. Admission still requires the path to have
+        // exactly one owner; a mere terminal declaration is not an emitter.
+        if (producers.length !== 1) {
+          errors.push(`reality check ${JSON.stringify(check.name)} references terminal path ${path}, but it has ${producers.length} admitted owners`);
+        }
+        continue;
+      }
+      if (terminalOwners.length > 0) {
+        const reachesEveryFinalizer = producers.some((producer) => terminalOwners.every((owner) => (
+          producer.id === owner.id || transitivelyDependsOn(owner.id, producer.id, byId)
+        )));
+        if (!reachesEveryFinalizer) {
+          errors.push(`reality check ${JSON.stringify(check.name)} references absent ${path}, but no producer is an ancestor of every terminal owner`);
+        }
+      } else {
+        const mandatoryProducer = producers.some((producer) => (
+          !producer.condition?.trim() && (producer.is_gate || !producer.retry_to?.length)
+        ));
+        if (!mandatoryProducer) {
+          errors.push(`reality check ${JSON.stringify(check.name)} references absent ${path}, but every producer is conditional or repair-only`);
+        }
+      }
+    }
+  }
+  return errors;
 }
 
 /**
@@ -3463,16 +4424,18 @@ function injectDispatchedStages(
   const seenIds = new Set<string>(sorted.map(s => s.id));
   for (let i = 0; i < itemList.length; i++) {
     const item = itemList[i] as Record<string, unknown> | null;
-    if (!item || typeof item !== 'object') continue;
-    if (!item.id) item.id = `dispatch_${i}`;
+    if (!item || typeof item !== 'object') {
+      skippedReasons.push(`${i}: stage item must be an object`);
+      continue;
+    }
     if (seenIds.has(item.id as string)) {
       skippedReasons.push(`${item.id}: duplicate stage ID; rename this stage to a unique ID and update its dependency references`);
-      log.warn({ id: item.id }, 'Duplicate stage ID in dispatch.yaml, skipping');
+      log.warn({ id: item.id }, 'Duplicate stage ID in dispatch.yaml; refusing the whole proposal');
       continue;
     }
     if (!roleRegistry.has(item.role as string)) {
       skippedReasons.push(`${item.id}: unknown role "${item.role}"; replace it with one of the available configured roles`);
-      log.warn({ role: item.role, id: item.id }, 'Unknown role in dispatch.yaml, skipping');
+      log.warn({ role: item.role, id: item.id }, 'Unknown role in dispatch.yaml; refusing the whole proposal');
       continue;
     }
     // Map task: to prompt_template:
@@ -3486,121 +4449,76 @@ function injectDispatchedStages(
     } catch (error) {
       const diagnostic = formatDispatchStageSchemaFailure(error);
       skippedReasons.push(`${item.id}: ${diagnostic}`);
-      log.warn({ id: item.id, diagnostic }, 'Invalid stage in dispatch.yaml, skipping; fix the named fields and regenerate the plan');
+      log.warn({ id: item.id, diagnostic }, 'Invalid stage in dispatch.yaml; refusing the whole proposal');
     }
   }
-  if (dispatched.length === 0) {
-    if (skippedReasons.length > 0) {
-      log.warn({ skippedReasons }, 'All stages in dispatch.yaml were invalid');
+  if (dispatched.length === 0 || skippedReasons.length > 0) {
+    const report: DispatchAdmissionReport = {
+      version: 1,
+      pass: false,
+      checkedAt: new Date().toISOString(),
+      errors: skippedReasons.length > 0 ? skippedReasons : ['dispatch contains no stages'],
+      terminalOwners: {},
+    };
+    writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    log.warn({ errors: report.errors }, 'Dynamic dispatch refused before any proposed stage was injected');
+    return [];
+  }
+
+  resolveDispatchDependencies(dispatched, dispatchStageId);
+  let criteria: BriefCriteriaArtifact | undefined;
+  try {
+    criteria = readBriefCriteriaForAdmission(runDirPath);
+  } catch (error) {
+    const report: DispatchAdmissionReport = {
+      version: 1,
+      pass: false,
+      checkedAt: new Date().toISOString(),
+      errors: [error instanceof Error ? error.message : String(error)],
+      terminalOwners: {},
+    };
+    writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    return [];
+  }
+  const admission = inspectDispatchAdmission({
+    dispatched,
+    baseStages: sorted,
+    dispatchStageId,
+    terminalStates: state.terminalStates,
+    research: state.research,
+    criteria,
+  });
+  if (admission.pass) {
+    const checksPath = join(runDirPath, 'reality_checks.md');
+    if (existsSync(checksPath)) {
+      const reachabilityErrors = inspectRealityCheckReachability({
+        markdown: readFileSync(checksPath, 'utf-8'),
+        projectDir,
+        stages: dispatched,
+        terminalStates: state.terminalStates,
+        research: state.research,
+      });
+      if (reachabilityErrors.length > 0) {
+        admission.pass = false;
+        admission.errors.push(...reachabilityErrors);
+      }
     }
+  }
+  writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(admission, null, 2)}\n`, 'utf-8');
+  if (!admission.pass) {
+    log.warn({ errors: admission.errors }, 'Dynamic dispatch topology refused before stage injection');
     return [];
   }
 
   applyScopePlanningDispositions(runDirPath, state.currentIteration ?? 1, items, dispatched);
 
-  resolveDispatchDependencies(dispatched, dispatchStageId);
-
-  // Validate dependencies: remove references to non-existent stages and self-references to prevent hangs
-  const allKnownIds = new Set([...sorted.map(s => s.id), ...dispatched.map(s => s.id)]);
-  const allKnownStages = new Map([...sorted, ...dispatched].map((stage) => [stage.id, stage]));
-  for (const s of dispatched) {
-    const invalid = s.depends_on.filter(d => !allKnownIds.has(d) || d === s.id);
-    if (invalid.length > 0) {
-      log.warn({ stage: s.id, invalidDeps: invalid }, 'Removing invalid depends_on references');
-      s.depends_on = s.depends_on.filter(d => allKnownIds.has(d) && d !== s.id);
-      for (const dep of invalid) delete s.dependency_reasons?.[dep];
-      if (s.depends_on.length === 0) {
-        s.depends_on = [dispatchStageId];
-        s.dependency_reasons ??= {};
-        s.dependency_reasons[dispatchStageId] = 'Framework dispatch dependency: the planner must materialize this stage before it can run.';
-      }
-    }
-    const missingReasons = s.depends_on.filter((dep) => !s.dependency_reasons?.[dep]?.trim());
-    if (missingReasons.length > 0) {
-      log.warn({ stage: s.id, missingReasons }, 'Planner omitted dependency_reasons entries; dependency retained for backward compatibility');
-    }
-    const extraReasons = Object.keys(s.dependency_reasons ?? {}).filter((dep) => !s.depends_on.includes(dep));
-    if (extraReasons.length > 0) {
-      log.warn({ stage: s.id, extraReasons }, 'Ignoring dependency_reasons entries without matching depends_on edges');
-      for (const dep of extraReasons) delete s.dependency_reasons?.[dep];
-    }
-    // Validate retry_to references
-    if (s.retry_to && s.retry_to.length > 0) {
-      // Gate stages must not also be retry targets — strip retry_to to prevent confusing behavior
-      if (s.is_gate) {
-        log.warn({ stage: s.id }, 'Gate stage has retry_to — stripping retry_to (gates evaluate, fix stages retry)');
-        s.retry_to = undefined;
-      } else {
-        const invalidRetry = s.retry_to.filter(r => !allKnownIds.has(r));
-        if (invalidRetry.length > 0) {
-          log.warn({ stage: s.id, invalidRetryTo: invalidRetry }, 'Removing invalid retry_to references');
-          s.retry_to = s.retry_to.filter(r => allKnownIds.has(r));
-          if (s.retry_to.length === 0) s.retry_to = undefined;
-        }
-        // Auto-add gate IDs to depends_on so retry_to stages wait for the gate
-        if (s.retry_to) {
-          for (const gateId of s.retry_to) {
-            const target = allKnownStages.get(gateId);
-            if (target && target.is_gate !== true) {
-              target.is_gate = true;
-              log.warn(
-                { stage: s.id, gate: gateId },
-                'retry_to target was not declared as a gate — normalizing it to a gate',
-              );
-            }
-          }
-          const missing = s.retry_to.filter(g => !s.depends_on.includes(g));
-          if (missing.length > 0) {
-            log.info({ stage: s.id, addedDeps: missing }, 'Auto-adding gate IDs to depends_on for retry_to stage');
-            s.depends_on = [...new Set([...s.depends_on, ...missing])];
-            s.dependency_reasons ??= {};
-            for (const gateId of missing) s.dependency_reasons[gateId] = 'Framework retry dependency: fixes run only after this gate reports a failure.';
-          }
-        }
-      }
-    }
-  }
-
-  // Cycle detection among dispatched stages to prevent hangs
-  {
-    const dispatchedIds = new Set(dispatched.map(s => s.id));
-    const visited = new Set<string>();
-    const inStack = new Set<string>();
-    const hasCycle = (id: string): boolean => {
-      if (inStack.has(id)) return true;
-      if (visited.has(id)) return false;
-      visited.add(id);
-      inStack.add(id);
-      const stage = dispatched.find(s => s.id === id);
-      if (stage) {
-        for (const dep of stage.depends_on) {
-          if (dispatchedIds.has(dep) && hasCycle(dep)) return true;
-        }
-      }
-      inStack.delete(id);
-      return false;
-    };
-    for (const s of dispatched) {
-      if (hasCycle(s.id)) {
-        log.warn({ stage: s.id }, 'Cycle detected in dispatched stages — breaking cycle by resetting depends_on to dispatch stage');
-        s.depends_on = [dispatchStageId];
-        s.dependency_reasons = {
-          [dispatchStageId]: 'Framework recovery dependency: cycle was removed and the stage now follows dispatch.',
-        };
-      }
-    }
-  }
-
   // Create stage directories and add to state (preserve existing status for
   // same-iteration reruns). A same-ID stage from an outer replacement is new
   // active work: its old live aliases were archived at the iteration boundary
   // and must not seed or suppress this execution.
-  let isReinjection = false;
   for (const s of dispatched) {
     mkdirSync(stageDir(projectDir, runId, s.id), { recursive: true });
-    if (state.stages[s.id]) {
-      isReinjection = true;
-    } else {
+    if (!state.stages[s.id]) {
       const pending: StageStatus = { status: STAGE_STATUS.PENDING, retries: 0 };
       if (state.stageEvidence?.some((entry) => entry.stageId === s.id)) {
         resetStageLiveAttemptAliases(projectDir, runId, s.id, pending);
@@ -3639,6 +4557,7 @@ function injectDispatchedStages(
       dynamic_dispatch: s.dynamic_dispatch || undefined,
       is_gate: s.is_gate || undefined,
       retry_to: s.retry_to?.length ? s.retry_to : undefined,
+      criterion_refs: s.criterion_refs.length ? s.criterion_refs : undefined,
     });
     writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
   } catch { /* best effort */ }
@@ -4057,6 +4976,8 @@ export function validateVerdictAgainstMetricFile(
   verdict: Record<string, unknown>,
   metric: Record<string, unknown>,
 ): string | null {
+  const metricContradiction = explicitPassContradiction(metric, 'metric.json', verdict.pass === true);
+  if (metricContradiction) return metricContradiction;
   if (metric.pass === false && verdict.pass === true) {
     // A closeout/ceiling-deliverable audit legitimately passes (the deliverable is valid)
     // while the beat-metric legitimately fails (no beat) — an honest negative is a valid
@@ -4203,6 +5124,87 @@ function writeTerminalStudyCompletionArtifacts(projectDir: string, runId: string
  * dependency readiness disables that fallback because only the producer's own
  * declared output can satisfy its edge.
  */
+const CONTRADICTORY_REJECT_OUTCOMES = new Set([
+  'fail', 'failed', 'reject', 'rejected', 'repair_required', 'requires_repair',
+  'reject_repair_required', 'rejected_repair_required',
+]);
+
+function structuredGateRejection(record: Record<string, unknown>): string | undefined {
+  if (record.repair_required === true || record.requires_repair === true) {
+    return 'repair_required=true';
+  }
+  const rawOutcome = typeof record.outcome === 'string'
+    ? record.outcome
+    : typeof record.status === 'string'
+      ? record.status
+      : undefined;
+  if (rawOutcome) {
+    const normalized = rawOutcome.trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (CONTRADICTORY_REJECT_OUTCOMES.has(normalized)) return `outcome=${rawOutcome}`;
+  }
+  const nextPhase = typeof record.nextPhase === 'string'
+    ? record.nextPhase
+    : typeof record.next_phase === 'string'
+      ? record.next_phase
+      : undefined;
+  if (nextPhase && /^(?:repair|fix|rework)(?:_|\b)/i.test(nextPhase.trim())) {
+    return `nextPhase=${nextPhase}`;
+  }
+  const reason = typeof record.reason === 'string' ? record.reason.trim() : '';
+  const explicitlyNegated = /\b(?:no|not|without)\s+(?:further\s+)?(?:repair|repairs)\s+(?:is\s+|are\s+)?required\b/i.test(reason)
+    || /\brepair\s+(?:is\s+)?not\s+required\b/i.test(reason);
+  if (!explicitlyNegated && /\b(?:repair\s+(?:is\s+)?required|requires?\s+(?:a\s+)?repair|needs?\s+(?:a\s+)?repair|must\s+be\s+repaired)\b/i.test(reason)) {
+    return `reason=${reason}`;
+  }
+  return undefined;
+}
+
+function explicitPassContradiction(
+  record: Record<string, unknown>,
+  source: 'verdict' | 'metric.json',
+  effectivePass = record.pass === true,
+): string | undefined {
+  if (!effectivePass) return undefined;
+  const rejection = structuredGateRejection(record);
+  return rejection
+    ? `Gate verdict contradiction: pass=true cannot accompany ${source} ${rejection}`
+    : undefined;
+}
+
+function validateGateCriterionEvidence(
+  base: string,
+  stageId: string,
+  verdict: Record<string, unknown>,
+): string | undefined {
+  let refs: string[] = [];
+  try {
+    const admission = JSON.parse(readFileSync(join(base, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    refs = admission.criterionGateRefs?.[stageId] ?? [];
+  } catch { /* legacy/static run without a criteria assignment */ }
+  if (refs.length === 0) return undefined;
+  const criteria = verdict.criteria;
+  if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) {
+    return `Gate criterion contract violation: missing criteria evidence map for ${refs.join(', ')}`;
+  }
+  const evidenceMap = criteria as Record<string, unknown>;
+  for (const ref of refs) {
+    const entry = evidenceMap[ref];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return `Gate criterion contract violation: missing evidence for ${ref}`;
+    }
+    const record = entry as Record<string, unknown>;
+    const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : '';
+    const evidence = typeof record.evidence === 'string' ? record.evidence.trim() : '';
+    if (!['pass', 'fail', 'judgement'].includes(status) || !evidence) {
+      return `Gate criterion contract violation: ${ref} needs status pass|fail|judgement and non-empty evidence`;
+    }
+    if (verdict.pass === true && status === 'fail') {
+      return `Gate criterion contract violation: pass=true conflicts with failed criterion ${ref}`;
+    }
+  }
+  return undefined;
+}
+
 export function readGateVerdict(
   projectDir: string,
   stageId: string,
@@ -4232,6 +5234,16 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
+  const contradiction = explicitPassContradiction(v, 'verdict');
+  if (contradiction) {
+    log.warn({ stageId, runId, contradiction }, 'Gate verdict rejected because its structured fields contradict pass=true');
+    return { pass: false, reason: contradiction };
+  }
+  const criterionViolation = validateGateCriterionEvidence(base, stageId, v);
+  if (criterionViolation) {
+    log.warn({ stageId, runId, criterionViolation }, 'Gate verdict rejected by canonical criterion coverage contract');
+    return { pass: false, reason: criterionViolation };
+  }
   if (runId && isTerminalStudyCompletionArtifact(v)) {
     writeTerminalStudyCompletionArtifacts(projectDir, runId, stageId, v);
     return { pass: true, reason: 'study_complete_without_model_success' };
@@ -4273,6 +5285,14 @@ interface GateRuntimeFacts {
     attempts: number;
     effectiveVerdict: { pass: boolean; reason?: string } | null;
   }>;
+}
+
+export function researchAdvanceEligible(input: {
+  gatesSettled: boolean;
+  stageFailed: boolean;
+  supervisorRejectPending: boolean;
+}): boolean {
+  return input.gatesSettled && !input.stageFailed && !input.supervisorRejectPending;
 }
 
 interface GateRetryDiagnosticArtifact {
@@ -4811,6 +5831,18 @@ export async function runWorkflow(
     writeRunState(projectDir, runId, state);
   }
 
+  // Criterion transport is tied to the exact admitted brief bytes and exists
+  // before a planner can emit dynamic stages.
+  try {
+    const briefPath = join(runDirPath, 'task_brief.md');
+    const exactBrief = existsSync(briefPath)
+      ? readFileSync(briefPath, 'utf-8')
+      : (taskDescription ?? '');
+    if (exactBrief) writeBriefCriteriaArtifact(runDirPath, exactBrief);
+  } catch (error) {
+    throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+
   // Claim liveness before probing siblings. In particular, a parked run remains
   // durably parked during admission, but this pid makes its resume-start window
   // visible to another concurrent launcher.
@@ -5035,7 +6067,16 @@ export async function runWorkflow(
   // research_integrity_rejections.json) in the terminal detail, so honest work the gate discarded
   // (e.g. a baseline==0 margin objective's legitimate ~0 result) is VISIBLE in the terminal report
   // rather than silently invisible. This does NOT change the noop gate's decision.
-  const finishResearchCeiling = async (state: StoreState, iterationNum: number, detail: string): Promise<StoreState> => {
+  const finishResearchCeiling = async (
+    state: StoreState,
+    iterationNum: number,
+    detail: string,
+    execution: {
+      stages: StageConfig[];
+      injectedDispatchStages: Set<string>;
+      planStageRetries: Map<string, number>;
+    },
+  ): Promise<StoreState> => {
     // Banked (journaled) measured rounds — the rounds that survived the integrity gates.
     let bankedRounds = 0;
     try {
@@ -5062,19 +6103,87 @@ export async function runWorkflow(
     const insufficientRounds = bankedRounds < requiredRounds;
 
     let terminalDetail = detail;
-    if (insufficientRounds) {
-      // Mid-search budget exhaustion with too few measured rounds for a real ceiling → `incomplete`.
-      state.status = 'incomplete';
-      state.failureReason = `${detail} (banked ${bankedRounds}/${requiredRounds} required measured rounds)`;
-    } else {
-      state.status = 'ceiling_hit';
-    }
+    const terminalStatus = insufficientRounds ? RUN_STATUS.INCOMPLETE : RUN_STATUS.CEILING_HIT;
+    const terminalFailureReason = insufficientRounds
+      ? `${detail} (banked ${bankedRounds}/${requiredRounds} required measured rounds)`
+      : undefined;
     if (totalRejected > 0) {
       const summary = Object.entries(rejections).filter(([, n]) => typeof n === 'number' && n > 0).map(([k, n]) => `${k}:${n}`).join(', ');
       terminalDetail = `${detail} | integrity-rejected rounds: ${totalRejected} (${summary})`;
     }
     // FIX D — a budget-exhaustion terminal is always non-ship; record any declared confirm as not-run.
-    recordConfirmNotRun(runDir(projectDir, runId), state.research?.confirm, state.status);
+    recordConfirmNotRun(runDir(projectDir, runId), state.research?.confirm, terminalStatus);
+    const declaredPathBE = state.terminalStates?.[terminalStatus]?.paths?.[0];
+    const admittedOwner = declaredPathBE
+      ? admittedTerminalOwner(runDirPath, declaredPathBE)
+      : undefined;
+
+    if (admittedOwner && declaredPathBE) {
+      // A dynamic research DAG has admitted exactly one terminal owner. Budget
+      // exhaustion is still a policy decision, but it must flow through that
+      // owner just like an ordinary ship/ceiling decision; otherwise the
+      // framework can bypass every mandatory ancestor at the last exit door.
+      writeFileSync(join(runDirPath, 'research_decision.json'), `${JSON.stringify({
+        version: 1,
+        decision: 'stop_ceiling',
+        terminalStatus,
+        terminalPath: declaredPathBE,
+        terminalOwner: admittedOwner,
+        reason: terminalDetail,
+        budgetExhausted: true,
+        bankedRounds,
+        requiredRounds,
+      }, null, 2)}\n`, 'utf-8');
+      mkdirSync(join(runDirPath, 'signals'), { recursive: true });
+      const readyPath = join(runDirPath, 'signals', 'research_terminal_ready.json');
+      writeFileSync(readyPath, `${JSON.stringify({
+        version: 1,
+        decision: 'stop_ceiling',
+        terminalStatus,
+        terminalPath: declaredPathBE,
+        terminalOwner: admittedOwner,
+        reason: terminalDetail,
+      }, null, 2)}\n`, 'utf-8');
+      appendSchedulerGuidanceOnce(
+        runDirPath,
+        admittedOwner,
+        `[research-terminal-ready:budget-${iterationNum}]`,
+        `The mechanically settled research decision is stop_ceiling because the iteration budget is exhausted. Read research_decision.json and write exactly ${declaredPathBE}; do not write any other terminal path.`,
+        Object.keys(state.stages),
+      );
+      const finalizer = execution.stages.find((stage) => stage.id === admittedOwner);
+      if (finalizer) {
+        state.stages[admittedOwner] = rependStageStatus(state.stages[admittedOwner], 0);
+        writeStageStatus(projectDir, runId, admittedOwner, state.stages[admittedOwner]);
+        writeRunState(projectDir, runId, state);
+        try { unlinkSync(readyPath); } catch { /* one-shot */ }
+        await executeIteration(
+          execution.stages, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+          resolvedAgentsDir, roleRegistry, execution.injectedDispatchStages, execution.planStageRetries,
+          skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
+        );
+        const finalized = readRunState(projectDir, runId);
+        if (isTerminalRunStatus(finalized.status) || isPausedRunStatus(finalized.status)) return finalized;
+        const finalizerStatus = finalized.stages[admittedOwner];
+        finalized.status = RUN_STATUS.INCOMPLETE;
+        finalized.failureReason = finalizerStatus?.status === STAGE_STATUS.FAILED
+          ? `Admitted terminal finalizer ${admittedOwner} failed after the budget-exhaustion decision: ${finalizerStatus.error ?? 'no error detail'}`
+          : `Admitted terminal finalizer ${admittedOwner} completed without writing ${declaredPathBE}`;
+        finalized.completedAt = new Date().toISOString();
+        writeRunState(projectDir, runId, finalized);
+        writeCampaignEntry(projectDir, finalized);
+        return finalized;
+      }
+      state.status = RUN_STATUS.INCOMPLETE;
+      state.failureReason = `Budget exhaustion resolved terminal owner ${admittedOwner}, but that stage was absent from the active admitted DAG.`;
+      state.completedAt = new Date().toISOString();
+      writeRunState(projectDir, runId, state);
+      writeCampaignEntry(projectDir, state);
+      return state;
+    }
+
+    state.status = terminalStatus;
+    if (terminalFailureReason) state.failureReason = terminalFailureReason;
     state.completedAt = new Date().toISOString();
     // Engine bug #7 (found by `flowcrew rehearse` on the event-drift brief): this third
     // terminal exit door committed ceiling_hit with none of the honesty treatment the
@@ -5082,36 +6191,57 @@ export async function runWorkflow(
     // brief-declared terminal artifact path was never written, terminalArtifact stayed
     // unset. Every door must honor the same contract.
     markLeftoverStagesSkipped(state, `research terminal '${state.status}' committed (budget exhausted) before this stage ran`);
-    const declaredPathBE = state.terminalStates?.[state.status]?.paths?.[0];
     if (declaredPathBE) state.terminalArtifact = declaredPathBE.split('/').pop();
-    const rg = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-    if (!rg.allowed) return rg.state;
-    writeRunState(projectDir, runId, state);
-    writeCampaignEntry(projectDir, state);
-    recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration: iterationNum, detail: terminalDetail });
+    let reportAbs: string | undefined;
+    let declaredAbs: string | undefined;
+    let wroteReportCandidate = false;
+    let wroteDeclaredCandidate = false;
     try {
       const rc2 = state.research;
       const reportDir = join(projectDir, rc2?.reportDir ?? 'docs');
       mkdirSync(reportDir, { recursive: true });
       let roundsMd = '';
       try {
-        const j2 = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: Array<{ label: string; result: number; confirmFailed?: boolean }> };
-        roundsMd = (j2.rounds ?? []).map((r) => `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n');
+        const j2 = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: ResearchRound[] };
+        roundsMd = (j2.rounds ?? []).map((r) => r.outcome === 'no_candidate'
+          ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
+          : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n');
       } catch { /* no journal */ }
       const body = `# Research ${state.status === RUN_STATUS.CEILING_HIT ? 'Ceiling' : 'Incomplete'} Report\n\n`
         + `Decision: budget-exhausted ${state.status}\n`
         + `Reason: ${terminalDetail}\n\n`
         + `## Rounds\n${roundsMd}\n`;
-      writeFileSync(join(reportDir, state.status === RUN_STATUS.CEILING_HIT ? 'program_ceiling_report.md' : 'program_incomplete_report.md'), body, 'utf-8');
+      reportAbs = join(reportDir, state.status === RUN_STATUS.CEILING_HIT ? 'program_ceiling_report.md' : 'program_incomplete_report.md');
+      if (!existsSync(reportAbs)) {
+        writeFileSync(reportAbs, body, 'utf-8');
+        wroteReportCandidate = true;
+      }
       if (declaredPathBE) {
-        const declaredAbs = join(projectDir, declaredPathBE);
+        declaredAbs = join(projectDir, declaredPathBE);
         if (!existsSync(declaredAbs)) {
           const declaredDir = declaredPathBE.includes('/') ? join(projectDir, declaredPathBE.substring(0, declaredPathBE.lastIndexOf('/'))) : projectDir;
           mkdirSync(declaredDir, { recursive: true });
-          writeFileSync(declaredAbs, `> Engine-authored terminal artifact (research budget exhausted; the declared path is part of the brief's terminal contract).\n\n${body}`, 'utf-8');
+          writeFileSync(declaredAbs, `> Engine-authored terminal candidate; acceptance remains subject to the declared reality checks.\n\n${body}`, 'utf-8');
+          wroteDeclaredCandidate = true;
         }
       }
     } catch { /* non-critical */ }
+    // Reality checks now observe the candidate they are expected to verify.
+    // A rejected candidate is retained only inside the run directory as audit
+    // evidence; it is not allowed to masquerade as committed terminal output.
+    const rg = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
+    if (!rg.allowed) {
+      const quarantine = (source: string | undefined, label: string): void => {
+        if (!source || !existsSync(source)) return;
+        try { renameSync(source, join(runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
+      };
+      if (wroteReportCandidate) quarantine(reportAbs, reportAbs?.split('/').pop() ?? 'budget_report');
+      if (wroteDeclaredCandidate) quarantine(declaredAbs, declaredPathBE?.split('/').pop() ?? 'terminal_candidate');
+      return rg.state;
+    }
+    writeRunState(projectDir, runId, state);
+    writeCampaignEntry(projectDir, state);
+    recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration: iterationNum, detail: terminalDetail });
     log.info({ runId, iteration: iterationNum, status: state.status, bankedRounds, requiredRounds, totalRejected }, 'Research run: iteration budget exhausted — policy-owned terminal (no gate-pass complete)');
     await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
     return state;
@@ -5128,6 +6258,15 @@ export async function runWorkflow(
       return state;
     }
 
+    const repeatedBlockage = concludeRepeatedBlockage(
+      state,
+      { projectDir, runId, runDirPath, iteration },
+    );
+    if (repeatedBlockage) {
+      await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+      return repeatedBlockage;
+    }
+
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
     // written by a PRIOR iteration (or present at start). Takes precedence
     // over supervisor-DONE below. Floor-unmet writes a hint and falls through.
@@ -5139,12 +6278,6 @@ export async function runWorkflow(
 
     const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
     if (terminalTop.decision === 'matched') return terminalTop.state;
-
-    // [Research advance gate, call site 1 of 2] If research mode, consume any
-    // round result written by a prior iteration, journal+evaluate, and either
-    // terminate (ship/ceiling) or steer the next round.
-    const researchTop = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
-    if (researchTop) return researchTop;
 
     // Honor supervisor DONE: if `signals/goal_met.json` exists at the top of
     // any iteration after the first, the supervisor has judged the original
@@ -5244,13 +6377,12 @@ export async function runWorkflow(
           if (sig.reason) replanReason = sig.reason;
         } catch { /* malformed; keep generic reason */ }
         try { unlinkSync(replanPath); } catch { /* already consumed */ }
-        try {
-          appendFileSync(
-            join(runDir(projectDir, runId), 'supervisor_guidance.md'),
-            `⚠️ PIVOT REQUIRED (supervisor REPLAN): ${replanReason}\nThe previous approach was judged fundamentally wrong. Plan a materially DIFFERENT approach; do not repeat the rejected direction.\n`,
-            'utf-8',
-          );
-        } catch { /* non-critical */ }
+        appendSchedulerGuidanceOnce(
+          runDir(projectDir, runId),
+          RUN_WIDE_GUIDANCE_TARGET,
+          `[supervisor-replan:iteration-${iteration}]`,
+          `⚠️ PIVOT REQUIRED (supervisor REPLAN): ${replanReason}\nThe previous approach was judged fundamentally wrong. Plan a materially DIFFERENT approach; do not repeat the rejected direction.`,
+        );
         recordRunEvent(projectDir, runId, { type: 'supervisor_replan', runId, timestamp: new Date().toISOString(), iteration, detail: replanReason });
         log.info({ runId, iteration, replanReason }, 'Supervisor REPLAN consumed; pivot hint injected for this iteration plan');
       }
@@ -5428,27 +6560,32 @@ export async function runWorkflow(
       return recoveredTerminal;
     }
 
-    // Research mode: if the advance gate processed a round and decided
-    // CONTINUE (signal present), loop to the next round. Iteration 2+ resets
-    // the dynamic-dispatch plan stage, so the planner re-runs and the agent
-    // proposes/tests the next direction. Consume the signal so a stuck round
-    // that produces no new result can't loop forever (it'll fall through to
-    // completion next time).
-    if (state.research && iteration < maxIterations) {
-      const contSignal = join(runDir(projectDir, runId), 'signals', 'research_continue.json');
-      if (existsSync(contSignal)) {
-        try { unlinkSync(contSignal); } catch { /* non-critical */ }
-        clearGateContinuationsForStages(runDirPath, sorted);
-        log.info({ runId, iteration }, 'Research advance decided CONTINUE — re-planning next round');
-        continue;
-      }
-    }
-
     // Collect dispatched stage IDs (only from stages in the current sorted pipeline, not orphans)
     const baseIds = new Set(baseStages.map(s => s.id));
     iterationDispatchedIds = sorted
       .filter(s => !baseIds.has(s.id))
       .map(s => s.id);
+
+    // A supervisor rejection is part of gate settlement, not an afterthought.
+    // Consume it before the bounded retry loop so a rejected gate is converted
+    // into a normal pass:false fact and must traverse its admitted retry_to
+    // repair route before research evidence or terminal work can advance.
+    while (consumeSupervisorReject(
+      state,
+      sorted,
+      iterationDispatchedIds,
+      { projectDir, runId, runDirPath, iteration },
+    )) {
+      await executeIteration(
+        sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
+        skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
+      );
+      state = readRunState(projectDir, runId);
+      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
+    }
+    state = readRunState(projectDir, runId);
+    if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
 
     // === INNER LOOP (retry_to) ===
     const maxInnerRetries = Math.max(0, Math.floor(Number(state.maxRetries ?? loadDefaults(projectDir).gate_retry_loops)));
@@ -5723,6 +6860,27 @@ export async function runWorkflow(
       ));
       revisitRuntimeFacts = beforeContinuation !== afterContinuation;
     }
+    const supervisorReworked = !anyFailed(state) && !isTerminalRunStatus(state.status)
+      ? consumeSupervisorReject(
+          state,
+          sorted,
+          iterationDispatchedIds,
+          { projectDir, runId, runDirPath, iteration },
+        )
+      : false;
+    if (supervisorReworked) {
+      await executeIteration(
+        sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
+        skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
+      );
+      state = readRunState(projectDir, runId);
+      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
+      revisitRuntimeFacts = true;
+    } else {
+      state = readRunState(projectDir, runId);
+      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
+    }
     }
 
     // No gate session is useful beyond this iteration's bounded repair loop.
@@ -5768,25 +6926,84 @@ export async function runWorkflow(
       detail: `iteration ${iteration} completed`,
     });
 
-    // FIX 2: before ACCEPTING any deliverable as terminal (gate-passed → complete
-    // or allDone → complete below), honor a pending supervisor REJECT. If the
-    // supervisor judged an emitted deliverable does not meet its declared work,
-    // re-pend that stage (+ its gate) and RE-RUN it WITHIN this iteration so the
-    // work is RE-DONE rather than accepted (a `continue` of the outer loop would
-    // reset the dispatched stages on the re-plan path and lose the re-work).
-    // Bounded by default_supervisor_max_rejects so a mis-firing supervisor cannot
-    // loop forever; the in-prompt guard keeps it from over-rejecting an honest
-    // negative. Re-evaluate gates after each re-work pass.
-    while (!anyFailed(state) && !isTerminalRunStatus(state.status)) {
-      const reworked = consumeSupervisorReject(state, sorted, iterationDispatchedIds, { projectDir, runId, runDirPath, iteration });
-      if (!reworked) break;
-      await executeIteration(
-        sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
-        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
-        availableSkillsList, attemptDeadlineClockFactory,
-      );
+    // A research result is not durable campaign evidence until every gate has
+    // settled green and every supervisor rejection/re-work has settled. This is
+    // the sole research-advance call site: an eager pre-gate consumer could
+    // previously bank a rejected round and move the campaign to the next one.
+    state = readRunState(projectDir, runId);
+    if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
+    const settledResearchGates = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+    if (state.research && researchAdvanceEligible({
+      gatesSettled: settledResearchGates.allPass,
+      stageFailed: anyFailed(state),
+      supervisorRejectPending: readPendingRejectSignal(runDirPath) !== null,
+    })) {
+      const researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
+      if (researchResult) return researchResult;
       state = readRunState(projectDir, runId);
-      if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return state;
+      const repeatedAfterResearch = concludeRepeatedBlockage(
+        state,
+        { projectDir, runId, runDirPath, iteration },
+      );
+      if (repeatedAfterResearch) {
+        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+        return repeatedAfterResearch;
+      }
+      const terminalReadyPath = join(runDirPath, 'signals', 'research_terminal_ready.json');
+      if (existsSync(terminalReadyPath)) {
+        let terminalOwner: string | undefined;
+        try {
+          const signal = JSON.parse(readFileSync(terminalReadyPath, 'utf-8')) as Record<string, unknown>;
+          if (typeof signal.terminalOwner === 'string') terminalOwner = signal.terminalOwner;
+        } catch { /* handled as an unresolved owner below */ }
+        const finalizer = terminalOwner ? sorted.find((stage) => stage.id === terminalOwner) : undefined;
+        if (!finalizer) {
+          state.status = RUN_STATUS.INCOMPLETE;
+          state.failureReason = 'Research policy reached a terminal decision, but its admitted terminal owner could not be resolved.';
+          state.completedAt = new Date().toISOString();
+          writeRunState(projectDir, runId, state);
+          return state;
+        }
+        state.stages[finalizer.id] = rependStageStatus(state.stages[finalizer.id], 0);
+        writeStageStatus(projectDir, runId, finalizer.id, state.stages[finalizer.id]);
+        writeRunState(projectDir, runId, state);
+        try { unlinkSync(terminalReadyPath); } catch { /* one-shot */ }
+        const finalized = await executeIteration(
+          sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents,
+          resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
+          availableSkillsList, attemptDeadlineClockFactory,
+        );
+        state = readRunState(projectDir, runId);
+        if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return state;
+        if (finalized.stages[finalizer.id]?.status === STAGE_STATUS.FAILED) {
+          observeStableBlockage({
+            runDirPath,
+            kind: 'terminal_finalizer',
+            stageId: finalizer.id,
+            detail: finalized.stages[finalizer.id]?.error ?? 'terminal finalizer failed',
+            evidenceDigest: (() => {
+              const path = join(runDirPath, 'stages', finalizer.id, 'output.md');
+              try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return undefined; }
+            })(),
+            threshold: state.campaignTriggers?.repeatedFailureAfter,
+          });
+          const repeatedFinalizer = concludeRepeatedBlockage(
+            state,
+            { projectDir, runId, runDirPath, iteration },
+          );
+          if (repeatedFinalizer) {
+            await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+            return repeatedFinalizer;
+          }
+        }
+      }
+      const contSignal = join(runDirPath, 'signals', 'research_continue.json');
+      if (existsSync(contSignal) && iteration < maxIterations) {
+        try { unlinkSync(contSignal); } catch { /* non-critical */ }
+        clearGateContinuationsForStages(runDirPath, sorted);
+        log.info({ runId, iteration }, 'Settled gates accepted the research round; re-planning the next round');
+        continue;
+      }
     }
 
     // Check if last gate passed
@@ -5838,7 +7055,12 @@ export async function runWorkflow(
           log.info({ runId, iteration }, 'Research run: gate passed but policy has not shipped/ceilinged — continuing (policy is sole terminal authority)');
           continue;
         }
-        return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
+        return await finishResearchCeiling(
+          state,
+          iteration,
+          'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
+          { stages: sorted, injectedDispatchStages, planStageRetries },
+        );
       }
       // Terminal-state already handled by the top gate + eager post-batch gate
       // (with an isTerminalStatus early-return after executeIteration), so
@@ -5910,7 +7132,12 @@ export async function runWorkflow(
           log.info({ runId, iteration }, 'Research run: no terminal from policy yet — continuing (policy is sole terminal authority)');
           continue;
         }
-        return await finishResearchCeiling(state, iteration, 'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)');
+        return await finishResearchCeiling(
+          state,
+          iteration,
+          'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
+          { stages: sorted, injectedDispatchStages, planStageRetries },
+        );
       }
       // Terminal-state already handled by the top + eager gates (see above).
       const unresolvedStageIds = guardPlainCompletionWithStageObligations(
@@ -5989,6 +7216,43 @@ export async function runWorkflow(
         gateArchiveCoordinate(iteration, innerRetriesUsed + 1),
         stableGateFacts,
       );
+      for (const evaluation of stableGateFacts.evaluations) {
+        if (evaluation.effectiveVerdict?.pass !== false) continue;
+        observeStableBlockage({
+          runDirPath,
+          kind: 'gate_rejection',
+          stageId: evaluation.id,
+          detail: evaluation.effectiveVerdict.reason ?? 'gate rejected without a reason',
+          evidenceDigest: createHash('sha256')
+            .update(JSON.stringify(evaluation.effectiveVerdict), 'utf8')
+            .digest('hex'),
+          repairDigest: (() => {
+            if (innerRetriesUsed < 1) return undefined;
+            const path = join(
+              canonicalGateRoundArtifactDir(
+                runDirPath,
+                gateArchiveCoordinate(iteration, innerRetriesUsed),
+              ),
+              'repair_diff.json',
+            );
+            try {
+              const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+              return createHash('sha256')
+                .update(JSON.stringify(parsed.files ?? []), 'utf8')
+                .digest('hex');
+            } catch { return undefined; }
+          })(),
+          threshold: state.campaignTriggers?.repeatedFailureAfter,
+        });
+      }
+      const repeatedGate = concludeRepeatedBlockage(
+        state,
+        { projectDir, runId, runDirPath, iteration },
+      );
+      if (repeatedGate) {
+        await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });
+        return repeatedGate;
+      }
     }
 
     // Max iterations reached
@@ -7171,6 +8435,7 @@ async function executeSingleStage(
       availableSkills,
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
+      criterionRefs: stage.criterion_refs,
       resumeSessionId: resumeSession?.sessionId,
       sessionOwnerStageId: resumeSession?.ownerStageId,
       preserveSession: retries === 0 && shouldPreserveSession(stage, allStages, sessionReuseEnabled),
@@ -7286,6 +8551,26 @@ async function executeIteration(
           const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, { validationBaseline });
           if (preflight.refusingFindings.length > 0) {
             writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
+            const refusalEvidence = JSON.stringify(preflight.refusingFindings.map((finding) => ({
+              code: finding.code,
+              checkIndex: finding.checkIndex,
+              checkName: finding.checkName,
+              checkType: finding.checkType,
+              evidence: finding.evidence,
+            })));
+            const blockage = observeStableBlockage({
+              runDirPath,
+              kind: 'planner_reality_preflight',
+              stageId: stage.id,
+              detail: preflight.refusingFindings.map((finding) => finding.code).sort().join(','),
+              evidenceDigest: createHash('sha256').update(refusalEvidence, 'utf8').digest('hex'),
+              threshold: state.campaignTriggers?.repeatedFailureAfter,
+            });
+            if (blockage?.escalatedNow) {
+              return concludeRepeatedBlockage(state, {
+                projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1,
+              }) ?? state;
+            }
             const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
             const retriesUsed = planStageRetries.get(stage.id) ?? 0;
             const decision = decideRealityCheckPreflightAction(
@@ -7396,6 +8681,21 @@ async function executeIteration(
             let rawDispatchText: string | null = null;
             if (dispatchExists) { try { rawDispatchText = readFileSync(dispatchPath, 'utf-8'); } catch { /* best effort */ } }
             const diagnosis = diagnoseEmptyDispatch(dispatchExists, rawDispatchText, [...roleRegistry.keys()]);
+            const blockage = observeStableBlockage({
+              runDirPath,
+              kind: 'planner_dispatch_refusal',
+              stageId: stage.id,
+              detail: diagnosis.transient ? 'transient invalid dispatch' : 'unresolvable dispatch roles',
+              evidenceDigest: createHash('sha256')
+                .update(rawDispatchText ?? '<missing dispatch>', 'utf8')
+                .digest('hex'),
+              threshold: state.campaignTriggers?.repeatedFailureAfter,
+            });
+            if (blockage?.escalatedNow) {
+              return concludeRepeatedBlockage(state, {
+                projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1,
+              }) ?? state;
+            }
             const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
             const retriesUsed = planStageRetries.get(stage.id) ?? 0;
             const decision = decideEmptyDispatchAction(diagnosis, retriesUsed, maxPlanRetries);
@@ -7702,6 +9002,7 @@ async function executeIteration(
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
+        criterionRefs: stage.criterion_refs,
         resumeSessionId: resumeSession?.sessionId,
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
@@ -7738,6 +9039,38 @@ async function executeIteration(
         item.result.exitCode = 1;
         item.result.timedOut = false;
         item.result.timeoutTerminationCause = 'failed';
+      }
+      if (state.research && item.result.exitCode === 0) {
+        const status = readStageStatus(projectDir, runId, item.stage.id);
+        const findings = inspectTemporalResearchTests({
+          projectDir,
+          writes: status.attempts?.at(-1)?.writes ?? status.writes ?? [],
+          resultFile: state.research.resultFile,
+          terminalPaths: Object.values(state.terminalStates ?? {}).flatMap((entry) => entry.paths),
+        });
+        if (findings.length > 0) {
+          const reason = `Temporal test contract rejected ${findings.length} generated test(s): ${findings.map((finding) => `${finding.file}: ${finding.reason}`).join('; ')}`;
+          try {
+            writeFileSync(join(runDirPath, 'stages', item.stage.id, 'temporal_test_guard.json'), `${JSON.stringify({
+              version: 1,
+              pass: false,
+              findings,
+            }, null, 2)}\n`, 'utf-8');
+          } catch { /* non-critical */ }
+          status.status = STAGE_STATUS.FAILED;
+          status.exitCode = 1;
+          status.error = reason;
+          const attempt = status.attempts?.at(-1);
+          if (attempt) {
+            attempt.status = STAGE_STATUS.FAILED;
+            attempt.exitCode = 1;
+            attempt.error = reason;
+          }
+          writeStageStatus(projectDir, runId, item.stage.id, status);
+          item.result.exitCode = 1;
+          item.result.timedOut = false;
+          item.result.timeoutTerminationCause = 'failed';
+        }
       }
     }
 
@@ -7840,14 +9173,6 @@ async function executeIteration(
 
     const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
     if (terminalEager.decision === 'matched') return terminalEager.state;
-
-    if (!failed) {
-      // [Research advance gate, call site 2 of 2] Same eager timing for research
-      // mode: consume the round result a stage just wrote, evaluate, terminate
-      // or steer — before any later stage can clobber it.
-      const researchEager = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
-      if (researchEager) return researchEager;
-    }
 
     if (failed) {
       // Don't set run status to failed here — let the iteration loop handle it

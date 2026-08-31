@@ -171,6 +171,36 @@ function noReadyRecord(): boolean {
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
+  it('refuses an occupied create-only output before creating a worktree', async () => {
+    mkdirSync(join(fixture.project, 'docs'), { recursive: true });
+    writeFileSync(join(fixture.project, 'docs', 'research-result.json'), 'x'.repeat(286 * 1024));
+    writeBrief([
+      '---',
+      'outputs:',
+      '  - path: docs/research-result.json',
+      '---',
+      '# Goal',
+      'Produce a fresh research result.',
+    ]);
+    const git = successfulGit();
+
+    const report = await runShipSetup(setupArgs(), { createWorktree: git });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      worktreeCreated: false,
+      sourceOutputInventory: {
+        blocking: [expect.objectContaining({
+          path: 'docs/research-result.json', size: 286 * 1024,
+        })],
+      },
+      blockers: [expect.objectContaining({
+        phase: 'source', input: 'docs/research-result.json', reason: expect.stringContaining('create-only output'),
+      })],
+    });
+    expect(git).not.toHaveBeenCalled();
+  });
+
   it('maps the exact declared base, branch, project, and target to one argv-safe Git command', async () => {
     const runner = vi.fn<GitCommandRunner>(() => ({ exitCode: 0 }));
 

@@ -92,6 +92,11 @@ discovers the target's build, test, and lint scripts from checked-in configurati
 that untouched baseline, and states later gate criteria as a delta from the observed result.
 The report separately records daemon→`dist` and `src`→`dist` freshness.
 
+Structurally declared outputs are inventoried separately. A non-empty create-only file, any
+symlink, or an unsupported filesystem entry is blocking; explicit `on_existing: update`,
+`append`, or `replace` records intentional reuse. Each existing file row includes its type,
+size, and SHA-256 so a large unrelated artifact from an earlier run cannot pass unnoticed.
+
 Exit 0 means the facts were gathered, even when history is adverse, a baseline is red, a build
 is stale, or an input is missing; invalid arguments, an unreadable requested brief, or a
 collection failure exit non-zero. `--json` emits the same facts as one machine-readable object.
