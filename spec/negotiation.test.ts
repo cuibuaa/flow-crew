@@ -50,8 +50,21 @@ const role: AgentConfig = {
   name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'fixture',
 };
 
+// The scheduler's technical-retry budget comes from the project's
+// config/defaults.yaml::default_timeout_ms, not from the stage's declared
+// timeout_ms. An unseeded temp project inherits a copy of this repository's
+// operator-owned config, so any absolute budget asserted below would move
+// whenever an operator retunes that file. Pin the one input these budgets are
+// derived from, so the assertions test the doubling rule and nothing else.
+const OWNED_STAGE_TIMEOUT_MS = 3_600_000;
+function seedProjectDefaults(dir: string): void {
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  writeFileSync(join(dir, 'config', 'defaults.yaml'), `default_timeout_ms: ${OWNED_STAGE_TIMEOUT_MS}\n`, 'utf-8');
+}
+
 beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-e9-project-'));
+  seedProjectDefaults(projectDir);
   isolatedStateDir = mkdtempSync(join(tmpdir(), 'flowcrew-e9-state-'));
   previousStateDir = fcGlobalDir();
   setFcGlobalDir(isolatedStateDir);
@@ -613,6 +626,7 @@ describe('bounded timeout negotiation', () => {
 
     rmSync(projectDir, { recursive: true, force: true });
     projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-e9-project-resume-missing-'));
+    seedProjectDefaults(projectDir);
     const recoveredFromRetryLedger = await scenario(false);
     expect(recoveredFromRetryLedger.budgets).toEqual([7_200_000]);
     expect(recoveredFromRetryLedger.status.status).toBe('complete');
