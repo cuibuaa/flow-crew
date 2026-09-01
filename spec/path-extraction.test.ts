@@ -311,6 +311,43 @@ describe('literal reality-check path extraction', () => {
     ]);
   });
 
+  it('does not claim the recorded slash-bearing sed capture program as a path', () => {
+    const projectDir = temporaryProject();
+    const manifest = join(projectDir, 'docs', 'happymj_incumbent', 'run_manifest.json');
+    mkdirSync(dirname(manifest), { recursive: true });
+    writeFileSync(manifest, '{"rounds":[]}\n', 'utf8');
+    const errors = inspectRealityCheckReachability({
+      markdown: markdownFor('exec-script-exit-zero', {
+        script: String.raw`sed -n 's/^[[:space:]]*"label"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/p' docs/happymj_incumbent/run_manifest.json`,
+      }),
+      projectDir,
+      stages: [],
+    });
+
+    expect(errors).toEqual([]);
+  });
+
+  it.each([
+    ['attached short expression', "sed -e's/foo/bar/' data/input.json"],
+    ['attached long expression', "sed --expression='s/foo/bar/' data/input.json"],
+  ])('does not claim an %s while retaining the input file', (_name, script) => {
+    const errors = reachabilityErrors('exec-script-exit-zero', { script });
+
+    expect(errors).toEqual([
+      'reality check "path boundary probe" references absent data/input.json, but no admitted stage or framework emitter owns it',
+    ]);
+  });
+
+  it('still extracts sed script files, input files, and redirection targets', () => {
+    const errors = reachabilityErrors('exec-script-exit-zero', {
+      script: 'sed -f scripts/filter.sed data/input.json > out/result.txt',
+    });
+
+    expect(errors.join('\n')).toContain('references absent scripts/filter.sed');
+    expect(errors.join('\n')).toContain('references absent data/input.json');
+    expect(errors.join('\n')).toContain('references absent out/result.txt');
+  });
+
   it('ignores static file API syntax inside an embedded-code comment', () => {
     expect(reachabilityErrors('exec-script-exit-zero', {
       script: [

@@ -1,0 +1,63 @@
+{
+  "source": {
+    "runId": "2026-08-31T12-22-45-2200a0",
+    "project": "daqing_incumbent_run",
+    "files": {
+      "run.json": { "bytes": 331400, "sha256": "26b47912c63ec0ada3adf831fafdef2a6b9ee7760e1414f308eb244c38ead0c1" },
+      "dispatch_admission.json": { "bytes": 3107, "sha256": "ffeb5035a12ee5db735b6c346593971a68f35e37b1efca43211a101344c47b68" },
+      "reality_checks.md": { "bytes": 1238, "sha256": "e234bd2f6322308f2004156981aa5424b7abd115451a4419a492011c784f53cf" },
+      "stages/audit_terminal/metric.json": { "bytes": 851, "sha256": "46bed43eaea2e45266305dba94d004c67b6cad0230e95bf5c82345c50dded3cd" },
+      "stage_evidence/iteration_8/YXVkaXRfdGVybWluYWw/verdict.json": { "bytes": 3541, "sha256": "a138cb858e76c66c95de067de5f6eddae2354faa82b1d4c743be4820fc0d8ad7" }
+    }
+  },
+  "recordedFailure": {
+    "status": "failed",
+    "iteration": 9,
+    "admissionPass": false,
+    "reasonContains": "run_manifest_round_labels_unique"
+  },
+  "briefDigest": "3dfd57d1bca1ff3cfc4ce7d3d69827b4d667c1747c4b658e55cb43f8bd828759",
+  "criterionId": "criterion_what_each_round_s_report_10_24e8ca77",
+  "research": {
+    "baseline": 0,
+    "policy": "greedy_stack",
+    "higherIsBetter": true,
+    "resultFile": "docs/happymj_incumbent/round_result.json",
+    "stop": { "beat": 0.05, "maxRounds": 6, "haltAfterNoImprovement": 4 }
+  },
+  "terminalStates": {
+    "ceiling_hit": { "paths": ["docs/happymj_incumbent/ceiling_report.md"] }
+  },
+  "manifestStop": {
+    "consecutive_no_improvement": 4,
+    "configured_halt_after_no_improvement": 4
+  },
+  "verdict": {
+    "pass": true,
+    "reason": "Terminal audit passed: four audited no-candidate rounds satisfy halt_after_no_improvement 4/4.",
+    "metric": "paired_ev_per_hand::qqgame.tuidaohu49.fan_value_additive.research.v1",
+    "criteria": {
+      "criterion_what_each_round_s_report_10_24e8ca77": {
+        "status": "pass",
+        "evidence": "run_manifest.json records consecutive_no_improvement=4 and configured_halt_after_no_improvement=4; only the ceiling artifact exists."
+      }
+    },
+    "phase": "audit_terminal",
+    "phaseComplete": true,
+    "nextPhase": null,
+    "outcome": "ceiling_hit"
+  },
+  "metric": {
+    "hasMetric": true,
+    "metric": "paired_ev_per_hand::qqgame.tuidaohu49.fan_value_additive.research.v1",
+    "value": 0,
+    "higherIsBetter": true,
+    "threshold": 0.05,
+    "pass": false,
+    "phase": "audit_terminal",
+    "phaseComplete": true,
+    "nextPhase": null,
+    "outcome": "ceiling_hit",
+    "reason": "halt_after_no_improvement fired at 4/4 after non-plan execution stages completed."
+  }
+}

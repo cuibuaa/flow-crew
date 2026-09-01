@@ -162,6 +162,29 @@ export interface StageEvidenceRecord {
 }
 
 /**
+ * Scheduler-derived proof that a canonical brief criterion was completed and
+ * independently verified in a retired dynamic DAG. Later settlement-only
+ * plans may consume this proof, but planner text cannot create it.
+ */
+export interface CriterionDischargeRecord {
+  criterionId: string;
+  briefDigest: string;
+  iteration: number;
+  workStageId: string;
+  gateStageId: string;
+  /** Run-directory-relative immutable verdict captured at retirement. */
+  verdictPath: string;
+  verdictSha256: string;
+}
+
+/** Exact scheduler-owned bytes of the last atomically admitted check set. */
+export interface AdmittedRealityChecks {
+  markdown: string;
+  sha256: string;
+  admittedAtIteration: number;
+}
+
+/**
  * A required dynamic stage that was still pending/running when a plan could
  * otherwise be replaced or the run could otherwise complete. The scheduler,
  * not a later planner, owns this ledger so omitting the ID from a replacement
@@ -520,6 +543,10 @@ export interface StoreState {
   retiredStageUsage?: RetiredStageUsage[];
   /** Append-only, iteration-addressed status/output/verdict evidence for replaced dynamic stages. */
   stageEvidence?: StageEvidenceRecord[];
+  /** Brief-digest-bound ordinary-work obligations already discharged by passing gates. */
+  criterionDischarges?: CriterionDischargeRecord[];
+  /** Canonical bytes inherited by later planner attempts until an amendment is admitted. */
+  admittedRealityChecks?: AdmittedRealityChecks;
   /** Required dynamic stages that a later plan must not silently forget. */
   unresolvedStageObligations?: UnresolvedStageObligation[];
   /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */

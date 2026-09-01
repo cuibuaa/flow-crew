@@ -59,7 +59,7 @@ import {
   resolveRequest,
   type ApprovalRisk,
 } from './inbox.js';
-import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig } from './store.js';
+import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig, CriterionDischargeRecord, StageEvidenceRecord } from './store.js';
 import { listCheckTypes, parseChecksFromMarkdown, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, ResearchPolicySchema, type ResearchRound } from './research-policy.js';
 import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
@@ -2298,6 +2298,26 @@ const INVALID_DISPATCH_ERROR_PREFIX = 'invalid dispatch.yaml';
 const INVALID_REALITY_CHECKS_ERROR_PREFIX = 'invalid reality_checks.md';
 const REALITY_CHECK_PREFLIGHT_ARTIFACT = 'reality_check_preflight.json';
 
+export function restoreAdmittedRealityChecks(runDirPath: string, state: StoreState): void {
+  const checksPath = join(runDirPath, 'reality_checks.md');
+  if (state.admittedRealityChecks) {
+    writeFileSync(checksPath, state.admittedRealityChecks.markdown, 'utf-8');
+  } else {
+    try { if (existsSync(checksPath)) unlinkSync(checksPath); } catch { /* no prior admitted copy */ }
+  }
+}
+
+export function promoteAdmittedRealityChecks(runDirPath: string, state: StoreState): void {
+  const checksPath = join(runDirPath, 'reality_checks.md');
+  if (!existsSync(checksPath)) return;
+  const markdown = readFileSync(checksPath, 'utf-8');
+  state.admittedRealityChecks = {
+    markdown,
+    sha256: createHash('sha256').update(markdown, 'utf8').digest('hex'),
+    admittedAtIteration: state.currentIteration ?? 1,
+  };
+}
+
 // Canonical dispatch.yaml schema reminder, single-sourced for the re-prompt so
 // the planner re-emits a well-formed file. Generic mechanism (no task content).
 const DISPATCH_SCHEMA_REMINDER = [
@@ -2341,8 +2361,8 @@ export function buildRetryPreamble(
       `RE-PLAN (attempt ${retries + 1}): pre-dispatch lint refused one or more hard checks in your previous reality_checks.md before any work stage ran.`,
       detail ? `Specific preflight finding(s): ${detail}` : 'A hard check could false-block a result that satisfies the task brief.',
       `Read ${runDirPath}/${REALITY_CHECK_PREFLIGHT_ARTIFACT} for the complete blocking and advisory findings from that proposal.`,
-      'Write fresh, complete dispatch.yaml and reality_checks.md files. Replace or omit each rejected hard check; preserve the brief\'s explicit exceptions and test the claimed contract property rather than a presentation or bookkeeping proxy.',
-      `Write both files in ${runDirPath}. Do not continue from partial planner artifacts: the rejected dispatch and checks were removed before this retry.`,
+      'Write a fresh, complete dispatch.yaml. The last admitted reality_checks.md is restored byte-for-byte; omit it to reuse those checks, or replace it only with an intentional complete amendment that addresses the named finding.',
+      `Write dispatch.yaml in ${runDirPath}. Do not continue from the rejected dispatch; an amended reality_checks.md is admitted only together with the repaired proposal.`,
     ].join('\n\n');
   }
   // Empty/invalid dispatch.yaml — re-plan, do NOT "continue from partial". The
@@ -4162,6 +4182,8 @@ interface DispatchAdmissionReport {
   criteriaDigest?: string;
   criterionGateRefs?: Record<string, string[]>;
   criterionTerminalRefs?: Record<string, string[]>;
+  /** Engine-derived prior work/gate proofs used by this admission. */
+  dischargedCriteria?: CriterionDischargeRecord[];
 }
 
 function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
@@ -4177,6 +4199,42 @@ function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifac
     if (currentDigest !== parsed.briefDigest) throw new Error('brief_criteria.json digest does not match task_brief.md');
   }
   return parsed;
+}
+
+export function validatedCriterionDischarges(
+  runDirPath: string,
+  state: StoreState,
+  briefDigest: string | undefined,
+): CriterionDischargeRecord[] {
+  if (!briefDigest) return [];
+  return (state.criterionDischarges ?? []).filter((record) => {
+    if (record.briefDigest !== briefDigest) return false;
+    const gateEvidence = state.stageEvidence?.find((entry) =>
+      entry.iteration === record.iteration
+      && entry.stageId === record.gateStageId
+      && entry.verdictPath === record.verdictPath
+      && entry.status.status === STAGE_STATUS.COMPLETE);
+    const workEvidence = state.stageEvidence?.find((entry) =>
+      entry.iteration === record.iteration
+      && entry.stageId === record.workStageId
+      && entry.status.status === STAGE_STATUS.COMPLETE);
+    if (!gateEvidence || !workEvidence) return false;
+    try {
+      const bytes = readFileSync(join(runDirPath, record.verdictPath));
+      if (createHash('sha256').update(bytes).digest('hex') !== record.verdictSha256) return false;
+      const verdict = JSON.parse(bytes.toString('utf-8')) as Record<string, unknown>;
+      if (verdict.pass !== true || !verdict.criteria || typeof verdict.criteria !== 'object'
+          || Array.isArray(verdict.criteria)) return false;
+      const criterion = (verdict.criteria as Record<string, unknown>)[record.criterionId];
+      if (!criterion || typeof criterion !== 'object' || Array.isArray(criterion)) return false;
+      const detail = criterion as Record<string, unknown>;
+      return detail.status === 'pass'
+        && typeof detail.evidence === 'string'
+        && detail.evidence.trim().length > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function dispatchGlobRegex(raw: string): RegExp | undefined {
@@ -4248,6 +4306,7 @@ export function inspectDispatchAdmission(input: {
   terminalStates?: TerminalStatesConfig;
   research?: ResearchConfig;
   criteria?: BriefCriteriaArtifact;
+  criterionDischarges?: CriterionDischargeRecord[];
 }): DispatchAdmissionReport {
   const errors: string[] = [];
   const all = [...input.baseStages, ...input.dispatched];
@@ -4384,6 +4443,11 @@ export function inspectDispatchAdmission(input: {
   }
 
   const criteria = input.criteria?.criteria ?? [];
+  const discharged = new Map(
+    (input.criterionDischarges ?? [])
+      .filter((record) => record.briefDigest === input.criteria?.briefDigest)
+      .map((record) => [record.criterionId, record]),
+  );
   const criterionIds = new Set(criteria.map((criterion) => criterion.id));
   for (const stage of input.dispatched) {
     for (const ref of stage.criterion_refs ?? []) {
@@ -4396,7 +4460,9 @@ export function inspectDispatchAdmission(input: {
     const terminalWorkers = workers.filter((stage) => ownerIds.has(stage.id));
     const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
     const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
-    if (workers.length === 0) errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
+    if (workers.length === 0 && !discharged.has(criterion.id)) {
+      errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
+    }
     for (const owner of terminalWorkers) {
       const refs = criterionTerminalRefs.get(owner.id) ?? [];
       refs.push(criterion.id);
@@ -4431,6 +4497,7 @@ export function inspectDispatchAdmission(input: {
         .map((stage) => [stage.id, [...stage.criterion_refs]]),
     ),
     criterionTerminalRefs: Object.fromEntries(criterionTerminalRefs),
+    dischargedCriteria: [...discharged.values()],
     ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
   };
 }
@@ -4657,23 +4724,99 @@ function realityCheckDirectFileArguments(
   }
 }
 
-function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void {
-  // A quoted literal remains available to the extractor, but quoting alone is
-  // not file semantics. Only separator-bearing literals are unambiguous here;
-  // slashless names need a structured field, file test, redirection, or static
-  // file-API call below.
-  const scriptWithoutComments = realityCheckScriptWithoutComments(script);
-  for (const match of scriptWithoutComments.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
-    addRealityCheckLiteralPath(match[1] ?? match[2] ?? match[3] ?? '', out, 'generic-literal');
-  }
-  realityCheckStaticFileArguments(scriptWithoutComments, out);
+function realityCheckSedProgramTokenIndexes(tokens: RealityCheckShellToken[]): Set<number> {
+  const programs = new Set<number>();
+  let commandStart = true;
+  const boundary = (token: RealityCheckShellToken): boolean =>
+    token.operator && ['\n', ';', '&&', '||', '|', '&', '(', ')'].includes(token.value);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (boundary(token)) {
+      commandStart = true;
+      continue;
+    }
+    if (token.operator || !commandStart) continue;
+    if (REALITY_CHECK_SHELL_CONTROL_WORDS.has(token.value)
+        || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) continue;
+    commandStart = false;
+    const command = token.value.split('/').at(-1) ?? token.value;
+    if (command !== 'sed') continue;
 
+    let hasProgram = false;
+    for (let cursor = index + 1; cursor < tokens.length && !boundary(tokens[cursor]); cursor += 1) {
+      const operand = tokens[cursor];
+      if (operand.operator) continue;
+      if (operand.value === '-e' || operand.value === '--expression') {
+        const expression = tokens[cursor + 1];
+        if (expression && !expression.operator) {
+          programs.add(cursor + 1);
+          cursor += 1;
+        }
+        hasProgram = true;
+        continue;
+      }
+      if (/^(?:-e.+|--expression=.+)$/.test(operand.value)) {
+        programs.add(cursor);
+        hasProgram = true;
+        continue;
+      }
+      if (operand.value === '-f' || operand.value === '--file') {
+        // The following token is deliberately NOT ignored: it is a sed script file.
+        if (tokens[cursor + 1] && !tokens[cursor + 1].operator) cursor += 1;
+        hasProgram = true;
+        continue;
+      }
+      if (/^(?:-f.+|--file=.+)$/.test(operand.value)) {
+        hasProgram = true;
+        continue;
+      }
+      if (operand.value.startsWith('-')) continue;
+      if (!hasProgram) {
+        programs.add(cursor);
+        hasProgram = true;
+      }
+      // Remaining positional operands are input files and stay extractable.
+    }
+  }
+  return programs;
+}
+
+function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void {
   // Shell-token scanning deliberately excludes heredoc bodies. Embedded
   // JavaScript property chains are code, while the surrounding shell still
   // carries literal test operands and paths.
   const tokens = realityCheckShellTokens(realityCheckShellWithoutHeredocs(script));
-  for (const token of tokens) {
-    if (!token.operator) addRealityCheckLiteralPath(token.value, out, 'generic-literal');
+  const sedProgramIndexes = realityCheckSedProgramTokenIndexes(tokens);
+  const sedPrograms = new Set<string>();
+  for (const index of sedProgramIndexes) {
+    const value = tokens[index]?.value;
+    if (!value) continue;
+    sedPrograms.add(value);
+    // Attached quoted forms tokenize as one option-bearing word (for example,
+    // -es/foo/bar/) while the quote scanner sees only the payload. Preserve
+    // both spellings so neither representation can become a phantom path.
+    if (value.startsWith('--expression=')) {
+      sedPrograms.add(value.slice('--expression='.length));
+    } else if (value.startsWith('-e') && value.length > 2) {
+      sedPrograms.add(value.slice(2));
+    }
+  }
+  const scriptWithoutComments = realityCheckScriptWithoutComments(script);
+  // Preserve quoted paths (including paths with spaces) while excluding only
+  // operands already identified by command grammar as sed programs.
+  for (const match of scriptWithoutComments.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
+    const literal = match[1] ?? match[2] ?? match[3] ?? '';
+    const tokenLiteral = match[2] === undefined ? literal.replace(/\\(.)/g, '$1') : literal;
+    if (!sedPrograms.has(tokenLiteral)) addRealityCheckLiteralPath(literal, out, 'generic-literal');
+  }
+  realityCheckStaticFileArguments(scriptWithoutComments, out);
+
+  for (const [index, token] of tokens.entries()) {
+    if (!token.operator
+        && !sedProgramIndexes.has(index)
+        && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) {
+      addRealityCheckLiteralPath(token.value, out, 'generic-literal');
+    }
   }
   let commandStart = true;
   for (let index = 0; index < tokens.length; index += 1) {
@@ -4933,6 +5076,7 @@ function injectDispatchedStages(
     terminalStates: state.terminalStates,
     research: state.research,
     criteria,
+    criterionDischarges: validatedCriterionDischarges(runDirPath, state, criteria?.briefDigest),
   });
   admission.proposalDigest = proposalDigest;
   if (admission.pass) {
@@ -5010,6 +5154,10 @@ function injectDispatchedStages(
   } catch { /* best effort */ }
 
   state.dispatchedStages = dispatched;
+  // Dispatch topology, reachability, and preflight have now been admitted as
+  // one proposal. Only at this boundary may candidate check bytes replace the
+  // prior scheduler-owned snapshot.
+  promoteAdmittedRealityChecks(runDirPath, state);
   // Auto-execute: planner output runs immediately, no manual approval gate.
   // The dashboard's "Plan Review" tab still renders the DAG for inspection,
   // but execution does not block on user click. The legacy `awaiting_approval`
@@ -5512,8 +5660,17 @@ function validateVerdictAgainstContract(
     return `verdict.metric="${verdict.metric ?? ''}" / metric.json.metric="${metric?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.`;
   }
   const higherIsBetter = contract.higherIsBetter !== false;
+  const terminalOutcome = typeof metric?.outcome === 'string'
+    ? metric.outcome
+    : typeof verdict.outcome === 'string' ? verdict.outcome : undefined;
+  const verifiedCampaignCeiling = verdict.pass === true
+    && terminalOutcome === RUN_STATUS.CEILING_HIT
+    && (metric?.phaseComplete === true || metric?.phase_complete === true
+      || verdict.phaseComplete === true || verdict.phase_complete === true)
+    && metric !== null
+    && metricFileIndicatesFailure(metric);
   const verdictThreshold = typeof verdict.threshold === 'number' ? verdict.threshold : null;
-  if (verdictThreshold !== null) {
+  if (verdictThreshold !== null && !verifiedCampaignCeiling) {
     if (higherIsBetter && verdictThreshold < contract.threshold) {
       return `verdict.threshold=${verdictThreshold} downgraded below contract.threshold=${contract.threshold}. Gate threshold was lowered — verdict invalid.`;
     }
@@ -5522,7 +5679,7 @@ function validateVerdictAgainstContract(
     }
   }
   const mechanicalPass = higherIsBetter ? value >= contract.threshold : value <= contract.threshold;
-  if (verdict.pass === true && !mechanicalPass) {
+  if (verdict.pass === true && !mechanicalPass && !verifiedCampaignCeiling) {
     return `verdict.pass=true but value=${value} does not satisfy contract (${higherIsBetter ? '>=' : '<='} ${contract.threshold}). Pass set independently of mechanical check — verdict invalid.`;
   }
   return null;
@@ -5720,6 +5877,80 @@ export function readGateVerdict(
   return v as { pass: boolean; reason?: string };
 }
 
+/**
+ * Derive cross-iteration criterion coverage exclusively from scheduler facts:
+ * completed ordinary work, a downstream completed gate, an effective passing
+ * verdict, and a passing per-ID evidence entry. The immutable archived verdict
+ * is digest-bound so later live aliases cannot manufacture a discharge.
+ */
+export function deriveCriterionDischarges(input: {
+  projectDir: string;
+  runId: string;
+  runDirPath: string;
+  iteration: number;
+  stages: StageConfig[];
+  state: StoreState;
+  evidence: StageEvidenceRecord[];
+}): CriterionDischargeRecord[] {
+  let admission: DispatchAdmissionReport;
+  try {
+    admission = JSON.parse(readFileSync(join(input.runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+  } catch {
+    return [];
+  }
+  if (!admission.pass || !admission.criteriaDigest) return [];
+
+  const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
+  const terminalOwnerIds = new Set(Object.values(admission.terminalOwners));
+  const contract = loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
+  const records = new Map<string, CriterionDischargeRecord>();
+  for (const gate of input.stages) {
+    const refs = admission.criterionGateRefs?.[gate.id] ?? [];
+    if (!gate.is_gate || refs.length === 0 || input.state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE) continue;
+    const immutable = input.evidence.find((entry) => entry.stageId === gate.id && entry.iteration === input.iteration);
+    if (!immutable?.verdictPath) continue;
+    const effective = readGateVerdict(input.projectDir, gate.id, input.runId, contract, false);
+    if (effective?.pass !== true) continue;
+
+    let verdictBytes: Buffer;
+    let verdict: Record<string, unknown>;
+    try {
+      verdictBytes = readFileSync(join(input.runDirPath, immutable.verdictPath));
+      verdict = JSON.parse(verdictBytes.toString('utf-8')) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const perCriterion = verdict.criteria;
+    if (!perCriterion || typeof perCriterion !== 'object' || Array.isArray(perCriterion)) continue;
+    for (const criterionId of refs) {
+      if (records.has(criterionId)) continue;
+      const criterionEvidence = (perCriterion as Record<string, unknown>)[criterionId];
+      if (!criterionEvidence || typeof criterionEvidence !== 'object' || Array.isArray(criterionEvidence)) continue;
+      const criterionRecord = criterionEvidence as Record<string, unknown>;
+      if (typeof criterionRecord.evidence !== 'string' || !criterionRecord.evidence.trim()
+          || criterionRecord.status !== 'pass') continue;
+      const worker = input.stages.find((stage) =>
+        !stage.is_gate
+        && !stage.retry_to?.length
+        && !terminalOwnerIds.has(stage.id)
+        && stage.criterion_refs.includes(criterionId)
+        && input.state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE
+        && transitivelyDependsOn(gate.id, stage.id, byId));
+      if (!worker) continue;
+      records.set(criterionId, {
+        criterionId,
+        briefDigest: admission.criteriaDigest,
+        iteration: input.iteration,
+        workStageId: worker.id,
+        gateStageId: gate.id,
+        verdictPath: immutable.verdictPath,
+        verdictSha256: createHash('sha256').update(verdictBytes).digest('hex'),
+      });
+    }
+  }
+  return [...records.values()];
+}
+
 interface GateRuntimeFacts {
   allPass: boolean;
   failedGateIds: string[];
@@ -5875,6 +6106,116 @@ function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, pr
     contractRefusals,
     evaluations,
   };
+}
+
+export interface ResearchSettlementProjection {
+  decision: 'ship' | 'stop_ceiling';
+  terminalStatus: string;
+  terminalPath: string;
+  terminalOwner: string;
+  gateId: string;
+  verificationPassed: true;
+  campaignSucceeded: boolean;
+  evidenceDigest: string;
+}
+
+/**
+ * Publish a terminal research decision from a completed settlement audit. The
+ * gate's effective verdict answers "was verification successful?"; metric.pass
+ * independently answers "did the campaign win?". A verified ceiling therefore
+ * remains publishable while any failed effective gate blocks publication.
+ */
+export function recoverVerifiedResearchSettlement(
+  allStages: StageConfig[],
+  state: StoreState,
+  projectDir: string,
+  runId: string,
+  runDirPath: string,
+): ResearchSettlementProjection | null {
+  if (!state.research || !state.terminalStates) return null;
+  const runtime = collectGateRuntimeFacts(allStages, state, projectDir, runId);
+  if (!runtime.allPass) return null;
+  let admission: DispatchAdmissionReport;
+  try {
+    admission = JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+  } catch {
+    return null;
+  }
+  if (!admission.pass) return null;
+
+  const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
+  for (const gate of [...allStages].reverse()) {
+    if (!gate.is_gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE) continue;
+    const effective = readGateVerdict(projectDir, gate.id, runId, contract, false);
+    if (effective?.pass !== true) continue;
+    let verdictBytes: Buffer;
+    let metricBytes: Buffer;
+    let verdict: Record<string, unknown>;
+    let metric: Record<string, unknown>;
+    try {
+      verdictBytes = readFileSync(join(runDirPath, `verdict_${gate.id}.json`));
+      metricBytes = readFileSync(join(stageDir(projectDir, runId, gate.id), 'metric.json'));
+      verdict = JSON.parse(verdictBytes.toString('utf-8')) as Record<string, unknown>;
+      metric = JSON.parse(metricBytes.toString('utf-8')) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const phaseComplete = metric.phaseComplete === true || metric.phase_complete === true
+      || verdict.phaseComplete === true || verdict.phase_complete === true;
+    const metricOutcome = typeof metric.outcome === 'string' ? metric.outcome.trim() : '';
+    const verdictOutcome = typeof verdict.outcome === 'string' ? verdict.outcome.trim() : metricOutcome;
+    if (!phaseComplete || !metricOutcome || verdictOutcome !== metricOutcome || metricOutcome === 'continue') continue;
+    const decision = RESEARCH_DECISION_STATUS_ALIASES.get(metricOutcome);
+    if (decision !== 'ship' && decision !== 'stop_ceiling') continue;
+    if (typeof metric.pass !== 'boolean') continue;
+    const campaignSucceeded = metric.pass;
+    // The terminal label and the domain comparison must agree. Audit success
+    // remains independent: it authorizes publication of either truthful result.
+    if ((decision === 'ship') !== campaignSucceeded) continue;
+    const terminalPath = state.terminalStates[metricOutcome]?.paths?.[0];
+    if (!terminalPath) continue;
+    const terminalOwner = admission.terminalOwners[terminalPath];
+    if (!terminalOwner || !allStages.some((stage) => stage.id === terminalOwner)) continue;
+    const evidenceDigest = createHash('sha256')
+      .update(verdictBytes)
+      .update(metricBytes)
+      .digest('hex');
+    const projection: ResearchSettlementProjection = {
+      decision,
+      terminalStatus: metricOutcome,
+      terminalPath,
+      terminalOwner,
+      gateId: gate.id,
+      verificationPassed: true,
+      campaignSucceeded,
+      evidenceDigest,
+    };
+    const decisionPath = join(runDirPath, 'research_decision.json');
+    let alreadyPublished = false;
+    try {
+      const existing = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
+      alreadyPublished = existing.evidenceDigest === evidenceDigest
+        && existing.terminalPath === terminalPath
+        && existing.terminalOwner === terminalOwner;
+    } catch { /* first publication */ }
+    if (!alreadyPublished) {
+      writeFileSync(decisionPath, `${JSON.stringify({ version: 1, ...projection }, null, 2)}\n`, 'utf-8');
+    }
+    mkdirSync(join(runDirPath, 'signals'), { recursive: true });
+    writeFileSync(join(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+      version: 1,
+      ...projection,
+    }, null, 2)}\n`, 'utf-8');
+    appendSchedulerGuidanceOnce(
+      runDirPath,
+      terminalOwner,
+      `[research-settlement:${evidenceDigest}]`,
+      `Audit ${gate.id} verified the terminal outcome while campaignSucceeded=${campaignSucceeded}. Read research_decision.json and write exactly ${terminalPath}; do not write another terminal path.`,
+      Object.keys(state.stages),
+    );
+    return projection;
+  }
+  return null;
 }
 
 function terminateForGateContractRefusal(
@@ -6861,6 +7202,9 @@ export async function runWorkflow(
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
     if (iteration > 1 && !isResumedIteration && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
+    if (iteration > 1 && !isResumedIteration && state.admittedRealityChecks) {
+      restoreAdmittedRealityChecks(runDirPath, state);
+    }
 
     // Reset all base stages to pending for this iteration
     state = readRunState(projectDir, runId);
@@ -6904,6 +7248,29 @@ export async function runWorkflow(
           iteration: evidence.iteration,
           status: evidence.status,
         });
+      }
+      const newlyDischarged = deriveCriterionDischarges({
+        projectDir,
+        runId,
+        runDirPath,
+        iteration: retiredIteration,
+        stages: previousDispatchedStages,
+        state,
+        evidence: capturedEvidence,
+      });
+      state.criterionDischarges ??= [];
+      for (const discharge of newlyDischarged) {
+        if (!state.criterionDischarges.some((existing) =>
+          existing.briefDigest === discharge.briefDigest
+          && existing.criterionId === discharge.criterionId)) {
+          state.criterionDischarges.push(discharge);
+        }
+      }
+      if (state.criterionDischarges.length > 0) {
+        writeFileSync(join(runDirPath, 'criterion_discharges.json'), `${JSON.stringify({
+          version: 1,
+          records: state.criterionDischarges,
+        }, null, 2)}\n`, 'utf-8');
       }
       for (const sid of retiringStageIds) {
         delete state.stages[sid];
@@ -7385,7 +7752,10 @@ export async function runWorkflow(
       stageFailed: anyFailed(state),
       supervisorRejectPending: readPendingRejectSignal(runDirPath) !== null,
     })) {
-      const researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
+      const recoveredSettlement = recoverVerifiedResearchSettlement(sorted, state, projectDir, runId, runDirPath);
+      const researchResult = recoveredSettlement
+        ? null
+        : await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
       if (researchResult) return researchResult;
       state = readRunState(projectDir, runId);
       const repeatedAfterResearch = concludeRepeatedBlockage(
@@ -9044,11 +9414,11 @@ async function executeIteration(
             );
 
             if (decision.action === 'retry') {
-              // Both planner artifacts belong to one proposal. Removing both is
-              // what prevents a corrected dispatch from inheriting stale checks.
-              for (const artifact of [join(runDirPath, 'dispatch.yaml'), plannerChecksPath]) {
-                try { if (existsSync(artifact)) unlinkSync(artifact); } catch { /* already gone */ }
-              }
+              // The dispatch is rejected, but the last admitted check bytes are
+              // scheduler-owned. Restore them so a retry can reuse them without
+              // asking the planner to recompose shell escaping.
+              try { if (existsSync(join(runDirPath, 'dispatch.yaml'))) unlinkSync(join(runDirPath, 'dispatch.yaml')); } catch { /* already gone */ }
+              restoreAdmittedRealityChecks(runDirPath, state);
               planStageRetries.set(stage.id, decision.nextRetry);
               injectedDispatchStages.delete(stage.id);
               const replanStatus: StageStatus = {
@@ -9126,6 +9496,7 @@ async function executeIteration(
         const injected = injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId);
 
         if (injected.length === 0) {
+          if (state.admittedRealityChecks) restoreAdmittedRealityChecks(runDirPath, state);
           // Check if there are static fallback stages
           const hasStaticFollowUp = sorted.some(s =>
             s.id !== stage.id && state.stages[s.id] && isPendingStageStatus(state.stages[s.id].status)
