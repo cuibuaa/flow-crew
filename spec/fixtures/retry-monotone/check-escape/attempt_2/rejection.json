@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 2,
+  "proposalDigest": "b682448b1fa6c415785292c6db90dee4bd1f92c719b9386220192b1aba94feec",
+  "proposalPath": "dispatch_rejections/attempt_2/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_2/dispatch_admission.json",
+  "errors": [
+    "reality check \"shipped_manifest_records_positive_round\" references absent console.error, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent ship_report.md, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent run_manifest.json, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent process.exit, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent JSON.parse, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent fs.readFileSync, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent manifest.rounds, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent manifest.rounds.length, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent latest.result, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_manifest_records_positive_round\" references absent 0.05, but no admitted stage or framework emitter owns it"
+  ],
+  "archivedAt": "2026-08-31T12:31:17.198Z"
+}

@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-09-01T11:09:57.050Z",
+  "errors": [
+    "criterion criterion_what_each_round_s_report_4_1efd2539: not assigned to a gate",
+    "criterion criterion_what_each_round_s_report_5_ed6f6c15: not assigned to a gate",
+    "criterion criterion_what_each_round_s_report_9_054b9401: not assigned to a gate"
+  ],
+  "terminalOwners": {
+    "docs/happymj_explore6/ship_report.md": "write_ship",
+    "docs/happymj_explore6/ceiling_report.md": "write_ceiling",
+    "docs/happymj_explore6/escalation_note.md": "write_escalate"
+  },
+  "terminalValidationScopes": {},
+  "criterionGateRefs": {},
+  "criterionTerminalRefs": {
+    "write_ceiling": [
+      "criterion_what_each_round_s_report_4_1efd2539",
+      "criterion_what_each_round_s_report_8_06f94983",
+      "criterion_what_each_round_s_report_10_f4d0b217",
+      "criterion_what_each_round_s_report_11_24e8ca77"
+    ],
+    "write_ship": [
+      "criterion_what_each_round_s_report_8_06f94983",
+      "criterion_what_each_round_s_report_10_f4d0b217",
+      "criterion_what_each_round_s_report_11_24e8ca77"
+    ],
+    "write_escalate": [
+      "criterion_what_each_round_s_report_8_06f94983",
+      "criterion_what_each_round_s_report_10_f4d0b217",
+      "criterion_what_each_round_s_report_11_24e8ca77"
+    ]
+  },
+  "dischargedCriteria": [
+    {
+      "criterionId": "criterion_what_each_round_s_report_1_d026c729",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_2_e30e6671",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_4_1efd2539",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_5_ed6f6c15",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_6_07fbe993",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_7_d343aa91",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_8_06f94983",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_9_054b9401",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_10_f4d0b217",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 2,
+      "workStageId": "patch_report",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_2/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "50e6e7157aaad8ff2335e106649392381a3292cd7976ddfc70db30d9bcc6154c"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_3_e19069aa",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 3,
+      "workStageId": "patch_sidecar",
+      "gateStageId": "verify_sidecar",
+      "verdictPath": "stage_evidence/iteration_3/dmVyaWZ5X3NpZGVjYXI/verdict.json",
+      "verdictSha256": "98e57e1a23b6ba974a8c42895ec9cf280289e1f2e91f77e51050be5e1a31eb90"
+    },
+    {
+      "criterionId": "criterion_what_each_round_s_report_11_24e8ca77",
+      "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+      "iteration": 4,
+      "workStageId": "execute_round",
+      "gateStageId": "verify_round",
+      "verdictPath": "stage_evidence/iteration_4/dmVyaWZ5X3JvdW5k/verdict.json",
+      "verdictSha256": "8aa0c33b45100953d820e4c78e085691120900c743be2f0527fe26a7e89c357f"
+    }
+  ],
+  "criteriaDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+  "proposalDigest": "c107dd5854b717f82357d88e49b9af67debc34858fe530d58516769d0b5041e4"
+}

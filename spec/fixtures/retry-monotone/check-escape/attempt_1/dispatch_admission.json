@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-08-31T12:26:33.756Z",
+  "errors": [
+    "reality check \"shipped_result_survives_confirmation\" references mutable optional result path docs/happymj_incumbent/round_result.json; a valid no-candidate round writes only its sidecar, so check the framework-emitted run_manifest.json instead"
+  ],
+  "terminalOwners": {
+    "docs/happymj_incumbent/ship_report.md": "write_ship",
+    "docs/happymj_incumbent/ceiling_report.md": "write_ceiling",
+    "docs/happymj_incumbent/escalation_note.md": "write_escalation"
+  },
+  "terminalValidationScopes": {},
+  "criterionGateRefs": {
+    "audit_round": [
+      "criterion_what_each_round_s_report_1_5fc9f76a",
+      "criterion_what_each_round_s_report_2_9ba6299d",
+      "criterion_what_each_round_s_report_3_3f23df43",
+      "criterion_what_each_round_s_report_4_dbb8d21e",
+      "criterion_what_each_round_s_report_5_07fbe993",
+      "criterion_what_each_round_s_report_6_d343aa91",
+      "criterion_what_each_round_s_report_7_06f94983",
+      "criterion_what_each_round_s_report_8_054b9401"
+    ]
+  },
+  "criterionTerminalRefs": {
+    "write_ship": [
+      "criterion_what_each_round_s_report_7_06f94983",
+      "criterion_what_each_round_s_report_9_f4d0b217",
+      "criterion_what_each_round_s_report_10_24e8ca77"
+    ],
+    "write_ceiling": [
+      "criterion_what_each_round_s_report_7_06f94983",
+      "criterion_what_each_round_s_report_9_f4d0b217",
+      "criterion_what_each_round_s_report_10_24e8ca77"
+    ],
+    "write_escalation": [
+      "criterion_what_each_round_s_report_7_06f94983",
+      "criterion_what_each_round_s_report_9_f4d0b217",
+      "criterion_what_each_round_s_report_10_24e8ca77"
+    ]
+  },
+  "criteriaDigest": "3dfd57d1bca1ff3cfc4ce7d3d69827b4d667c1747c4b658e55cb43f8bd828759",
+  "proposalDigest": "0841c3e2ec6994e3146a971d622a28f7247782082053947d41b77e6c9fd52449"
+}

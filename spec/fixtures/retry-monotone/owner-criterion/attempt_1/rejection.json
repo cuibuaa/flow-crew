@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 1,
+  "proposalDigest": "28952be1792e6418c87238a3f13cfd9d4c53b60c218c97176141b7f971732783",
+  "proposalPath": "dispatch_rejections/attempt_1/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_1/dispatch_admission.json",
+  "errors": [
+    "reality check \"exactly_one_round_outcome\" references mutable optional result path docs/happymj_explore6/round_result.json; a valid no-candidate round writes only its sidecar, so check the framework-emitted run_manifest.json instead"
+  ],
+  "archivedAt": "2026-09-01T05:01:02.759Z"
+}

@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "sourceRunId": "2026-08-31T12-22-45-2200a0",
+  "sourceRoot": "dispatch_rejections",
+  "taskBrief": {
+    "path": "task_brief.md",
+    "bytes": 7965,
+    "sha256": "3dfd57d1bca1ff3cfc4ce7d3d69827b4d667c1747c4b658e55cb43f8bd828759",
+    "sourcePath": "task_brief.md"
+  },
+  "recoveredRealityChecks": [
+    {
+      "path": "attempt_1/reality_checks.md",
+      "bytes": 909,
+      "sha256": "2efc648de6c4384f3c706d0c85c79ecf25a162c213a3efe36aca8c07e55289c8",
+      "sourcePath": "stages/plan/live.log"
+    },
+    {
+      "path": "attempt_2/reality_checks.md",
+      "bytes": 1848,
+      "sha256": "3dca1b9207eef14147e79b7ea2038ef93747db8b950a66d140aca16bb68fbcdb",
+      "sourcePath": "stages/plan/live.log"
+    },
+    {
+      "path": "attempt_3/reality_checks.md",
+      "bytes": 1238,
+      "sha256": "e234bd2f6322308f2004156981aa5424b7abd115451a4419a492011c784f53cf",
+      "sourcePath": "stages/plan/live.log"
+    }
+  ],
+  "files": [
+    {
+      "path": "attempt_1/dispatch.yaml",
+      "bytes": 8310,
+      "sha256": "0841c3e2ec6994e3146a971d622a28f7247782082053947d41b77e6c9fd52449"
+    },
+    {
+      "path": "attempt_1/dispatch_admission.json",
+      "bytes": 1893,
+      "sha256": "df84e5349b34d3fbbdf36772269d2aaade0e9630c58722fdea4e145d8831e95a"
+    },
+    {
+      "path": "attempt_1/rejection.json",
+      "bytes": 605,
+      "sha256": "a0750f57184421f3d02a443513c80686b61d46288f20cd0d5b116bf3b802f8d5"
+    },
+    {
+      "path": "attempt_2/dispatch.yaml",
+      "bytes": 8489,
+      "sha256": "b682448b1fa6c415785292c6db90dee4bd1f92c719b9386220192b1aba94feec"
+    },
+    {
+      "path": "attempt_2/dispatch_admission.json",
+      "bytes": 3135,
+      "sha256": "88824333480273e38fee3bbf7b3b9005c571b5d91cb8e66b5fe4c36c883ef675"
+    },
+    {
+      "path": "attempt_2/rejection.json",
+      "bytes": 1847,
+      "sha256": "475c70c2a8501e15933c650072be026136bf34779d45e54c9bbb76d1e57228f9"
+    },
+    {
+      "path": "attempt_3/dispatch.yaml",
+      "bytes": 6617,
+      "sha256": "cfbc304d5bf2a802ce7020b801ff1b0fd88815be850605b869daee5bdc416691"
+    },
+    {
+      "path": "attempt_3/dispatch_admission.json",
+      "bytes": 3107,
+      "sha256": "ffeb5035a12ee5db735b6c346593971a68f35e37b1efca43211a101344c47b68"
+    },
+    {
+      "path": "attempt_3/rejection.json",
+      "bytes": 550,
+      "sha256": "1ae042672ce74b34fc35fa14803955ee26e5f90ef3045c0bd9c2d3e08279d2cd"
+    }
+  ]
+}

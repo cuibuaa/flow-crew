@@ -1,0 +1,146 @@
+- id: scout_lit
+  role: campaign_scout
+  scope: []
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_8_054b9401
+  prompt_template: |
+    Search external literature for HappyMJ-expressible complete-policy improvement methods not matching the ledger or dead ends. Check dead_end nodes; do not propose anything similar to them. Write concise findings, candidate exclusions, and source/approach nodes to /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/knowledge_graph.json and a scout note under the run directory. Do not write project files.
+
+- id: plan_round
+  role: campaign_planner
+  scope: []
+  depends_on:
+    - scout_lit
+  dependency_reasons:
+    scout_lit: "The round plan must consume the scout's non-duplicate method findings before selecting one mechanism."
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_8_054b9401
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/tech_solution.md, the scout note, knowledge graph, prior artifacts, Makefile, `happymj/baselines.py`, relevant `happymj/*round*.py`, and `happymj/measure_brac_power.py`. Choose exactly one genuinely new complete-policy mechanism for this round. Pre-register gates, seed ranges, thresholds, expected feasibility quantities where computable, no-effect control, and audit evidence in a run-directory round plan. Do not write project files.
+
+- id: run_round
+  role: coder
+  scope:
+    - happymj/**
+    - tests/test_happymj_*.py
+    - docs/happymj_incumbent/round_*.md
+    - docs/happymj_incumbent/round_*.json
+    - docs/happymj_incumbent/round_*.txt
+    - docs/happymj_incumbent/round_result.json
+    - docs/happymj_incumbent/round_result.no_candidate.json
+    - docs/happymj_incumbent/run_manifest.json
+  depends_on:
+    - plan_round
+  dependency_reasons:
+    plan_round: "The executor must implement and measure the single mechanism selected and frozen by plan_round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_8_054b9401
+  prompt_template: |
+    Read the run-directory round plan and implement exactly that one mechanism. Keep prior campaign dirs read-only and put one-off probes under $TMPDIR. Write durable non-terminal artifacts only under the declared incumbent round paths; do not write terminal reports. Add only time-invariant tests. Measure no-effect, candidate EV, decision differences, divergent-block EV, mean/median/position/tail trimming, and dependencies of supplied quantities. After the last project write, run `make build`, `make test`, and `make lint` directly and record exit codes/totals.
+
+- id: audit_round
+  role: qa
+  scope: []
+  depends_on:
+    - run_round
+  dependency_reasons:
+    run_round: "The audit must inspect the code, tests, measurements, and artifacts produced by run_round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+  is_gate: true
+  prompt_template: |
+    Audit the completed round exhaustively: verify it tested one non-duplicate mechanism, preserved the yardstick, wrote exactly one fresh round outcome type, reported all required statistics/evidence, used time-invariant tests, and reran `make build`, `make test`, and `make lint` after final writes. Inspect raw evidence and prior-art claims. Write /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/verdict_audit_round.json with per-criterion evidence and end with a Coverage Map.
+
+- id: fix_round
+  role: coder
+  scope:
+    - happymj/**
+    - tests/test_happymj_*.py
+    - docs/happymj_incumbent/round_*.md
+    - docs/happymj_incumbent/round_*.json
+    - docs/happymj_incumbent/round_*.txt
+    - docs/happymj_incumbent/round_result.json
+    - docs/happymj_incumbent/round_result.no_candidate.json
+    - docs/happymj_incumbent/run_manifest.json
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "The fix must consume audit_round's rejected verdict and findings before repairing the round."
+  retry_to:
+    - audit_round
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/verdict_audit_round.json and the durable rejected QA output. Repair only the rejected issues, keeping the same frozen mechanism unless the audit proves it invalid before outcome use. Put temporary work under $TMPDIR. Re-run affected tests plus `make build`, `make test`, and `make lint`; do not leave failing verification.
+
+- id: write_ship
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/ship_report.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "A ship report may be written only after the independent audit has passed for the winning round."
+  condition: research.terminalPath == docs/happymj_incumbent/ship_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write only docs/happymj_incumbent/ship_report.md for a confirmed win. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, repair run-local check declarations only if their paths or fields mismatch emitters, and report each exit code plus any repair narrative in the report body.
+
+- id: write_ceiling
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/ceiling_report.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "A ceiling report may be written only after the independent audit has passed for the round supporting the stopping condition."
+  condition: research.terminalPath == docs/happymj_incumbent/ceiling_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write only docs/happymj_incumbent/ceiling_report.md when a configured stopping condition has fired. Name the stopping rule and count. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, repair run-local check declarations only if needed, and report each exit code plus any repair narrative in the report body.
+
+- id: write_escalation
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/escalation_note.md
+  depends_on:
+    - audit_round
+  dependency_reasons:
+    audit_round: "An escalation note may be written only after the independent audit has passed for the blocker evidence."
+  condition: research.terminalPath == docs/happymj_incumbent/escalation_note.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write only docs/happymj_incumbent/escalation_note.md for a genuine blocker. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, repair run-local check declarations only if needed, and report each exit code plus any repair narrative in the note body.

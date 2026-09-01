@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 3,
+  "proposalDigest": "cfbc304d5bf2a802ce7020b801ff1b0fd88815be850605b869daee5bdc416691",
+  "proposalPath": "dispatch_rejections/attempt_3/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_3/dispatch_admission.json",
+  "errors": [
+    "reality check \"run_manifest_round_labels_unique\" references absent s/^[[:space:]]*\"label\"[[:space:]]*:[[:space:]]*\"/([^\"]*/)\".*/1/p, but no admitted stage or framework emitter owns it"
+  ],
+  "archivedAt": "2026-08-31T21:36:27.920Z"
+}

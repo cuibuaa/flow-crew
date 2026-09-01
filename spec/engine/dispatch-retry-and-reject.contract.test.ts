@@ -191,7 +191,7 @@ describe('FIX 1 (pure) — decideEmptyDispatchAction retries under budget, escal
 });
 
 describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-prompt', () => {
-  it('emits "you failed to emit a valid dispatch.yaml", the detail, the schema, and "write ONLY the file"', () => {
+  it('emits the dispatch failure, detail, schema, and incumbent-replacement instruction', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'plan'), { recursive: true });
     writeFileSync(join(rd, 'stages', 'plan', 'status.json'),
       JSON.stringify({ status: 'pending', retries: 1, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
@@ -199,7 +199,7 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
     expect(p).toMatch(/failed to emit a valid dispatch\.yaml/i);
     expect(p).toContain('wizard');
     expect(p).toMatch(/Required dispatch\.yaml schema/);
-    expect(p).toMatch(/Write ONLY the dispatch\.yaml file/);
+    expect(p).toMatch(/Replace the structurally invalid dispatch\.yaml/);
     expect(p).not.toMatch(/continue from where you left off/);
   });
 });
@@ -309,7 +309,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
 
-  it('bounds repeated identical topology refusals and preserves every rejected attempt', async () => {
+  it('stops a repeated identical topology refusal and preserves both rejected attempts', async () => {
     const runId = setupResearchAdmissionRun();
     const rd = runDir(projectDir, runId);
     const agentsDir = writeRoles(['planner', 'qa']);
@@ -330,12 +330,15 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
 
     const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
 
-    expect(planCalls).toBe(3);
+    expect(planCalls).toBe(2);
     expect(final.status).not.toBe('complete');
-    for (const attempt of [1, 2, 3]) {
+    expect(final.failureReason).toContain('identical refused candidate');
+    expect(final.failureReason).toContain('stage:measure:scope');
+    for (const attempt of [1, 2]) {
       expect(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8'))
         .toBe(measuringOwnerDispatch);
     }
+    expect(existsSync(join(rd, 'dispatch_rejections', 'attempt_3'))).toBe(false);
   }, 60_000);
 
   it('rolls back a durable non-terminal delta from an admitted validation-capable finalizer', async () => {

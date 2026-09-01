@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "briefDigest": "8e7fffcdfb643571358914fc8de7613527022d6d0ba282d8a77de55ae4a6b94a",
+  "criteria": [
+    {
+      "id": "criterion_what_each_round_s_report_1_d026c729",
+      "text": "**What \"no effect\" measures in this round's own serving configuration**, at this round's own sample size: a behaviourally identical control, its interval beside the candidate's.",
+      "line": 110,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_2_e30e6671",
+      "text": "**The candidate's decision-level difference from the incumbent**, beside its overall paired EV and its EV restricted to blocks where outcomes diverged. A candidate that approaches the incumbent by seldom differing must not be recorded as an improvement.",
+      "line": 113,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_3_e19069aa",
+      "text": "**Every headline statistic reports its mean, its median, where the reported value sits in its own distribution, and how it moves as the most extreme blocks are removed from each end.**",
+      "line": 117,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_4_1efd2539",
+      "text": "**A round that claims an axis is exhausted shows the dose went up.** A scale round states its training volume against what prior campaigns used, in the same units; a resolution round states its block count against 854 and the half-width achieved. An axis probed at the old dose closes nothing.",
+      "line": 120,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_5_ed6f6c15",
+      "text": "**Anything built is checked against what the package already provides**, naming the module considered and why it does not serve, before writing a new one.",
+      "line": 125,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_6_07fbe993",
+      "text": "**`make build`, `make test`, and `make lint` end green after the last write of each round**, each with its direct exit code and totals; never read the exit status after a pipe.",
+      "line": 128,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_7_d343aa91",
+      "text": "**Every test this task writes asserts properties that hold at every point in time.** No test may assert that a terminal artifact is absent, and none may assert that a shared campaign file names the round that wrote the test.",
+      "line": 131,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_8_06f94983",
+      "text": "**Each round's result is audited by something other than what produced it, before it counts**, with the audit's verdict and identity reported. No terminal artifact is written until that audit has run and passed for the round the terminal outcome rests on.",
+      "line": 135,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_9_054b9401",
+      "text": "**Say what each supplied quantity in this brief depends on that the brief did not state**, and whether that changes what it is worth.",
+      "line": 139,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_10_f4d0b217",
+      "text": "**Re-read the run's declared reality checks before each terminal write**, run each, report each exit code, and repair any check whose field names or paths do not match what the emitters actually produce, or which requires an artifact only a later stage writes. State such a check as the invariant that holds throughout — at most one terminal artifact, and no conflicting pair. Put the repair narrative in the report body, never inside a machine-read declaration.",
+      "line": 142,
+      "section": "What each round's report must show"
+    },
+    {
+      "id": "criterion_what_each_round_s_report_11_24e8ca77",
+      "text": "**Choose the terminal path by which outcome happened.** A confirmed win writes the ship report. A ceiling writes the ceiling report only when a configured stopping condition has actually fired, naming which one and the count that satisfies it. A blocker writes the escalation note. **A round whose audit concludes the campaign should continue is not a terminal outcome: write no terminal artifact and let the next round begin.** Write at most one, and only once the campaign itself has ended.",
+      "line": 149,
+      "section": "What each round's report must show"
+    }
+  ]
+}

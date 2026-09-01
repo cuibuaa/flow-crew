@@ -1,0 +1,154 @@
+- id: scout_lit
+  role: campaign_scout
+  scope: []
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_9_054b9401
+  prompt_template: |
+    Search external Mahjong/offline-RL/self-play literature for mechanisms not already in the ledger and expressible with the repository's available data. Check dead ends and do not propose anything similar to them. Write concise findings and candidate directions to the run directory and update the task-local knowledge graph.
+
+- id: choose_round
+  role: campaign_planner
+  scope: []
+  depends_on:
+    - scout_lit
+  dependency_reasons:
+    scout_lit: "The round choice must consume the external candidate directions and duplicate filters produced by scout_lit."
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_9_054b9401
+  prompt_template: |
+    Read tech_solution.md, scout outputs, prior docs, ITERATION_LOG.md, and relevant happymj modules. Select exactly one genuinely new Explore 6 mechanism, preferably on an open axis only if its dose/configuration is above prior measured doses. Freeze gates, thresholds, seed ranges, sample size, expected feasibility quantities, and audit plan before outcome measurement. Write the round plan in the run directory.
+
+- id: execute_round
+  role: coder
+  scope:
+    - happymj/explore6_*.py
+    - tests/test_happymj_explore6_*.py
+    - docs/happymj_explore6/round_result.json
+    - docs/happymj_explore6/round_result.json.no_candidate.json
+    - docs/happymj_explore6/round_*.md
+    - docs/happymj_explore6/round_*.json
+    - docs/happymj_explore6/round_*.log
+    - docs/happymj_explore6/run_manifest.json
+    - docs/happymj_explore6/artifacts/**
+  depends_on:
+    - choose_round
+  dependency_reasons:
+    choose_round: "Implementation must consume the frozen one-mechanism round plan and its pre-outcome gates."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_e30e6671
+    - criterion_what_each_round_s_report_3_e19069aa
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_6_07fbe993
+    - criterion_what_each_round_s_report_7_d343aa91
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_9_054b9401
+  prompt_template: |
+    Execute the frozen plan for exactly one mechanism. Use existing happymj machinery where possible; add only scoped explore6 code/tests if needed. Preserve raw blocks and write one round report plus either round_result.json or round_result.json.no_candidate.json, never both. Run make build, make test, and make lint after the last write, with direct exit codes/totals. Put any temporary one-off work only under the OS temp root.
+
+- id: verify_round
+  role: qa
+  scope: []
+  depends_on:
+    - execute_round
+  dependency_reasons:
+    execute_round: "The audit must inspect the round artifacts, code, tests, raw evidence, and command results produced by execute_round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_e30e6671
+    - criterion_what_each_round_s_report_3_e19069aa
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_6_07fbe993
+    - criterion_what_each_round_s_report_7_d343aa91
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_9_054b9401
+  is_gate: true
+  prompt_template: |
+    Independently audit the round for fixed-yardstick compliance, one-mechanism fidelity, non-identity accounting, raw-block/statistical support, no-effect control, report completeness, time-invariant tests, and green make build/test/lint. Run the required mechanical suites read-only. Write verdict to /home/qian/.fc/runs/2026-09-01T04-57-02-3c2e0a/verdict_verify_round.json and end first-pass output with a Coverage Map.
+
+- id: fix_round
+  role: coder
+  scope:
+    - happymj/explore6_*.py
+    - tests/test_happymj_explore6_*.py
+    - docs/happymj_explore6/round_result.json
+    - docs/happymj_explore6/round_result.json.no_candidate.json
+    - docs/happymj_explore6/round_*.md
+    - docs/happymj_explore6/round_*.json
+    - docs/happymj_explore6/round_*.log
+    - docs/happymj_explore6/run_manifest.json
+    - docs/happymj_explore6/artifacts/**
+  depends_on:
+    - verify_round
+  dependency_reasons:
+    verify_round: "The repair must consume verify_round's rejected verdict and findings before changing round artifacts."
+  retry_to:
+    - verify_round
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_e30e6671
+    - criterion_what_each_round_s_report_3_e19069aa
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_6_07fbe993
+    - criterion_what_each_round_s_report_7_d343aa91
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_9_054b9401
+  prompt_template: |
+    Read the durable rejected verdict and QA output for verify_round. Fix only the cited issues in scoped files, preserving one-mechanism and exactly-one-outcome constraints. Re-run the touched tests plus make build, make test, and make lint. Put temporary one-off work only under the OS temp root.
+
+- id: write_ship
+  role: coder
+  scope:
+    - docs/happymj_explore6/ship_report.md
+  depends_on:
+    - verify_round
+  dependency_reasons:
+    verify_round: "The ship report may only rest on an audited round that passed independent verification."
+  condition: research.terminalPath == docs/happymj_explore6/ship_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_10_f4d0b217
+    - criterion_what_each_round_s_report_11_24e8ca77
+  prompt_template: |
+    Write only the ship report. Before writing, re-read reality_checks.md, run each declared check as a throughout invariant, run the confirmation command and make build/test/lint, and report direct exit codes/totals. Explain any repaired check narrative in the report body, not machine declarations. Do not write if the framework did not select this terminal path.
+
+- id: write_ceiling
+  role: coder
+  scope:
+    - docs/happymj_explore6/ceiling_report.md
+  depends_on:
+    - verify_round
+  dependency_reasons:
+    verify_round: "The ceiling report may only rest on audited round evidence that passed independent verification."
+  condition: research.terminalPath == docs/happymj_explore6/ceiling_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_10_f4d0b217
+    - criterion_what_each_round_s_report_11_24e8ca77
+  prompt_template: |
+    Write only the ceiling report, naming the configured stop condition that actually fired and its count. Before writing, re-read reality_checks.md, run each declared check as a throughout invariant, and run make build/test/lint with direct exit codes/totals. Put any check repair narrative in the report body. Do not write on continue.
+
+- id: write_escalate
+  role: coder
+  scope:
+    - docs/happymj_explore6/escalation_note.md
+  depends_on:
+    - verify_round
+  dependency_reasons:
+    verify_round: "An escalation note must include the audited state of the attempted round and why progress is blocked."
+  condition: research.terminalPath == docs/happymj_explore6/escalation_note.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_8_06f94983
+    - criterion_what_each_round_s_report_10_f4d0b217
+    - criterion_what_each_round_s_report_11_24e8ca77
+  prompt_template: |
+    Write only the escalation note if the framework selected this terminal path. Before writing, re-read reality_checks.md, run each declared check as a throughout invariant, and run make build/test/lint with direct exit codes/totals. State the blocker, failed alternatives, and why no truthful round continuation is possible.

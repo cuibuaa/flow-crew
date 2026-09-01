@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 2,
+  "proposalDigest": "c107dd5854b717f82357d88e49b9af67debc34858fe530d58516769d0b5041e4",
+  "proposalPath": "dispatch_rejections/attempt_2/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_2/dispatch_admission.json",
+  "errors": [
+    "criterion criterion_what_each_round_s_report_4_1efd2539: not assigned to a gate",
+    "criterion criterion_what_each_round_s_report_5_ed6f6c15: not assigned to a gate",
+    "criterion criterion_what_each_round_s_report_9_054b9401: not assigned to a gate"
+  ],
+  "archivedAt": "2026-09-01T11:09:57.054Z"
+}

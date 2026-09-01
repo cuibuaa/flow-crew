@@ -118,6 +118,17 @@ import {
 } from './guidance.js';
 import { recordBlockageOccurrence } from './blockage-ledger.js';
 import { inspectTemporalResearchTests } from './temporal-test-guard.js';
+import {
+  buildMonotonePlanRetryContext,
+  planRetryPairDigest,
+  planRetryPreflightRequirement,
+  planRetryRequirement,
+  preparePlanRetryCandidate,
+  recordPlanRetryAdmission,
+  recordPlanRetryRefusal,
+  type PlanRetryRequirement,
+  type PreparedPlanRetryCandidate,
+} from './plan-retry-monotone.js';
 
 const log = createLogger({ name: 'scheduler' });
 const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
@@ -2355,31 +2366,35 @@ export function buildRetryPreamble(
     const status = JSON.parse(statusRaw) as { error?: string };
     prevError = status.error;
   } catch { /* status not readable; fall through to generic message */ }
+  const monotoneContext = buildMonotonePlanRetryContext(runDirPath, stageId);
+  const withMonotoneContext = (message: string): string => monotoneContext
+    ? `${message}\n\n${monotoneContext}`
+    : message;
   if (prevError && prevError.startsWith(INVALID_REALITY_CHECKS_ERROR_PREFIX)) {
     const detail = prevError.slice(INVALID_REALITY_CHECKS_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
-    return [
+    return withMonotoneContext([
       `RE-PLAN (attempt ${retries + 1}): pre-dispatch lint refused one or more hard checks in your previous reality_checks.md before any work stage ran.`,
       detail ? `Specific preflight finding(s): ${detail}` : 'A hard check could false-block a result that satisfies the task brief.',
       `Read ${runDirPath}/${REALITY_CHECK_PREFLIGHT_ARTIFACT} for the complete blocking and advisory findings from that proposal.`,
-      'Write a fresh, complete dispatch.yaml. The last admitted reality_checks.md is restored byte-for-byte; omit it to reuse those checks, or replace it only with an intentional complete amendment that addresses the named finding.',
-      `Write dispatch.yaml in ${runDirPath}. Do not continue from the rejected dispatch; an amended reality_checks.md is admitted only together with the repaired proposal.`,
-    ].join('\n\n');
+      'Repair the scheduler-materialized incumbent pair. Passing reality-check bytes and dispatch components are retained; replace only the check/component implicated by a still-unsatisfied requirement.',
+      `Write the repaired dispatch.yaml in ${runDirPath}. An amended reality_checks.md is admitted only together with the repaired proposal.`,
+    ].join('\n\n'));
   }
   // Empty/invalid dispatch.yaml — re-plan, do NOT "continue from partial". The
   // detail (parse error / unknown roles) is carried in the error string itself.
   if (prevError && prevError.startsWith(INVALID_DISPATCH_ERROR_PREFIX)) {
     const detail = prevError.slice(INVALID_DISPATCH_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
     const admissionRefusal = detail.startsWith('dispatch admission rejected the complete proposal');
-    return [
+    return withMonotoneContext([
       admissionRefusal
         ? `RE-PLAN (attempt ${retries + 1}): your previous dispatch.yaml was schema-valid but admission rejected its topology or coverage before any proposed work stage ran.`
         : `RE-PLAN (attempt ${retries + 1}): your previous attempt exited cleanly but you failed to emit a valid dispatch.yaml — it produced ZERO usable stages.`,
       detail ? `Specific problem: ${detail}` : 'The file was missing, empty, unparseable, or contained no schema-valid stages.',
       DISPATCH_SCHEMA_REMINDER,
       admissionRefusal
-        ? `Repair every named admission error in a fresh, complete proposal. Treat the archived proposal and report as read-only evidence, then write ONLY ${runDirPath}/dispatch.yaml; do not repeat the rejected topology unchanged.`
-        : `Write ONLY the dispatch.yaml file (at ${runDirPath}/dispatch.yaml) with at least one schema-valid stage that uses a known role. Do not continue from any partial output; emit a fresh, complete file.`,
-    ].join('\n\n');
+        ? `Repair every still-unsatisfied admission requirement in the materialized incumbent at ${runDirPath}/dispatch.yaml. The archived proposal/report remain read-only evidence; do not repeat an identical or cycling refusal.`
+        : `Replace the structurally invalid dispatch.yaml at ${runDirPath}/dispatch.yaml with at least one schema-valid stage that uses a known role.`,
+    ].join('\n\n'));
   }
   let cause: string;
   if (prevError && prevError.startsWith('aborted by supervisor')) {
@@ -2392,7 +2407,7 @@ export function buildRetryPreamble(
   } else {
     cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
   }
-  return `RETRY (attempt ${retries + 1}): ${cause} Read partial output at ${partialPath} and continue from where you left off. Do not start over.`;
+  return withMonotoneContext(`RETRY (attempt ${retries + 1}): ${cause} Read partial output at ${partialPath} and continue from where you left off. Do not start over.`);
 }
 
 /**
@@ -2461,6 +2476,87 @@ interface ArchivedDispatchRefusal {
   report: DispatchAdmissionReport;
   proposalPath: string;
   admissionPath: string;
+}
+
+function currentDispatchAdmissionReport(runDirPath: string): DispatchAdmissionReport | undefined {
+  try {
+    return JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+  } catch {
+    return undefined;
+  }
+}
+
+function planRetryRequirementsFromAdmission(report: DispatchAdmissionReport | undefined): PlanRetryRequirement[] {
+  return (report?.errors ?? []).map((error) => planRetryRequirement(error, 'admission'));
+}
+
+function planRetrySatisfiedRequirements(input: {
+  runDirPath: string;
+  state: StoreState;
+  report?: DispatchAdmissionReport;
+  checksMarkdown?: string;
+  preflightFindings?: readonly RealityCheckPreflightFinding[];
+}): PlanRetryRequirement[] {
+  const satisfied: PlanRetryRequirement[] = [];
+  const failures = new Set(planRetryRequirementsFromAdmission(input.report).map((requirement) => requirement.id));
+  const completeAdmissionObserved = Boolean(
+    input.report
+    && input.report.terminalValidationScopes !== undefined
+    && input.report.criterionGateRefs !== undefined
+    && input.report.criterionTerminalRefs !== undefined
+    && input.report.dischargedCriteria !== undefined,
+  );
+  for (const entry of Object.values(input.state.terminalStates ?? {})) {
+    for (const path of entry.paths) {
+      const fact = planRetryRequirement(`terminal_states path ${path}: has its admitted scoped owner`, 'admission');
+      if (!failures.has(fact.id) && input.report?.terminalOwners[path]) {
+        satisfied.push({ ...fact, detail: `terminal path ${path} retains scoped owner ${input.report.terminalOwners[path]}` });
+      }
+    }
+  }
+  try {
+    const artifact = readBriefCriteriaForAdmission(input.runDirPath);
+    for (const criterion of artifact?.criteria ?? []) {
+      const fact = planRetryRequirement(`criterion ${criterion.id}: complete admission assignment passed`, 'admission');
+      if (completeAdmissionObserved
+        && input.report?.criteriaDigest === artifact?.briefDigest
+        && !failures.has(fact.id)) satisfied.push(fact);
+    }
+  } catch {
+    // The admission report itself carries a digest/shape failure in this case.
+  }
+  const failedCheckNames = new Set((input.preflightFindings ?? []).map((finding) => finding.checkName));
+  for (const error of input.report?.errors ?? []) {
+    const match = /^reality check\s+"([^"]+)"/i.exec(error);
+    if (match) failedCheckNames.add(match[1]);
+  }
+  for (const check of parseChecksFromMarkdown(input.checksMarkdown ?? '')) {
+    if (!completeAdmissionObserved || check.kind === 'invalid' || failedCheckNames.has(check.name)) continue;
+    satisfied.push(planRetryRequirement(`reality check "${check.name}" passed preflight and reachability`, 'admission'));
+  }
+  return satisfied;
+}
+
+function concludePlanRetryFailure(input: {
+  state: StoreState;
+  projectDir: string;
+  runId: string;
+  stageId: string;
+  reason: string;
+}): StoreState {
+  input.state.status = RUN_STATUS.FAILED;
+  input.state.failureReason = input.reason;
+  input.state.completedAt = new Date().toISOString();
+  writeRunState(input.projectDir, input.runId, input.state);
+  recordRunEvent(input.projectDir, input.runId, {
+    type: 'run_completed',
+    runId: input.runId,
+    timestamp: input.state.completedAt,
+    iteration: input.state.currentIteration ?? 1,
+    stageId: input.stageId,
+    detail: `failed: ${input.reason}`,
+  });
+  return input.state;
 }
 
 function archiveDispatchAdmissionRefusal(input: {
@@ -4966,6 +5062,7 @@ function injectDispatchedStages(
   state: StoreState,
   projectDir: string,
   runId: string,
+  inspectOnly = false,
 ): StageConfig[] {
   // Read dispatch.yaml from run dir
   const runDirPath = runDir(projectDir, runId);
@@ -5100,6 +5197,11 @@ function injectDispatchedStages(
     log.warn({ errors: admission.errors }, 'Dynamic dispatch topology refused before stage injection');
     return [];
   }
+
+  // A preflight refusal still receives a complete admission observation. This
+  // dry path stops before every state/workflow mutation, so no proposed stage
+  // can run until both validators accept the same effective candidate pair.
+  if (inspectOnly) return dispatched;
 
   applyScopePlanningDispositions(runDirPath, state.currentIteration ?? 1, items, dispatched);
 
@@ -9370,6 +9472,20 @@ async function executeIteration(
     for (const stage of sorted) {
       if (stage.dynamic_dispatch && !injectedDispatchStages.has(stage.id) &&
           state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) {
+        const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
+        const retriesUsed = planStageRetries.get(stage.id) ?? 0;
+        let preparedPlanRetry: PreparedPlanRetryCandidate;
+        try {
+          preparedPlanRetry = preparePlanRetryCandidate({
+            runDirPath,
+            stageId: stage.id,
+            iteration: state.currentIteration ?? 1,
+            attemptIndex: retriesUsed + 1,
+          });
+        } catch (error) {
+          const reason = `Plan retry incumbent integrity check failed before admission: ${error instanceof Error ? error.message : String(error)}`;
+          return concludePlanRetryFailure({ state, projectDir, runId, stageId: stage.id, reason });
+        }
         const plannerChecksPath = join(runDirPath, 'reality_checks.md');
         let exactTaskBrief = state.taskDescription ?? taskDescription ?? '';
         try {
@@ -9385,6 +9501,43 @@ async function executeIteration(
           const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, { validationBaseline });
           if (preflight.refusingFindings.length > 0) {
             writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
+            injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId, true);
+            const preflightAdmissionReport = currentDispatchAdmissionReport(runDirPath);
+            const unsatisfied = [
+              ...preflight.refusingFindings.map((finding) => planRetryPreflightRequirement({
+                code: finding.code,
+                checkName: finding.checkName,
+                checkIndex: finding.checkIndex,
+                detail: `${finding.message}${finding.evidence ? ` Evidence: ${finding.evidence}` : ''}`,
+              })),
+              ...planRetryRequirementsFromAdmission(preflightAdmissionReport),
+            ];
+            let ratchet;
+            try {
+              ratchet = recordPlanRetryRefusal({
+                runDirPath,
+                prepared: preparedPlanRetry,
+                maxAttempts: maxPlanRetries + 1,
+                unsatisfied,
+                incumbentOverride: state.admittedRealityChecks && unsatisfied.some((item) => item.id.startsWith('reality-check:'))
+                  ? { dispatch: preparedPlanRetry.effective.dispatch, realityChecks: state.admittedRealityChecks.markdown }
+                  : undefined,
+                satisfied: planRetrySatisfiedRequirements({
+                  runDirPath,
+                  state,
+                  report: preflightAdmissionReport,
+                  checksMarkdown: plannerChecks,
+                  preflightFindings: preflight.refusingFindings,
+                }),
+                // Preflight already has a persisted three-strike escalation
+                // contract. Keep counting identical hard-check failures there;
+                // complete dispatch refusals use the ratchet's early stop.
+                stopOnRepeat: false,
+              });
+            } catch (error) {
+              const reason = `Plan retry incumbent integrity check failed while recording a preflight refusal: ${error instanceof Error ? error.message : String(error)}`;
+              return concludePlanRetryFailure({ state, projectDir, runId, stageId: stage.id, reason });
+            }
             const refusalEvidence = JSON.stringify(preflight.refusingFindings.map((finding) => ({
               code: finding.code,
               checkIndex: finding.checkIndex,
@@ -9405,8 +9558,15 @@ async function executeIteration(
                 projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1,
               }) ?? state;
             }
-            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
-            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
+            if (ratchet.stop) {
+              return concludePlanRetryFailure({
+                state,
+                projectDir,
+                runId,
+                stageId: stage.id,
+                reason: ratchet.reason ?? `Planner could not satisfy ${unsatisfied.map((item) => item.id).join(', ')}`,
+              });
+            }
             const decision = decideRealityCheckPreflightAction(
               preflight.refusingFindings,
               retriesUsed,
@@ -9414,11 +9574,9 @@ async function executeIteration(
             );
 
             if (decision.action === 'retry') {
-              // The dispatch is rejected, but the last admitted check bytes are
-              // scheduler-owned. Restore them so a retry can reuse them without
-              // asking the planner to recompose shell escaping.
-              try { if (existsSync(join(runDirPath, 'dispatch.yaml'))) unlinkSync(join(runDirPath, 'dispatch.yaml')); } catch { /* already gone */ }
-              restoreAdmittedRealityChecks(runDirPath, state);
+              // recordPlanRetryRefusal materialized the digest-verified
+              // proposal/check incumbent. The next planner edits that pair;
+              // passing components are no longer recomposed from scratch.
               planStageRetries.set(stage.id, decision.nextRetry);
               injectedDispatchStages.delete(stage.id);
               const replanStatus: StageStatus = {
@@ -9465,6 +9623,11 @@ async function executeIteration(
             const rewrite = demoteRealityCheckAdvisories(plannerChecks, preflight.advisoryFindings);
             if (rewrite.markdown !== plannerChecks) {
               writeFileSync(plannerChecksPath, rewrite.markdown, 'utf-8');
+              preparedPlanRetry.effective = {
+                ...preparedPlanRetry.effective,
+                realityChecks: rewrite.markdown,
+              };
+              preparedPlanRetry.effectivePairDigest = planRetryPairDigest(preparedPlanRetry.effective);
             }
             writeRealityCheckPreflightArtifact(
               runDirPath,
@@ -9515,14 +9678,12 @@ async function executeIteration(
             const dispatchExists = existsSync(dispatchPath);
             let rawDispatchText: string | null = null;
             if (dispatchExists) { try { rawDispatchText = readFileSync(dispatchPath, 'utf-8'); } catch { /* best effort */ } }
-            const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults(projectDir).plan_stage_retries)));
-            const retriesUsed = planStageRetries.get(stage.id) ?? 0;
             const structuralDiagnosis = diagnoseEmptyDispatch(dispatchExists, rawDispatchText, [...roleRegistry.keys()]);
             const archivedRefusal = dispatchExists && rawDispatchText !== null && structuralDiagnosis.transient
               ? archiveDispatchAdmissionRefusal({
                   runDirPath,
                   stageId: stage.id,
-                  attemptIndex: retriesUsed + 1,
+                  attemptIndex: preparedPlanRetry.attemptIndex,
                   rawDispatchText,
                 })
               : undefined;
@@ -9539,6 +9700,40 @@ async function executeIteration(
                   ].join('\n'),
                 }
               : structuralDiagnosis;
+            const admissionReport = archivedRefusal?.report ?? currentDispatchAdmissionReport(runDirPath);
+            const unsatisfied = admissionReport?.errors.length
+              ? planRetryRequirementsFromAdmission(admissionReport)
+              : [planRetryRequirement(diagnosis.detail, 'structure')];
+            let ratchet;
+            try {
+              ratchet = recordPlanRetryRefusal({
+                runDirPath,
+                prepared: preparedPlanRetry,
+                maxAttempts: maxPlanRetries + 1,
+                unsatisfied,
+                incumbentOverride: state.admittedRealityChecks && unsatisfied.some((item) => item.id.startsWith('reality-check:'))
+                  ? { dispatch: preparedPlanRetry.effective.dispatch, realityChecks: state.admittedRealityChecks.markdown }
+                  : undefined,
+                satisfied: planRetrySatisfiedRequirements({
+                  runDirPath,
+                  state,
+                  report: admissionReport,
+                  checksMarkdown: preparedPlanRetry.effective.realityChecks,
+                }),
+              });
+            } catch (error) {
+              const reason = `Plan retry incumbent integrity check failed while recording an admission refusal: ${error instanceof Error ? error.message : String(error)}`;
+              return concludePlanRetryFailure({ state, projectDir, runId, stageId: stage.id, reason });
+            }
+            if (ratchet.stop) {
+              return concludePlanRetryFailure({
+                state,
+                projectDir,
+                runId,
+                stageId: stage.id,
+                reason: ratchet.reason ?? `Planner could not satisfy ${unsatisfied.map((item) => item.id).join(', ')}`,
+              });
+            }
             const blockage = observeStableBlockage({
               runDirPath,
               kind: 'planner_dispatch_refusal',
@@ -9557,13 +9752,9 @@ async function executeIteration(
             const decision = decideEmptyDispatchAction(diagnosis, retriesUsed, maxPlanRetries);
 
             if (decision.action === 'retry') {
-              // Bounded re-plan: delete the bad dispatch.yaml, re-pend the plan
-              // stage (so it re-runs), bump its retry counter, and stamp the
-              // specific error into status.json so buildRetryPreamble injects the
-              // dispatch-specific re-prompt ("you failed to emit a valid
-              // dispatch.yaml — here is the parse error / required schema — write
-              // ONLY the file"). Then loop so the plan stage runs again.
-              try { if (dispatchExists) unlinkSync(dispatchPath); } catch { /* already gone */ }
+              // The ratchet has already restored the digest-verified incumbent
+              // pair. Re-pend the planner against that edit base and carry the
+              // cumulative requirement ledger in its retry preamble.
               planStageRetries.set(stage.id, decision.nextRetry);
               injectedDispatchStages.delete(stage.id); // allow re-injection after the re-run
               const replanStatus: StageStatus = {
@@ -9602,6 +9793,24 @@ async function executeIteration(
             return state;
           }
           log.info({ stage: stage.id }, 'No dispatch.yaml — falling back to static stages');
+        } else {
+          try {
+            recordPlanRetryAdmission({
+              runDirPath,
+              prepared: preparedPlanRetry,
+              satisfied: planRetrySatisfiedRequirements({
+                runDirPath,
+                state,
+                report: currentDispatchAdmissionReport(runDirPath),
+                checksMarkdown: existsSync(plannerChecksPath)
+                  ? readFileSync(plannerChecksPath, 'utf-8')
+                  : undefined,
+              }),
+            });
+          } catch (error) {
+            const reason = `Plan retry incumbent integrity check failed while recording admission: ${error instanceof Error ? error.message : String(error)}`;
+            return concludePlanRetryFailure({ state, projectDir, runId, stageId: stage.id, reason });
+          }
         }
 
         state = readRunState(projectDir, runId);

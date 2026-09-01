@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 3,
+  "proposalDigest": "998b0e43e8a9047cdb7559c574574aac7da8025bd9d16fc48b3d2fdd4f15d90a",
+  "proposalPath": "dispatch_rejections/attempt_3/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_3/dispatch_admission.json",
+  "errors": [
+    "terminal_states path docs/happymj_explore6/ship_report.md: expected exactly one scoped owner, found 0",
+    "terminal_states path docs/happymj_explore6/ceiling_report.md: expected exactly one scoped owner, found 0",
+    "terminal_states path docs/happymj_explore6/escalation_note.md: expected exactly one scoped owner, found 0"
+  ],
+  "archivedAt": "2026-09-01T11:12:00.694Z"
+}

@@ -1,0 +1,44 @@
+- id: choose_round
+  role: campaign_planner
+  scope:
+    - docs/happymj_explore6/round_03_plan.json
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_9_054b9401
+  prompt_template: |
+    Read tech_solution.md, iteration_log.md, the knowledge graph, current Explore 6 artifacts, prior campaign docs, ITERATION_LOG.md, and relevant happymj modules. Choose exactly one Round 3 mechanism distinct from Round 1 generic PG/MMD/PPO and Round 2 Deep-CFR neural regret, avoiding recorded dead ends and unchanged prior configurations. Write only docs/happymj_explore6/round_03_plan.json with frozen mechanism, gates, seed ranges, thresholds, sample sizing, feasibility quantities, support/no-candidate fallback, audit identity, and later evidence requirements. Do not open outcomes or write terminal artifacts. Put temporary one-off work only under the OS temp root.
+
+- id: verify_plan
+  role: qa
+  scope: []
+  depends_on:
+    - choose_round
+  dependency_reasons:
+    choose_round: "Verification must inspect the Round 3 plan selected and written by choose_round."
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_9_054b9401
+  is_gate: true
+  prompt_template: |
+    Audit docs/happymj_explore6/round_03_plan.json as a read-only gate before execution. Verify it chooses one genuinely new mechanism, freezes dose/sample sizing and gates before outcomes, states dose/resolution comparisons where relevant, names package modules considered before any new build, and discloses dependencies of supplied quantities. Also check it writes no terminal artifact and does not open outcome evidence. Run any read-only schema/consistency probes needed, with temporary work only under the OS temp root. Write verdict to /home/qian/.fc/runs/2026-09-01T04-57-02-3c2e0a/verdict_verify_plan.json with per-criterion evidence and end with a Coverage Map.
+
+- id: fix_plan
+  role: campaign_planner
+  scope:
+    - docs/happymj_explore6/round_03_plan.json
+  depends_on:
+    - verify_plan
+  dependency_reasons:
+    verify_plan: "The fix must consume verify_plan's rejected verdict before repairing the Round 3 plan."
+  criterion_refs:
+    - criterion_what_each_round_s_report_4_1efd2539
+    - criterion_what_each_round_s_report_5_ed6f6c15
+    - criterion_what_each_round_s_report_9_054b9401
+  retry_to:
+    - verify_plan
+  prompt_template: |
+    Read verdict_verify_plan.json and the verify_plan output, then repair only docs/happymj_explore6/round_03_plan.json. Address every rejected item while preserving the one-mechanism, no-outcome, no-terminal choose_round phase boundary. Put temporary one-off work only under the OS temp root.

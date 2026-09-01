@@ -1,0 +1,117 @@
+- id: audit_terminal
+  role: qa
+  scope:
+    - .pytest_cache/**
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  is_gate: true
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/tech_solution.md, current reality_checks.md, prior audit outputs, docs/happymj_incumbent/run_manifest.json, and the round 01-04 artifacts. Verify the terminal ceiling basis without writing project files except tool caches: non-plan execution exists, all four no-improvement rounds were audited, halt_after_no_improvement fired at 4/4, the single-terminal invariant holds, and make build/test/lint exit 0. Write /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/verdict_audit_terminal.json with per-criterion evidence and a Coverage Map.
+
+- id: fix_terminal
+  role: coder
+  scope:
+    - .pytest_cache/**
+    - docs/happymj_incumbent/round_04_measurement.json
+    - docs/happymj_incumbent/round_04_report.md
+    - docs/happymj_incumbent/run_manifest.json
+    - tests/audit_terminal_verification.py
+  depends_on:
+    - audit_terminal
+  dependency_reasons:
+    audit_terminal: "The repair must consume audit_terminal's rejected verdict before changing any non-terminal support artifact."
+  retry_to:
+    - audit_terminal
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/verdict_audit_terminal.json and the durable rejected gate output. Repair only rejected non-terminal consistency issues; do not create, delete, or edit terminal report files. Keep one-off temporary work under $TMPDIR. Re-run the touched audit checks plus make build/test/lint, and leave a concise handoff in the stage output.
+
+- id: write_ship
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/ship_report.md
+  depends_on:
+    - audit_terminal
+  dependency_reasons:
+    audit_terminal: "A ship report may be written only after the independent terminal audit has passed."
+  condition: research.terminalPath == docs/happymj_incumbent/ship_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write only docs/happymj_incumbent/ship_report.md for a confirmed win. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, and report every exit code in the report body. Include the audit identity and evidence for all assigned criteria. Do not touch any other terminal path.
+
+- id: write_ceiling
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/ceiling_report.md
+  depends_on:
+    - audit_terminal
+  dependency_reasons:
+    audit_terminal: "A ceiling report may be written only after the independent terminal audit has verified the fired stopping condition."
+  condition: research.terminalPath == docs/happymj_incumbent/ceiling_report.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write exactly docs/happymj_incumbent/ceiling_report.md and no other terminal artifact. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, and report every exit code plus any run-local check repair narrative in the report body. Name halt_after_no_improvement as fired at 4/4 and cite the passed audit identity and round evidence for all assigned criteria.
+
+- id: write_escalation
+  role: doc_writer
+  scope:
+    - docs/happymj_incumbent/escalation_note.md
+  depends_on:
+    - audit_terminal
+  dependency_reasons:
+    audit_terminal: "An escalation note may be written only after the independent terminal audit has verified the blocker evidence."
+  condition: research.terminalPath == docs/happymj_incumbent/escalation_note.md
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_5fc9f76a
+    - criterion_what_each_round_s_report_2_9ba6299d
+    - criterion_what_each_round_s_report_3_3f23df43
+    - criterion_what_each_round_s_report_4_dbb8d21e
+    - criterion_what_each_round_s_report_5_07fbe993
+    - criterion_what_each_round_s_report_6_d343aa91
+    - criterion_what_each_round_s_report_7_06f94983
+    - criterion_what_each_round_s_report_8_054b9401
+    - criterion_what_each_round_s_report_9_f4d0b217
+    - criterion_what_each_round_s_report_10_24e8ca77
+  prompt_template: |
+    Write only docs/happymj_incumbent/escalation_note.md for a genuine blocker. Before writing, re-read /home/qian/.fc/runs/2026-08-31T12-22-45-2200a0/reality_checks.md, run each declared check from the project root, and report every exit code in the note body. Include the audit identity and evidence for all assigned criteria. Do not touch any other terminal path.
