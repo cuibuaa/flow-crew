@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.8.4] - 2026-09-01
+
+Five fixes, all found by watching real runs on the day 0.8.3 went live. Four repair the engine's
+own new admission and settlement machinery where practice disagreed with it; one makes a spec
+independent of operator-tuned configuration. No new commands.
+
+### Fixed — a task display that let a dead wait look alive
+
+An entry recording "waiting on task N" stayed ordinary-looking for days after task N ended, and
+whether it carried a run annotation at all depended on whether a task id happened to be persisted.
+Entries are now linked deterministically, and an open entry whose referenced run has ended renders
+with an explicit wrap-up-overdue marker and the run's terminal status, counted in the header. The
+ship workflow records the task id explicitly at launch.
+
+### Fixed — an admission that rejected what the planner emits
+
+The 0.8.3 dispatch admission rejected sound shapes: a three-writer terminal topology with one path
+per writer, narrow eligibility conditions expressing the same guarantee as the demanded literal,
+and criteria owned by the terminal stage. Retries repeated the identical rejection without ever
+showing the planner why. Recoverable shapes now admit, the two protected rejections — a measuring
+stage owning a terminal path, and continue releasing a terminal write — keep their red tests, and
+a rejected plan's retry receives the exact archived errors and converges or stops after bounded
+identical refusals, with every rejected proposal quarantined durably.
+
+### Fixed — code mistaken for paths
+
+The admission's literal-path extraction claimed identifiers inside embedded check scripts as
+project paths needing owners: property accesses, standard-library calls, even bare numerals. Plans
+carrying ordinary node or shell reality checks were rejected for phantom paths across two
+unrelated projects. Extraction now distinguishes a path from a token of code, on both sides of the
+boundary, and a check that genuinely requires an artifact before its writer runs is still refused.
+
+### Fixed — a finished campaign that could not say so
+
+Three defects interacted so that a campaign whose stop condition had fired could burn its
+remaining plan attempts and end failed with its ceiling report already on disk: gate pass was
+conflated with beating the metric, which a ceiling by definition does not; settlement-only
+iterations were held to work-iteration criteria coverage; and every recomposition of an
+already-admitted reality check mangled its escaping. A verified losing ceiling now settles, a
+winning metric cannot be labeled a ceiling, and admitted checks are reused byte-for-byte instead
+of recomposed.
+
+### Fixed — a spec whose budget moved with operator configuration
+
+The negotiation spec asserted absolute retry budgets inherited from the repository's own
+config/defaults.yaml, so retuning that operator-owned file failed two tests that had nothing to do
+with the change. The spec now seeds its own default and asserts the doubling rule against it.
+
 ## [0.8.3] - 2026-08-31
 
 Thirteen failure classes observed across a day of real runs, each reproduced before it was changed.
