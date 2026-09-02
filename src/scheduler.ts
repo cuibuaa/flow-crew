@@ -62,6 +62,7 @@ import {
 import type { StoreState, StageStatus, WriteAttribution, TerminalStatesConfig, TerminalStateEntry, PostTerminateHook, ProgramConfig, ResearchConfig, ResearchIntegrityConfig, ResearchConfirmConfig, CriterionDischargeRecord, StageEvidenceRecord } from './store.js';
 import { listCheckTypes, parseChecksFromMarkdown, runAllChecks } from './reality-gate/index.js';
 import { evaluateResearch, evaluateResearchCeilingFloor, RESEARCH_POLICY_IDS, ResearchPolicySchema, type ResearchRound } from './research-policy.js';
+import { resolveResearchPaths } from './research-paths.js';
 import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './research-feasibility.js';
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
@@ -1606,7 +1607,8 @@ export async function tryAdvanceResearch(
 ): Promise<StoreState | null> {
   const rc = state.research;
   if (!rc) return null;
-  const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
+  const researchPaths = resolveResearchPaths(rc);
+  const resultRel = researchPaths.resultFile;
   const resultAbs = join(ctx.projectDir, resultRel);
   const noCandidateAbs = `${resultAbs}.no_candidate.json`;
   // Only count a result file freshly written during this run. A result_file
@@ -1900,12 +1902,12 @@ export async function tryAdvanceResearch(
   try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
   // Project-relative mirror of the round record (the journal lives in the run dir, which a
   // planner's project-relative reality check can't reach). The planner is told to reference
-  // <report_dir>/run_manifest.json for any round-level check — so it never invents a missing
-  // artifact and false-blocks an honest ceiling (observed: planner required run_manifest.json).
+  // the exact resolved run_manifest.json for any round-level check — so it never invents a
+  // missing artifact and false-blocks an honest ceiling (observed: planner required one).
   try {
-    const manifestDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
-    mkdirSync(manifestDir, { recursive: true });
-    writeFileSync(join(manifestDir, 'run_manifest.json'), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+    const manifestPath = join(ctx.projectDir, researchPaths.manifestFile);
+    mkdirSync(dirname(manifestPath), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
   } catch { /* non-critical */ }
 
   const evalResult = evaluateResearch(rc, journal.rounds);
@@ -1979,8 +1981,7 @@ export async function tryAdvanceResearch(
       if (lastRound) lastRound.confirmFailed = true;
       try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       try {
-        const manifestDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
-        writeFileSync(join(manifestDir, 'run_manifest.json'), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+        writeFileSync(join(ctx.projectDir, researchPaths.manifestFile), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
       } catch { /* non-critical */ }
       finalEval = evaluateResearch(rc, journal.rounds);
       finalEval.reason = `confirm gate failed on '${label}' (${detail}) — candidate excluded from kept stack | ${finalEval.reason}`;
@@ -2125,7 +2126,7 @@ export async function tryAdvanceResearch(
   // after those checks passed, creating an unsatisfiable gate. These writes are
   // candidates, not a committed terminal state; a rejected candidate is moved
   // into the run directory for audit and removed from the live project path.
-  const reportDir = join(ctx.projectDir, rc.reportDir ?? 'docs');
+  const reportDir = join(ctx.projectDir, researchPaths.reportDir);
   const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
   const reportAbs = join(reportDir, reportName);
   const reportBody = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
@@ -4518,11 +4519,12 @@ export function inspectDispatchAdmission(input: {
       }
       if (input.research && !checkedResearchOwnerIds.has(owner.id)) {
         checkedResearchOwnerIds.add(owner.id);
-        const resultFile = normalizedProjectPath(input.research.resultFile ?? 'docs/research_round_result.json');
+        const researchPaths = resolveResearchPaths(input.research);
+        const resultFile = normalizedProjectPath(researchPaths.resultFile);
         const researchOutputs = [
           resultFile,
           resultFile ? `${resultFile}.no_candidate.json` : undefined,
-          normalizedProjectPath(join(input.research.reportDir ?? 'docs', 'run_manifest.json')),
+          normalizedProjectPath(researchPaths.manifestFile),
         ].filter((path): path is string => Boolean(path));
         for (const researchOutput of researchOutputs) {
           if (stageScopeOwnsPath(owner, researchOutput)) {
@@ -4985,11 +4987,12 @@ export function inspectRealityCheckReachability(input: {
   research?: ResearchConfig;
 }): string[] {
   const allowedFrameworkPaths = new Set<string>();
-  const optionalResearchResultPath = input.research
-    ? normalizedProjectPath(input.research.resultFile ?? 'docs/research_round_result.json')
+  const researchPaths = input.research ? resolveResearchPaths(input.research) : undefined;
+  const optionalResearchResultPath = researchPaths
+    ? normalizedProjectPath(researchPaths.resultFile)
     : undefined;
-  if (input.research) {
-    allowedFrameworkPaths.add(normalizedProjectPath(join(input.research.reportDir ?? 'docs', 'run_manifest.json')) ?? '');
+  if (researchPaths) {
+    allowedFrameworkPaths.add(normalizedProjectPath(researchPaths.manifestFile) ?? '');
   }
   const terminalPaths = new Set(
     Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths)
@@ -7088,7 +7091,7 @@ export async function runWorkflow(
     let wroteDeclaredCandidate = false;
     try {
       const rc2 = state.research;
-      const reportDir = join(projectDir, rc2?.reportDir ?? 'docs');
+      const reportDir = join(projectDir, resolveResearchPaths(rc2).reportDir);
       mkdirSync(reportDir, { recursive: true });
       let roundsMd = '';
       try {

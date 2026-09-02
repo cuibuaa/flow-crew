@@ -253,7 +253,7 @@ research` explicitly when using the `objective:` alias for a metric loop.
 | `policy` | `greedy_stack`, `best_of_n`, or `replace_if_better`. |
 | `higher_is_better` | Direction of improvement; defaults to true. Boolean strings `"true"` and `"false"` are coerced. |
 | `result_file` | Project-relative latest-round JSON. Default: `docs/research_round_result.json`. |
-| `report_dir` | Project-relative directory for framework-owned reports and `run_manifest.json`. Default: `docs`. |
+| `report_dir` | Optional project-relative override for framework-owned reports and `run_manifest.json`. When omitted, the directory containing `result_file` is used; the default result file therefore resolves to `docs`. |
 | `result_schema` | JSON Schema subset used both in planner context and at round ingestion. |
 | `context_roots` | Project-relative roots inventoried for a dynamic planner. Default: `data`. |
 | `directions` | Opaque portfolio labels an outer campaign should cover before accepting a frontier. |
@@ -638,8 +638,10 @@ The minimum payload is:
 `result_schema` can require additional fields, and integrity rules can inspect
 their numeric values. The scheduler ignores stale files from before the run,
 rejects an already-journaled label as an immutable round identity, writes the durable
-`research_journal.json`, and mirrors accepted rounds to
-`<report_dir>/run_manifest.json`.
+`research_journal.json`, and mirrors accepted rounds to the resolved report
+directory's exact `run_manifest.json`. An explicit `report_dir` wins; otherwise
+the manifest is written beside `result_file`. A same-basename path elsewhere,
+a wildcard, and any unrelated sibling path are not framework outputs.
 
 A round with no acting candidate writes no fake baseline measurement. Instead,
 write exactly one fresh sidecar at `<result_file>.no_candidate.json`:

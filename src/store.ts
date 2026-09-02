@@ -426,8 +426,9 @@ export interface ResearchConfig {
    */
   resultFile?: string;
   /**
-   * Project-relative dir where the framework writes ship/ceiling reports.
-   * Default: docs/.
+   * Optional project-relative override for framework reports and run_manifest.json.
+   * Without it, the framework uses the directory containing resultFile; the
+   * default result file therefore keeps the historical docs/ directory.
    */
   reportDir?: string;
   /**

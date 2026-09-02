@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "stageId": "plan",
+  "attemptIndex": 2,
+  "proposalDigest": "dde0e6a7c148b4be5c3fe22e32ac9b85434d9df234b7fb1d296445f1df1ab97b",
+  "proposalPath": "dispatch_rejections/attempt_2/dispatch.yaml",
+  "admissionPath": "dispatch_rejections/attempt_2/dispatch_admission.json",
+  "errors": [
+    "reality check \"round_result_and_no_candidate_are_mutually_exclusive\" references absent docs/happymj_explore7/run_manifest.json, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_result_survives_confirmation\" references absent docs/happymj_explore7/run_manifest.json, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_result_survives_confirmation\" references absent docs/happymj_explore7/*, but no admitted stage or framework emitter owns it"
+  ],
+  "archivedAt": "2026-09-02T05:15:56.138Z"
+}

@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "pass": false,
+  "checkedAt": "2026-09-02T05:15:56.125Z",
+  "errors": [
+    "reality check \"round_result_and_no_candidate_are_mutually_exclusive\" references absent docs/happymj_explore7/run_manifest.json, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_result_survives_confirmation\" references absent docs/happymj_explore7/run_manifest.json, but no admitted stage or framework emitter owns it",
+    "reality check \"shipped_result_survives_confirmation\" references absent docs/happymj_explore7/*, but no admitted stage or framework emitter owns it"
+  ],
+  "terminalOwners": {
+    "docs/happymj_explore7/ship_report.md": "final_ship",
+    "docs/happymj_explore7/ceiling_report.md": "final_ceiling",
+    "docs/happymj_explore7/escalation_note.md": "final_escalate"
+  },
+  "terminalValidationScopes": {},
+  "criterionGateRefs": {
+    "audit_round": [
+      "criterion_what_each_round_s_report_1_d026c729",
+      "criterion_what_each_round_s_report_2_bd1f6ff7",
+      "criterion_what_each_round_s_report_3_46ff17b2",
+      "criterion_what_each_round_s_report_4_7ab9e086",
+      "criterion_what_each_round_s_report_5_2904b165",
+      "criterion_what_each_round_s_report_6_ed6f6c15",
+      "criterion_what_each_round_s_report_7_07fbe993",
+      "criterion_what_each_round_s_report_8_d343aa91",
+      "criterion_what_each_round_s_report_9_491d334b",
+      "criterion_what_each_round_s_report_10_054b9401",
+      "criterion_what_each_round_s_report_11_f4d0b217",
+      "criterion_what_each_round_s_report_12_24e8ca77"
+    ]
+  },
+  "criterionTerminalRefs": {
+    "final_ship": [
+      "criterion_what_each_round_s_report_9_491d334b",
+      "criterion_what_each_round_s_report_11_f4d0b217",
+      "criterion_what_each_round_s_report_12_24e8ca77"
+    ],
+    "final_ceiling": [
+      "criterion_what_each_round_s_report_9_491d334b",
+      "criterion_what_each_round_s_report_11_f4d0b217",
+      "criterion_what_each_round_s_report_12_24e8ca77"
+    ],
+    "final_escalate": [
+      "criterion_what_each_round_s_report_9_491d334b",
+      "criterion_what_each_round_s_report_11_f4d0b217",
+      "criterion_what_each_round_s_report_12_24e8ca77"
+    ]
+  },
+  "dischargedCriteria": [],
+  "criteriaDigest": "aad67e3a272e3acb732e97e357df281736bd413f3fcdb840cb44478b24b1ee36",
+  "proposalDigest": "dde0e6a7c148b4be5c3fe22e32ac9b85434d9df234b7fb1d296445f1df1ab97b"
+}

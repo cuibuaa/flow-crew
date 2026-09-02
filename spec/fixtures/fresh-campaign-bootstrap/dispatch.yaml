@@ -1,0 +1,147 @@
+- id: scout_methods
+  role: campaign_scout
+  scope: []
+  depends_on: []
+  dependency_reasons: {}
+  criterion_refs: []
+  prompt_template: |
+    Search external literature for HappyMJ-applicable offline/RL/game methods not already closed by the ledger. Check dead_end nodes; do not propose anything similar to them. Use only methods expressible with the available project data and infrastructure; exclude human/platform-record methods. Write concise findings to /home/qian/.fc/runs/2026-09-02T05-08-21-979823/scout_findings.md and update the run-local knowledge graph.
+- id: plan_round
+  role: campaign_planner
+  scope: []
+  depends_on: [scout_methods]
+  dependency_reasons:
+    scout_methods: "The round plan consumes the scout's filtered candidate directions before selecting one mechanism."
+  criterion_refs:
+    - criterion_what_each_round_s_report_6_ed6f6c15
+    - criterion_what_each_round_s_report_10_054b9401
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-09-02T05-08-21-979823/tech_solution.md and scout_findings.md. Select exactly one genuinely new mechanism for the next round, or identify a blocker/frontier. Freeze gates, thresholds, seed ranges, primary block count, expected qualifying-member count computed from structural quantities, numeric feasibility floor, any below-floor revision rule, and shared initialization before outcomes. Write /home/qian/.fc/runs/2026-09-02T05-08-21-979823/round_strategy.md.
+- id: run_round
+  role: coder
+  scope:
+    - happymj/tensor_collect.py
+    - happymj/tensor_env.py
+    - happymj/tensor_policy.py
+    - happymj/tensor_rules.py
+    - happymj/vector_engine.py
+    - happymj/unified_engine.py
+    - happymj/batch_bridge.py
+    - happymj/explore7_*.py
+    - tests/test_happymj_explore7*.py
+    - docs/happymj_explore7/round_plan.md
+    - docs/happymj_explore7/round_report.md
+    - docs/happymj_explore7/round_result.json
+    - docs/happymj_explore7/round_result.json.no_candidate.json
+    - docs/happymj_explore7/artifacts/**
+  depends_on: [plan_round]
+  dependency_reasons:
+    plan_round: "The implementation must execute the single frozen mechanism and gates selected in round_strategy.md."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_bd1f6ff7
+    - criterion_what_each_round_s_report_3_46ff17b2
+    - criterion_what_each_round_s_report_4_7ab9e086
+    - criterion_what_each_round_s_report_5_2904b165
+    - criterion_what_each_round_s_report_6_ed6f6c15
+    - criterion_what_each_round_s_report_7_07fbe993
+    - criterion_what_each_round_s_report_8_d343aa91
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_10_054b9401
+  prompt_template: |
+    Read /home/qian/.fc/runs/2026-09-02T05-08-21-979823/round_strategy.md and implement/execute that one mechanism only. Before any project writes, inspect the relevant project config/toolchain and existing HappyMJ vector modules. Put temporary one-off work under the OS temp root. Prove scalar equivalence before vector output counts. Emit exactly one of the result or no-candidate artifacts, write a full non-terminal round report, add time-invariant tests if needed, and finish with direct `make build`, `make test`, and `make lint` exits/totals after the last write.
+- id: audit_round
+  role: qa
+  scope: []
+  depends_on: [run_round]
+  dependency_reasons:
+    run_round: "The audit must inspect the produced round artifacts, code changes, tests, and command evidence."
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_bd1f6ff7
+    - criterion_what_each_round_s_report_3_46ff17b2
+    - criterion_what_each_round_s_report_4_7ab9e086
+    - criterion_what_each_round_s_report_5_2904b165
+    - criterion_what_each_round_s_report_6_ed6f6c15
+    - criterion_what_each_round_s_report_7_07fbe993
+    - criterion_what_each_round_s_report_8_d343aa91
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_10_054b9401
+    - criterion_what_each_round_s_report_11_f4d0b217
+    - criterion_what_each_round_s_report_12_24e8ca77
+  is_gate: true
+  prompt_template: |
+    Independently audit the round without modifying project files. Verify one fresh outcome artifact exists, the schema/no-candidate contract is respected, equivalence evidence precedes counted vector use, tests are time-invariant, and the report supports every assigned criterion. Run the relevant mechanical suites including `make build`, `make test`, and `make lint` after reading the toolchain. Write /home/qian/.fc/runs/2026-09-02T05-08-21-979823/verdict_audit_round.json with per-ID evidence and end with a Coverage Map.
+- id: fix_round
+  role: coder
+  scope:
+    - happymj/tensor_collect.py
+    - happymj/tensor_env.py
+    - happymj/tensor_policy.py
+    - happymj/tensor_rules.py
+    - happymj/vector_engine.py
+    - happymj/unified_engine.py
+    - happymj/batch_bridge.py
+    - happymj/explore7_*.py
+    - tests/test_happymj_explore7*.py
+    - docs/happymj_explore7/round_plan.md
+    - docs/happymj_explore7/round_report.md
+    - docs/happymj_explore7/round_result.json
+    - docs/happymj_explore7/round_result.json.no_candidate.json
+    - docs/happymj_explore7/artifacts/**
+  depends_on: [audit_round]
+  dependency_reasons:
+    audit_round: "The repair consumes audit_round's rejected verdict and evidence before retrying that gate."
+  retry_to: [audit_round]
+  criterion_refs:
+    - criterion_what_each_round_s_report_1_d026c729
+    - criterion_what_each_round_s_report_2_bd1f6ff7
+    - criterion_what_each_round_s_report_3_46ff17b2
+    - criterion_what_each_round_s_report_4_7ab9e086
+    - criterion_what_each_round_s_report_5_2904b165
+    - criterion_what_each_round_s_report_6_ed6f6c15
+    - criterion_what_each_round_s_report_7_07fbe993
+    - criterion_what_each_round_s_report_8_d343aa91
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_10_054b9401
+  prompt_template: |
+    Read the durable rejected audit verdict and QA output, then fix only the reported defects in the round implementation/artifacts. Keep the same one-mechanism round; do not write terminal reports. Put temporary one-off work under the OS temp root. Re-run the failed evidence and the required make commands, then leave the tree ready for audit_round retry.
+- id: final_ship
+  role: doc_writer
+  scope: [docs/happymj_explore7/ship_report.md]
+  depends_on: [audit_round]
+  dependency_reasons:
+    audit_round: "The ship report can only materialize after the independent round audit has passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_11_f4d0b217
+    - criterion_what_each_round_s_report_12_24e8ca77
+  condition: "research.terminalPath == docs/happymj_explore7/ship_report.md"
+  prompt_template: |
+    Materialize only the confirmed-win terminal report at docs/happymj_explore7/ship_report.md. Before writing, re-read /home/qian/.fc/runs/2026-09-02T05-08-21-979823/reality_checks.md, run each declared check plus the confirmation command, and report direct exit codes in the body. Verify the audit verdict artifact exists and passed. Do not write any ceiling or escalation artifact.
+- id: final_ceiling
+  role: doc_writer
+  scope: [docs/happymj_explore7/ceiling_report.md]
+  depends_on: [audit_round]
+  dependency_reasons:
+    audit_round: "The ceiling report can only materialize after the independent round audit has passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_11_f4d0b217
+    - criterion_what_each_round_s_report_12_24e8ca77
+  condition: "research.terminalPath == docs/happymj_explore7/ceiling_report.md"
+  prompt_template: |
+    Materialize only the configured-ceiling terminal report at docs/happymj_explore7/ceiling_report.md. Before writing, re-read /home/qian/.fc/runs/2026-09-02T05-08-21-979823/reality_checks.md, run each declared check, and report direct exit codes in the body. Name the exact stopping condition and count that fired, verify the audit verdict artifact exists and passed, and do not write ship or escalation artifacts.
+- id: final_escalate
+  role: doc_writer
+  scope: [docs/happymj_explore7/escalation_note.md]
+  depends_on: [audit_round]
+  dependency_reasons:
+    audit_round: "The escalation note can only materialize after the independent round audit has passed."
+  criterion_refs:
+    - criterion_what_each_round_s_report_9_491d334b
+    - criterion_what_each_round_s_report_11_f4d0b217
+    - criterion_what_each_round_s_report_12_24e8ca77
+  condition: "research.terminalPath == docs/happymj_explore7/escalation_note.md"
+  prompt_template: |
+    Materialize only the blocker terminal note at docs/happymj_explore7/escalation_note.md. Before writing, re-read /home/qian/.fc/runs/2026-09-02T05-08-21-979823/reality_checks.md, run each declared check, and report direct exit codes in the body. State the precise engine/yardstick blocker, verify the audit verdict artifact exists and passed, and do not write ship or ceiling artifacts.

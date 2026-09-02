@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
+import { resolveResearchPaths } from './research-paths.js';
 import type {
   ProjectValidationBaseline,
   ValidationCommand,
@@ -370,11 +371,12 @@ function deriveBriefContract(brief: string): BriefContractModel {
       collectOutputValues(value, key, rawArtifacts);
     }
     if (researchLoopActive) {
-      rawArtifacts.push(typeof research.result_file === 'string' ? research.result_file : 'docs/research_round_result.json');
-      researchReportDir = typeof research.report_dir === 'string'
-        ? normalizeArtifactPath(research.report_dir)
-        : 'docs';
-      if (researchReportDir) rawArtifacts.push(posix.join(researchReportDir, 'run_manifest.json'));
+      const resolved = resolveResearchPaths({
+        resultFile: typeof research.result_file === 'string' ? research.result_file : undefined,
+        reportDir: typeof research.report_dir === 'string' ? research.report_dir : undefined,
+      });
+      rawArtifacts.push(resolved.resultFile, resolved.manifestFile);
+      researchReportDir = resolved.reportDir;
     }
   }
   rawArtifacts.push(...explicitBodyArtifacts(frontmatter.body));
@@ -390,9 +392,6 @@ function deriveBriefContract(brief: string): BriefContractModel {
       .map(normalizeArtifactPath)
       .filter((path): path is string => path !== undefined),
   )];
-  // The framework-owned round manifest is contractual wherever the planner
-  // elects to inspect it; its directory is selected by the research contract.
-  requiredArtifacts.push('**/run_manifest.json');
   return {
     requiredArtifacts: [...new Set(requiredArtifacts)],
     artifactDeclarationsComplete: frontmatter.declarationsComplete,
@@ -432,9 +431,9 @@ function artifactIsRequired(path: string, contract: BriefContractModel): boolean
   return contract.requiredArtifacts.some((pattern) => {
     if (globPattern(pattern).test(normalized)) return true;
     const checkedPathIsAbsolute = normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized);
+    if (!checkedPathIsAbsolute) return false;
     const portablePattern = pattern.replace(/^(?:\.\.\/)+/, '').replace(/^\/+/, '');
     if (!portablePattern) return false;
-    if (!checkedPathIsAbsolute && portablePattern.includes('/')) return false;
     return globPattern(`**/${portablePattern}`).test(normalized);
   });
 }
