@@ -1,0 +1,1709 @@
+{
+  "version": 1,
+  "evidenceRunId": "2026-09-02T08-37-37-fdc755",
+  "baseFailures": {
+    "behavior1": {
+      "exitCode": 1,
+      "logBytes": 1711,
+      "logSha256": "b4f439f6d985f43e98381a8bd3936ce2b08091bba1046346dc669c726e82c1d5"
+    },
+    "behavior2": {
+      "exitCode": 1,
+      "logBytes": 934,
+      "logSha256": "2ce54c2b125da72582696fdc1096e1380217e078c54fc23e95bd289eb94f44f2"
+    }
+  },
+  "anchors": {
+    "historicalConstraintAudit": {
+      "sourcePath": "stages/fix_round_03/constraint_audit_attempt_2.json",
+      "bytes": 3086,
+      "sha256": "b848c74719dd4b4c2a829f246e04e63fad24d81deb3bf69cac9b3a7a788deb44",
+      "slice": {
+        "label": "b1-unauthorized-existing-test-and-rollback",
+        "byteStart": 1283,
+        "byteEndExclusive": 2593,
+        "sha256": "9a69e752a6f1bb04b4448b97c813aab8df1d9e40e6488c0bd14c36c98a7963dd"
+      },
+      "unauthorizedPath": "tests/test_happymj_explore7_round02_verification.py",
+      "recordedElapsedMs": 5741999,
+      "childCloseToAuditCompleteMs": 29023
+    },
+    "falseAbort1": {
+      "sourcePath": "stages/_supervisor/trace.jsonl",
+      "byteStart": 7569,
+      "byteEndExclusive": 7991,
+      "sha256": "053622832acd0441624ce23d2bc809379543b3820947a6d2358ade87e455dd1b"
+    },
+    "falseAbort2": {
+      "sourcePath": "stages/_supervisor/trace.jsonl",
+      "byteStart": 7991,
+      "byteEndExclusive": 8358,
+      "sha256": "44a4f8e34e1d3dca0b0e6bd3ca2d9947156ddd6c737b87ea1119b22793566765"
+    },
+    "effectiveAbortSuppression": {
+      "sourcePath": "supervisor_log.md",
+      "byteStart": 5312,
+      "byteEndExclusive": 6074,
+      "sha256": "fc7a359be7626464713bc13545b9461e791a0ea74b8e2ceed3c4d67ccb26e230"
+    },
+    "replayInputSha256": "27df0bce6af5c1401f4430e63c15d7dacfa6de4a14c5597f0a4e8e6dbf4ea0ce"
+  },
+  "before": {
+    "calls": 120,
+    "tokensIn": 2172792,
+    "tokensOut": 9840,
+    "verdictCounts": {
+      "WAIT": 90,
+      "ABORT": 15,
+      "GUIDE": 11,
+      "REJECT": 2,
+      "UNKNOWN": 2
+    }
+  },
+  "finalHistoricalStateForDisclosure": {
+    "calls": 121,
+    "tokensIn": 2190534,
+    "tokensOut": 9892,
+    "verdictCounts": {
+      "WAIT": 91,
+      "ABORT": 15,
+      "GUIDE": 11,
+      "REJECT": 2,
+      "UNKNOWN": 2
+    }
+  },
+  "expectedCounterfactual": {
+    "calls": 37,
+    "tokensInUsingHistoricalCallSizes": 653704,
+    "tokensOutUsingHistoricalCallSizes": 3427,
+    "caveat": "Artifact >= threshold timestamps are absent from the retained history, so implementation replay must add only byte-anchored reconstructable artifact events; never infer them from a model call. Historical token sizes are a fixed counterfactual, not a prediction of changed prompt tokenization."
+  },
+  "calls": [
+    {
+      "index": 1,
+      "verdict": "WAIT",
+      "tokensIn": 16507,
+      "tokensOut": 41,
+      "durationMs": 7107,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "b1dbb742d01677c69e2e",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T08:37:53.793Z",
+          "source": "run.json#stages.plan.attempts.1.startedAt",
+          "stageId": "plan",
+          "quantities": {
+            "attemptIndex": 1,
+            "transition": "running"
+          }
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "verdict": "WAIT",
+      "tokensIn": 18403,
+      "tokensOut": 41,
+      "durationMs": 9394,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 3,
+      "verdict": "WAIT",
+      "tokensIn": 18599,
+      "tokensOut": 42,
+      "durationMs": 9616,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "b448529522fd3ab3e6c0",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T08:41:51.306Z",
+          "source": "events.jsonl:1",
+          "stageId": "plan",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "verdict": "WAIT",
+      "tokensIn": 16661,
+      "tokensOut": 47,
+      "durationMs": 7757,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "7325d54841b24c42be64",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T08:45:03.382Z",
+          "source": "events.jsonl:4",
+          "stageId": "plan",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "verdict": "WAIT",
+      "tokensIn": 19226,
+      "tokensOut": 49,
+      "durationMs": 9118,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "4e9fb161110d509b4ebf",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T08:46:57.306Z",
+          "source": "stages/scout_direction/scope_revision_decision_attempt_1_5430caf853c099d582489951301fe1fa0bff95b377149f59d3446963c90ef31a.json",
+          "stageId": "scout_direction",
+          "quantities": {
+            "requestId": "scout-literature-scan-docs-happymj-explore7",
+            "decision": "accepted",
+            "requestedPathCount": 1
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "verdict": "WAIT",
+      "tokensIn": 16630,
+      "tokensOut": 49,
+      "durationMs": 9749,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "d5d89c84bf27046beec3",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T08:49:37.535Z",
+          "source": "events.jsonl:6",
+          "stageId": "scout_direction",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "verdict": "WAIT",
+      "tokensIn": 19255,
+      "tokensOut": 46,
+      "durationMs": 8706,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 8,
+      "verdict": "WAIT",
+      "tokensIn": 18636,
+      "tokensOut": 48,
+      "durationMs": 7676,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 9,
+      "verdict": "WAIT",
+      "tokensIn": 18029,
+      "tokensOut": 47,
+      "durationMs": 9299,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 10,
+      "verdict": "WAIT",
+      "tokensIn": 17569,
+      "tokensOut": 50,
+      "durationMs": 6908,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 11,
+      "verdict": "WAIT",
+      "tokensIn": 18839,
+      "tokensOut": 44,
+      "durationMs": 7309,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 12,
+      "verdict": "WAIT",
+      "tokensIn": 17787,
+      "tokensOut": 49,
+      "durationMs": 8341,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 13,
+      "verdict": "WAIT",
+      "tokensIn": 16571,
+      "tokensOut": 53,
+      "durationMs": 7370,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "3bd4e148f017839103df",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T09:24:05.455Z",
+          "source": "events.jsonl:8",
+          "stageId": "run_round",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "verdict": "WAIT",
+      "tokensIn": 18495,
+      "tokensOut": 56,
+      "durationMs": 7372,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 15,
+      "verdict": "WAIT",
+      "tokensIn": 18560,
+      "tokensOut": 44,
+      "durationMs": 8730,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 16,
+      "verdict": "WAIT",
+      "tokensIn": 17539,
+      "tokensOut": 48,
+      "durationMs": 7647,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 17,
+      "verdict": "WAIT",
+      "tokensIn": 18534,
+      "tokensOut": 45,
+      "durationMs": 7154,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 18,
+      "verdict": "WAIT",
+      "tokensIn": 18768,
+      "tokensOut": 91,
+      "durationMs": 8490,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 19,
+      "verdict": "WAIT",
+      "tokensIn": 18123,
+      "tokensOut": 47,
+      "durationMs": 7831,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 20,
+      "verdict": "WAIT",
+      "tokensIn": 18810,
+      "tokensOut": 45,
+      "durationMs": 7884,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 21,
+      "verdict": "ABORT",
+      "tokensIn": 18941,
+      "tokensOut": 258,
+      "durationMs": 11846,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "3136070cc483bebcc435",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T10:07:55.602Z",
+          "source": "events.jsonl:10",
+          "stageId": "audit_round",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 22,
+      "verdict": "ABORT",
+      "tokensIn": 19069,
+      "tokensOut": 156,
+      "durationMs": 9957,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 23,
+      "verdict": "WAIT",
+      "tokensIn": 16735,
+      "tokensOut": 41,
+      "durationMs": 7150,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "4d7b1c6e30959143f9fd",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:12:26.697Z",
+          "source": "events.jsonl:16",
+          "stageId": "plan",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 24,
+      "verdict": "WAIT",
+      "tokensIn": 18755,
+      "tokensOut": 47,
+      "durationMs": 7314,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 25,
+      "verdict": "WAIT",
+      "tokensIn": 18264,
+      "tokensOut": 47,
+      "durationMs": 7326,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 26,
+      "verdict": "WAIT",
+      "tokensIn": 17650,
+      "tokensOut": 52,
+      "durationMs": 7994,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 27,
+      "verdict": "WAIT",
+      "tokensIn": 17537,
+      "tokensOut": 80,
+      "durationMs": 7929,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 28,
+      "verdict": "GUIDE",
+      "tokensIn": 17680,
+      "tokensOut": 117,
+      "durationMs": 8310,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 29,
+      "verdict": "WAIT",
+      "tokensIn": 16592,
+      "tokensOut": 66,
+      "durationMs": 7378,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "16d6bcbfe731a19bc3c6",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T11:06:38.186Z",
+          "source": "guidance_history/iter_2.md#9b324c5f61773b3d5719",
+          "stageId": "run_round_02",
+          "quantities": {
+            "guidanceId": "9b324c5f61773b3d5719",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 30,
+      "verdict": "REJECT",
+      "tokensIn": 18785,
+      "tokensOut": 167,
+      "durationMs": 9547,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 31,
+      "verdict": "WAIT",
+      "tokensIn": 18467,
+      "tokensOut": 56,
+      "durationMs": 7086,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 32,
+      "verdict": "WAIT",
+      "tokensIn": 17687,
+      "tokensOut": 53,
+      "durationMs": 7246,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 33,
+      "verdict": "REJECT",
+      "tokensIn": 19984,
+      "tokensOut": 65,
+      "durationMs": 7918,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 34,
+      "verdict": "WAIT",
+      "tokensIn": 18622,
+      "tokensOut": 48,
+      "durationMs": 7248,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 35,
+      "verdict": "WAIT",
+      "tokensIn": 17489,
+      "tokensOut": 54,
+      "durationMs": 7999,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 36,
+      "verdict": "WAIT",
+      "tokensIn": 17574,
+      "tokensOut": 46,
+      "durationMs": 7005,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 37,
+      "verdict": "GUIDE",
+      "tokensIn": 18799,
+      "tokensOut": 97,
+      "durationMs": 9803,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 38,
+      "verdict": "WAIT",
+      "tokensIn": 17589,
+      "tokensOut": 84,
+      "durationMs": 7994,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "286e8890d412c7a31bb8",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T12:09:26.744Z",
+          "source": "guidance_history/iter_2.md#9d981b019beb76f5ed5b",
+          "stageId": "audit_round_02",
+          "quantities": {
+            "guidanceId": "9d981b019beb76f5ed5b",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 39,
+      "verdict": "WAIT",
+      "tokensIn": 18876,
+      "tokensOut": 71,
+      "durationMs": 9366,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 40,
+      "verdict": "ABORT",
+      "tokensIn": 16835,
+      "tokensOut": 255,
+      "durationMs": 10608,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "473e87c236b26be4445d",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T12:15:16.370Z",
+          "source": "events.jsonl:23",
+          "stageId": "fix_round_02",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 41,
+      "verdict": "ABORT",
+      "tokensIn": 17830,
+      "tokensOut": 265,
+      "durationMs": 11027,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "2ab1fc720039a0e5033e",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T13:16:53.116Z",
+          "source": "events.jsonl:25",
+          "stageId": "audit_round_02",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 42,
+      "verdict": "ABORT",
+      "tokensIn": 19186,
+      "tokensOut": 57,
+      "durationMs": 8322,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 43,
+      "verdict": "WAIT",
+      "tokensIn": 19109,
+      "tokensOut": 51,
+      "durationMs": 6973,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 44,
+      "verdict": "GUIDE",
+      "tokensIn": 18896,
+      "tokensOut": 84,
+      "durationMs": 12206,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 45,
+      "verdict": "ABORT",
+      "tokensIn": 16837,
+      "tokensOut": 132,
+      "durationMs": 9652,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "7ec94883d488868a29cf",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T13:40:18.250Z",
+          "source": "guidance_history/iter_2.md#b1be9c018b835863f673",
+          "stageId": "fix_round_02",
+          "quantities": {
+            "guidanceId": "b1be9c018b835863f673",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 46,
+      "verdict": "ABORT",
+      "tokensIn": 16804,
+      "tokensOut": 116,
+      "durationMs": 9422,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "9baef35e1e2c5910a771",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T14:10:51.678Z",
+          "source": "events.jsonl:29",
+          "stageId": "audit_round_02",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 47,
+      "verdict": "ABORT",
+      "tokensIn": 16867,
+      "tokensOut": 128,
+      "durationMs": 10206,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "d9c94c4e4e1d1611815c",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T14:12:41.565Z",
+          "source": "stages/fix_round_02/scope_revision_decision_attempt_3_ac388f4301a6628201f92a48b1788b797175d07f281464f73c76e34afec1ccb9.json",
+          "stageId": "fix_round_02",
+          "quantities": {
+            "requestId": "fix-round-02-round01-test-repair-attempt3-001",
+            "decision": "accepted",
+            "requestedPathCount": 1
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 48,
+      "verdict": "UNKNOWN",
+      "tokensIn": 18101,
+      "tokensOut": 48,
+      "durationMs": 32212,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "bd0309d3c80850a747af",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T15:08:56.191Z",
+          "source": "events.jsonl:33",
+          "stageId": "audit_round_02",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 49,
+      "verdict": "ABORT",
+      "tokensIn": 19257,
+      "tokensOut": 228,
+      "durationMs": 10317,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "84f1e71caf31d98c40d9",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T15:09:09.857Z",
+          "source": "guidance_history/iter_2.md#5bdd5e5db7345e9e295c",
+          "stageId": "*",
+          "quantities": {
+            "guidanceId": "5bdd5e5db7345e9e295c",
+            "guidanceSource": "scheduler"
+          }
+        }
+      ]
+    },
+    {
+      "index": 50,
+      "verdict": "GUIDE",
+      "tokensIn": 19105,
+      "tokensOut": 327,
+      "durationMs": 13229,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 51,
+      "verdict": "WAIT",
+      "tokensIn": 16548,
+      "tokensOut": 72,
+      "durationMs": 7700,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "aaa5a6c9e5cc9fe0fbc2",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T15:11:06.206Z",
+          "source": "guidance_history/iter_3.md#d073f19e876828b18eda",
+          "stageId": "plan",
+          "quantities": {
+            "guidanceId": "d073f19e876828b18eda",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 52,
+      "verdict": "GUIDE",
+      "tokensIn": 18578,
+      "tokensOut": 122,
+      "durationMs": 8962,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 53,
+      "verdict": "GUIDE",
+      "tokensIn": 18770,
+      "tokensOut": 105,
+      "durationMs": 9439,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "655f7a013b077b1a0790",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T15:14:48.933Z",
+          "source": "guidance_history/iter_3.md#0e40009a911c3e899682",
+          "stageId": "run_round_03",
+          "quantities": {
+            "guidanceId": "0e40009a911c3e899682",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 54,
+      "verdict": "ABORT",
+      "tokensIn": 17702,
+      "tokensOut": 96,
+      "durationMs": 8428,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "a34f450d7170400875f7",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T15:17:59.560Z",
+          "source": "guidance_history/iter_3.md#d17a217e809ab8f38e30",
+          "stageId": "run_round_03",
+          "quantities": {
+            "guidanceId": "d17a217e809ab8f38e30",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 55,
+      "verdict": "WAIT",
+      "tokensIn": 18837,
+      "tokensOut": 56,
+      "durationMs": 7502,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "112fbdb6858e03690fcf",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T15:30:07.994Z",
+          "source": "stages/run_round_03/scope_revision_decision_attempt_2_0a55019275f6da5ccc16d167d9ab2e72a1b79bc4748374f01ad1019026d8ecb3.json",
+          "stageId": "run_round_03",
+          "quantities": {
+            "requestId": "run_round_03_attempt2_round2_repair_0e40009a",
+            "decision": "accepted",
+            "requestedPathCount": 6
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 56,
+      "verdict": "WAIT",
+      "tokensIn": 16848,
+      "tokensOut": 41,
+      "durationMs": 9259,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "6e6a2f43d99df05ddbe5",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T15:32:00.822Z",
+          "source": "events.jsonl:41",
+          "stageId": "run_round_03",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 57,
+      "verdict": "WAIT",
+      "tokensIn": 18491,
+      "tokensOut": 44,
+      "durationMs": 7567,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 58,
+      "verdict": "WAIT",
+      "tokensIn": 18569,
+      "tokensOut": 44,
+      "durationMs": 8388,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 59,
+      "verdict": "WAIT",
+      "tokensIn": 18659,
+      "tokensOut": 178,
+      "durationMs": 9923,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 60,
+      "verdict": "WAIT",
+      "tokensIn": 17948,
+      "tokensOut": 53,
+      "durationMs": 12885,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "7f9d1c3b6fa5891cd5bb",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T15:57:35.039Z",
+          "source": "events.jsonl:43",
+          "stageId": "audit_round_03",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 61,
+      "verdict": "WAIT",
+      "tokensIn": 19134,
+      "tokensOut": 47,
+      "durationMs": 7233,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 62,
+      "verdict": "WAIT",
+      "tokensIn": 18590,
+      "tokensOut": 72,
+      "durationMs": 8202,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 63,
+      "verdict": "WAIT",
+      "tokensIn": 17530,
+      "tokensOut": 54,
+      "durationMs": 7555,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 64,
+      "verdict": "GUIDE",
+      "tokensIn": 18795,
+      "tokensOut": 196,
+      "durationMs": 10477,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 65,
+      "verdict": "WAIT",
+      "tokensIn": 17770,
+      "tokensOut": 47,
+      "durationMs": 7395,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "4ac316d52562e190f939",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T16:59:54.729Z",
+          "source": "guidance_history/iter_3.md#f888ffc209bb206c93c8",
+          "stageId": "fix_round_03",
+          "quantities": {
+            "guidanceId": "f888ffc209bb206c93c8",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 66,
+      "verdict": "ABORT",
+      "tokensIn": 17644,
+      "tokensOut": 57,
+      "durationMs": 7878,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 67,
+      "verdict": "WAIT",
+      "tokensIn": 18906,
+      "tokensOut": 123,
+      "durationMs": 9036,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 68,
+      "verdict": "WAIT",
+      "tokensIn": 18711,
+      "tokensOut": 47,
+      "durationMs": 8496,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "42cf4e860bf9ceb2756b",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T17:35:08.300Z",
+          "source": "stages/fix_round_03/scope_revision_decision_attempt_1_ddc08315458a1fbe20ca7d3b6a9039493e7ab4f7015457855e198c789e30f612.json",
+          "stageId": "fix_round_03",
+          "quantities": {
+            "requestId": "fix-round-03-scope-7623968b4bab",
+            "decision": "accepted",
+            "requestedPathCount": 1
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 69,
+      "verdict": "WAIT",
+      "tokensIn": 16834,
+      "tokensOut": 54,
+      "durationMs": 8370,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "3df6afdccf12092564e6",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T17:36:23.056Z",
+          "source": "events.jsonl:45",
+          "stageId": "fix_round_03",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 70,
+      "verdict": "GUIDE",
+      "tokensIn": 18821,
+      "tokensOut": 117,
+      "durationMs": 10996,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 71,
+      "verdict": "WAIT",
+      "tokensIn": 18524,
+      "tokensOut": 53,
+      "durationMs": 7971,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "e886cb62d5c4e69d405b",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T17:38:35.952Z",
+          "source": "guidance_history/iter_3.md#e886ea4853e7b8be7706",
+          "stageId": "audit_round_03",
+          "quantities": {
+            "guidanceId": "e886ea4853e7b8be7706",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 72,
+      "verdict": "GUIDE",
+      "tokensIn": 18713,
+      "tokensOut": 226,
+      "durationMs": 11033,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 73,
+      "verdict": "ABORT",
+      "tokensIn": 16674,
+      "tokensOut": 141,
+      "durationMs": 12260,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "753121c3ed1f9d9dda98",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T18:18:40.378Z",
+          "source": "guidance_history/iter_3.md#83be2f161fa0c394d217",
+          "stageId": "audit_round_03",
+          "quantities": {
+            "guidanceId": "83be2f161fa0c394d217",
+            "guidanceSource": "supervisor"
+          }
+        }
+      ]
+    },
+    {
+      "index": 74,
+      "verdict": "WAIT",
+      "tokensIn": 18866,
+      "tokensOut": 55,
+      "durationMs": 7985,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 75,
+      "verdict": "WAIT",
+      "tokensIn": 18496,
+      "tokensOut": 53,
+      "durationMs": 8926,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "c757d1e85fd2b2db9503",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T19:56:07.322Z",
+          "source": "events.jsonl:49",
+          "stageId": "fix_round_03",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 76,
+      "verdict": "WAIT",
+      "tokensIn": 19062,
+      "tokensOut": 116,
+      "durationMs": 12417,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 77,
+      "verdict": "WAIT",
+      "tokensIn": 16493,
+      "tokensOut": 50,
+      "durationMs": 7457,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "0abe4e3962dd46989bd4",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T19:59:58.793Z",
+          "source": "events.jsonl:52",
+          "stageId": "plan",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 78,
+      "verdict": "WAIT",
+      "tokensIn": 18804,
+      "tokensOut": 49,
+      "durationMs": 7937,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 79,
+      "verdict": "WAIT",
+      "tokensIn": 18293,
+      "tokensOut": 81,
+      "durationMs": 8558,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 80,
+      "verdict": "WAIT",
+      "tokensIn": 17528,
+      "tokensOut": 50,
+      "durationMs": 8568,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 81,
+      "verdict": "WAIT",
+      "tokensIn": 18891,
+      "tokensOut": 78,
+      "durationMs": 9708,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 82,
+      "verdict": "WAIT",
+      "tokensIn": 17831,
+      "tokensOut": 49,
+      "durationMs": 7753,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 83,
+      "verdict": "WAIT",
+      "tokensIn": 17577,
+      "tokensOut": 50,
+      "durationMs": 7479,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 84,
+      "verdict": "WAIT",
+      "tokensIn": 17543,
+      "tokensOut": 80,
+      "durationMs": 8995,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 85,
+      "verdict": "WAIT",
+      "tokensIn": 18976,
+      "tokensOut": 95,
+      "durationMs": 22281,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 86,
+      "verdict": "WAIT",
+      "tokensIn": 18869,
+      "tokensOut": 71,
+      "durationMs": 8050,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 87,
+      "verdict": "WAIT",
+      "tokensIn": 17499,
+      "tokensOut": 80,
+      "durationMs": 7938,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 88,
+      "verdict": "ABORT",
+      "tokensIn": 17524,
+      "tokensOut": 60,
+      "durationMs": 7721,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 89,
+      "verdict": "WAIT",
+      "tokensIn": 19035,
+      "tokensOut": 56,
+      "durationMs": 8062,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 90,
+      "verdict": "WAIT",
+      "tokensIn": 19052,
+      "tokensOut": 59,
+      "durationMs": 7499,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "9c1190f43598544f7bcb",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T21:08:50.976Z",
+          "source": "events.jsonl:54",
+          "stageId": "settle_round_03",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 91,
+      "verdict": "WAIT",
+      "tokensIn": 19129,
+      "tokensOut": 58,
+      "durationMs": 8000,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 92,
+      "verdict": "WAIT",
+      "tokensIn": 18885,
+      "tokensOut": 49,
+      "durationMs": 9490,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 93,
+      "verdict": "WAIT",
+      "tokensIn": 17794,
+      "tokensOut": 48,
+      "durationMs": 7358,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 94,
+      "verdict": "WAIT",
+      "tokensIn": 17604,
+      "tokensOut": 50,
+      "durationMs": 7945,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 95,
+      "verdict": "WAIT",
+      "tokensIn": 17579,
+      "tokensOut": 47,
+      "durationMs": 7567,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 96,
+      "verdict": "WAIT",
+      "tokensIn": 18485,
+      "tokensOut": 87,
+      "durationMs": 8541,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 97,
+      "verdict": "UNKNOWN",
+      "tokensIn": 18097,
+      "tokensOut": 119,
+      "durationMs": 32521,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "7472da15548048397072",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T21:47:59.729Z",
+          "source": "events.jsonl:56",
+          "stageId": "audit_round_03",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 98,
+      "verdict": "WAIT",
+      "tokensIn": 18808,
+      "tokensOut": 137,
+      "durationMs": 9492,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "7a564223647bbbe75806",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T21:48:13.713Z",
+          "source": "guidance_history/iter_4.md#e0ef8d79e4a22df90232",
+          "stageId": "*",
+          "quantities": {
+            "guidanceId": "e0ef8d79e4a22df90232",
+            "guidanceSource": "scheduler"
+          }
+        }
+      ]
+    },
+    {
+      "index": 99,
+      "verdict": "WAIT",
+      "tokensIn": 18607,
+      "tokensOut": 52,
+      "durationMs": 7188,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 100,
+      "verdict": "WAIT",
+      "tokensIn": 16701,
+      "tokensOut": 80,
+      "durationMs": 7331,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "fb99c092dd2ddfaac33f",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T21:52:22.014Z",
+          "source": "events.jsonl:62",
+          "stageId": "plan",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 101,
+      "verdict": "WAIT",
+      "tokensIn": 19060,
+      "tokensOut": 78,
+      "durationMs": 10032,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 102,
+      "verdict": "WAIT",
+      "tokensIn": 18566,
+      "tokensOut": 53,
+      "durationMs": 7404,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 103,
+      "verdict": "WAIT",
+      "tokensIn": 17516,
+      "tokensOut": 47,
+      "durationMs": 8325,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 104,
+      "verdict": "WAIT",
+      "tokensIn": 17577,
+      "tokensOut": 84,
+      "durationMs": 7900,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 105,
+      "verdict": "WAIT",
+      "tokensIn": 17363,
+      "tokensOut": 88,
+      "durationMs": 9181,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 106,
+      "verdict": "WAIT",
+      "tokensIn": 17334,
+      "tokensOut": 53,
+      "durationMs": 7955,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 107,
+      "verdict": "ABORT",
+      "tokensIn": 17589,
+      "tokensOut": 195,
+      "durationMs": 11307,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 108,
+      "verdict": "ABORT",
+      "tokensIn": 17372,
+      "tokensOut": 140,
+      "durationMs": 9819,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 109,
+      "verdict": "WAIT",
+      "tokensIn": 18847,
+      "tokensOut": 142,
+      "durationMs": 9163,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "c58cf5658152215ac9e6",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T23:12:13.610Z",
+          "source": "stages/run_round_04/scope_revision_decision_attempt_1_1a97964892c821c286864fe0656ebabae8df5499efaf1c7c01cab823b9d555eb.json",
+          "stageId": "run_round_04",
+          "quantities": {
+            "requestId": "round04_stale_round03_verifier_20260902",
+            "decision": "accepted",
+            "requestedPathCount": 1
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 110,
+      "verdict": "WAIT",
+      "tokensIn": 18064,
+      "tokensOut": 51,
+      "durationMs": 7526,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 111,
+      "verdict": "WAIT",
+      "tokensIn": 17563,
+      "tokensOut": 48,
+      "durationMs": 8212,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 112,
+      "verdict": "GUIDE",
+      "tokensIn": 18345,
+      "tokensOut": 216,
+      "durationMs": 10452,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 113,
+      "verdict": "WAIT",
+      "tokensIn": 16798,
+      "tokensOut": 74,
+      "durationMs": 8475,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "938b50258e6252b3272c",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T23:45:09.919Z",
+          "source": "events.jsonl:64",
+          "stageId": "run_round_04",
+          "quantities": {
+            "transition": "complete"
+          }
+        }
+      ]
+    },
+    {
+      "index": 114,
+      "verdict": "WAIT",
+      "tokensIn": 18480,
+      "tokensOut": 49,
+      "durationMs": 17644,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 115,
+      "verdict": "WAIT",
+      "tokensIn": 18664,
+      "tokensOut": 46,
+      "durationMs": 7307,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "8db26fd77ed9ec0d21db",
+          "type": "scope_request",
+          "timestamp": "2026-09-02T23:46:48.878Z",
+          "source": "stages/audit_round_04/scope_revision_decision_attempt_1_8c21acadd3c5754e7d919596596ba7ebfcf6256ea5c326f13c6e171a1f2211fa.json",
+          "stageId": "audit_round_04",
+          "quantities": {
+            "requestId": "audit_round_04_verification_script_20260902",
+            "decision": "accepted",
+            "requestedPathCount": 1
+          },
+          "timestampSemantics": "decision timestamp is the nearest durable proxy for request arrival; request JSON has no arrival timestamp"
+        }
+      ]
+    },
+    {
+      "index": 116,
+      "verdict": "WAIT",
+      "tokensIn": 17559,
+      "tokensOut": 50,
+      "durationMs": 7641,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 117,
+      "verdict": "WAIT",
+      "tokensIn": 17590,
+      "tokensOut": 57,
+      "durationMs": 7658,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 118,
+      "verdict": "WAIT",
+      "tokensIn": 18871,
+      "tokensOut": 48,
+      "durationMs": 13075,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 119,
+      "verdict": "GUIDE",
+      "tokensIn": 17144,
+      "tokensOut": 84,
+      "durationMs": 9074,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    },
+    {
+      "index": 120,
+      "verdict": "WAIT",
+      "tokensIn": 17403,
+      "tokensOut": 55,
+      "durationMs": 8733,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": []
+    }
+  ],
+  "falseAborts": [
+    {
+      "index": 21,
+      "assessmentStartedAt": "2026-09-02T10:08:46.279Z",
+      "assessmentCompletedAt": "2026-09-02T10:08:58.139Z",
+      "verdict": "ABORT",
+      "tokensIn": 18941,
+      "tokensOut": 258,
+      "durationMs": 11846,
+      "selectedByReconstructableEvent": true,
+      "triggeringEvents": [
+        {
+          "eventId": "3136070cc483bebcc435",
+          "type": "gate_verdict",
+          "timestamp": "2026-09-02T10:07:55.602Z",
+          "source": "events.jsonl:10",
+          "stageId": "audit_round",
+          "quantities": {
+            "durableEvent": "stage_complete"
+          }
+        },
+        {
+          "eventId": "c4cb0bfcce1adf363d0d",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:07:55.602Z",
+          "source": "events.jsonl:10",
+          "stageId": "audit_round",
+          "quantities": {
+            "transition": "complete"
+          }
+        },
+        {
+          "eventId": "7adbd6dbedd674a0c71a",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:08:10.914Z",
+          "source": "events.jsonl:11",
+          "stageId": "write_ship",
+          "quantities": {
+            "transition": "skipped"
+          }
+        },
+        {
+          "eventId": "9a495e82d5dfc431423c",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:08:10.920Z",
+          "source": "events.jsonl:12",
+          "stageId": "write_ceiling",
+          "quantities": {
+            "transition": "skipped"
+          }
+        },
+        {
+          "eventId": "3397db1ff0452a472573",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:08:10.930Z",
+          "source": "events.jsonl:13",
+          "stageId": "write_escalation",
+          "quantities": {
+            "transition": "skipped"
+          }
+        },
+        {
+          "eventId": "2ccc84839548820990ed",
+          "type": "guidance_arrival",
+          "timestamp": "2026-09-02T10:08:10.983Z",
+          "source": "guidance_history/iter_1.md#fb94702106c793f2b780",
+          "stageId": "*",
+          "quantities": {
+            "guidanceId": "fb94702106c793f2b780",
+            "guidanceSource": "scheduler"
+          }
+        },
+        {
+          "eventId": "11bf7c98fda5e30dde70",
+          "type": "stage_transition",
+          "timestamp": "2026-09-02T10:08:26.124Z",
+          "source": "run.json#stages.plan.attempts.3.startedAt",
+          "stageId": "plan",
+          "quantities": {
+            "attemptIndex": 3,
+            "transition": "running"
+          }
+        }
+      ],
+      "clockComparison": {
+        "stageElapsedMs": 5452486,
+        "activeAttemptElapsedMs": 292,
+        "activeAttemptId": "24e73f89335da76fbc05037b5954bc03"
+      },
+      "expectedCurrentDisposition": "assessment permitted for its event, but ABORT is invalid under active-attempt quantities"
+    },
+    {
+      "index": 22,
+      "assessmentStartedAt": "2026-09-02T10:09:28.593Z",
+      "assessmentCompletedAt": "2026-09-02T10:09:38.560Z",
+      "verdict": "ABORT",
+      "tokensIn": 19069,
+      "tokensOut": 156,
+      "durationMs": 9957,
+      "selectedByReconstructableEvent": false,
+      "triggeringEvents": [],
+      "clockComparison": {
+        "stageElapsedMs": 5494800,
+        "activeAttemptElapsedMs": 42606,
+        "activeAttemptId": "24e73f89335da76fbc05037b5954bc03"
+      },
+      "expectedCurrentDisposition": "no model call"
+    }
+  ]
+}

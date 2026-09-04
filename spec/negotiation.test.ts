@@ -321,23 +321,37 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     expect(status.constraintAudit).toMatchObject({ rejectedRevisionCount: 1, violationCount: 1 });
   });
 
-  it('records snapshot-only out-of-scope attribution as unverified without silently approving it', { timeout: 10_000 }, async () => {
+  it('attributes an unstructured out-of-scope write through the writer lease and corrects it in the same attempt', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
     const { config, yaml } = scopeWorkflow();
     const created = prepareRun(config, yaml);
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
+    let invocationCount = 0;
+    const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
       if (summary) return summary;
-      writeFileSync(join(projectDir, 'src', 'observed.ts'), 'snapshot only\n');
-      return { output: 'snapshot', exitCode: 0, duration_ms: 2 };
+      invocationCount++;
+      if (invocationCount === 1) writeFileSync(join(projectDir, 'src', 'observed.ts'), 'snapshot only\n');
+      else expect(prompt).toContain('# Live constraint correction');
+      return { output: invocationCount === 1 ? 'snapshot' : 'corrected', exitCode: 0, duration_ms: 2 };
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope snapshot', true);
     expect(final.status).toBe('complete');
+    expect(invocationCount).toBe(2);
     const status = readStageStatus(projectDir, created.runId, 'ordinary');
-    expect(status.constraintAudit).toMatchObject({ acceptedRevisionCount: 0, violationCount: 0, unverifiedCount: 1 });
+    expect(status.attempts).toHaveLength(1);
+    expect(status.constraintAudit).toMatchObject({
+      acceptedRevisionCount: 0,
+      violationCount: 1,
+      liveViolationCount: 1,
+      liveRestoredCount: 1,
+      unresolvedViolationCount: 0,
+      unverifiedCount: 0,
+    });
     const audit = readJson(join(created.runDirPath, status.constraintAudit!.path));
-    expect(audit.violations).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/observed.ts', certainty: 'unverified' })]));
+    expect(audit.violations).toEqual(expect.arrayContaining([expect.objectContaining({
+      path: 'src/observed.ts', certainty: 'definite', resolution: 'live_reverted',
+    })]));
     expect(audit.rolledBackWrites).toEqual(['src/observed.ts']);
     expect(existsSync(join(projectDir, 'src', 'observed.ts'))).toBe(false);
   });

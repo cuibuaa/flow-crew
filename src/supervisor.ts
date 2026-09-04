@@ -20,7 +20,7 @@ import {
   updateRunState,
 } from './store.js';
 import type { RunStatus, StageStatus, StoreState, SupervisorAttempt, SupervisorUsage } from './store.js';
-import type { SupervisorConfig } from './config.js';
+import { loadProjectDefaults, type SupervisorConfig } from './config.js';
 import { appendTraceEvent } from './trace.js';
 import { ABORT_SIGNAL_VERSION, type AbortSignalSource, type StageAbortSignal } from './abort-signal.js';
 import { createLogger } from './logging.js';
@@ -29,7 +29,15 @@ import {
   renderGuidanceEnvelope,
   RUN_WIDE_GUIDANCE_TARGET,
 } from './guidance.js';
-import { recordRunEvent } from './run-events.js';
+import { readRunEvents, recordRunEvent, type RunEvent } from './run-events.js';
+import {
+  SupervisorEventCursor,
+  resolveSupervisorDeadlineMarginMs,
+  type SupervisorEvent,
+  type SupervisorEventCandidate,
+  type SupervisorEventCursorSnapshot,
+  type SupervisorEventQuantities,
+} from './supervisor-events.js';
 
 const log = createLogger({ name: 'supervisor' });
 
@@ -99,6 +107,8 @@ interface SupervisorAction {
   timestamp: string;
   tick: number;
   assessment: SupervisorAssessment;
+  /** The deterministic event that authorized this model call. */
+  trigger: SupervisorEvent;
   runningStages: string[];
   /** Attempt that was running when the action targeted its stage. */
   targetAttemptIndex?: number;
@@ -479,27 +489,23 @@ export function buildSupervisorRolePrompt(stuckThresholdMs: number, taskDescript
   return `${buildSupervisorSystemPrompt(stuckThresholdMs)}\n\n# Original Goal\n${taskDescription}`;
 }
 
-export type SupervisorAssessmentTrigger = 'anomaly' | 'routine' | 'none';
+export type SupervisorAssessmentTrigger = 'event' | 'none';
 
 export function selectSupervisorAssessmentTrigger(input: {
-  anomalySignals: string[];
-  runningStageCount: number;
-  accumulatedOutputBytes: number;
-  minDeltaBytes: number;
-  now: number;
-  lastRoutineAssessmentAt: number;
-  routineAssessmentIntervalMs: number;
-  routineAssessmentsThisIteration: number;
-  maxRoutineAssessmentsPerIteration: number;
-  cooldownUntil: number;
+  deterministicEvents?: readonly SupervisorEvent[];
+  /** Legacy clock/counter inputs remain accepted for replay compatibility only. */
+  anomalySignals?: string[];
+  runningStageCount?: number;
+  accumulatedOutputBytes?: number;
+  minDeltaBytes?: number;
+  now?: number;
+  lastRoutineAssessmentAt?: number;
+  routineAssessmentIntervalMs?: number;
+  routineAssessmentsThisIteration?: number;
+  maxRoutineAssessmentsPerIteration?: number;
+  cooldownUntil?: number;
 }): SupervisorAssessmentTrigger {
-  if (input.anomalySignals.length > 0) return 'anomaly';
-  if (input.runningStageCount === 0) return 'none';
-  if (input.accumulatedOutputBytes < input.minDeltaBytes) return 'none';
-  if (input.now - input.lastRoutineAssessmentAt < input.routineAssessmentIntervalMs) return 'none';
-  if (input.routineAssessmentsThisIteration >= input.maxRoutineAssessmentsPerIteration) return 'none';
-  if (input.now < input.cooldownUntil) return 'none';
-  return 'routine';
+  return (input.deterministicEvents?.length ?? 0) > 0 ? 'event' : 'none';
 }
 
 function artifactShowsFailedGate(artifact: { path: string; content: string }): boolean {
@@ -552,8 +558,6 @@ export class Supervisor {
   private attemptEvidenceKeys = new Map<string, string>();
   private attemptSegmentFloors = new Map<string, number>();
   private stageEvidenceDigests = new Map<string, string>();
-  private artifactEvidenceDigests = new Map<string, string>();
-  private lastAssessmentEvidenceDigest?: string;
   private lastActionTime = 0;
   private assessmentCount = 0;
   /** Consecutive failed assessments (null returns from assess()). After a
@@ -573,6 +577,8 @@ export class Supervisor {
   private completedStages = new Map<string, { role: string; duration: number }>();
   private lastState: StoreState | null = null;
   private usage: SupervisorUsage | null = null;
+  private eventCursor = new SupervisorEventCursor();
+  private runEventCursor = 0;
 
   constructor(
     private projectDir: string,
@@ -582,17 +588,15 @@ export class Supervisor {
     private taskDescription: string,
   ) {}
 
-  // Heartbeats stay cheap and fixed-rate. Semantic LLM reviews have their own
-  // routine cadence; anomaly signals bypass that cadence and routine budget.
+  // Heartbeats stay cheap and fixed-rate. They collect deterministic events;
+  // only an event dequeued from eventCursor authorizes a model call.
   private effectivePollIntervalMs: number = 0;
   private consecutiveWaits = 0;
   private prevStageStatusSnapshot: Record<string, string> = {};
-  private lastRoutineAssessmentAt = Date.now();
   private accumulatedOutputBytes = 0;
   private pendingTails = new Map<string, string>();
   private pendingArtifacts = new Map<string, { path: string; content: string }>();
-  private seenAnomalySignals = new Set<string>();
-  // Per-iteration ROUTINE budget refills when state.currentIteration advances.
+  // Per-iteration count remains visible as a quantity, but never authorizes a call.
   private lastSeenIteration = 0;
   private iterationAssessmentCount = 0;
   // GAP-2 watchdog: last-progress timestamp per running stage (carried across ticks).
@@ -608,9 +612,20 @@ export class Supervisor {
     this.stopped = false;
     this.effectivePollIntervalMs = this.config.pollIntervalMs;
     const startedAt = new Date().toISOString();
+    this.restoreEventState();
     try {
       const state = readRunState(this.projectDir, this.runId);
       const prior = state.supervisor;
+      if (prior) {
+        const snapshot = this.eventCursor.snapshot();
+        this.eventCursor = new SupervisorEventCursor({
+          seenEventIds: [
+            ...snapshot.seenEventIds,
+            ...prior.attempts.flatMap((attempt) => attempt.trigger?.eventId ? [attempt.trigger.eventId] : []),
+          ],
+          pendingEvents: snapshot.pendingEvents,
+        });
+      }
       this.usage = prior ? {
         ...prior,
         status: 'running',
@@ -627,12 +642,11 @@ export class Supervisor {
       };
       this.assessmentCount = this.usage.calls;
       this.startTime = Date.parse(this.usage.startedAt) || Date.now();
-      this.lastRoutineAssessmentAt = Date.now();
       this.persistUsage();
     } catch { /* run state may not be initialized yet */ }
     const logPath = this.logPath();
     mkdirSync(join(this.runDir(), 'signals'), { recursive: true });
-    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${startedAt}\nConfig: heartbeat=${this.config.pollIntervalMs}ms, routine=${this.config.routineAssessmentIntervalMs}ms, model=${this.config.model}, routine-max/iter=${this.config.maxAssessmentsPerIteration}\n\n`);
+    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${startedAt}\nConfig: heartbeat=${this.config.pollIntervalMs}ms, assessment-mode=deterministic-events, model=${this.config.model}, legacy-routine=${this.config.routineAssessmentIntervalMs}ms, legacy-max/iter=${this.config.maxAssessmentsPerIteration}\n\n`);
     log.info({ runId: this.runId }, 'Supervisor started');
     this.scheduleNextTick();
   }
@@ -711,6 +725,7 @@ export class Supervisor {
     startedAt: string,
     result: RunResult | undefined,
     verdict: SupervisorAssessment | null,
+    trigger: SupervisorEvent,
     error?: string,
   ): void {
     if (!this.usage) {
@@ -733,6 +748,7 @@ export class Supervisor {
       exitCode,
       tokens_in: result?.tokens_in,
       tokens_out: result?.tokens_out,
+      trigger,
       ...(verdict ? {
         unverifiedAssessment: {
           verdict: verdict.verdict,
@@ -753,7 +769,7 @@ export class Supervisor {
         timestamp: completedAt,
         stageId: '_supervisor',
         type: 'llm_call',
-        inputSummary: 'Supervisor semantic assessment',
+        inputSummary: `Supervisor semantic assessment triggered by ${trigger.type} (${trigger.eventId})`,
         outputSummary: verdict
           ? `Unverified model assessment — ${verdict.verdict}: ${verdict.reason}`
           : (error ?? `exit ${exitCode}`),
@@ -894,6 +910,9 @@ export class Supervisor {
       tokensIn: this.usage?.tokens_in ?? 0,
       tokensOut: this.usage?.tokens_out ?? 0,
       assessmentDurationMs: this.usage?.duration_ms ?? 0,
+      runEventCursor: this.runEventCursor,
+      eventCursor: this.eventCursor.snapshot(),
+      stageStatusSnapshot: this.prevStageStatusSnapshot,
       actions: this.actions.slice(-30).map(a => ({
         tick: a.tick,
         timestamp: a.timestamp,
@@ -904,9 +923,30 @@ export class Supervisor {
         guidance: a.assessment.guidance,
         targetAttemptIndex: a.targetAttemptIndex,
         source: a.source,
+        trigger: a.trigger,
       })),
     };
     try { writeFileSync(path, JSON.stringify(payload, null, 2), 'utf-8'); } catch { /* non-critical */ }
+  }
+
+  private restoreEventState(): void {
+    try {
+      const parsed = JSON.parse(readFileSync(join(this.runDir(), 'supervisor_state.json'), 'utf-8')) as {
+        runEventCursor?: unknown;
+        eventCursor?: Partial<SupervisorEventCursorSnapshot>;
+        stageStatusSnapshot?: unknown;
+      };
+      if (Number.isSafeInteger(parsed.runEventCursor) && Number(parsed.runEventCursor) >= 0) {
+        this.runEventCursor = Number(parsed.runEventCursor);
+      }
+      if (parsed.eventCursor) this.eventCursor = new SupervisorEventCursor(parsed.eventCursor);
+      if (parsed.stageStatusSnapshot && typeof parsed.stageStatusSnapshot === 'object') {
+        this.prevStageStatusSnapshot = Object.fromEntries(
+          Object.entries(parsed.stageStatusSnapshot as Record<string, unknown>)
+            .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+        );
+      }
+    } catch { /* first start or legacy state */ }
   }
 
   private readUserInput(): string | null {
@@ -1030,6 +1070,294 @@ export class Supervisor {
     try { return readStageStatus(this.projectDir, this.runId, stageId); } catch { return fallback; }
   }
 
+  private activeAttemptQuantities(
+    state: StoreState,
+    runningStages: readonly string[],
+    now: number,
+  ): SupervisorEventQuantities['activeAttempts'] {
+    return runningStages.flatMap((stageId) => {
+      const attempt = currentRunningAttempt(state.stages[stageId]);
+      if (!attempt) return [];
+      const attemptStartedMs = Date.parse(attempt.startedAt);
+      const base = {
+        stageId,
+        attemptIndex: attempt.index,
+        attemptStartedAt: attempt.startedAt,
+        elapsedMs: Number.isFinite(attemptStartedMs) ? Math.max(0, now - attemptStartedMs) : 0,
+      };
+      const ledgerPath = join(
+        this.runDir(),
+        'stages',
+        stageId,
+        `attempt_deadline_execution_${attempt.index}_budget.jsonl`,
+      );
+      try {
+        const created = readFileSync(ledgerPath, 'utf-8')
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .find((entry) => entry.type === 'attempt_deadline_created');
+        const deadlineAt = typeof created?.deadlineAt === 'string' ? created.deadlineAt : undefined;
+        const deadlineMs = deadlineAt ? Date.parse(deadlineAt) : Number.NaN;
+        if (deadlineAt && Number.isFinite(deadlineMs)) {
+          return [{ ...base, deadlineAt, remainingMs: Math.max(0, deadlineMs - now) }];
+        }
+      } catch { /* the status-backed active-attempt facts remain usable */ }
+      return [base];
+    });
+  }
+
+  private eventQuantities(
+    state: StoreState,
+    runningStages: readonly string[],
+    now: number,
+  ): SupervisorEventQuantities {
+    let gateRetryMaximum = Math.max(0, Math.floor(state.maxRetries ?? 0));
+    let supervisorRejectMaximum = 0;
+    // Reading a project's existing defaults is safe. Do not cause a supervisor
+    // heartbeat to scaffold configuration in projects that do not have it.
+    if (existsSync(join(this.projectDir, 'config', 'defaults.yaml'))) {
+      try {
+        const defaults = loadProjectDefaults(this.projectDir);
+        gateRetryMaximum = Math.max(0, Math.floor(state.maxRetries ?? defaults.gate_retry_loops));
+        supervisorRejectMaximum = Math.max(0, Math.floor(defaults.supervisor_max_rejects));
+      } catch { /* zero/explicit state quantities fail closed and remain visible */ }
+    }
+    const maximum = Math.max(0, Math.floor(this.config.maxAssessmentsPerIteration));
+    const changedPaths = new Set([...this.pendingTails.keys(), ...this.pendingArtifacts.keys()]);
+    return {
+      iteration: state.currentIteration ?? 1,
+      runningStageCount: runningStages.length,
+      activeAttempts: this.activeAttemptQuantities(state, runningStages, now),
+      minArtifactDeltaBytes: this.config.minDeltaBytes,
+      deadlineMarginMs: resolveSupervisorDeadlineMarginMs(this.config.pollIntervalMs),
+      pollIntervalMs: this.config.pollIntervalMs,
+      changedBytes: this.accumulatedOutputBytes,
+      changedPathCount: changedPaths.size,
+      supervisorAssessmentBudget: {
+        used: this.iterationAssessmentCount,
+        maximum,
+        remaining: Math.max(0, maximum - this.iterationAssessmentCount),
+      },
+      supervisorRejectBudget: { maximum: supervisorRejectMaximum },
+      gateRetryBudget: { maximum: gateRetryMaximum },
+    };
+  }
+
+  private readNewRunEvents(): RunEvent[] {
+    const events = readRunEvents(this.projectDir, this.runId);
+    if (this.runEventCursor > events.length) this.runEventCursor = 0;
+    const next = events.slice(this.runEventCursor);
+    this.runEventCursor = events.length;
+    return next;
+  }
+
+  private eventCandidates(input: {
+    state: StoreState;
+    runningStages: string[];
+    transitionParts: string[];
+    recentArtifacts: Array<{ path: string; content: string }>;
+    userInput: string | null;
+    now: number;
+  }): SupervisorEventCandidate[] {
+    const { state, runningStages, transitionParts, recentArtifacts, userInput, now } = input;
+    const observedAt = new Date(now).toISOString();
+    const quantities = this.eventQuantities(state, runningStages, now);
+    const candidates: SupervisorEventCandidate[] = [];
+    const newRunEvents = this.readNewRunEvents();
+    const gateArtifactsFromEvents = new Set<string>();
+    let operatorGuidanceRecorded = false;
+
+    for (const event of newRunEvents) {
+      const common = {
+        observedAt: event.timestamp,
+        ...(event.stageId ? { stageId: event.stageId } : {}),
+        quantities,
+      };
+      if (event.type === 'scope_revision_requested') {
+        candidates.push({
+          ...common,
+          type: 'scope_request',
+          source: 'run_event:scope_revision_requested',
+          fingerprint: {
+            requestId: event.requestId,
+            stageId: event.stageId,
+            attemptIndex: event.attemptIndex,
+            timestamp: event.timestamp,
+          },
+          quantities: {
+            ...quantities,
+            scopeRequestId: event.requestId,
+            scopeRequestAttemptIndex: event.attemptIndex,
+          },
+        });
+      } else if (event.type === 'guidance_written' && event.source !== 'supervisor') {
+        operatorGuidanceRecorded ||= event.source === 'operator';
+        candidates.push({
+          ...common,
+          type: 'guidance_arrival',
+          source: 'run_event:guidance_written',
+          fingerprint: {
+            source: event.source,
+            stageId: event.stageId,
+            timestamp: event.timestamp,
+            detailDigest: createHash('sha256').update(event.detail ?? '').digest('hex'),
+          },
+          quantities: {
+            ...quantities,
+            guidanceSource: event.source,
+            guidanceTargetStage: event.stageId ?? RUN_WIDE_GUIDANCE_TARGET,
+          },
+        });
+      } else if (event.type === 'verdict_written') {
+        for (const artifact of event.artifacts ?? []) gateArtifactsFromEvents.add(artifact);
+        candidates.push({
+          ...common,
+          type: 'gate_verdict',
+          source: 'run_event:verdict_written',
+          fingerprint: {
+            stageId: event.stageId,
+            artifacts: [...(event.artifacts ?? [])].sort(),
+            timestamp: event.timestamp,
+          },
+          quantities: {
+            ...quantities,
+            gateStageId: event.stageId,
+            gateArtifacts: [...(event.artifacts ?? [])].sort(),
+          },
+        });
+      } else if (
+        event.type === 'attempt_failed'
+        && (
+          event.adapterFailure === true
+          || /adapter(?: connection)? (?:failed|failure|error)|connection (?:failed|failure|error)/i.test(event.detail ?? '')
+        )
+      ) {
+        candidates.push({
+          ...common,
+          type: 'adapter_failure',
+          source: 'run_event:attempt_failed',
+          fingerprint: {
+            stageId: event.stageId,
+            attemptIndex: event.attemptIndex,
+            attemptStartedAt: event.attemptStartedAt,
+            timestamp: event.timestamp,
+          },
+          quantities: {
+            ...quantities,
+            failedAttemptIndex: event.attemptIndex,
+            failedExitCode: event.exitCode,
+            failureDetail: event.detail,
+          },
+        });
+      }
+    }
+
+    if (transitionParts.length > 0) {
+      const transitionedStageIds = transitionParts.map((transition) => transition.split(':', 1)[0]);
+      candidates.push({
+        type: 'stage_transition',
+        observedAt,
+        source: 'run_state',
+        fingerprint: {
+          iteration: state.currentIteration ?? 1,
+          transitions: [...transitionParts].sort(),
+          executions: transitionedStageIds.map((stageId) => {
+            const status = state.stages[stageId];
+            const attempt = status?.attempts?.at(-1);
+            return {
+              stageId,
+              status: status?.status ?? 'absent',
+              retries: status?.retries,
+              attemptIndex: attempt?.index,
+              attemptStartedAt: attempt?.startedAt,
+              attemptCompletedAt: attempt?.completedAt,
+            };
+          }),
+        },
+        quantities: { ...quantities, transitions: [...transitionParts].sort() },
+      });
+    }
+    if (userInput && !operatorGuidanceRecorded) {
+      candidates.push({
+        type: 'guidance_arrival',
+        observedAt,
+        source: 'operator_input_fallback',
+        fingerprint: {
+          observedAt,
+          contentDigest: createHash('sha256').update(userInput).digest('hex'),
+        },
+        quantities: {
+          ...quantities,
+          guidanceSource: 'operator',
+          guidanceTargetStage: null,
+        },
+      });
+    }
+    for (const artifact of recentArtifacts) {
+      if (!/(^|\/)verdict(?:[_.][^/]*)?\.json$/i.test(artifact.path)) continue;
+      if (gateArtifactsFromEvents.has(artifact.path)) continue;
+      candidates.push({
+        type: 'gate_verdict',
+        observedAt,
+        source: 'artifact_scan',
+        fingerprint: {
+          path: artifact.path,
+          contentDigest: createHash('sha256').update(artifact.content).digest('hex'),
+        },
+        quantities: {
+          ...quantities,
+          gateArtifacts: [artifact.path],
+          gatePass: (() => {
+            try { return (JSON.parse(artifact.content) as { pass?: unknown }).pass; }
+            catch { return undefined; }
+          })(),
+        },
+      });
+    }
+    if (quantities.changedBytes >= quantities.minArtifactDeltaBytes) {
+      candidates.push({
+        type: 'artifact_change',
+        observedAt,
+        source: 'bounded_evidence_scan',
+        fingerprint: {
+          paths: [...new Set([...this.pendingTails.keys(), ...this.pendingArtifacts.keys()])].sort(),
+          stageDigests: [...this.stageEvidenceDigests].sort(([left], [right]) => left.localeCompare(right)),
+          artifactDigests: [...this.pendingArtifacts].map(([path, artifact]) => [
+            path,
+            createHash('sha256').update(artifact.content).digest('hex'),
+          ]).sort(([left], [right]) => left.localeCompare(right)),
+        },
+        quantities: {
+          ...quantities,
+          changedPaths: [...new Set([...this.pendingTails.keys(), ...this.pendingArtifacts.keys()])].sort(),
+        },
+      });
+    }
+    for (const attempt of quantities.activeAttempts) {
+      if (attempt.remainingMs === undefined || attempt.remainingMs > quantities.deadlineMarginMs) continue;
+      candidates.push({
+        type: 'deadline_margin',
+        observedAt,
+        source: 'attempt_deadline_ledger',
+        stageId: attempt.stageId,
+        fingerprint: {
+          stageId: attempt.stageId,
+          attemptIndex: attempt.attemptIndex,
+          attemptStartedAt: attempt.attemptStartedAt,
+          deadlineAt: attempt.deadlineAt,
+        },
+        quantities: {
+          ...quantities,
+          deadlineStageId: attempt.stageId,
+          deadlineAttemptIndex: attempt.attemptIndex,
+          deadlineRemainingMs: attempt.remainingMs,
+        },
+      });
+    }
+    return candidates;
+  }
+
   private async tick(): Promise<void> {
     if (this.stopped) return;
     this.tickCount++;
@@ -1045,11 +1373,12 @@ export class Supervisor {
     // Track milestones and update progress
     this.trackMilestones(state);
 
-    // Refill the ROUTINE semantic-review budget when the iteration advances.
+    // Reset the compatibility counter when the iteration advances. It is
+    // recorded in event quantities but never authorizes or suppresses a call.
     const currentIter = state.currentIteration ?? 1;
     if (currentIter !== this.lastSeenIteration) {
       if (this.lastSeenIteration !== 0) {
-        log.info({ from: this.lastSeenIteration, to: currentIter, perIterUsed: this.iterationAssessmentCount }, 'Supervisor per-iteration budget refilled');
+        log.info({ from: this.lastSeenIteration, to: currentIter, perIterUsed: this.iterationAssessmentCount }, 'Supervisor per-iteration event counter reset');
       }
       this.lastSeenIteration = currentIter;
       this.iterationAssessmentCount = 0;
@@ -1207,92 +1536,47 @@ export class Supervisor {
       }
     }
 
-    // Scan artifacts on every heartbeat, retaining them until the next semantic
-    // call. Failed gates are immediate anomaly signals; ordinary artifacts stay
-    // in the pending prompt for the next routine call.
+    // Scan artifacts on every heartbeat and retain their exact bounded bytes.
+    // The scan is evidence collection only; it authorizes a model call solely
+    // when it produces one of the typed events below.
     const recentArtifacts = this.readRecentArtifacts();
     for (const artifact of recentArtifacts) {
+      const previous = this.pendingArtifacts.get(artifact.path);
+      if (previous?.content !== artifact.content) {
+        this.accumulatedOutputBytes += Buffer.byteLength(artifact.content);
+      }
       this.pendingArtifacts.set(artifact.path, artifact);
-      this.artifactEvidenceDigests.set(
-        artifact.path,
-        createHash('sha256').update(artifact.content).digest('hex'),
-      );
     }
-
-    const detectedSignals = detectSupervisorAnomalySignals({
+    const now = Date.now();
+    this.eventCursor.offer(this.eventCandidates({
       state,
-      stageTransitionFingerprint: transitionParts.length > 0 ? transitionParts.sort().join('|') : undefined,
-      stalledStageIds,
+      runningStages,
+      transitionParts,
       recentArtifacts,
       userInput,
-      pendingApprovalFingerprint: this.pendingApprovalFingerprint(),
-    }).map((signal) => (
-      signal.startsWith('user_input:')
-      || signal.startsWith('gate_failed:')
-      || signal.startsWith('stage_transition:')
-    ) ? `${signal}:tick${this.tickCount}` : signal);
-    const anomalySignals = detectedSignals.filter((signal) => !this.seenAnomalySignals.has(signal));
-    for (const signal of anomalySignals) this.seenAnomalySignals.add(signal);
-
-    const now = Date.now();
-    const trigger = selectSupervisorAssessmentTrigger({
-      anomalySignals,
-      runningStageCount: runningStages.length,
-      accumulatedOutputBytes: this.accumulatedOutputBytes,
-      minDeltaBytes: this.config.minDeltaBytes,
       now,
-      lastRoutineAssessmentAt: this.lastRoutineAssessmentAt,
-      routineAssessmentIntervalMs: this.config.routineAssessmentIntervalMs,
-      routineAssessmentsThisIteration: this.iterationAssessmentCount,
-      maxRoutineAssessmentsPerIteration: this.config.maxAssessmentsPerIteration,
-      cooldownUntil: this.lastActionTime + this.config.cooldownAfterActionMs,
-    });
-    if (trigger === 'none') {
+    }));
+    const triggeringEvent = this.eventCursor.next();
+    if (selectSupervisorAssessmentTrigger({
+      deterministicEvents: triggeringEvent ? [triggeringEvent] : [],
+    }) === 'none' || !triggeringEvent) {
       this.writeProgress();
       return;
     }
+    // Persist consumption before the external call. A daemon restart cannot
+    // replay the same event merely because the model call was in flight.
+    this.writeSupervisorState();
 
-    let extraContext = anomalySignals.length > 0
-      ? `\n\n# Immediate anomaly signals\n${anomalySignals.map((signal) => `- ${signal}`).join('\n')}\nAssess now; this call bypassed routine throttling.`
-      : '';
+    let extraContext = `\n\n# Deterministic Triggering Event\n${JSON.stringify(triggeringEvent, null, 2)}\nThis event authorized this assessment. Its quantities are the values read when the event crossed its threshold.`;
     if (userInput) {
       extraContext += `\n\n# User Guidance (just received)\n${userInput}\nIncorporate this into your assessment.`;
     }
     const assessmentTails = new Map(this.pendingTails);
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
-    const evidenceDigest = supervisorEvidenceDigest({
-      // The prompt contains only deltas, but novelty is cumulative. Otherwise
-      // clearing a delivered tail would itself look like new evidence and
-      // trigger a second static WAIT call.
-      tails: new Map(runningStages.map((stageId) => [
-        stageId,
-        this.stageEvidenceDigests.get(stageId) ?? this.attemptEvidenceKeys.get(stageId) ?? stageId,
-      ])),
-      artifacts: [...this.artifactEvidenceDigests].map(([path, content]) => ({ path, content })),
-      // Edge-triggered anomalies remain part of the cumulative semantic state
-      // after delivery. Otherwise their disappearance on the next heartbeat
-      // would itself look novel and spend another call concluding WAIT.
-      anomalySignals: [...this.seenAnomalySignals],
-      attemptKeys: runningStages.map((stageId) => {
-        const facts = stageFacts.get(stageId);
-        return `${stageId}:${facts?.attemptIndex ?? 'unknown'}:${facts?.attemptStartedAt ?? 'unknown'}`;
-      }),
-    });
-    if (trigger === 'routine' && evidenceDigest === this.lastAssessmentEvidenceDigest) {
-      // Advance cadence without spending a semantic-call budget slot. The
-      // evidence was already assessed, but a later novel byte/artifact/attempt
-      // must still retain the iteration's remaining review capacity.
-      this.lastRoutineAssessmentAt = now;
-      this.writeProgress();
-      return;
-    }
-    if (trigger === 'routine') {
-      this.lastRoutineAssessmentAt = now;
-      this.iterationAssessmentCount++;
-    }
+    this.iterationAssessmentCount++;
     const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
     const assessmentStartedAt = Date.now();
-    let assessment = await this.assess(prompt);
+    let assessment = await this.assess(prompt, triggeringEvent);
     this.accumulatedOutputBytes = 0;
     this.pendingTails.clear();
     this.pendingArtifacts.clear();
@@ -1315,7 +1599,6 @@ export class Supervisor {
       this.writeProgress();
       return;
     }
-    this.lastAssessmentEvidenceDigest = evidenceDigest;
     if (userInput && addressedOperatorTarget && assessment.verdict === 'GUIDE') {
       const targetIsKnown = addressedOperatorTarget === RUN_WIDE_GUIDANCE_TARGET
         || Object.hasOwn(state.stages, addressedOperatorTarget);
@@ -1356,6 +1639,7 @@ export class Supervisor {
       timestamp: new Date().toISOString(),
       tick: this.tickCount,
       assessment: effectiveAssessment,
+      trigger: triggeringEvent,
       runningStages,
       targetAttemptIndex: effectiveAssessment.targetStage
         ? currentRunningAttempt(this.authoritativeStageStatus(
@@ -1561,7 +1845,7 @@ export class Supervisor {
     });
   }
 
-  private async assess(prompt: string): Promise<SupervisorAssessment | null> {
+  private async assess(prompt: string, trigger: SupervisorEvent): Promise<SupervisorAssessment | null> {
     const agentConfig: AgentConfig = {
       name: 'supervisor',
       description: 'Workflow supervisor',
@@ -1581,13 +1865,13 @@ export class Supervisor {
         stageId: '_supervisor',
       });
     } catch (err) {
-      this.recordAssessmentUsage(startedAt, undefined, null, err instanceof Error ? err.message : String(err));
+      this.recordAssessmentUsage(startedAt, undefined, null, trigger, err instanceof Error ? err.message : String(err));
       log.warn({ err }, 'Supervisor assessment call failed');
       return null;
     }
 
     if (result.exitCode !== 0) {
-      this.recordAssessmentUsage(startedAt, result, null, `adapter exit ${result.exitCode}`);
+      this.recordAssessmentUsage(startedAt, result, null, trigger, `adapter exit ${result.exitCode}`);
       log.warn({ exitCode: result.exitCode }, 'Supervisor assessment returned non-zero');
       return null;
     }
@@ -1596,11 +1880,11 @@ export class Supervisor {
     // parseSupervisorVerdict scans last-to-first to skip the echoed template).
     const verdict = parseSupervisorVerdict(result.output);
     if (!verdict) {
-      this.recordAssessmentUsage(startedAt, result, null, 'unparseable supervisor verdict');
+      this.recordAssessmentUsage(startedAt, result, null, trigger, 'unparseable supervisor verdict');
       log.warn({ outputPreview: result.output.slice(-500) }, 'No parseable supervisor verdict in response');
       return null;
     }
-    this.recordAssessmentUsage(startedAt, result, verdict);
+    this.recordAssessmentUsage(startedAt, result, verdict, trigger);
     return verdict;
   }
 
@@ -1846,6 +2130,8 @@ export class Supervisor {
       `## Tick ${action.tick} — ${action.timestamp}`,
       `Running: ${action.runningStages.join(', ')}`,
       `Source: ${action.source ?? 'supervisor (legacy)'}${action.targetAttemptIndex === undefined ? '' : ` · execution ${action.targetAttemptIndex}`}`,
+      `Trigger: ${action.trigger.type} · ${action.trigger.eventId}`,
+      `Trigger quantities: ${JSON.stringify(action.trigger.quantities)}`,
       `Verdict: **${action.assessment.verdict}**${action.assessment.targetStage ? ` → ${action.assessment.targetStage}` : ''}`,
       `Reason: ${action.assessment.reason}`,
     ];

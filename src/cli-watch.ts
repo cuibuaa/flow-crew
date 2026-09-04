@@ -1,4 +1,5 @@
 import { createWatchState, pollWatch, type WatchAlert, type WatchPollDependencies, type WatchPollResult } from './watch.js';
+import { formatRunDriftRow } from './run-drift.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -77,7 +78,7 @@ export function parseWatchArgs(args: string[]): ParsedWatchArgs {
 export function watchUsage(): string {
   return [
     'Usage: flowcrew watch [--once] [--poll <seconds>] [--all]',
-    'Reports a first-pass heartbeat and edge-triggered stall judgements, evidence gaps, and status contradictions.',
+    'Reports a first-pass drift snapshot plus edge-triggered drift crossings, stalls, evidence gaps, and status contradictions.',
     'The default scans indexed operational runs. --all audits every entry under the runs directory.',
     `Poll interval must be between ${MIN_WATCH_POLL_MS / 1_000} and ${MAX_WATCH_POLL_MS / 1_000} seconds (default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
   ].join('\n');
@@ -160,6 +161,10 @@ export function formatWatchPoll(result: WatchPollResult): string[] {
       + (diagnostics.length > 0 ? ` · diagnostics: ${diagnostics.join(', ')}` : ''));
   }
   for (const alert of result.alerts) lines.push(alertLine(alert));
+  for (const drift of result.drift) {
+    lines.push(`[DRIFT] ${oneLine(drift.runId)} · ${formatRunDriftRow(drift.row)}`
+      + (drift.crossedNow ? ` · crossed ${drift.previousCrossing}->${drift.row.crossing}` : ''));
+  }
   return lines;
 }
 

@@ -38,9 +38,11 @@ describe('supervisor cost visibility', () => {
       { output: '{"verdict":"WAIT","target_stage":null,"reason":"progress","guidance":null}', exitCode: 0, duration_ms: 20, tokens_in: 200, tokens_out: 20 },
       { output: 'adapter failed', exitCode: 2, duration_ms: 30, tokens_in: 300, tokens_out: 30 },
     ];
+    const prompts: string[] = [];
     const adapter: Adapter = {
-      async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         expect(opts.stageId).toBe('_supervisor');
+        prompts.push(prompt);
         return outputs.shift()!;
       },
     };
@@ -89,6 +91,13 @@ describe('supervisor cost visibility', () => {
       status: 'complete', calls: 3, tokens_in: 600, tokens_out: 60, duration_ms: 60,
     });
     expect(accounted.supervisor?.attempts.map((attempt) => attempt.status)).toEqual(['failed', 'complete', 'failed']);
+    expect(accounted.supervisor?.attempts.map((attempt) => attempt.trigger?.type)).toEqual([
+      'stage_transition', 'guidance_arrival', 'stage_transition',
+    ]);
+    expect(accounted.supervisor?.attempts.every((attempt) => (
+      attempt.trigger?.eventId && attempt.trigger.quantities.deadlineMarginMs === 200_000
+    ))).toBe(true);
+    expect(prompts.every((prompt) => prompt.includes('# Deterministic Triggering Event'))).toBe(true);
     expect(readTraceEvents(projectDir, created.runId, '_supervisor')).toHaveLength(3);
     const statusPath = join(runDir(projectDir, created.runId), 'stages', '_supervisor', 'status.json');
     expect(existsSync(statusPath)).toBe(true);

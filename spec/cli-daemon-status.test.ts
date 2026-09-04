@@ -235,6 +235,15 @@ describe('daemon status local diagnosis', () => {
         terminal_artifact: 'escalation_note.md',
       },
     });
+    expect(merged.operational?.drift?.rows).toHaveLength(6);
+    expect(merged.operational?.drift?.rows.map((row) => row.id)).toEqual([
+      'research_dose',
+      'first_plan_admission',
+      'supervisor_rejections',
+      'engine_overhead',
+      'registry_growth',
+      'log_growth',
+    ]);
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
     expect(registry.get(task.id)?.completed_at).toBeUndefined();
   });

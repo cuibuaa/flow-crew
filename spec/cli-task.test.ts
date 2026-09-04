@@ -7,6 +7,7 @@ import type { Server } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { cmdTask } from '../src/cli-task.js';
+import { buildOperationalProjection } from '../src/cli-events.js';
 import { startRpcServer, type RpcRequest, type RpcResponse } from '../src/orchestrator-rpc.js';
 import type { TaskEntry } from '../src/task-registry.js';
 import type { CancellationResult } from '../src/run-control.js';
@@ -62,7 +63,13 @@ describe('cmdTask', () => {
   // Keep the preregistered item-17 workload ID stable. The assertion below is
   // the documented replacement for the obsolete raw-by-default behavior.
   it('shows task details and recent ticks', async () => {
-    server = await startRpcServer(socketPath, () => ({ task: task({ id: 3, status: 'done' }), recent_ticks: ['- tick'] }));
+    server = await startRpcServer(socketPath, () => ({
+      task: {
+        ...task({ id: 3, status: 'done' }),
+        operational: buildOperationalProjection({ runId: 'run-3', status: 'complete' }),
+      },
+      recent_ticks: ['- tick'],
+    }));
     const out = new Capture();
 
     const code = await cmdTask(['task', 'show', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
@@ -71,6 +78,8 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('Task #3');
     expect(out.text()).toContain('Raw ticks: hidden (pass --raw)');
     expect(out.text()).not.toContain('- tick');
+    expect(out.text().split(/\r?\n/u).filter((line) => line.startsWith('Drift '))).toHaveLength(6);
+    expect(out.text()).toContain('Drift research_dose: value=unavailable; unit=unknown; threshold=');
 
     const raw = new Capture();
     const rawCode = await cmdTask(['task', 'show', '3', '--raw', '--port', socketPath], { stdout: raw.stream as any, stderr: raw.err as any });

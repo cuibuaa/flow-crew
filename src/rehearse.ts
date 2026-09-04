@@ -34,6 +34,39 @@ export interface Finding {
   text: string;
 }
 
+export interface IsolatedRehearsalOptions {
+  /** Used only for project-aware static inspection; the simulated run uses its own temp project. */
+  projectDir?: string;
+  staticOnly?: boolean;
+  keep?: boolean;
+  label?: string;
+}
+
+export interface IsolatedRehearsalResult {
+  exitCode: 0 | 1;
+  findings: Finding[];
+  simulated: boolean;
+  preflight: {
+    digest: string;
+    contractReady: boolean;
+    requiresAcknowledgement: boolean;
+  };
+  outputInventory: {
+    entries: number;
+    blocking: number;
+  };
+  diagnosticsLogPath: string;
+  retainedArtifacts?: {
+    projectDir: string;
+    runDir: string;
+  };
+}
+
+interface RunRehearsalOptions extends IsolatedRehearsalOptions {
+  briefText?: string;
+  render?: boolean;
+}
+
 export type GitIgnoreProbe = (
   projectDir: string,
   candidatePaths: readonly string[],
@@ -166,9 +199,26 @@ function initializeTemporaryGitRepository(projectDir: string, stateDir: string):
   });
 }
 
+async function settleDeferredRunWrites(runDirectory: string): Promise<void> {
+  const refreshPath = join(runDirectory, 'attempt_summary_refresh.json');
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const refresh = JSON.parse(readFileSync(refreshPath, 'utf-8')) as { pending?: unknown };
+      if (refresh.pending !== true) return;
+    } catch {
+      // No refresh request means this run has no debounced write to drain.
+      return;
+    }
+    await new Promise<void>((resolvePoll) => setTimeout(resolvePoll, 25));
+  }
+  throw new Error('rehearsal run-event summary refresh did not settle within 5000 ms');
+}
+
 export async function cmdRehearse(argv: string[]): Promise<void> {
   try {
-    await runRehearsal(argv);
+    const result = await runRehearsal(argv);
+    process.exitCode = result.exitCode;
   } catch (error) {
     const briefPath = argv.find((arg) => !arg.startsWith('--')) ?? '<brief.md>';
     console.error(`Rehearsal could not complete safely: ${conciseError(error)}`);
@@ -177,15 +227,15 @@ export async function cmdRehearse(argv: string[]): Promise<void> {
   }
 }
 
-async function runRehearsal(argv: string[]): Promise<void> {
+async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): Promise<IsolatedRehearsalResult> {
   const briefPath = argv.find((a) => !a.startsWith('--'));
-  if (!briefPath || !existsSync(briefPath)) {
-    console.error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only]');
-    process.exit(1);
+  if (!briefPath || (options.briefText === undefined && !existsSync(briefPath))) {
+    throw new Error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only]');
   }
-  const keep = argv.includes('--keep');
-  const staticOnly = argv.includes('--static-only');
-  const brief = readFileSync(briefPath, 'utf-8');
+  const keep = options.keep ?? argv.includes('--keep');
+  const staticOnly = options.staticOnly ?? argv.includes('--static-only');
+  const brief = options.briefText ?? readFileSync(briefPath, 'utf-8');
+  const briefLabel = options.label ?? briefPath;
   const diagnosticsDir = mkdtempSync(join(tmpdir(), 'flowcrew-rehearse-diagnostics-'));
   const diagnosticLogPath = join(diagnosticsDir, 'engine.log');
   const closeDiagnostics = routeLogsToFile(diagnosticLogPath);
@@ -199,7 +249,7 @@ async function runRehearsal(argv: string[]): Promise<void> {
   const add = (level: Finding['level'], text: string) => findings.push({ level, text });
 
   // ---------- static contract checks ----------
-  const projectDir = process.env.PROJECT_DIR || process.cwd();
+  const projectDir = options.projectDir ?? process.env.PROJECT_DIR ?? process.cwd();
   const preflightContext = projectBriefPreflightContext(projectDir, brief);
   const preflight = inspectBrief(brief, preflightContext);
   for (const finding of preflight.findings) {
@@ -226,6 +276,8 @@ async function runRehearsal(argv: string[]): Promise<void> {
   let simulated = false;
   let tempFcHome = '';
   let tempProject = '';
+  let rehearsalRunDir = '';
+  let retainedArtifacts: IsolatedRehearsalResult['retainedArtifacts'];
   if (!staticOnly && rc && !hasFail()) {
     simulated = true;
     tempFcHome = mkdtempSync(join(tmpdir(), 'fc-rehearse-home-'));
@@ -393,6 +445,7 @@ async function runRehearsal(argv: string[]): Promise<void> {
       );
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       const runDirPath = join(tempFcHome, 'runs', state.runId!);
+      rehearsalRunDir = runDirPath;
 
       // ---------- verdicts on the simulated run ----------
       const statusResolution = resolveRunStatus(state.status);
@@ -445,7 +498,10 @@ async function runRehearsal(argv: string[]): Promise<void> {
 
       const pendingStages = Object.entries(state.stages ?? {}).filter(([, s]) => store.isPendingStageStatus(s.status));
       if (pendingStages.length > 0) add('fail', `run.json still contains pending stages: ${pendingStages.map(([k]) => k).join(', ')}`);
-      if (keep) add('ok', `Artifacts retained: project=${tempProject} run=${runDirPath}`);
+      if (keep) {
+        retainedArtifacts = { projectDir: tempProject, runDir: runDirPath };
+        add('ok', `Artifacts retained: project=${tempProject} run=${runDirPath}`);
+      }
     } catch (error) {
       const retry = `flowcrew rehearse ${shellQuote(briefPath)} --static-only`;
       if (simulationPhase === 'git') {
@@ -454,6 +510,16 @@ async function runRehearsal(argv: string[]): Promise<void> {
         add('fail', `The isolated scheduler rehearsal could not complete: ${conciseError(error)}\n  Next: ${retry}`);
       }
     } finally {
+      if (rehearsalRunDir) {
+        // Keep the rehearsal home active until framework-owned debounced writes
+        // settle. Restoring the caller's FC home first redirects their mutable
+        // global path lookup into the caller after rehearsal returns.
+        try {
+          await settleDeferredRunWrites(rehearsalRunDir);
+        } catch (error) {
+          add('fail', `The isolated scheduler rehearsal left deferred writes pending: ${conciseError(error)}`);
+        }
+      }
       store.setFcGlobalDir(realFcHome);
       if (!keep) {
         rmSync(tempFcHome, { recursive: true, force: true });
@@ -465,14 +531,49 @@ async function runRehearsal(argv: string[]): Promise<void> {
   // ---------- report ----------
   closeDiagnostics();
   process.off('exit', closeDiagnostics);
-  console.log(`\nRehearsal report — ${briefPath}${simulated ? '' : ' (static checks only)'}\n`);
-  for (const f of findings) console.log(`${mark[f.level]} ${f.text}`);
-  console.log(`\nBrief admission: ${preflight.requiresAcknowledgement
-    ? `explicit acknowledgement required for exact digest ${preflight.digest}`
-    : `no explicit acknowledgement required for exact digest ${preflight.digest}`}`);
   const fails = findings.filter((f) => f.level === 'fail').length;
   const warns = findings.filter((f) => f.level === 'warn').length;
-  console.log(`\n${fails === 0 ? '✅ Contract ready' : `❌ ${fails} contract problem${fails === 1 ? '' : 's'}`}${warns ? ` · ${warns} warning${warns === 1 ? '' : 's'}` : ''}`);
-  console.log(`Engine diagnostics (not part of the verdict): ${diagnosticLogPath}`);
-  process.exit(rehearsalExitCode(findings));
+  if (options.render !== false) {
+    console.log(`\nRehearsal report — ${briefLabel}${simulated ? '' : ' (static checks only)'}\n`);
+    for (const f of findings) console.log(`${mark[f.level]} ${f.text}`);
+    console.log(`\nBrief admission: ${preflight.requiresAcknowledgement
+      ? `explicit acknowledgement required for exact digest ${preflight.digest}`
+      : `no explicit acknowledgement required for exact digest ${preflight.digest}`}`);
+    console.log(`\n${fails === 0 ? '✅ Contract ready' : `❌ ${fails} contract problem${fails === 1 ? '' : 's'}`}${warns ? ` · ${warns} warning${warns === 1 ? '' : 's'}` : ''}`);
+    console.log(`Engine diagnostics (not part of the verdict): ${diagnosticLogPath}`);
+  }
+  return {
+    exitCode: rehearsalExitCode(findings),
+    findings,
+    simulated,
+    preflight: {
+      digest: preflight.digest,
+      contractReady: preflight.contractReady,
+      requiresAcknowledgement: preflight.requiresAcknowledgement,
+    },
+    outputInventory: {
+      entries: outputInventory.entries.length,
+      blocking: outputInventory.blocking.length,
+    },
+    diagnosticsLogPath: diagnosticLogPath,
+    ...(retainedArtifacts ? { retainedArtifacts } : {}),
+  };
 }
+
+/**
+ * Programmatic rehearsal for generated briefs. It has no CLI exit side effect and the
+ * scheduler simulation remains confined to OS-temporary FC/project directories.
+ */
+export async function rehearseBriefIsolated(
+  brief: string,
+  options: IsolatedRehearsalOptions = {},
+): Promise<IsolatedRehearsalResult> {
+  return runRehearsal([options.label ?? 'generated-successor.md'], {
+    ...options,
+    briefText: brief,
+    render: false,
+  });
+}
+
+/** Short alias for callers which already establish that generated rehearsal is isolated. */
+export const rehearseBrief = rehearseBriefIsolated;

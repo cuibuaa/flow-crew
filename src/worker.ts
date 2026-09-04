@@ -32,6 +32,12 @@ import {
 } from './attempt-deadline.js';
 import { guidanceForStageFromText, readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { recordRunEvent } from './run-events.js';
+import {
+  acquireAttributableWriterLease,
+  LIVE_CONSTRAINT_MAX_REINVOCATIONS,
+  type LiveConstraintGuardFactory,
+  type LiveConstraintInvocationResult,
+} from './live-constraint-guard.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -72,6 +78,8 @@ export interface StageOpts {
    * observes only these roots; run-level scope enforcement owns global change
    * detection and rollback. */
   projectWriteScope?: string[];
+  /** Scheduler-owned canonical scope policy bound to the run rollback baseline. */
+  liveConstraintGuardFactory?: LiveConstraintGuardFactory;
 }
 
 const ADAPTER_ERROR_PATTERNS = ['403 Forbidden', 'connection refused', 'ECONNREFUSED', 'ECONNRESET', 'rate limit', 'ETIMEDOUT', '429 Too Many', '502 Bad Gateway', '503 Service Unavailable', 'overloaded'];
@@ -320,6 +328,27 @@ export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
 ): Promise<RunResult> {
+  // Preserve the synchronous launch edge only when the scheduler supplied no
+  // live policy. An explicitly empty scope still needs an attributable lease:
+  // any project write from that invocation is necessarily a violation.
+  if (!opts.liveConstraintGuardFactory) {
+    return runStageWithWriterLease(adapter, opts);
+  }
+  const releaseWriterLease = await acquireAttributableWriterLease(
+    opts.projectDir,
+    true,
+  );
+  try {
+    return await runStageWithWriterLease(adapter, opts);
+  } finally {
+    releaseWriterLease();
+  }
+}
+
+async function runStageWithWriterLease(
+  adapter: Adapter,
+  opts: StageOpts,
+): Promise<RunResult> {
   const skillNames = opts.stageSkills ?? [];
   let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
@@ -344,6 +373,7 @@ export async function runStage(
   if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an execution index`);
   const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
   if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
+  const liveConstraintGuard = opts.liveConstraintGuardFactory?.({ attemptIndex, attemptStartedAt });
   // Compatibility aggregates remain in the attempt ledger; live top-level
   // outcome fields must describe this execution, not the one it retried.
   const freshRunningStatus = freshRunningStageProjection(runningStatus, opts.retries, attemptStartedAt);
@@ -690,10 +720,13 @@ export async function runStage(
   };
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
+  let invocationIndex = 0;
+  let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
     session: boolean,
+    invocationPrompt = prompt,
   ): Promise<RunResult> => {
     if (aggregateAbortSignal.aborted || attemptDeadline.remainingMs() <= 0) {
       if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
@@ -705,21 +738,28 @@ export async function runStage(
       remainingMs: Math.max(0, Math.floor(attemptDeadline.remainingMs())),
       effectiveBudgetMs,
     });
-    return new Promise<RunResult>((resolvePromise, rejectPromise) => {
+    invocationIndex++;
+    const invocationAbortController = new AbortController();
+    const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
+    const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
+      if (!invocationAbortController.signal.aborted) invocationAbortController.abort(reason);
+    });
+    latestLiveConstraintResult = undefined;
+    const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
       let settled = false;
       let closeObservationTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (value: RunResult): void => {
         if (settled) return;
         settled = true;
         if (closeObservationTimer) clearTimeout(closeObservationTimer);
-        aggregateAbortSignal.removeEventListener('abort', onAbort);
+        invocationAbortSignal.removeEventListener('abort', onAbort);
         resolvePromise(value);
       };
       const fail = (error: unknown): void => {
         if (settled) return;
         settled = true;
         if (closeObservationTimer) clearTimeout(closeObservationTimer);
-        aggregateAbortSignal.removeEventListener('abort', onAbort);
+        invocationAbortSignal.removeEventListener('abort', onAbort);
         rejectPromise(error);
       };
       const onAbort = (): void => {
@@ -735,8 +775,8 @@ export async function runStage(
           }, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
         }
       };
-      aggregateAbortSignal.addEventListener('abort', onAbort, { once: true });
-      selectedAdapter.run(prompt, selectedRole, {
+      invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
+      selectedAdapter.run(invocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,
         runDir: opts.runDir,
@@ -746,7 +786,7 @@ export async function runStage(
         resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined,
         sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
         preserveSession: opts.preserveSession,
-        abortSignal: aggregateAbortSignal,
+        abortSignal: invocationAbortSignal,
       }).then(
         (value) => {
           lastChildClosedAt = new Date().toISOString();
@@ -759,10 +799,92 @@ export async function runStage(
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           if (aggregateAbortSignal.aborted) finish(cancelledResult());
+          else if (invocationAbortController.signal.aborted) finish(cancelledResult());
           else fail(error);
         },
       );
     });
+    try {
+      return await invocation;
+    } finally {
+      latestLiveConstraintResult = await liveMonitor?.finish();
+    }
+  };
+
+  const mergeInvocationTelemetry = (prior: RunResult | undefined, next: RunResult): RunResult => {
+    if (!prior) return next;
+    const writes = [...new Set([...(prior.writes ?? []), ...(next.writes ?? [])])];
+    const structured = prior.writeAttribution === 'structured' && next.writeAttribution === 'structured';
+    return {
+      ...next,
+      output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked after live scope correction]\n\n'),
+      duration_ms: prior.duration_ms + next.duration_ms,
+      tokens_in: (prior.tokens_in === undefined && next.tokens_in === undefined)
+        ? undefined
+        : (prior.tokens_in ?? 0) + (next.tokens_in ?? 0),
+      tokens_out: (prior.tokens_out === undefined && next.tokens_out === undefined)
+        ? undefined
+        : (prior.tokens_out ?? 0) + (next.tokens_out ?? 0),
+      ...(writes.length > 0 ? { writes } : {}),
+      ...(writes.length > 0 ? { writeAttribution: structured ? 'structured' : 'unknown' } : {}),
+    };
+  };
+
+  let liveReinvocations = 0;
+  const invokeAdapterWithLiveCorrection = async (
+    selectedAdapter: Adapter,
+    selectedRole: AgentConfig,
+    session: boolean,
+  ): Promise<RunResult> => {
+    let combined: RunResult | undefined;
+    let invocationPrompt = prompt;
+    let mayResume = session;
+    while (true) {
+      const current = await invokeAdapter(selectedAdapter, selectedRole, mayResume, invocationPrompt);
+      combined = mergeInvocationTelemetry(combined, current);
+      const live = latestLiveConstraintResult;
+      if (live?.monitorFailure) {
+        return {
+          ...combined,
+          exitCode: 1,
+          timedOut: false,
+          adapterError: false,
+          friendlyError: live.monitorFailure.reason,
+        };
+      }
+      const incidents = live?.incidents ?? [];
+      if (incidents.length === 0) return combined;
+      const instructions = [...new Set(incidents.map((incident) => incident.scopeRevisionInstruction))];
+      if (incidents.some((incident) => !incident.restored)) {
+        return {
+          ...combined,
+          exitCode: 1,
+          timedOut: false,
+          adapterError: false,
+          friendlyError: `live constraint rollback failed; ${instructions.join(' ')}`,
+        };
+      }
+      if (liveReinvocations >= LIVE_CONSTRAINT_MAX_REINVOCATIONS || aggregateAbortSignal.aborted) {
+        return {
+          ...combined,
+          exitCode: aggregateAbortSignal.aborted ? combined.exitCode : 1,
+          timedOut: aggregateAbortSignal.aborted ? combined.timedOut : false,
+          adapterError: false,
+          friendlyError: aggregateAbortSignal.aborted
+            ? combined.friendlyError
+            : `scope_violation: repeated live constraint violation after same-attempt correction; ${instructions.join(' ')}`,
+        };
+      }
+      liveReinvocations++;
+      mayResume = false;
+      invocationPrompt = `${prompt}\n\n# Live constraint correction\n${instructions.join('\n')}`;
+      try {
+        appendFileSync(
+          liveLogPath,
+          `\nLive constraint guard restored ${incidents.map((incident) => incident.path).join(', ')}; reinvoking inside attempt ${attemptIndex}.\n`,
+        );
+      } catch { /* durable incident JSONL remains the audit source */ }
+    }
   };
   const adapterRetryDelays = opts.technicalRetry?.delaysMs ?? ADAPTER_RETRY_DELAYS;
   const waitForRetry = (delayMs: number): Promise<boolean> => attemptDeadline.boundedSleep(delayMs, attemptAbortController.signal);
@@ -771,7 +893,7 @@ export async function runStage(
   // Abort and legacy-extension polling live through adapter backoff and
   // fallback so every phase remains governed by this attempt's one deadline.
   try {
-    result = await invokeAdapter(adapter, resolvedRole, true);
+    result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
     if (result.exitCode !== 0 && isAdapterError(result.output)) {
@@ -785,7 +907,7 @@ export async function runStage(
           result = cancelledResult();
           break;
         }
-        result = await invokeAdapter(adapter, resolvedRole, false);
+        result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, false);
         if (result.exitCode === 0 || !isAdapterError(result.output)) break;
       }
 
@@ -811,7 +933,7 @@ export async function runStage(
                 model: projectDefaults.model,
                 reasoning_effort: projectDefaults.reasoning_effort,
               };
-              result = await invokeAdapter(fallbackAdapter, fallbackRole, false);
+              result = await invokeAdapterWithLiveCorrection(fallbackAdapter, fallbackRole, false);
               try { appendFileSync(liveLogPath, `\n↪︎ Fallback ${fallbackName} returned exit=${result.exitCode}.\n`); } catch { /* ignore */ }
             }
           }
@@ -932,6 +1054,8 @@ export async function runStage(
     attemptIndex,
     attemptStartedAt,
     status: final.status,
+    exitCode: result.exitCode,
+    adapterFailure: result.adapterError === true,
     detail: result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
     source: 'worker',
   });

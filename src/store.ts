@@ -27,6 +27,7 @@ import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './rea
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
+import type { SupervisorEvent } from './supervisor-events.js';
 import {
   UnknownRunStatusError,
   isSuccessfulRunStatus,
@@ -103,6 +104,9 @@ export interface StageConstraintAuditSummary {
   appliedWriteCount?: number;
   rolledBackWriteCount?: number;
   rejectedDigestCount?: number;
+  liveViolationCount?: number;
+  liveRestoredCount?: number;
+  unresolvedViolationCount?: number;
 }
 
 export interface StageAttempt {
@@ -226,6 +230,8 @@ export interface SupervisorAttempt {
   exitCode: number;
   tokens_in?: number;
   tokens_out?: number;
+  /** Deterministic event and complete quantities that authorized the call. */
+  trigger?: SupervisorEvent;
   /** Raw model output is retained for audit only and is never an effective action. */
   unverifiedAssessment?: {
     verdict: string;

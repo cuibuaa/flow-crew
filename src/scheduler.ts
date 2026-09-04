@@ -103,6 +103,17 @@ import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from '
 import { appendTraceEvent } from './trace.js';
 import { generateRunSummary } from './run-summary.js';
 import { Supervisor, computeSupervisorEvidenceBinding, type SupervisorEvidenceBinding } from './supervisor.js';
+import {
+  LiveConstraintGuard,
+  SCOPE_REVISION_REQUEST_FILE,
+  scopeRevisionContract,
+  scopeRevisionInstruction,
+  type LiveConstraintGuardOptions,
+  type LiveConstraintGuardFactory,
+  type LiveConstraintIncident,
+} from './live-constraint-guard.js';
+// Compatibility-visible transport basename; its canonical definition lives in
+// live-constraint-guard.ts: scope_revision_request.json.
 import { isSessionReuseEnabled, loadProjectDefaults, loadSupervisorConfig } from './config.js';
 import { readCodexSession, type CodexSessionMetadata } from './adapters/codex.js';
 import { createLogger } from './logging.js';
@@ -1030,8 +1041,6 @@ function appendApprovalRequestContract(prompt: string, runDirPath: string, stage
     + `Each stage has its own slot so parallel requests are not overwritten.`;
 }
 
-const SCOPE_REVISION_REQUEST_FILE = 'scope_revision_request.json';
-
 function appendScopeRevisionContract(
   prompt: string,
   runDirPath: string,
@@ -1040,20 +1049,15 @@ function appendScopeRevisionContract(
 ): string {
   const declaredScope = stage.scope ?? [];
   const scopePresence = stage.scope === undefined ? 'missing' : 'present';
-  const gateIsolation = stage.is_gate
-    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or an OS temporary probe lane.'
-    : '';
-  return `${prompt}\n\nDeclared project-write scope: ${JSON.stringify(declaredScope)} (declaration ${scopePresence}). `
-    + `A missing declaration is closed, never allow-all. Before any project write outside this initial capability, produce `
-    + `exactly one JSON request to ${join(runDirPath, 'stages', stage.id, SCOPE_REVISION_REQUEST_FILE)} `
-    + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${runId}","stageId":"${stage.id}",`
-    + `"attemptIndex":<current execution index>,"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
-    + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/execution/path binding. `
-    + `Accepted paths from an earlier execution of this same stage remain in the effective scope after the scheduler revalidates them against the current batch. `
-    + `Wait without hot-polling: continue independent work, or check for scope_revision_decision_<requestId>.json at most once per second, bounded by the remaining execution deadline; the scheduler also watches the directory and publishes one durable decision. `
-    + `Write the new path only when accepted; `
-    + `a rejection is an auditable request to stop or re-plan, not permission to bypass scope with casts or indirection.`
-    + gateIsolation;
+  return `${prompt}\n\n${scopeRevisionContract({
+    runDir: runDirPath,
+    runId,
+    stageId: stage.id,
+    attemptIndex: '<current execution index>',
+    scope: declaredScope,
+    scopePresence,
+    gate: stage.is_gate === true,
+  })}`;
 }
 
 export function appendResearchTemporalPathContract(
@@ -8139,7 +8143,7 @@ export async function runWorkflow(
               projectDir,
               runId,
               state.currentIteration ?? 1,
-              (retryStage) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory),
+              (retryStage, liveConstraintGuardFactory) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory),
               repairSnapshot,
             );
             innerRetriesUsed = inner + 1;
@@ -8201,7 +8205,7 @@ export async function runWorkflow(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (gate) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory),
+                (gate, liveConstraintGuardFactory) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeRetryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory),
               );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
@@ -9050,6 +9054,131 @@ function enforceStageScopeWrites(input: {
   return { rawWrites, appliedWrites, rolledBackWrites, rollbackFailures, durableWrites };
 }
 
+function createSchedulerLiveConstraintGuardFactory(input: {
+  stage: StageConfig;
+  projectDir: string;
+  runId: string;
+  context: ScopeBatchContext;
+}): LiveConstraintGuardFactory | undefined {
+  // Every declared scope is enforceable, including an explicitly empty one.
+  // The worker's attributable writer lease serializes these invocations across
+  // every adapter so an unexpected write by a read-only stage remains attributable.
+  if (!input.stage.scope) return undefined;
+  const runDirPath = runDir(input.projectDir, input.runId);
+  return ({ attemptIndex }) => {
+    const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attemptIndex);
+    const options: LiveConstraintGuardOptions = {
+      projectDir: input.projectDir,
+      runDir: runDirPath,
+      stageId: input.stage.id,
+      attemptIndex,
+      effectiveScope: () => attemptContext.effectiveScope,
+      scopeRevisionInstruction: (paths) => scopeRevisionInstruction({
+        runDir: runDirPath,
+        runId: input.runId,
+        stageId: input.stage.id,
+        attemptIndex,
+        scope: attemptContext.effectiveScope,
+        scopePresence: input.context.declaredScopes.get(input.stage.id) === null ? 'missing' : 'present',
+        gate: input.stage.is_gate === true,
+        violatingPaths: paths,
+      }),
+      scanAndRestore: (candidatePaths, trigger) => {
+        const baseline = input.context.snapshot.rollbackBaseline;
+        const candidates = new Set<string>();
+        const fullReconciliation = trigger === 'fallback' || trigger === 'phase_boundary';
+        if (fullReconciliation) {
+          for (const path of listProjectFiles(input.projectDir)) candidates.add(path);
+          for (const path of baseline.images.keys()) candidates.add(path);
+          for (const path of baseline.cleanTracked) candidates.add(path);
+          for (const path of input.context.snapshot.files.keys()) candidates.add(path);
+        } else {
+          for (const rawPath of candidatePaths) {
+            const path = normalizedProjectPath(rawPath);
+            if (!path) continue;
+            candidates.add(path);
+            for (const nested of listProjectFilesAt(input.projectDir, path)) candidates.add(nested);
+            const prefix = `${path.replace(/\/$/, '')}/`;
+            for (const known of new Set([...baseline.cleanTracked, ...baseline.images.keys()])) {
+              if (known.startsWith(prefix)) candidates.add(known);
+            }
+          }
+          for (const path of changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir)) {
+            candidates.add(path);
+          }
+        }
+        const violations = [...candidates].sort().flatMap((path) => {
+          const before = baselineImage(baseline, path);
+          const current = readRepairFileImage(input.projectDir, path);
+          if (repairFileFingerprintsEqual(repairFileFingerprint(before), repairFileFingerprint(current))) return [];
+          if (scopeContainsPath(attemptContext.effectiveScope, path)) {
+            // Commit an authorized write into the shared run baseline before
+            // the next lease owner starts. The round snapshot still preserves
+            // the original preimage for the post-attempt audit/repair diff.
+            settleRollbackBaselinePath(baseline, input.projectDir, path);
+            return [];
+          }
+          const restored = restoreProjectPath(input.projectDir, path, before);
+          return [{
+            path,
+            reason: restored
+              ? 'adapter attributed an unauthorized project write; live enforcement restored its preimage before the invocation ended'
+              : 'adapter attributed an unauthorized project write; live enforcement could not restore its preimage',
+            restored,
+            ...(restored ? {} : { rollbackFailure: `could not restore ${path}` }),
+          }];
+        });
+        for (const violation of violations) {
+          recordRunEvent(input.projectDir, input.runId, {
+            type: 'live_constraint_violation',
+            runId: input.runId,
+            timestamp: new Date().toISOString(),
+            stageId: input.stage.id,
+            attemptIndex,
+            files: [violation.path],
+            detail: violation.reason,
+            source: 'scheduler',
+            level: 'warning',
+          });
+        }
+        return { scannedPaths: candidates.size, violations };
+      },
+    };
+    return new LiveConstraintGuard(options);
+  };
+}
+
+function readLiveConstraintIncidents(
+  runDirPath: string,
+  stageId: string,
+  attemptIndex: number,
+): LiveConstraintIncident[] {
+  const path = join(
+    runDirPath,
+    'stages',
+    stageId,
+    `live_constraint_incidents_attempt_${attemptIndex}.jsonl`,
+  );
+  try {
+    return readFileSync(path, 'utf-8').split(/\r?\n/).flatMap((line) => {
+      if (!line.trim()) return [];
+      try {
+        const incident = JSON.parse(line) as LiveConstraintIncident;
+        return incident.kind === 'live_constraint_incident'
+          && incident.stageId === stageId
+          && incident.attemptIndex === attemptIndex
+          && typeof incident.path === 'string'
+          ? [incident]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
 const SCOPE_PLANNING_INPUT_PREFIX = 'scope_negotiation_input_';
 const SCOPE_PLANNING_DISPOSITION_PREFIX = 'scope_negotiation_disposition_';
 
@@ -9207,9 +9336,15 @@ function reconcileStageScope(input: {
   const effectiveScope = attemptContext.effectiveScope;
   const decisions = [...attemptContext.decisionPaths];
   const mismatches = [...attemptContext.mismatchPaths];
+  const runDirPath = runDir(input.projectDir, input.runId);
+  const liveIncidents = readLiveConstraintIncidents(runDirPath, input.stage.id, attempt.index);
   const attributedWrites = attempt.writes ?? [];
   const schedulerObservedWrites = changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir);
-  const rawWrites = canonicalProjectWriteUnion(attributedWrites, schedulerObservedWrites);
+  const rawWrites = canonicalProjectWriteUnion(
+    attributedWrites,
+    schedulerObservedWrites,
+    liveIncidents.map((incident) => incident.path),
+  );
   const definiteWrites = new Set(
     attempt.writeAttribution === 'structured'
       ? canonicalProjectWriteUnion(attributedWrites)
@@ -9243,6 +9378,9 @@ function reconcileStageScope(input: {
   // attempt before terminal evaluation.
   const governedScope: string[] | null = input.terminalDurableScope ?? ordinaryGovernedScope;
   const terminalValidationOnly = input.terminalDurableScope !== undefined;
+  const restoredLivePaths = new Set(liveIncidents
+    .filter((incident) => incident.restored)
+    .map((incident) => normalizedProjectPath(incident.path) ?? incident.path));
   const enforcement = enforceStageScopeWrites({
     projectDir: input.projectDir,
     snapshot: input.context.snapshot,
@@ -9251,16 +9389,33 @@ function reconcileStageScope(input: {
     definiteWrites,
     preserveUnverifiedPath: (path) => peerScopeContainsPath(input.context, input.stage.id, path),
   });
-  const violations: Array<{ path: string; certainty: 'definite' | 'unverified'; reason: string }> = [];
+  const violations: Array<{
+    path: string;
+    certainty: 'definite' | 'unverified';
+    reason: string;
+    resolution?: 'live_reverted';
+  }> = [];
   for (const rawPath of enforcement.rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
-    const definitelyAttributed = definiteWrites.has(normalized ?? rawPath);
+    // A live incident is attributable even when an adapter has no structured
+    // write report: the project writer lease excludes every peer writer for
+    // the lifetime of this attempt.
+    const definitelyAttributed = definiteWrites.has(normalized ?? rawPath)
+      || restoredLivePaths.has(normalized ?? rawPath);
     if (!definitelyAttributed && !normalized) continue;
-    if (governedScope === null || scopeContainsPath(governedScope, rawPath)) continue;
+    const liveReverted = restoredLivePaths.has(normalized ?? rawPath)
+      && !enforcement.rolledBackWrites.includes(normalized ?? rawPath)
+      && !enforcement.rollbackFailures.includes(normalized ?? rawPath);
+    // The incident's captured effective scope is the authority for the moment
+    // of violation. A later accepted revision permits the corrected write; it
+    // does not erase the fact that the first write was unauthorized.
+    if (!liveReverted && (governedScope === null || scopeContainsPath(governedScope, rawPath))) continue;
     violations.push({
       path: rawPath,
       certainty: definitelyAttributed ? 'definite' : 'unverified',
-      reason: definitelyAttributed
+      reason: liveReverted
+        ? 'live enforcement restored the unauthorized project write before the adapter invocation ended; post-attempt audit verified the preimage remained restored'
+        : definitelyAttributed
         ? enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
           ? terminalValidationOnly
             ? 'terminal finalizer left a durable non-terminal validation-scope delta; enforcement restored its preimage before terminal evaluation'
@@ -9271,6 +9426,7 @@ function reconcileStageScope(input: {
         : enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
           ? 'snapshot observed a change outside the complete batch capability; enforcement restored its preimage while ownership remains unverified'
           : 'snapshot observed a change outside effective scope but cannot prove ownership',
+      ...(liveReverted ? { resolution: 'live_reverted' as const } : {}),
     });
   }
   const stagePath = join(runDir(input.projectDir, input.runId), 'stages', input.stage.id);
@@ -9281,9 +9437,9 @@ function reconcileStageScope(input: {
   const acceptedRevisionCount = decisionRecords.filter((decision) => decision.accepted === true).length;
   const rejectedRevisionCount = decisionRecords.filter((decision) => decision.accepted === false).length;
   const definite = violations.filter((violation) => violation.certainty === 'definite');
+  const unresolvedDefinite = definite.filter((violation) => violation.resolution !== 'live_reverted');
   const unverified = violations.filter((violation) => violation.certainty === 'unverified');
   const auditPath = join(stagePath, `constraint_audit_attempt_${attempt.index}.json`);
-  const runDirPath = runDir(input.projectDir, input.runId);
   const auditRelativePath = auditPath.slice(runDirPath.length + 1).replace(/\\/g, '/');
   const stageKind: ScopeStageKind = input.stage.is_gate ? 'gate' : 'ordinary';
   const iteration = readRunState(input.projectDir, input.runId).currentIteration ?? 1;
@@ -9327,6 +9483,32 @@ function reconcileStageScope(input: {
       durableWrites: enforcement.durableWrites,
     })];
   });
+  const postAttemptInstruction = unresolvedDefinite.length > 0
+    ? scopeRevisionInstruction({
+        runDir: runDirPath,
+        runId: input.runId,
+        stageId: input.stage.id,
+        attemptIndex: '<current execution index>',
+        scope: effectiveScope,
+        scopePresence: declaredScope === null ? 'missing' : 'present',
+        gate: input.stage.is_gate === true,
+        violatingPaths: unresolvedDefinite.map((violation) => violation.path),
+      })
+    : undefined;
+  const scopeRevisionInstructions = [...new Set([
+    ...liveIncidents.map((incident) => incident.scopeRevisionInstruction),
+    ...(postAttemptInstruction ? [postAttemptInstruction] : []),
+  ])];
+  const rolledBackSet = new Set([
+    ...enforcement.rolledBackWrites,
+    ...restoredLivePaths,
+  ]);
+  const allRolledBackWrites = [
+    ...enforcement.rawWrites.filter((path) => rolledBackSet.has(normalizedProjectPath(path) ?? path)),
+    ...[...rolledBackSet].filter((path) => !enforcement.rawWrites.some(
+      (rawPath) => (normalizedProjectPath(rawPath) ?? rawPath) === path,
+    )),
+  ];
   const audit = {
     version: 1,
     stageId: input.stage.id,
@@ -9341,13 +9523,15 @@ function reconcileStageScope(input: {
     decisions: decisionRecords,
     rawWrites: enforcement.rawWrites,
     appliedWrites: enforcement.appliedWrites,
-    rolledBackWrites: enforcement.rolledBackWrites,
+    rolledBackWrites: allRolledBackWrites,
     rollbackFailures: enforcement.rollbackFailures,
     durableWrites: enforcement.durableWrites,
     planningDigests,
     stateTransitions,
     writes: attempt.writes ?? [],
     writeAttribution: attempt.writeAttribution ?? 'unknown',
+    liveIncidents,
+    scopeRevisionInstructions,
     violations,
     timeout: attempt.timeout,
     completedAt: new Date().toISOString(),
@@ -9361,20 +9545,23 @@ function reconcileStageScope(input: {
     rejectedRevisionCount,
     mismatchCount: mismatches.length,
     violationCount: definite.length,
+    liveViolationCount: liveIncidents.length,
+    liveRestoredCount: liveIncidents.filter((incident) => incident.restored).length,
+    unresolvedViolationCount: unresolvedDefinite.length,
     unverifiedCount: unverified.length,
     rawWriteCount: enforcement.rawWrites.length,
     appliedWriteCount: enforcement.appliedWrites.length,
-    rolledBackWriteCount: enforcement.rolledBackWrites.length,
+    rolledBackWriteCount: allRolledBackWrites.length,
     rejectedDigestCount: planningDigests.length,
   };
-  const error = definite.length > 0
+  const error = unresolvedDefinite.length > 0
     ? terminalValidationOnly
-      ? `terminal_scope_violation: ${definite.map((violation) => violation.path).join(', ')} left a durable non-terminal delta after the finalizer's gates`
-      : `scope_violation: ${definite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope`
+      ? `terminal_scope_violation: ${unresolvedDefinite.map((violation) => violation.path).join(', ')} left a durable non-terminal delta after the finalizer's gates. ${postAttemptInstruction}`
+      : `scope_violation: ${unresolvedDefinite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope. ${postAttemptInstruction}`
     : undefined;
   return {
     status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, summary, error),
-    violation: definite.length > 0,
+    violation: unresolvedDefinite.length > 0,
   };
 }
 
@@ -9482,7 +9669,7 @@ async function runScopeSafeStageGroup(
   projectDir: string,
   runId: string,
   iteration: number,
-  execute: (stage: StageConfig) => Promise<void>,
+  execute: (stage: StageConfig, liveConstraintGuardFactory?: LiveConstraintGuardFactory) => Promise<void>,
   snapshot?: RepairRoundSnapshot,
 ): Promise<void> {
   const runDirPath = runDir(projectDir, runId);
@@ -9502,7 +9689,9 @@ async function runScopeSafeStageGroup(
     const context = createScopeBatchContext(projectDir, selected, snapshot, runId);
     let complete = false;
     const executions = Promise.all(selected.map(async (stage) => {
-      try { await execute(stage); }
+      try {
+        await execute(stage, createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId, context }));
+      }
       catch (error) {
         const retries = (() => {
           try { return readStageStatus(projectDir, runId, stage.id).retries; }
@@ -9905,6 +10094,7 @@ async function executeSingleStage(
   roundDiffPath?: string,
   availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
+  liveConstraintGuardFactory?: LiveConstraintGuardFactory,
 ): Promise<void> {
   if (!agents.has(stage.role)) {
     const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -10030,6 +10220,7 @@ async function executeSingleStage(
       sessionOwnerStageId: resumeSession?.ownerStageId,
       preserveSession: retries === 0 && shouldPreserveSession(stage, allStages, sessionReuseEnabled),
       projectWriteScope: stage.scope ?? [],
+      liveConstraintGuardFactory,
     });
 
     const retryableTimeout = recordSchedulerTechnicalAttemptResult(
@@ -10726,6 +10917,12 @@ async function executeIteration(
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
         projectWriteScope: stage.scope ?? [],
+        liveConstraintGuardFactory: createSchedulerLiveConstraintGuardFactory({
+          stage,
+          projectDir,
+          runId,
+          context: ordinaryScopeContext,
+        }),
       });
       recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);
       return { stage, result, currentRetries };

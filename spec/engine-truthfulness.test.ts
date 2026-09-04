@@ -525,8 +525,6 @@ async function runScopeRevisionScenario(input: {
   writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-original\n');
   let gateCalls = 0;
   let observedDecision: ScopeRevisionDecision | undefined;
-  let reportPeerStarted!: () => void;
-  const peerStarted = new Promise<void>((resolvePeerStarted) => { reportPeerStarted = resolvePeerStarted; });
   let releasePeer!: () => void;
   const peerMayFinish = new Promise<void>((resolvePeer) => { releasePeer = resolvePeer; });
   const requestId = `scope-${input.expectAcceptance ? 'accept' : 'reject'}`;
@@ -570,12 +568,10 @@ async function runScopeRevisionScenario(input: {
       }
       if (opts.stageId === 'peer_repair') {
         writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-active\n');
-        reportPeerStarted();
         await peerMayFinish;
         return { output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' };
       }
       if (opts.stageId === 'repair_scope') {
-        if (input.peerConflict) await peerStarted;
         const stagePath = join(opts.runDir, 'stages', opts.stageId);
         mkdirSync(stagePath, { recursive: true });
         const request: ScopeRevisionRequest = {
@@ -661,7 +657,7 @@ describe('reasoned scope revision', () => {
     });
   });
 
-  it('rejects an addition that overlaps a still-running repair peer', { timeout: 15_000 }, async () => {
+  it('rejects an addition that overlaps an active serialized repair peer', { timeout: 15_000 }, async () => {
     const result = await runScopeRevisionScenario({
       requestedPath: 'src/peer.ts',
       reason: 'The repair would otherwise duplicate the peer type change.',

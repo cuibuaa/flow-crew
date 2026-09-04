@@ -10,7 +10,14 @@ import {
 import { join, resolve } from 'node:path';
 import { listOperationalRunIdsFromIndex } from './run-index.js';
 import { isRunningRunStatus } from './lifecycle-status.js';
+import {
+  buildRunDriftProjection,
+  readRunDriftProjection,
+  type RunDriftProjection,
+} from './run-drift.js';
 import { runsRoot as defaultRunsRoot } from './store.js';
+
+export { formatRunDriftProjection } from './run-drift.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -93,6 +100,8 @@ export interface OperationalProjection {
     requestedAt?: string;
     detail: string;
   };
+  /** Shared bounded rows rendered by status, watch, and task show. */
+  drift?: RunDriftProjection;
   sourceCoverage: {
     runState: 'read' | 'unavailable';
     events: 'read' | 'missing' | 'unreadable';
@@ -255,6 +264,8 @@ export function buildOperationalProjection(
   options: {
     nowMs?: number;
     eventsCoverage?: OperationalProjection['sourceCoverage']['events'];
+    includeDrift?: boolean;
+    drift?: RunDriftProjection;
   } = {},
 ): OperationalProjection {
   const nowMs = options.nowMs ?? Date.now();
@@ -297,6 +308,9 @@ export function buildOperationalProjection(
     nowMs,
   );
   const approval = pendingApproval(state ?? {});
+  const drift = options.includeDrift === false
+    ? undefined
+    : options.drift ?? buildRunDriftProjection(state, events);
   return {
     version: 1,
     ...(runId ? { runId } : {}),
@@ -309,6 +323,7 @@ export function buildOperationalProjection(
     ...(lastGuidance ? { lastGuidance } : {}),
     pendingScope: pendingScopeRequests(events),
     ...(approval ? { pendingApproval: approval } : {}),
+    ...(drift ? { drift } : {}),
     sourceCoverage: {
       runState: state ? 'read' : 'unavailable',
       events: options.eventsCoverage ?? 'read',
@@ -356,7 +371,7 @@ export function readOperatorEvents(runDirectory: string, maxEvents = 500): Event
 
 export function readOperationalProjection(
   runDirectory: string,
-  options: { nowMs?: number; state?: OperationalRunState } = {},
+  options: { nowMs?: number; state?: OperationalRunState; includeDrift?: boolean } = {},
 ): OperationalProjection {
   let state = options.state;
   if (!state) {
@@ -373,7 +388,15 @@ export function readOperationalProjection(
   } catch {
     eventsCoverage = 'unreadable';
   }
-  return buildOperationalProjection(state, events, { nowMs: options.nowMs, eventsCoverage });
+  const drift = options.includeDrift === false
+    ? undefined
+    : readRunDriftProjection(runDirectory, { state, events, eventsCoverage });
+  return buildOperationalProjection(state, events, {
+    nowMs: options.nowMs,
+    eventsCoverage,
+    includeDrift: options.includeDrift,
+    ...(drift ? { drift } : {}),
+  });
 }
 
 export function formatHumanDuration(milliseconds: number | undefined): string {

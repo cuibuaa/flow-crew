@@ -11,6 +11,21 @@ import {
 } from '../src/supervisor.js';
 import { loadSupervisorConfig } from '../src/config.js';
 import type { StoreState } from '../src/store.js';
+import { createSupervisorEvent } from '../src/supervisor-events.js';
+
+const eventQuantities = {
+  iteration: 1,
+  runningStageCount: 1,
+  activeAttempts: [],
+  minArtifactDeltaBytes: 4096,
+  deadlineMarginMs: 60_000,
+  pollIntervalMs: 30_000,
+  changedBytes: 0,
+  changedPathCount: 0,
+  supervisorAssessmentBudget: { used: 20, maximum: 20, remaining: 0 },
+  supervisorRejectBudget: { maximum: 2 },
+  gateRetryBudget: { maximum: 2 },
+};
 
 function productionAssessmentTimeoutMs(): number {
   const sourcePath = join(import.meta.dirname, '..', 'src', 'supervisor.ts');
@@ -114,8 +129,16 @@ describe('supervisor routine/anomaly scheduling', () => {
     expect(history).not.toContain('same wrong recipe 7');
   });
 
-  it('lets anomaly signals bypass cadence, output threshold, cooldown, and routine cap', () => {
+  it('lets a deterministic event authorize assessment independent of legacy clock and cap inputs', () => {
+    const event = createSupervisorEvent({
+      type: 'gate_verdict',
+      observedAt: '2026-09-04T00:00:00.000Z',
+      source: 'test',
+      fingerprint: { path: 'verdict_release.json', digest: 'abc' },
+      quantities: eventQuantities,
+    });
     expect(selectSupervisorAssessmentTrigger({
+      deterministicEvents: [event],
       anomalySignals: ['gate_failed:release'],
       runningStageCount: 0,
       accumulatedOutputBytes: 0,
@@ -126,10 +149,10 @@ describe('supervisor routine/anomaly scheduling', () => {
       routineAssessmentsThisIteration: 20,
       maxRoutineAssessmentsPerIteration: 20,
       cooldownUntil: Number.MAX_SAFE_INTEGER,
-    })).toBe('anomaly');
+    })).toBe('event');
   });
 
-  it('requires cumulative 4096 bytes and 180 seconds for an ordinary assessment', () => {
+  it('makes no model-call trigger on a clock tick without a deterministic event', () => {
     const common = {
       anomalySignals: [] as string[],
       runningStageCount: 1,
@@ -141,9 +164,9 @@ describe('supervisor routine/anomaly scheduling', () => {
       maxRoutineAssessmentsPerIteration: 20,
       cooldownUntil: 0,
     };
-    expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 1500 + 1500 + 1500 })).toBe('routine');
+    expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 1500 + 1500 + 1500 })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 4095 })).toBe('none');
-    expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 4096, now: 179_999 })).toBe('none');
+    expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 4096, now: 360_000 })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ ...common, accumulatedOutputBytes: 4096, routineAssessmentsThisIteration: 20 })).toBe('none');
   });
 

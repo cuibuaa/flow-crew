@@ -11,6 +11,7 @@ export type RunEventType =
   | 'guidance_written'
   | 'scope_revision_requested'
   | 'scope_revision_decided'
+  | 'live_constraint_violation'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'supervisor_reject_requested'
@@ -53,6 +54,8 @@ export interface RunEvent {
   files?: string[];
   attemptIndex?: number;
   attemptStartedAt?: string;
+  exitCode?: number;
+  adapterFailure?: boolean;
   requestId?: string;
   decision?: 'accepted' | 'rejected' | 'discarded';
   evidenceGeneration?: string;

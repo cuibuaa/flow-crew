@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "kind": "closed_loop_campaign_evidence",
+  "evidenceRunId": "2026-09-03T17-09-17-3c94c0",
+  "predecessorTaskId": 2135,
+  "oracleTaskId": 2137,
+  "predecessorBrief": "---\nresearch:\n  baseline: 0.0\n  policy: greedy_stack\n  higher_is_better: true\n  result_file: docs/replay/round_result.json\n  result_schema:\n    type: object\n    required: [label, result]\n    properties:\n      label: {type: string}\n      result: {type: number}\n  confirm:\n    command: node -e \"process.exit(1)\"\n    requires: A disjoint confirmation must reject a false ship candidate.\n    timeout_seconds: 60\n  stop:\n    beat: 0.05\n    max_rounds: 4\n    halt_after_no_improvement: 1\nterminal_states:\n  shipped:\n    paths: [docs/replay/ship_report.md]\n  ceiling_hit:\n    paths: [docs/replay/ceiling_report.md]\n  escalated:\n    paths: [docs/replay/escalation_note.md]\n---\n\n# Serve all four seats inside the batched engine, then dose\n\n## Outcome\n\nA policy whose paired 95% interval against three fixed `HeuristicPolicyV1` opponents lies wholly above zero under the frozen evaluation, or an honest ceiling.\n\n## Constraints\n\n- **The yardstick's semantics do not move**: paired EV per hand, candidate minus the three fixed\n  original `HeuristicPolicyV1` opponents, same reward profile, rules hash, fan table, and\n  paired-block construction, confirmation on a disjoint sample. The primary block count is free;\n  a round states before opening any outcome what effect size its sample resolves.\n- Dose is expected to rise by about an order of magnitude until wall-clock or the stopping rule binds.\n\n## What each round's report must show\n\n6. **Dose and capacity in the same units**: measured four-seat capacity as cost per step\n   against batch size and as decisions per second; the training dose as decisions and as\n   minutes of that capacity; what bound the dose; and the dose-versus-EV relationship across\n   this campaign's rounds so far. Any figure quoted from an earlier document appears beside it\n   with its recorded unit and the cross-check fields.\n\n## Out of scope\n\n- Moving the frozen yardstick.\n",
+  "preflightAddendum": "\n## Measurement reporting\n\nEvery headline or quoted statistic reports its mean, its median, and where the reported value sits in its own distribution.\n",
+  "frozenContract": {
+    "goal": {
+      "baseline": 0,
+      "policy": "greedy_stack",
+      "higherIsBetter": true,
+      "beat": 0.05,
+      "confirmation": "The paired interval against three fixed HeuristicPolicyV1 opponents must lie entirely above zero on a disjoint sample, recomputed from preserved raw blocks rather than from the round's own summary."
+    },
+    "goalDigest": "f3d7ae579e97c7c218e121060c1bf35fe1d20cc80e0728432b610ba3874214a7",
+    "yardstickText": "- **The yardstick's semantics do not move**: paired EV per hand, candidate minus the three fixed\n  original `HeuristicPolicyV1` opponents, same reward profile, rules hash, fan table, and\n  paired-block construction, confirmation on a disjoint sample. The primary block count is free;\n  a round states before opening any outcome what effect size its sample resolves.\n",
+    "yardstickDigest": "fc12f847d7a1b44abdda22e871f530c5979443534c086e32a0bc0d1b9cd834a9",
+    "budget": {
+      "maxRuns": 4,
+      "usedRuns": 1
+    },
+    "noProgress": {
+      "rounds": 2,
+      "tolerance": 0
+    }
+  },
+  "terminal": {
+    "status": "stopped",
+    "goalMet": false,
+    "historicalReplay": true,
+    "artifactId": "run.json:b4-cancelled-run-status+iteration+reason",
+    "artifactBytes": "  \"status\": \"stopped\",\n  \"currentIteration\": 4,\n  \"failureReason\": \"Cancelled by user\",\n",
+    "sourceAnchor": "b4-cancelled-run-status"
+  },
+  "operatorGuidance": [
+    {
+      "id": "05f0794a7301f9e9eedb",
+      "source": "operator",
+      "target": "__missing__",
+      "createdAt": "2026-09-03T19:12:19.595Z",
+      "addressed": true,
+      "quarantined": true,
+      "quarantineReason": "guidance did not declare a target stage",
+      "sourceAnchor": "b4-guidance-1",
+      "body": "[user]: For the run_round re-attempt after the supervisor rejection: Round 1's primary evaluation was never opened (development gate vetoed the candidate), so primary_recomputed_from_raw_blocks=false is the honest value, not a contradiction, and the measurements stand. Do not re-collect, re-train, or re-evaluate. Make the audit artifact unambiguous instead: record primary_opened=false, mark primary_recomputed_from_raw_blocks as not applicable when primary was not opened, and record development_recomputed_from_raw_blocks with its actual true/false from the preserved development blocks; state the same in the report's audit section. The audit's 'passed' verdict must be read against the round's outcome (continue, no candidate), and the audit criterion asks for recomputation of whatever metric the round reported, which here is the development EV."
+    },
+    {
+      "id": "b7af8a5c0339d2c0897a",
+      "source": "operator",
+      "target": "__missing__",
+      "createdAt": "2026-09-03T23:19:21.701Z",
+      "addressed": true,
+      "quarantined": true,
+      "quarantineReason": "guidance did not declare a target stage",
+      "sourceAnchor": "b4-guidance-2",
+      "body": "[user]: For the run_round2 re-attempt: this rejection is about the report's 'supplied quantity dependencies' section only. Do not re-collect, re-train, or re-evaluate; the measurements and audit stand. Complete that section for every quantity the brief supplies — baseline 0.0, beat 0.05, max_rounds 7, halt_after_no_improvement 5, hard_floor 2, the result_file and result_schema, the confirm command and its timeout, the three terminal paths, and each declared input directory — stating for each what it depends on that the brief did not state and whether that changes what it is worth. Then re-run only the report checks. Separately, for Round 3 planning: the brief expects the training dose to rise by about an order of magnitude per round; Round 2 rose from 1.2 to 2.1 minutes of capacity. Round 3 should be sized in the tens of minutes of measured four-seat capacity unless wall-clock binds, and say what bound it."
+    },
+    {
+      "id": "597258736ef05518534a",
+      "source": "operator",
+      "target": "run_round2",
+      "createdAt": "2026-09-03T23:19:31.476Z",
+      "addressed": true,
+      "sourceAnchor": "b4-guidance-3",
+      "body": "Do not re-collect, re-train, or re-evaluate; complete the report section for every brief-supplied quantity named in the user guidance, re-run only the report checks, and preserve the existing Round 2 measurements/audit/no-candidate outcome."
+    },
+    {
+      "id": "00c756e206a6f84623ea",
+      "source": "operator",
+      "target": "__missing__",
+      "createdAt": "2026-09-04T01:32:40.683Z",
+      "addressed": true,
+      "quarantined": true,
+      "quarantineReason": "guidance did not declare a target stage",
+      "sourceAnchor": "b4-guidance-floor-authority",
+      "body": "[user]: Binding for verify_round3, fix_round3, and every later round. Criterion 6 says the training dose is expected to rise by about an order of magnitude per round until wall-clock or the stopping rule binds. Rounds 1-3 trained on 1.2, 2.1, and 2.1 minutes of measured four-seat capacity; Round 3 did not rise at all, and the stated bound ('one resident collection pass sized to reach multiple capacity-minutes') is a choice, not a wall-clock limit. Therefore Round 3 fails criterion 6 as it stands. The repair for Round 3 is not a report edit: keep the same mechanism and the same frozen gates and seeds, and re-run its collection and training at a dose of at least 20 minutes of the measured four-seat capacity (about 38 million decisions at the measured rate), then re-evaluate under the same yardstick and report the dose-versus-EV relationship across all rounds so far. The stage timeout is three hours; if wall-clock genuinely binds below 20 minutes of capacity, say exactly what bound it with the measured collection and training rates. From Round 4 onward the same floor applies, and a round whose dose does not rise over the previous round's fails criterion 6 regardless of its other results."
+    },
+    {
+      "id": "aeab5775d48a9d78da61",
+      "source": "operator",
+      "target": "verify_round3",
+      "createdAt": "2026-09-04T01:32:50.192Z",
+      "addressed": true,
+      "sourceAnchor": "b4-guidance-5",
+      "body": "Reject Round 3 as-is and rerun the same mechanism with the same frozen gates and seeds at no less than 20 minutes of measured four-seat capacity, about 38M decisions, then re-evaluate and re-audit; do not accept a report-only repair."
+    }
+  ],
+  "criterion": {
+    "id": "criterion_what_each_round_s_report_6_4f06e967",
+    "text": "6. **Dose and capacity in the same units**: measured four-seat capacity as cost per step\n   against batch size and as decisions per second; the training dose as decisions and as\n   minutes of that capacity; what bound the dose; and the dose-versus-EV relationship across\n   this campaign's rounds so far. Any figure quoted from an earlier document appears beside it\n   with its recorded unit and the cross-check fields.\n\n",
+    "metricId": "dose_minutes",
+    "unit": "minutes",
+    "normalizedUnit": "minutes",
+    "neverFailed": true,
+    "verdicts": [
+      {"status": "pass", "source": "b4-criterion-6-round-1-pass"},
+      {"status": "pass", "source": "b4-criterion-6-round-2-pass"},
+      {"status": "judgement", "source": "b4-criterion-6-round-3-not-failed"}
+    ]
+  },
+  "metricSeries": {
+    "metricId": "dose_minutes",
+    "criterionId": "criterion_what_each_round_s_report_6_4f06e967",
+    "unit": "minutes of measured four-seat capacity",
+    "normalizedUnit": "minutes",
+    "values": [1.19595173424691, 2.1428210997008135, 2.1175898313695143],
+    "source": "b4-dose-series",
+    "stagnation": {"rounds": 2, "tolerance": 0, "direction": "increase"}
+  },
+  "declinedItems": [
+    {
+      "source": "admission",
+      "id": "reality-check:round_result_has_single_encoding",
+      "detail": "The mutable optional round result cannot be required for a valid no-candidate round; use the framework-owned immutable run manifest.",
+      "sourceAnchor": "b3-first-plan-rejected"
+    },
+    {
+      "source": "supervisor_reject",
+      "id": "run_round:2026-09-03T19:11:33.703Z",
+      "detail": "Do not repeat the rejected interpretation that an unopened primary metric must have been recomputed.",
+      "sourceAnchor": "b3-supervisor-rejection-1"
+    },
+    {
+      "source": "supervisor_reject",
+      "id": "run_round2:2026-09-03T23:18:45.044Z",
+      "detail": "Do not omit brief-supplied quantities from the dependency account.",
+      "sourceAnchor": "b3-supervisor-rejection-2"
+    }
+  ],
+  "expectation": {
+    "floor": {"metricId": "dose_minutes", "operator": ">=", "value": 20, "unit": "minutes"},
+    "latestObservedDoseMinutes": 2.1175898313695143,
+    "promotedGuidanceIds": ["05f0794a7301f9e9eedb", "b7af8a5c0339d2c0897a", "597258736ef05518534a", "00c756e206a6f84623ea", "aeab5775d48a9d78da61"],
+    "convertedCriterionId": "criterion_what_each_round_s_report_6_4f06e967",
+    "within_expected_range": false,
+    "method_was_not_adjusted_to_match_expectation": true
+  },
+  "oracle": {
+    "comparisonOnly": true,
+    "yardstickDigest": "fc12f847d7a1b44abdda22e871f530c5979443534c086e32a0bc0d1b9cd834a9",
+    "containsHardDoseFloor": true,
+    "hardFloorAnchor": "b4-human-successor-hard-floor",
+    "convertedCriterionAnchor": "b4-human-successor-criterion-6"
+  },
+  "anchors": [
+    {"label": "b4-cancelled-run-status", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/run.json", "byteStart": 146, "byteEndExclusive": 169, "sha256": "8ffc6557582acd4e15cec92172beea57a3ad177118cccf8790c4e68b5e8eb51f", "utf8": "  \"status\": \"stopped\",\n"},
+    {"label": "b4-terminal-decision-before-cancel", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/research_decision.json", "byteStart": 0, "byteEndExclusive": 183, "sha256": "8af4591342ddd62e293742a1c6804c2b6f33ed8f474f502cc53027debd3e9a2c", "utf8": "{\n  \"runningBest\": 0,\n  \"keptLabels\": [],\n  \"latestKept\": false,\n  \"consecutiveNoImprovement\": 2,\n  \"decision\": \"continue\",\n  \"reason\": \"no improvement this round, but budget remains\""},
+    {"label": "b4-guidance-1", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_1.md", "byteStart": 1013, "byteEndExclusive": 1261, "sha256": "e8fdef15b7957cafb3ce06354c9a31116a6ce55183114c1f4d1cd43ab7739532", "utf8": "<!-- flowcrew-guidance {\"version\":1,\"id\":\"05f0794a7301f9e9eedb\",\"target\":\"__missing__\",\"source\":\"operator\",\"createdAt\":\"2026-09-03T19:12:19.595Z\",\"bodyLength\":853,\"quarantined\":true,\"quarantineReason\":\"guidance did not declare a target stage\"} -->\n"},
+    {"label": "b4-guidance-2", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_2.md", "byteStart": 733, "byteEndExclusive": 981, "sha256": "c66059cd55dea380eada6db741d53bba4b9fac647241a2cc0ebad718a90a90b3", "utf8": "<!-- flowcrew-guidance {\"version\":1,\"id\":\"b7af8a5c0339d2c0897a\",\"target\":\"__missing__\",\"source\":\"operator\",\"createdAt\":\"2026-09-03T23:19:21.701Z\",\"bodyLength\":919,\"quarantined\":true,\"quarantineReason\":\"guidance did not declare a target stage\"} -->\n"},
+    {"label": "b4-guidance-3", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_2.md", "byteStart": 1907, "byteEndExclusive": 2074, "sha256": "7f83741a77cecd48b384cdb88f7d0ae38353f41f514fc8b0c12066eee5b551ed", "utf8": "<!-- flowcrew-guidance {\"version\":1,\"id\":\"597258736ef05518534a\",\"target\":\"run_round2\",\"source\":\"operator\",\"createdAt\":\"2026-09-03T23:19:31.476Z\",\"bodyLength\":240} -->\n"},
+    {"label": "b4-guidance-4", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_3.md", "byteStart": 0, "byteEndExclusive": 249, "sha256": "f141cf260db8673e295aaec6cda1f3dffec4949653b401721d6dcd78658a667a", "utf8": "<!-- flowcrew-guidance {\"version\":1,\"id\":\"00c756e206a6f84623ea\",\"target\":\"__missing__\",\"source\":\"operator\",\"createdAt\":\"2026-09-04T01:32:40.683Z\",\"bodyLength\":1203,\"quarantined\":true,\"quarantineReason\":\"guidance did not declare a target stage\"} -->\n"},
+    {"label": "b4-guidance-5", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_3.md", "byteStart": 1455, "byteEndExclusive": 1625, "sha256": "486146b82650cf29c211f9a15e5de582a4688d5f656f022b626e0cfb29ac8154", "utf8": "<!-- flowcrew-guidance {\"version\":1,\"id\":\"aeab5775d48a9d78da61\",\"target\":\"verify_round3\",\"source\":\"operator\",\"createdAt\":\"2026-09-04T01:32:50.192Z\",\"bodyLength\":233} -->\n"},
+    {"label": "b4-guidance-floor-authority", "sourcePath": "/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/guidance_history/iter_3.md", "byteStart": 249, "byteEndExclusive": 1453, "sha256": "e5e96277c6eb4493a30d702aea007af476f2bc4eaf5cbae007a25ae53b807db2", "utf8": "[user]: Binding for verify_round3, fix_round3, and every later round. Criterion 6 says the training dose is expected to rise by about an order of magnitude per round until wall-clock or the stopping rule binds. Rounds 1-3 trained on 1.2, 2.1, and 2.1 minutes of measured four-seat capacity; Round 3 did not rise at all, and the stated bound ('one resident collection pass sized to reach multiple capacity-minutes') is a choice, not a wall-clock limit. Therefore Round 3 fails criterion 6 as it stands. The repair for Round 3 is not a report edit: keep the same mechanism and the same frozen gates and seeds, and re-run its collection and training at a dose of at least 20 minutes of the measured four-seat capacity (about 38 million decisions at the measured rate), then re-evaluate under the same yardstick and report the dose-versus-EV relationship across all rounds so far. The stage timeout is three hours; if wall-clock genuinely binds below 20 minutes of capacity, say exactly what bound it with the measured collection and training rates. From Round 4 onward the same floor applies, and a round whose dose does not rise over the previous round's fails criterion 6 regardless of its other results.\n"},
+    {"label": "b4-predecessor-yardstick", "sourcePath": "/home/qian/.fc/tasks/2135/brief.md", "byteStart": 4554, "byteEndExclusive": 4920, "sha256": "fc12f847d7a1b44abdda22e871f530c5979443534c086e32a0bc0d1b9cd834a9", "utf8": "- **The yardstick's semantics do not move**: paired EV per hand, candidate minus the three fixed\n  original `HeuristicPolicyV1` opponents, same reward profile, rules hash, fan table, and\n  paired-block construction, confirmation on a disjoint sample. The primary block count is free;\n  a round states before opening any outcome what effect size its sample resolves.\n"},
+    {"label": "b4-predecessor-criterion-6", "sourcePath": "/home/qian/.fc/tasks/2135/brief.md", "byteStart": 8287, "byteEndExclusive": 8708, "sha256": "a972af782c069168343348d478a58cd7011af5d649a1a09c17f1c15cb15d2d3b", "utf8": "6. **Dose and capacity in the same units**: measured four-seat capacity as cost per step\n   against batch size and as decisions per second; the training dose as decisions and as\n   minutes of that capacity; what bound the dose; and the dose-versus-EV relationship across\n   this campaign's rounds so far. Any figure quoted from an earlier document appears beside it\n   with its recorded unit and the cross-check fields.\n\n"},
+    {"label": "b4-dose-series", "sourcePath": "/mnt/d/Work/Code/Python/tb/poker/daqing_mahjong/docs/happymj_explore8b/rounds/round_03/report.md", "byteStart": 4196, "byteEndExclusive": 4812, "sha256": "1b8b7ff0cc8e0ce21044d9dd9efb84f45811c20e87fe70b3c2a930fa559cc254", "utf8": "Dose-versus-EV across explore8b: `[{'development_ev': -2.1822916666666665, 'dose_minutes': 1.19595173424691, 'label': 'round01_static_opponent_tendency_conditioned_return_table', 'outcome': 'no_candidate', 'primary_ev': None, 'round': 1}, {'development_ev': -2.3854166666666665, 'dose_minutes': 2.1428210997008135, 'label': 'round02_deep_monte_carlo_return_table', 'outcome': 'no_candidate', 'primary_ev': None, 'round': 2}, {'development_ev': None, 'dose_minutes': 2.1175898313695143, 'label': 'round03_advantage_weighted_behavioral_preference_policy', 'outcome': 'no_candidate', 'primary_ev': None, 'round': 3}]`.\n"}
+  ]
+}

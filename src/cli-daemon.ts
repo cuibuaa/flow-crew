@@ -183,6 +183,7 @@ export async function handleDaemonCancellationRequest(
 export function mergeTaskWithRunState(
   task: TaskEntry,
   runRoot = runsRoot(),
+  options: { includeDrift?: boolean } = {},
 ): TaskShowEntry {
   if (!task.run_id) return { ...task };
   const runPath = isAbsolute(task.run_id) ? task.run_id : join(runRoot, task.run_id);
@@ -202,7 +203,7 @@ export function mergeTaskWithRunState(
     return {
       ...task,
       status: state.status,
-      operational: readOperationalProjection(runPath, { state }),
+      operational: readOperationalProjection(runPath, { state, includeDrift: options.includeDrift }),
       // A terminal registry timestamp may record a later control-plane action
       // (for example an already-terminal cancellation). Preserve it when
       // present; otherwise project the run's authoritative completion time.
@@ -255,7 +256,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     if (req.cmd === 'list') {
       return {
-        tasks: registry.list(req.filter).map((task) => mergeTaskWithRunState(task)),
+        tasks: registry.list(req.filter).map((task) => mergeTaskWithRunState(task, runsRoot(), { includeDrift: false })),
         registry_unreadable_records: registry.health().unreadableRecords,
       };
     }

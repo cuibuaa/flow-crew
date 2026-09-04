@@ -119,5 +119,12 @@ describe('project-scoped status', () => {
     expect(result.stdout).toContain('Status: complete');
     expect(result.stdout).not.toContain('In progress');
     expect(result.stdout).not.toContain('Stale supervisor projection');
+    const drift = result.stdout.split(/\r?\n/u).filter((line) => line.startsWith('Drift '));
+    expect(drift).toHaveLength(6);
+    expect(drift.every((line) => (
+      line.includes('; unit=') && line.includes('; threshold=')
+      && line.includes('; source=') && line.includes('; crossing=')
+    ))).toBe(true);
+    expect(drift.find((line) => line.startsWith('Drift research_dose:'))).toContain('value=unavailable');
   });
 });

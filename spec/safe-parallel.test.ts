@@ -121,14 +121,9 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
 
   let active = 0;
   let maxActive = 0;
-  let entered = 0;
-  let releaseBoth!: () => void;
   let markWriterDone!: () => void;
-  let markObserverSawWrite!: () => void;
   let observerSawWrite = false;
-  const bothEntered = new Promise<void>((resolve) => { releaseBoth = resolve; });
   const writerDone = new Promise<void>((resolve) => { markWriterDone = resolve; });
-  const observerSawWritePromise = new Promise<void>((resolve) => { markObserverSawWrite = resolve; });
   const physicalWriteCalls = { left: 0, right: 0 };
 
   const adapter: Adapter = {
@@ -138,16 +133,12 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
       }
       active++;
       maxActive = Math.max(maxActive, active);
-      entered++;
-      if (entered === 2) releaseBoth();
-      await bothEntered;
       try {
         if (mode === 'one-writer') {
           if (opts.stageId === 'left') {
             physicalWriteCalls.left++;
             writeFileSync(join(projectDir, sharedPath), 'export const source = "left";\n');
             markWriterDone();
-            await observerSawWritePromise;
             return {
               output: 'left wrote', exitCode: 0, duration_ms: 1,
               writes: [sharedPath], writeAttribution: 'structured',
@@ -155,7 +146,6 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
           }
           await writerDone;
           observerSawWrite = existsSync(join(projectDir, sharedPath));
-          markObserverSawWrite();
           return {
             output: 'right observed without writing', exitCode: 0, duration_ms: 1,
             writeAttribution: 'unknown',
@@ -192,7 +182,7 @@ beforeEach(() => {
 afterEach(() => rmSync(projectDir, { recursive: true, force: true }));
 
 describe('safe scope batching', () => {
-  it('admits both independent ready stages into the same batch', async () => {
+  it('admits independent scopes in one scheduler batch but leases their writer invocations one at a time', async () => {
     const stages = [
       stage({ id: 'left', scope: ['src/left.ts'] }),
       stage({ id: 'right', scope: ['spec/right/**'] }),
@@ -203,7 +193,7 @@ describe('safe scope batching', () => {
 
     const measured = await runStatic([['src/left.ts'], ['spec/right/**']]);
     expect(measured.final.status).toBe('complete');
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
   });
 
   it('serializes overlapping scopes and records the reason without failing the run', async () => {
@@ -262,13 +252,13 @@ describe('safe scope batching', () => {
     expect(siblings.deferred).toEqual([]);
   });
 
-  it('does not claim that a snapshot observer co-wrote its concurrent peer\'s physical write', async () => {
+  it('serializes an empty-scope observer and does not claim that it co-wrote its peer\'s physical write', async () => {
     const measured = await runPhysicalWriteScenario('one-writer');
     const warnings = measured.events.filter((event) => event.type === 'parallel_write_conflict');
     const leftAttempt = measured.final.stages.left.attempts?.at(-1);
     const rightAttempt = measured.final.stages.right.attempts?.at(-1);
 
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
     expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 0 });
     expect(measured.observerSawWrite).toBe(true);
     expect(leftAttempt).toMatchObject({ writes: [measured.sharedPath], writeAttribution: 'structured' });
@@ -281,12 +271,12 @@ describe('safe scope batching', () => {
     expect(measured.final.status).toBe('complete');
   });
 
-  it('warns when two concurrent adapters physically write and structurally report the same file', async () => {
+  it('prevents two write-capable adapters from running concurrently and retains the conflict/audit backstops', async () => {
     const measured = await runPhysicalWriteScenario('two-writers');
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
 
-    expect(measured.maxActive).toBe(2);
-    expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 1 });
+    expect(measured.maxActive).toBe(1);
+    expect(measured.physicalWriteCalls).toEqual({ left: 2, right: 2 });
     expect(measured.final.stages.left.attempts?.at(-1)).toMatchObject({
       writes: [measured.sharedPath], writeAttribution: 'structured',
     });
@@ -307,7 +297,7 @@ describe('safe scope batching', () => {
     const canonical = '../fc-home/runs/example/knowledge_graph.json';
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], [reported]);
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
     expect(warning).toMatchObject({
       level: 'warning',
       stageIds: ['left', 'right'],

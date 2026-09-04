@@ -10,10 +10,24 @@ import {
 } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { listOperationalRunIdsFromIndex } from './run-index.js';
+import {
+  buildRunDriftProjection,
+  readRunDriftProjection,
+  type RunDriftCrossing,
+  type RunDriftProjection,
+  type RunDriftRow,
+} from './run-drift.js';
 
 export interface WatchState {
   initialized: boolean;
   activeConditionIds: ReadonlySet<string>;
+  /** Ephemeral only: never serialized into a run, task, guidance, or signal. */
+  driftRows: Readonly<Record<string, WatchDriftSnapshot>>;
+}
+
+export interface WatchDriftSnapshot {
+  fingerprint: string;
+  crossing: RunDriftCrossing;
 }
 
 export interface WatchPollDependencies {
@@ -25,6 +39,7 @@ export interface WatchPollDependencies {
   isProcessAlive?: (pid: number) => boolean;
   artifactMtimeMs?: (path: string) => number | undefined;
   readPathMetadata?: (path: string) => WatchPathMetadata | undefined;
+  readDriftProjection?: (runDirectory: string, state: Record<string, unknown>) => RunDriftProjection;
   nowMs?: () => number;
 }
 
@@ -121,6 +136,14 @@ export interface WatchPollResult {
   stats: WatchScanStats;
   heartbeat?: WatchHeartbeat;
   alerts: WatchAlert[];
+  drift: WatchDriftRow[];
+}
+
+export interface WatchDriftRow {
+  runId: string;
+  row: RunDriftRow;
+  crossedNow: boolean;
+  previousCrossing?: RunDriftCrossing;
 }
 
 interface ResolvedWatchPollDependencies {
@@ -131,6 +154,7 @@ interface ResolvedWatchPollDependencies {
   isProcessAlive: (pid: number) => boolean;
   artifactMtimeMs?: (path: string) => number | undefined;
   readPathMetadata: (path: string) => WatchPathMetadata | undefined;
+  readDriftProjection: (runDirectory: string, state: Record<string, unknown>) => RunDriftProjection;
   nowMs: () => number;
 }
 
@@ -178,7 +202,7 @@ const TOP_LEVEL_ACTIVITY_FILES = [
 export const WATCH_TERMINAL_GRACE_MS = 540_000;
 
 export function createWatchState(): WatchState {
-  return { initialized: false, activeConditionIds: new Set<string>() };
+  return { initialized: false, activeConditionIds: new Set<string>(), driftRows: {} };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -221,8 +245,18 @@ function resolveDependencies(overrides: WatchPollDependencies): ResolvedWatchPol
     isProcessAlive: overrides.isProcessAlive ?? processIsAlive,
     artifactMtimeMs: overrides.artifactMtimeMs,
     readPathMetadata: overrides.readPathMetadata ?? pathMetadata,
+    readDriftProjection: overrides.readDriftProjection
+      ?? ((runDirectory, state) => readRunDriftProjection(runDirectory, { state })),
     nowMs: overrides.nowMs ?? Date.now,
   };
+}
+
+function driftKey(runId: string, rowId: string): string {
+  return JSON.stringify([runId, rowId]);
+}
+
+function driftCrossed(previous: RunDriftCrossing, current: RunDriftCrossing): boolean {
+  return previous !== current && previous !== 'unavailable' && current !== 'unavailable';
 }
 
 function parseObject(text: string): JsonObject | undefined {
@@ -726,6 +760,8 @@ export function pollWatch(
   const diagnostics: MutableDiagnostics = stats;
   const active = new Map<string, WatchAlert>();
   const unjudgeableRunIds = new Set<string>();
+  const nextDriftRows: Record<string, WatchDriftSnapshot> = {};
+  const drift: WatchDriftRow[] = [];
   let livenessGaps = 0;
 
   let entries: readonly string[] = [];
@@ -805,6 +841,29 @@ export function pollWatch(
     if (!live) continue;
     stats.liveRuns += 1;
 
+    let driftProjection: RunDriftProjection;
+    try {
+      driftProjection = deps.readDriftProjection(runDir, state);
+    } catch {
+      // A view failure is evidence unavailability, never permission to infer
+      // zeros or to stop the existing watch judgements.
+      driftProjection = buildRunDriftProjection(state);
+    }
+    for (const row of driftProjection.rows) {
+      const key = driftKey(runId, row.id);
+      const fingerprint = JSON.stringify(row);
+      const previous = previousState.driftRows?.[key];
+      nextDriftRows[key] = { fingerprint, crossing: row.crossing };
+      if (!previous || previous.fingerprint !== fingerprint) {
+        drift.push({
+          runId,
+          row,
+          crossedNow: previous ? driftCrossed(previous.crossing, row.crossing) : false,
+          ...(previous ? { previousCrossing: previous.crossing } : {}),
+        });
+      }
+    }
+
     if (!mismatch) {
       const quiescence = terminalQuiescence(state);
       if (typeof quiescence === 'string') {
@@ -874,6 +933,7 @@ export function pollWatch(
     // An unavailable root proves neither recovery nor persistence. Retain prior
     // edges so a root outage cannot make every unchanged stall fire again.
     for (const priorId of previousState.activeConditionIds) activeConditionIds.add(priorId);
+    Object.assign(nextDriftRows, previousState.driftRows ?? {});
   } else if (unjudgeableRunIds.size > 0) {
     for (const priorId of previousState.activeConditionIds) {
       try {
@@ -887,15 +947,25 @@ export function pollWatch(
         // Condition IDs are generated internally; ignore an incompatible old version.
       }
     }
+    for (const [key, snapshot] of Object.entries(previousState.driftRows ?? {})) {
+      try {
+        const parts: unknown = JSON.parse(key);
+        if (Array.isArray(parts) && typeof parts[0] === 'string' && unjudgeableRunIds.has(parts[0])) {
+          nextDriftRows[key] = snapshot;
+        }
+      } catch { /* incompatible in-memory state is safely dropped */ }
+    }
   }
   const state: WatchState = {
     initialized: true,
     activeConditionIds,
+    driftRows: nextDriftRows,
   };
   return {
     state,
     stats,
     heartbeat: previousState.initialized ? undefined : { kind: 'heartbeat', stats },
     alerts,
+    drift,
   };
 }

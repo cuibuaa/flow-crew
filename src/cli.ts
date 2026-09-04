@@ -120,7 +120,7 @@ const {
 const { detectSupervisorBackend } = cliDoctorModule;
 const { isLiveFlowcrewSchedulerForRun, parseSchedulerPidMarker } = runLockModule;
 const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
-const { formatHumanDuration, readOperationalProjection } = cliEventsModule;
+const { formatHumanDuration, formatRunDriftProjection, readOperationalProjection } = cliEventsModule;
 
 const args = bootstrapArgs;
 const command = args[0];
@@ -1438,6 +1438,7 @@ function cmdStatus() {
   if (operational.lastGuidance) console.log(`Latest guidance: ${operational.lastGuidance.detail}`);
   for (const pending of operational.pendingScope) console.log(`Pending scope: ${pending.requestId}${pending.stageId ? ` · ${pending.stageId}` : ''}`);
   if (operational.pendingApproval) console.log(`Pending approval: ${operational.pendingApproval.detail}`);
+  for (const line of formatRunDriftProjection(operational.drift)) console.log(line);
   console.log(`Evidence: state ${operational.sourceCoverage.runState}; events ${operational.sourceCoverage.events}; ${operational.sourceCoverage.stageCount} stages`);
   if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
   console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}`);
