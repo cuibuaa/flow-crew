@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
-import { execWithTimeout } from './base.js';
+import { execWithStdin } from './base.js';
+import { findExecutableOnPath } from './availability.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
 import { CommandActivityTracker } from '../command-activity.js';
@@ -413,23 +414,33 @@ export function codexArgs(): string[] {
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
-export function buildCodexExecArgs(prompt: string, sessionId?: string): string[] {
+function preserveMissingCodexDiagnostic(result: RunResult): void {
+  // execWithStdin currently settles an asynchronous spawn error without its
+  // Error object. Recover only the unambiguous missing-executable case; an
+  // executable that exits silently must keep its original empty output.
+  if (result.exitCode === 1 && result.output === '' && findExecutableOnPath('codex') === undefined) {
+    result.output = 'Command not found: codex. Install the adapter CLI and try again.';
+  }
+}
+
+export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[] {
   if (sessionId !== undefined && !isCodexSessionUuid(sessionId)) {
     throw new Error('Codex session resume requires an explicit UUID');
   }
   const args = sessionId
     ? ['exec', 'resume', '--json', ...codexArgs(), sessionId]
     : ['exec', '--json', ...codexArgs()];
-  // Terminate option parsing before prompts that begin with YAML fences/dashes.
-  args.push('--', prompt);
+  // Terminate option parsing, then tell Codex to read the prompt from stdin.
+  // Keeping prompt bytes out of argv avoids the OS per-argument size ceiling.
+  args.push('--', '-');
   return args;
 }
 
 /**
  * OpenAI Codex CLI adapter.
  *
- * Non-interactive: `codex exec "prompt"` (no sandbox/approval prompts)
- * Resume: `codex exec resume <UUID> "follow-up"`
+ * Non-interactive: `printf prompt | codex exec -` (no sandbox/approval prompts)
+ * Resume: `printf follow-up | codex exec resume <UUID> -`
  * Interactive: `codex` (TUI mode, needs PTY)
  *
  * Flags:
@@ -473,7 +484,7 @@ export class CodexAdapter implements Adapter {
             })
           : undefined;
         try {
-          result = await execWithTimeout('codex', args, {
+          result = await execWithStdin('codex', args, prompt, {
             cwd: opts.workDir,
             timeout_ms: opts.timeout_ms,
             liveLogPath,
@@ -481,6 +492,7 @@ export class CodexAdapter implements Adapter {
             onStdout: (chunk) => commandActivity?.feed(chunk),
             abortSignal: opts.abortSignal,
           });
+          preserveMissingCodexDiagnostic(result);
         } finally {
           commandActivity?.close();
         }

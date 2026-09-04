@@ -404,11 +404,50 @@ artifacts remain in the selected project.
 | Round result | Measurement stage | Research advance gate | Path from `research.result_file`, or the mutually exclusive `.no_candidate.json` sidecar. After ingestion it is moved to an outcome-named `<runDir>/research_round_<N>_*consumed.json` and journaled. |
 | `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
 | `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
-| `handoff_<stageId>.md` | Each stage on completion | The next stage that depends on it | `<runDir>/handoff_<stageId>.md`; what a stage passes forward, rather than the next stage re-reading its predecessor's full output. |
+| `handoff_<stageId>.md` | Each stage on completion | Operator and explicitly directed later stages | `<runDir>/handoff_<stageId>.md`; the concise human handoff requested by the worker prompt. Automatic predecessor context does not read this file; it reads the stage status and output described below. |
 | `scope_revision_request.json` | A stage needing a path outside its declared scope | Scheduler policy, which writes `scope_revision_decision_*.json` beside it | `<runDir>/stages/<stageId>/`; answered by a deterministic predicate chain — matching run and live execution index (`attemptIndex` in the machine contract), digest-verified paths, no collision with a running peer, and the requested file not already modified — never by the supervisor. |
 | Guidance | Supervisor, scheduler, or operator path | Exact target stage and explicit run-wide consumers | Targeted envelopes in `supervisor_guidance.md` plus optional `stages/<stageId>/guidance.md`; filtered per consumer and archived by iteration. |
 | Terminal artifact | Exactly one admitted owner for that terminal path (or the static-workflow compatibility path) | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; accepted only with owner-attributed latest-execution write evidence and snapshotted as `<runDir>/terminal_<basename>`. |
 | Stage output | Every stage execution | Technical retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest execution. A retry that needs to read what an *earlier* execution actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered execution — `output.md` alone was overwritten by each new execution, so a passing execution's output could be destroyed by a later one that failed in seconds. |
+
+### Automatic predecessor context budget
+
+For each `depends_on` edge, the worker renders one predecessor block from
+`stages/<stageId>/status.json` and `stages/<stageId>/output.md`. In `full`
+visibility that candidate contains status, the comma-separated artifact list,
+and output. In `minimal` visibility it contains status, the artifact list, and
+the verification instruction; `none` injects no predecessor block.
+
+The engine measures the complete candidate with UTF-8 byte accounting. A block
+of **8,000 bytes or less is injected unchanged**. A block of **8,001 bytes or
+more switches** to a bounded form that contains:
+
+- status and the complete candidate's byte count;
+- the predecessor stage directory as one absolute path;
+- the number of artifact names omitted, with an instruction to read
+  `status.json` for the complete status and artifact list;
+- the complete output byte count, an instruction to read `output.md`, and a
+  UTF-8-safe head/tail excerpt (the `minimal` excerpt is additionally limited
+  to 512 bytes).
+
+The complete replacement, including headings, counts, path, filenames,
+instructions, and excerpt, is mechanically capped at
+`MAX_PREDECESSOR_CONTEXT_BYTES = 8_000`; truncation never splits a Unicode code
+point. The files named by the replacement remain the source of truth. Following
+the instruction to open them is agent behavior rather than an engine-enforced
+read, so permanent boundary/real-child tests and criterion-aware QA must catch a
+wording regression.
+
+For `n` visible predecessors, let `B_i` be the UTF-8 size produced by the rule
+above for predecessor `i`. The exact dependency-context contribution is
+`sum(B_i) + 2 * (n - 1)` bytes because blocks have a two-newline separator, and
+its upper bound is therefore `n * 8,000 + 2 * (n - 1)` bytes. With `none` it is
+zero. The prompt template, assigned criteria, guidance, skills, and handoff
+suffix are separate additive sections; this is deliberately not a whole-prompt
+size limit. Process-backed adapters deliver that assembled prompt through stdin
+(Codex uses the explicit `-` sentinel), so those other sections are not exposed
+to an operating system's single-argument limit; the mock adapter stays
+in-process.
 
 The `stages` map and `stages/<stageId>/` files are live aliases for the active
 DAG. At an outer re-plan boundary, the scheduler first materializes the

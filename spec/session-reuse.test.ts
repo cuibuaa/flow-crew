@@ -59,11 +59,14 @@ describe('UUID-only Codex sessions', () => {
     expect(isSessionReuseEnabled()).toBe(false);
   });
 
-  it('builds an explicit UUID resume command and never selects global recency', () => {
+  it('builds an explicit UUID resume command with a stdin sentinel and never selects global recency', () => {
     const args = buildCodexExecArgs('continue', UUID);
     expect(args.slice(0, 3)).toEqual(['exec', 'resume', '--json']);
     expect(args).toContain(UUID);
     expect(args).not.toContain(['--', 'last'].join(''));
+    // Prompt presence in argv became obsolete when large prompts moved to stdin.
+    expect(args).not.toContain('continue');
+    expect(args.slice(-2)).toEqual(['--', '-']);
     expect(() => buildCodexExecArgs('continue', 'not-a-uuid')).toThrow(/explicit UUID/);
   });
 

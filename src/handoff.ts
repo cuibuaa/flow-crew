@@ -6,7 +6,7 @@ import { readStageStatus } from './store.js';
 import { getDefaultTimeout } from './config.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 
-const MAX_CONTEXT_CHARS = 8000;
+export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
 
 function readDefaultTimeout(projectDir: string): string {
@@ -60,33 +60,135 @@ function resolveVisibility(opts: HandoffOpts): HandoffVisibility {
   return opts.handoffVisibility ?? 'full';
 }
 
-function buildFullContext(depId: string, opts: HandoffOpts): string {
+interface PredecessorContextSource {
+  statusText: string;
+  artifactNames: string[];
+  output: string;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+function takeUtf8Head(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (utf8Bytes(value) <= maxBytes) return value;
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of value) {
+    const codePointBytes = utf8Bytes(codePoint);
+    if (bytes + codePointBytes > maxBytes) break;
+    bytes += codePointBytes;
+    end += codePoint.length;
+  }
+  return value.slice(0, end);
+}
+
+function takeUtf8Tail(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (utf8Bytes(value) <= maxBytes) return value;
+  let bytes = 0;
+  let start = value.length;
+  while (start > 0) {
+    let codePointStart = start - 1;
+    const trailing = value.charCodeAt(codePointStart);
+    if (trailing >= 0xdc00 && trailing <= 0xdfff && codePointStart > 0) {
+      const leading = value.charCodeAt(codePointStart - 1);
+      if (leading >= 0xd800 && leading <= 0xdbff) codePointStart--;
+    }
+    const codePoint = value.slice(codePointStart, start);
+    const codePointBytes = utf8Bytes(codePoint);
+    if (bytes + codePointBytes > maxBytes) break;
+    bytes += codePointBytes;
+    start = codePointStart;
+  }
+  return value.slice(start);
+}
+
+function renderOutputExcerpt(output: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const outputBytes = utf8Bytes(output);
+  if (outputBytes === 0) return takeUtf8Head('(output.md is empty)', maxBytes);
+  if (outputBytes <= maxBytes) return output;
+
+  // Reserve for the largest possible omission count first. The exact marker
+  // below can only be the same size or smaller, keeping the complete excerpt
+  // inside maxBytes without ever splitting a UTF-8 code point.
+  const reservedMarker = `\n...[${outputBytes} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
+  const contentBudget = Math.max(0, maxBytes - utf8Bytes(reservedMarker));
+  const tailBudget = Math.min(2_000, Math.floor(contentBudget / 4));
+  const head = takeUtf8Head(output, contentBudget - tailBudget);
+  const tail = takeUtf8Tail(output, tailBudget);
+  const omittedBytes = outputBytes - utf8Bytes(head) - utf8Bytes(tail);
+  const marker = `\n...[${omittedBytes} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
+  return takeUtf8Head(`${head}${marker}${tail}`, maxBytes);
+}
+
+function readPredecessorContext(depId: string, opts: HandoffOpts): PredecessorContextSource {
   let statusText = 'unknown';
-  let artifacts = 'none';
+  let artifactNames: string[] = [];
   try {
     const st = readStageStatus(opts.projectDir, opts.runId, depId);
     statusText = st.status;
-    artifacts = st.artifacts?.join(', ') || 'none';
+    artifactNames = Array.isArray(st.artifacts)
+      ? st.artifacts.filter((artifact): artifact is string => typeof artifact === 'string')
+      : [];
   } catch { /* missing stage data */ }
-  let output = readStageOutput(opts.projectDir, opts.runId, depId);
-  if (output.length > MAX_CONTEXT_CHARS) {
-    // Keep both the start and end of the output so the handoff note (written at the end) is preserved
-    const tailSize = Math.min(2000, Math.floor(MAX_CONTEXT_CHARS / 4));
-    const headSize = MAX_CONTEXT_CHARS - tailSize;
-    output = output.slice(0, headSize) + '\n...(truncated)...\n' + output.slice(-tailSize);
+  return {
+    statusText,
+    artifactNames,
+    output: readStageOutput(opts.projectDir, opts.runId, depId),
+  };
+}
+
+function boundPredecessorContext(
+  candidate: string,
+  depId: string,
+  opts: HandoffOpts,
+  visibility: Exclude<HandoffVisibility, 'none'>,
+  source: PredecessorContextSource,
+): string {
+  const candidateBytes = utf8Bytes(candidate);
+  if (candidateBytes <= MAX_PREDECESSOR_CONTEXT_BYTES) return candidate;
+
+  const stageDirectory = join(opts.runDir, 'stages', depId);
+  const heading = visibility === 'minimal'
+    ? `## Previous stage: ${depId}`
+    : `## Context from stage: ${depId}`;
+  const outputBytes = utf8Bytes(source.output);
+  const header = `${heading}
+Status: ${source.statusText}
+Inline predecessor block: ${candidateBytes} UTF-8 bytes; limit: ${MAX_PREDECESSOR_CONTEXT_BYTES} bytes.
+Complete predecessor stage directory: ${stageDirectory}
+Artifact names omitted from this prompt: ${source.artifactNames.length}. Read status.json for complete status and artifacts.
+Complete output: output.md (${outputBytes} UTF-8 bytes).
+Inline output excerpt (head and tail when truncated):`;
+  const headerBytes = utf8Bytes(header);
+  if (headerBytes >= MAX_PREDECESSOR_CONTEXT_BYTES) {
+    return takeUtf8Head(header, MAX_PREDECESSOR_CONTEXT_BYTES);
   }
-  return `## Context from stage: ${depId}\nStatus: ${statusText}\nArtifacts: ${artifacts}\nSummary:\n${output}`;
+
+  const remainingBytes = MAX_PREDECESSOR_CONTEXT_BYTES - headerBytes - 1;
+  const excerptBudget = visibility === 'minimal'
+    ? Math.min(512, remainingBytes)
+    : remainingBytes;
+  const excerpt = renderOutputExcerpt(source.output, excerptBudget);
+  const bounded = excerpt ? `${header}\n${excerpt}` : header;
+  return takeUtf8Head(bounded, MAX_PREDECESSOR_CONTEXT_BYTES);
+}
+
+function buildFullContext(depId: string, opts: HandoffOpts): string {
+  const source = readPredecessorContext(depId, opts);
+  const artifacts = source.artifactNames.join(', ') || 'none';
+  const candidate = `## Context from stage: ${depId}\nStatus: ${source.statusText}\nArtifacts: ${artifacts}\nSummary:\n${source.output}`;
+  return boundPredecessorContext(candidate, depId, opts, 'full', source);
 }
 
 function buildMinimalContext(depId: string, opts: HandoffOpts): string {
-  let statusText = 'unknown';
-  let artifacts = 'none';
-  try {
-    const st = readStageStatus(opts.projectDir, opts.runId, depId);
-    statusText = st.status;
-    artifacts = st.artifacts?.join(', ') || 'none';
-  } catch { /* missing stage data */ }
-  return `## Previous stage: ${depId}\nStatus: ${statusText}\nFiles changed: ${artifacts}\nVerify the changes are correct.`;
+  const source = readPredecessorContext(depId, opts);
+  const artifacts = source.artifactNames.join(', ') || 'none';
+  const candidate = `## Previous stage: ${depId}\nStatus: ${source.statusText}\nFiles changed: ${artifacts}\nVerify the changes are correct.`;
+  return boundPredecessorContext(candidate, depId, opts, 'minimal', source);
 }
 
 function buildDependencyContext(opts: HandoffOpts): string {
