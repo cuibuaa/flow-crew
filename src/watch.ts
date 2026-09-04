@@ -9,6 +9,7 @@ import {
   STAGE_STATUS,
 } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
+import { listOperationalRunIdsFromIndex } from './run-index.js';
 
 export interface WatchState {
   initialized: boolean;
@@ -18,6 +19,8 @@ export interface WatchState {
 export interface WatchPollDependencies {
   runsRoot?: string;
   readDirectory?: (path: string) => readonly string[];
+  /** Active/unknown candidates from the run index; null selects legacy root scan. */
+  candidateRunIds?: (path: string) => readonly string[] | null;
   readText?: (path: string) => string;
   isProcessAlive?: (pid: number) => boolean;
   artifactMtimeMs?: (path: string) => number | undefined;
@@ -123,6 +126,7 @@ export interface WatchPollResult {
 interface ResolvedWatchPollDependencies {
   runsRoot: string;
   readDirectory: (path: string) => readonly string[];
+  candidateRunIds: (path: string) => readonly string[] | null;
   readText: (path: string) => string;
   isProcessAlive: (pid: number) => boolean;
   artifactMtimeMs?: (path: string) => number | undefined;
@@ -205,9 +209,14 @@ function pathMetadata(path: string): WatchPathMetadata | undefined {
 }
 
 function resolveDependencies(overrides: WatchPollDependencies): ResolvedWatchPollDependencies {
+  const root = overrides.runsRoot ?? globalRunsRoot();
   return {
-    runsRoot: overrides.runsRoot ?? globalRunsRoot(),
+    runsRoot: root,
     readDirectory: overrides.readDirectory ?? ((path) => readdirSync(path)),
+    candidateRunIds: overrides.candidateRunIds
+      ?? (overrides.readDirectory
+        ? (() => null)
+        : (() => listOperationalRunIdsFromIndex(''))),
     readText: overrides.readText ?? ((path) => readFileSync(path, 'utf-8')),
     isProcessAlive: overrides.isProcessAlive ?? processIsAlive,
     artifactMtimeMs: overrides.artifactMtimeMs,
@@ -721,9 +730,15 @@ export function pollWatch(
 
   let entries: readonly string[] = [];
   try {
-    entries = deps.readDirectory(deps.runsRoot);
+    entries = deps.candidateRunIds(deps.runsRoot) ?? deps.readDirectory(deps.runsRoot);
   } catch {
-    stats.rootReadErrors = 1;
+    try {
+      // A missing/unavailable index is a compatibility condition, not proof
+      // that the runs root is unreadable. Fall back to the legacy scan.
+      entries = deps.readDirectory(deps.runsRoot);
+    } catch {
+      stats.rootReadErrors = 1;
+    }
   }
   stats.entries = entries.length;
 

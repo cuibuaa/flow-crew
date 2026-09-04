@@ -351,9 +351,15 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
+  // Stable item-17 workload IDs. The running fixture now proves live process
+  // ownership; the missing/dead-owner behavior is covered by the replay suite.
   it.each(['running', 'parked'])('waits for a readable %s bound run when its unit reports failed', async (runStatus) => {
     const runId = `bound-${runStatus}`;
-    writeRun(runId, runStatus);
+    const runPath = writeRun(runId, runStatus);
+    if (runStatus === 'running') {
+      writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+      writeSchedulerProcessIdentity(runPath, runId);
+    }
     const task = registry.create({
       brief_text: 'must not replay',
       projectDir: tempDir,
@@ -829,7 +835,9 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
 
   it('defers a readable running bound run instead of starting a new run (C2)', async () => {
     const runId = 'bound-running';
-    writeRun(runId, 'running');
+    const runPath = writeRun(runId, 'running');
+    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeSchedulerProcessIdentity(runPath, runId);
     const task = registry.create({
       brief_text: 'must not relaunch',
       projectDir: tempDir,
@@ -844,7 +852,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
       status: 'deferred',
       run_id: runId,
     });
-    expect(registry.get(task.id)?.defer_reason).toContain('waiting for existing run');
+    expect(registry.get(task.id)?.defer_reason).toContain('waiting for that exact process');
     expect(systemd.runs).toHaveLength(0);
   });
 

@@ -10,12 +10,15 @@
     "postinstall": "(cd ui && npm install || true)",
     "prepare": "npm run build && npm run build:ui",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/cli.js',0o755)\"",
+    "build": "node --import tsx scripts/build.ts",
+    "build:clean": "npm run clean && npm run build",
     "start": "node dist/index.js",
     "dev": "cd ui && npm run build && cd .. && tsx src/index.ts",
     "build:ui": "cd ui && npm run build",
     "lint": "eslint \"src/**/*.ts\"",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:baseline-identities": "vitest run --exclude \"spec/ux-perf-*.replay.ts\" --exclude \"spec/ux-perf-*.replay.tsx\"",
+    "test:ux-perf": "vitest run --config vitest.ux-perf.config.ts"
   },
   "keywords": [
     "flowcrew",

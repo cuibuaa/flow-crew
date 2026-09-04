@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { appendRunEventAtRunDir } from './run-events.js';
 
 export const RUN_WIDE_GUIDANCE_TARGET = '*';
 
@@ -217,5 +218,18 @@ export function appendGuidanceEnvelope(input: {
   const ledgerPath = join(input.runDir, 'supervisor_guidance.md');
   mkdirSync(dirname(ledgerPath), { recursive: true });
   appendFileSync(ledgerPath, `${existsSync(ledgerPath) ? '\n\n' : ''}${renderGuidanceEnvelope(envelope)}\n`, 'utf-8');
+  try {
+    appendRunEventAtRunDir(input.runDir, {
+      type: 'guidance_written',
+      runId: basename(input.runDir),
+      timestamp: createdAt,
+      ...(target !== RUN_WIDE_GUIDANCE_TARGET && STAGE_ID.test(target) ? { stageId: target } : {}),
+      detail: envelope.quarantined
+        ? `${envelope.quarantineReason}: ${body}`
+        : body,
+      level: envelope.quarantined ? 'warning' : 'info',
+      source: input.source,
+    });
+  } catch { /* guidance durability must not depend on the optional event feed */ }
   return envelope;
 }

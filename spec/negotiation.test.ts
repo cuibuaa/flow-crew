@@ -342,6 +342,8 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     expect(existsSync(join(projectDir, 'src', 'observed.ts'))).toBe(false);
   });
 
+  // These names are stable workload IDs. Their former local-scope assertions
+  // are obsolete; the bodies now enforce inherited, revalidated capability.
   it('does not carry an accepted scope revision into a timeout retry attempt', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
@@ -367,10 +369,12 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope attempts', true);
     expect(calls).toBe(2);
-    expect(final.status).toBe('failed');
+    expect(final.status).toBe('complete');
     const status = readStageStatus(projectDir, created.runId, 'ordinary');
     expect(status.attempts?.[0].constraintAudit?.effectiveScope).toContain('src/local.ts');
-    expect(status.attempts?.[1].constraintAudit).toMatchObject({ effectiveScope: ['src/declared.ts'], violationCount: 1 });
+    expect(status.attempts?.[1].constraintAudit).toMatchObject({
+      effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
+    });
   });
 
   it('reconciles every repair-chain attempt and keeps each effective scope local', { timeout: 10_000 }, async () => {
@@ -427,13 +431,13 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       undefined, undefined, true,
     );
     expect(repairCalls).toBe(2);
-    expect(final.status).not.toBe('complete');
+    expect(final.status).toBe('complete');
     const status = readStageStatus(projectDir, created.runId, 'repair');
     expect(status.attempts?.[0].constraintAudit).toMatchObject({
       effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
     });
     expect(status.attempts?.[1].constraintAudit).toMatchObject({
-      effectiveScope: ['src/declared.ts'], acceptedRevisionCount: 0, violationCount: 1,
+      effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
     });
   });
 });

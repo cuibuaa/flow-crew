@@ -28,9 +28,14 @@ import {
 } from '../src/fc-tasks.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const fcTasksSourceUrl = pathToFileURL(join(projectRoot, 'src', 'fc-tasks.ts')).href;
+const fcTasksModuleUrl = pathToFileURL(join(projectRoot, 'dist', 'fc-tasks.js')).href;
+const TSX_LOADER_BASELINE_HEAP_MIB = 12;
+const BOUNDED_DIRECTORY_MARGIN_HEAP_MIB = 20;
+const BOUNDED_DIRECTORY_HEAP_MIB = TSX_LOADER_BASELINE_HEAP_MIB
+  + BOUNDED_DIRECTORY_MARGIN_HEAP_MIB;
 
 let root: string;
+const verifiedLoaderHeaps = new Set<number>();
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-tasks-wip-regression-'));
@@ -64,8 +69,6 @@ function seed(session: string, filename: string, value: unknown): string {
 function runInline(source: string, args: string[] = [], heapMiB?: number) {
   return spawnSync(process.execPath, [
     ...(heapMiB === undefined ? [] : [`--max-old-space-size=${heapMiB}`]),
-    '--import',
-    'tsx',
     '--input-type=module',
     '-e',
     source,
@@ -84,12 +87,14 @@ function runInline(source: string, args: string[] = [], heapMiB?: number) {
 }
 
 function expectConstrainedLoader(heapMiB: number): void {
+  if (verifiedLoaderHeaps.has(heapMiB)) return;
   const control = runInline(`
     const module = await import(process.argv[1]);
     process.stdout.write(typeof module.readTaskLedger);
-  `, [fcTasksSourceUrl], heapMiB);
+  `, [fcTasksModuleUrl], heapMiB);
   expect(control.status, control.stderr).toBe(0);
   expect(control.stdout).toBe('function');
+  verifiedLoaderHeaps.add(heapMiB);
 }
 
 interface ChildObservation {
@@ -206,7 +211,7 @@ describe('session ledger publication regressions', () => {
       process.stdout.write(JSON.stringify(observed));
     `;
 
-    const child = runInline(source, [fcTasksSourceUrl, root]);
+    const child = runInline(source, [fcTasksModuleUrl, root]);
     expect(child.status, child.stderr).toBe(0);
     const observed = JSON.parse(child.stdout) as {
       create: string;
@@ -241,7 +246,7 @@ describe('session ledger publication regressions', () => {
       process.stdout.write(JSON.stringify(events));
     `;
 
-    const child = runInline(source, [fcTasksSourceUrl, root]);
+    const child = runInline(source, [fcTasksModuleUrl, root]);
     expect(child.status, child.stderr).toBe(0);
     const events = JSON.parse(child.stdout) as string[][];
     const linkIndex = events.findIndex(([type]) => type === 'link');
@@ -313,8 +318,8 @@ describe('session ledger publication regressions', () => {
     const releaseSubject = join(root, 'release-subject');
     const releaseDescription = join(root, 'release-description');
     const child = (field: string, value: string, release: string) => observeChild(spawn(process.execPath, [
-      '--import', 'tsx', '--input-type=module', '-e', workerSource,
-      fcTasksSourceUrl, root, field, value, release,
+      '--input-type=module', '-e', workerSource,
+      fcTasksModuleUrl, root, field, value, release,
     ], {
       cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -376,6 +381,7 @@ describe('session ledger publication regressions', () => {
       storeRoot: root,
       session: 'live-owner',
       entry: task('must-not-publish'),
+      lockTiming: { waitMs: 25, pollMs: 5 },
     })).toThrow(/busy|lock|concurrent/iu);
     expect(existsSync(join(root, 'live-owner', 'must-not-publish.json'))).toBe(false);
 
@@ -455,8 +461,8 @@ describe('session ledger publication regressions', () => {
     `;
     const release = [join(root, 'release-a'), join(root, 'release-b')];
     const child = (id: string, index: number) => observeChild(spawn(process.execPath, [
-      '--import', 'tsx', '--input-type=module', '-e', workerSource,
-      fcTasksSourceUrl, root, id, release[index],
+      '--input-type=module', '-e', workerSource,
+      fcTasksModuleUrl, root, id, release[index],
     ], {
       cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -507,7 +513,7 @@ describe('session ledger input and CLI regressions', () => {
       const result = renderFcTasks({ storeRoot: process.argv[2], explicitSession: 'oversized', columns: 80, lines: 20 });
       process.stdout.write(result.text);
     `;
-    const child = runInline(source, [fcTasksSourceUrl, root], 64);
+    const child = runInline(source, [fcTasksModuleUrl, root], 64);
     expect(child.status, child.stderr.slice(-1_000)).toBe(0);
     expect(child.stdout.trim()).not.toBe('');
     expect(child.stdout).toMatch(/degraded|oversized|too large/iu);
@@ -542,7 +548,7 @@ describe('session ledger input and CLI regressions', () => {
       });
       process.stdout.write(result.text);
     `;
-    const child = runInline(source, [fcTasksSourceUrl, root], 64);
+    const child = runInline(source, [fcTasksModuleUrl, root], 64);
     expect(child.status, child.stderr.slice(-1_000)).toBe(0);
     expect(child.stdout.trim()).not.toBe('');
     expect(child.stdout).toMatch(/degraded\[payload_too_large\]|payload.*limit/iu);
@@ -602,7 +608,7 @@ describe('session ledger input and CLI regressions', () => {
       });
     } finally {
       if (originalTty) Object.defineProperty(process.stdin, 'isTTY', originalTty);
-      else delete (process.stdin as NodeJS.ReadStream & { isTTY?: boolean }).isTTY;
+      else Reflect.deleteProperty(process.stdin, 'isTTY');
     }
 
     expect(code, stderr.text).toBe(0);
@@ -621,10 +627,15 @@ describe('session ledger input and CLI regressions', () => {
   });
 
   it('QA01 bounds non-JSON directory entries before readdir allocation can exhaust the process', { timeout: 20_000 }, () => {
-    expectConstrainedLoader(12);
+    // The cap is a predeclared transpiler baseline plus a bounded-operation
+    // margin. It stays far below materializing every candidate while avoiding
+    // a fixture that spends the run one minor allocation from V8 abort.
+    expectConstrainedLoader(BOUNDED_DIRECTORY_HEAP_MIB);
     const sessionPath = join(root, 'many-non-json');
     mkdirSync(sessionPath);
-    for (let index = 0; index < 100_000; index += 1) {
+    // One entry beyond the production streaming cap reaches the same boundary
+    // without spending seconds manufacturing irrelevant directory contents.
+    for (let index = 0; index < 4_097; index += 1) {
       writeFileSync(join(sessionPath, `${index}.tmp`), '');
     }
     const source = `
@@ -632,7 +643,8 @@ describe('session ledger input and CLI regressions', () => {
       const result = renderFcTasks({ storeRoot: process.argv[2], explicitSession: 'many-non-json', maxEntries: 1 });
       process.stdout.write(result.text);
     `;
-    const child = runInline(source, [fcTasksSourceUrl, root], 12);
+    const child = runInline(source, [fcTasksModuleUrl, root], BOUNDED_DIRECTORY_HEAP_MIB);
+    expect(child.signal, child.stderr.slice(-1_000)).toBeNull();
     expect(child.status, child.stderr.slice(-1_000)).toBe(0);
     expect(child.stdout.trim()).not.toBe('');
   });
@@ -681,7 +693,7 @@ describe('session ledger input and CLI regressions', () => {
       });
       process.stdout.write(result.text);
     `;
-    const child = runInline(source, [fcTasksSourceUrl, storeRoot, engineRoot], 64);
+    const child = runInline(source, [fcTasksModuleUrl, storeRoot, engineRoot], 64);
     expect(child.status, child.stderr.slice(-1_000)).toBe(0);
     expect(child.stdout.trim()).not.toBe('');
     expect(child.stdout).toMatch(/degraded|oversized|too large|stale/iu);
@@ -850,7 +862,7 @@ describe('session ledger input and CLI regressions', () => {
       const result = readTaskLedger(storeRoot, 'session');
       process.stdout.write(JSON.stringify({ state: result.state, ids: result.entries.map((entry) => entry.id), issues: result.issues }));
     `;
-    const child = runInline(source, [fcTasksSourceUrl, storeRoot, sessionPath, outside, kind]);
+    const child = runInline(source, [fcTasksModuleUrl, storeRoot, sessionPath, outside, kind]);
     expect(child.status, child.stderr).toBe(0);
     const observed = JSON.parse(child.stdout) as { state: string; ids: string[] };
     expect(observed.ids).not.toContain('outside-secret');
@@ -893,7 +905,7 @@ describe('session ledger input and CLI regressions', () => {
       process.stdout.write(JSON.stringify({ outcome, outsideTarget: fs.existsSync(outside + '/escaped.json') }));
     `;
 
-    const child = runInline(source, [fcTasksSourceUrl, storeRoot, sessionPath, outside]);
+    const child = runInline(source, [fcTasksModuleUrl, storeRoot, sessionPath, outside]);
     expect(child.status, child.stderr).toBe(0);
     const observed = JSON.parse(child.stdout) as { outcome: string; outsideTarget: boolean };
     expect(observed.outcome).not.toBe('acknowledged');

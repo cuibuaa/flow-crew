@@ -10,7 +10,7 @@ brief
   -> scheduler runs the stage DAG
   -> worker launches the configured backend adapter
   -> QA gates write verdicts
-  -> fix stages retry failed gates
+  -> fix stages repair failures and gates re-evaluate
   -> supervisor observes and can guide, abort, replan, or mark early success
   -> run summary and knowledge graph are persisted
 ```
@@ -49,7 +49,7 @@ The inner loop handles stage-level convergence:
   immediately rather than consuming its remaining retry budget.
 - Exhausted retries escalate to the outer loop.
 
-This keeps one implementation attempt from being treated as a final answer.
+This keeps one implementation execution from being treated as a final answer.
 
 ## Outer Loop
 
@@ -71,11 +71,22 @@ Runs live under the global FlowCrew directory so one dashboard can show every pr
 ~/.fc/runs/<runId>/task_brief.md
 ~/.fc/runs/<runId>/dispatch.yaml
 ~/.fc/runs/<runId>/knowledge_graph.json
+~/.fc/runs/<runId>/events.jsonl
+~/.fc/runs/<runId>/progress.md
 ~/.fc/runs/<runId>/supervisor_log.md
 ~/.fc/runs/<runId>/summary.md
 ~/.fc/runs/<runId>/.reality-gate.json
+~/.fc/runs/<runId>/stages/<stageId>/status.json
+~/.fc/runs/<runId>/stages/<stageId>/output_attempt_<execution>.md
+~/.fc/runs/<runId>/stages/<stageId>/attempt_deadline_execution_<execution>_budget.jsonl
+~/.fc/runs/<runId>/stages/<stageId>/constraint_audit_attempt_<execution>.json
 ~/.fc/campaigns/<name>.jsonl
 ```
+
+`run.json` is the compact canonical projection; append-only histories and `events.jsonl`
+retain the audit trail. Operator surfaces read a bounded event tail and report when either
+source is missing. The three deliberately distinct counters are task **launch**, stage
+**execution**, and gate **re-evaluation**.
 
 ## Design Boundary
 
@@ -104,8 +115,9 @@ express not just *who does what*, but the shape of the work:
   the planner commits to a subgraph now and the rest when the problem is understood.
 - **capability** — each stage declares which paths it may write. Declaring nothing means
   writing nothing; the closed case is the default, not an oversight.
-- **budget** — a soft time budget per attempt and an immutable ceiling for the stage as a
-  whole, so a stage can ask for more time without any path to unbounded time.
+- **budget** — an immutable deadline for one stage execution. Adapter retries, backoff, and
+  fallback all consume it; only a configured technical retry can start a later execution with
+  a strictly larger derived deadline.
 
 Because it is a grammar rather than a fixed template, the planner composes these freely for
 the problem in front of it — a wide parallel fan-out for independent work, a narrow chain with

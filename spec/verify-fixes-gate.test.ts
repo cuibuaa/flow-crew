@@ -21,8 +21,8 @@ import {
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const fcTasksSourceUrl = new URL('../src/fc-tasks.ts', import.meta.url).href;
-const cliSourcePath = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+const fcTasksModuleUrl = new URL('../dist/fc-tasks.js', import.meta.url).href;
+const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
 function task(id: string, extra: Partial<FcTaskEntry> = {}): FcTaskEntry {
   return {
@@ -107,7 +107,7 @@ describe('independent session-ledger release gate', () => {
     try {
       const child = spawnSync(
         process.execPath,
-        ['--import', 'tsx', '--input-type=module', '-e', source, fcTasksSourceUrl, storeRoot],
+        ['--input-type=module', '-e', source, fcTasksModuleUrl, storeRoot],
         {
           cwd: projectRoot,
           encoding: 'utf-8',
@@ -201,7 +201,7 @@ describe('independent session-ledger release gate', () => {
     try {
       const child = spawnSync(
         process.execPath,
-        ['--import', 'tsx', '--input-type=module', '-e', source, fcTasksSourceUrl, root],
+        ['--input-type=module', '-e', source, fcTasksModuleUrl, root],
         {
           cwd: projectRoot,
           encoding: 'utf-8',
@@ -316,9 +316,8 @@ describe('independent session-ledger release gate', () => {
     const child = spawn(
       process.execPath,
       [
-        '--import', 'tsx',
         '--import', preload,
-        cliSourcePath,
+        cliPath,
         'fc_tasks', 'create',
         '--session', 'session',
         '--store-root', root,

@@ -1,6 +1,7 @@
-import { readFileSync, readlinkSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
@@ -67,7 +68,7 @@ import { parseResearchFeasibility, type ResearchFeasibilityConfig } from './rese
 import { summarizeContext } from './context-inventory.js';
 import { summarizeLedger } from './campaign-ledger.js';
 import { validate as validateResultSchema } from './reality-gate/checks/json-schema-match.js';
-import { runStage } from './worker.js';
+import { freshRunningStageProjection, runStage } from './worker.js';
 import {
   createTechnicalRetryBudgetState,
   nextTechnicalRetryBudget,
@@ -77,6 +78,8 @@ import {
 } from './attempt-deadline.js';
 import {
   buildScopeNegotiationTrace,
+  constraintDecisionPath,
+  negotiationIdentity,
   negotiationRequestDigest,
   parseScopeRevisionRequest,
   publishConstraintDecision,
@@ -99,7 +102,7 @@ import { recordRunEvent, recordStageOutcome } from './run-events.js';
 import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
 import { appendTraceEvent } from './trace.js';
 import { generateRunSummary } from './run-summary.js';
-import { Supervisor } from './supervisor.js';
+import { Supervisor, computeSupervisorEvidenceBinding, type SupervisorEvidenceBinding } from './supervisor.js';
 import { isSessionReuseEnabled, loadProjectDefaults, loadSupervisorConfig } from './config.js';
 import { readCodexSession, type CodexSessionMetadata } from './adapters/codex.js';
 import { createLogger } from './logging.js';
@@ -1044,22 +1047,40 @@ function appendScopeRevisionContract(
     + `A missing declaration is closed, never allow-all. Before any project write outside this initial capability, produce `
     + `exactly one JSON request to ${join(runDirPath, 'stages', stage.id, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${runId}","stageId":"${stage.id}",`
-    + `"attemptIndex":<current attempt>,"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
-    + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/attempt/path binding. `
-    + `Wait for a scope_revision_decision_*.json file with the same requestId. Write the new path only when accepted; `
+    + `"attemptIndex":<current execution index>,"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
+    + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/execution/path binding. `
+    + `Accepted paths from an earlier execution of this same stage remain in the effective scope after the scheduler revalidates them against the current batch. `
+    + `Wait without hot-polling: continue independent work, or check for scope_revision_decision_<requestId>.json at most once per second, bounded by the remaining execution deadline; the scheduler also watches the directory and publishes one durable decision. `
+    + `Write the new path only when accepted; `
     + `a rejection is an auditable request to stop or re-plan, not permission to bypass scope with casts or indirection.`
     + gateIsolation;
+}
+
+export function appendResearchTemporalPathContract(
+  prompt: string,
+  research: ResearchConfig | undefined,
+  terminalStates: TerminalStatesConfig | undefined,
+): string {
+  if (!research) return prompt;
+  const paths = resolveResearchPaths(research);
+  const terminalPaths = Object.values(terminalStates ?? {}).flatMap((entry) => entry.paths);
+  return `${prompt}\n\n# Resolved research temporal paths (scheduler-owned)\n`
+    + `- mutable latest measured result: ${paths.resultFile}\n`
+    + `- mutable no-candidate alternative: ${paths.resultFile}.no_candidate.json\n`
+    + `- always-emitted framework manifest: ${paths.manifestFile}\n`
+    + `- terminal outputs: ${terminalPaths.length > 0 ? terminalPaths.join(', ') : 'none declared'}\n`
+    + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. Use ${paths.manifestFile} or scheduler-consumed immutable round evidence. This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path.`;
 }
 
 function appendAttemptDeadlineContract(
   prompt: string,
   attemptBudgetMs: number,
 ): string {
-  return `${prompt}\n\nRuntime timeout contract: this attempt has an immutable ${attemptBudgetMs}ms deadline. `
+  return `${prompt}\n\nRuntime timeout contract: this execution has an immutable ${attemptBudgetMs}ms deadline. `
     + `The base stage timeout comes only from config/defaults.yaml::default_timeout_ms. Adapter retries, backoff, `
-    + `fallback loading, and fallback execution all consume this same attempt deadline; runtime extension requests `
-    + `are rejected and cannot move it. If this attempt times out and a configured technical retry remains, the next `
-    + `attempt receives a strictly larger derived budget. A current-attempt supervisor ABORT remains authoritative.`;
+    + `fallback loading, and fallback execution all consume this same execution deadline; runtime extension requests `
+    + `are rejected and cannot move it. If this execution times out and a configured technical retry remains, the next `
+    + `execution receives a strictly larger derived budget. A current-execution supervisor ABORT remains authoritative.`;
 }
 
 function appendGateConstraintAuditContext(
@@ -1219,11 +1240,17 @@ export async function tryTerminateOnTerminalState(
       entry.paths.flatMap((path) => {
         const projectPath = join(ctx.projectDir, path);
         const snapshotPath = join(ctx.runDirPath, `terminal_${path.split('/').pop()}`);
+        const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
+        const attributedToCurrentRun = Boolean(
+          admittedOwner
+          && stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path),
+        );
         const sources = [projectPath, snapshotPath].filter((candidate) => {
           try {
             return existsSync(candidate)
               && Number.isFinite(startedAtMs)
-              && statSync(candidate).mtimeMs >= startedAtMs;
+              && (statSync(candidate).mtimeMs >= startedAtMs
+                || (candidate === projectPath && attributedToCurrentRun));
           } catch { return false; }
         });
         return sources.length > 0 ? [{ terminalStatus, path, sources }] : [];
@@ -1293,8 +1320,16 @@ export async function tryTerminateOnTerminalState(
         notMatchedReasons.push(`${terminalStatus}: ${path} is absent`);
         continue;
       }
+      const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
+      const attributedToCurrentRun = Boolean(
+        admittedOwner
+        && stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path),
+      );
       const source = Number.isFinite(startedAtMs)
         ? candidates.find((candidate) => candidate.mtimeMs >= startedAtMs)
+          ?? (attributedToCurrentRun
+            ? candidates.find((candidate) => candidate.path === projPath)
+            : undefined)
         : undefined;
       if (!source) {
         const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:freshness]`;
@@ -1313,7 +1348,6 @@ export async function tryTerminateOnTerminalState(
         continue;
       }
       const sourcePath = source.path;
-      const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
       if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path)) {
         const marker = `[scheduler-hint:${terminalStatus}:${path}:owner]`;
         const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no completed-attempt write attribution for the path`;
@@ -1908,6 +1942,7 @@ export async function tryAdvanceResearch(
     const manifestPath = join(ctx.projectDir, researchPaths.manifestFile);
     mkdirSync(dirname(manifestPath), { recursive: true });
     writeFileSync(manifestPath, JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+    settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, researchPaths.manifestFile);
   } catch { /* non-critical */ }
 
   const evalResult = evaluateResearch(rc, journal.rounds);
@@ -1982,6 +2017,7 @@ export async function tryAdvanceResearch(
       try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       try {
         writeFileSync(join(ctx.projectDir, researchPaths.manifestFile), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
+        settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, researchPaths.manifestFile);
       } catch { /* non-critical */ }
       finalEval = evaluateResearch(rc, journal.rounds);
       finalEval.reason = `confirm gate failed on '${label}' (${detail}) — candidate excluded from kept stack | ${finalEval.reason}`;
@@ -2399,7 +2435,7 @@ export function buildRetryPreamble(
   }
   let cause: string;
   if (prevError && prevError.startsWith('aborted by supervisor')) {
-    cause = `Previous attempt was ${prevError}. The supervisor judged that the previous attempt was stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this attempt, and START making file edits within a few minutes; do NOT spend the whole attempt only inspecting code.`;
+    cause = `Previous execution was ${prevError}. The supervisor judged that execution stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this execution, and START making file edits within a few minutes; do NOT spend the whole execution only inspecting code.`;
   } else if (prevError && prevError.startsWith('adapter connection failed')) {
     cause = `Previous attempt failed with an adapter connection error (transient). Retry the same plan.`;
   } else if (timeoutContext) {
@@ -2704,6 +2740,9 @@ export interface SupervisorRejectSignal {
    * with no target named (the caller maps it to the most-recently-completed stage). */
   targetStage: string | null;
   reason: string;
+  /** Present on v2 signals. Legacy signals remain readable for old on-disk
+   * runs, while every newly written signal is attempt/generation bound. */
+  evidence?: SupervisorEvidenceBinding;
 }
 
 /** Decision for a supervisor REJECT. A bounded budget prevents an infinite
@@ -2753,9 +2792,12 @@ function readPendingRejectSignal(runDirPath: string): { path: string; signal: Su
   let reason = 'supervisor rejected the deliverable as not meeting its declared work';
   let targetStage: string | null = null;
   try {
-    const sig = JSON.parse(readFileSync(path, 'utf-8')) as { reason?: string; stage?: string };
+    const sig = JSON.parse(readFileSync(path, 'utf-8')) as { reason?: string; stage?: string; evidence?: SupervisorEvidenceBinding };
     if (sig.reason) reason = sig.reason;
     if (typeof sig.stage === 'string') targetStage = sig.stage;
+    if (sig.evidence && sig.evidence.version === 1) {
+      return { path, signal: { targetStage, reason, evidence: sig.evidence } };
+    }
   } catch { /* malformed; keep generic reason */ }
   if (!targetStage && pick.startsWith('reject_')) targetStage = pick.slice('reject_'.length, -'.json'.length);
   return { path, signal: { targetStage, reason } };
@@ -2805,6 +2847,39 @@ export function consumeSupervisorReject(
       .map((id) => ({ id, at: state.stages[id]?.completedAt ?? '' }))
       .sort((a, b) => (a.at < b.at ? 1 : -1));
     resolved = candidates.length > 0 ? candidates[0].id : null;
+  }
+
+  if (pending.signal.evidence) {
+    const target = pending.signal.targetStage;
+    const current = target && state.stages[target]
+      ? computeSupervisorEvidenceBinding(ctx.runDirPath, target, state.stages[target])
+      : undefined;
+    const bound = pending.signal.evidence;
+    const matches = Boolean(current?.emittedDeliverable
+      && target === bound.stageId
+      && current.attemptIndex === bound.attemptIndex
+      && current.attemptStartedAt === bound.attemptStartedAt
+      && current.generation === bound.generation);
+    if (!matches) {
+      const discardedAt = new Date().toISOString();
+      const archiveDir = join(ctx.runDirPath, 'supervisor_rejections', 'discarded');
+      mkdirSync(archiveDir, { recursive: true });
+      publishJsonCreateOnly(join(archiveDir, `${discardedAt.replace(/[:.]/g, '-')}_${bound.stageId}_${bound.attemptIndex}.json`), {
+        version: 1,
+        discardedAt,
+        reason: 'attempt/evidence generation no longer matches the rejected deliverable',
+        signal: pending.signal,
+        currentEvidence: current ?? null,
+      });
+      try { unlinkSync(pending.path); } catch { /* already consumed */ }
+      recordRunEvent(ctx.projectDir, ctx.runId, {
+        type: 'supervisor_reject_discarded', runId: ctx.runId, timestamp: discardedAt,
+        stageId: bound.stageId, attemptIndex: bound.attemptIndex,
+        attemptStartedAt: bound.attemptStartedAt, evidenceGeneration: bound.generation,
+        decision: 'discarded', detail: 'stale attempt/evidence generation', source: 'scheduler', level: 'warning',
+      });
+      return false;
+    }
   }
 
   const counts = readRejectCounts(ctx.runDirPath);
@@ -3573,6 +3648,52 @@ interface RepairFileFingerprint {
   mode: number;
 }
 
+interface RunRollbackBaseline {
+  key: string;
+  projectDir: string;
+  runDirPath?: string;
+  images: Map<string, RepairFileImage>;
+  fingerprints: Map<string, RepairFileFingerprint>;
+  cleanTracked: Set<string>;
+  gitIndexEntries: Map<string, { objectId: string; mode: string }>;
+  gitRoot?: string;
+  journal: Map<string, number>;
+  journalSequence: number;
+  reliable: boolean;
+  watcher?: import('node:fs').FSWatcher;
+  initialization: {
+    filesEnumerated: number;
+    filesRead: number;
+    filesHashed: number;
+    bytesRead: number;
+    bytesHashed: number;
+    strategy: 'git-index-plus-dirty-images' | 'filesystem-images';
+  };
+}
+
+export interface RepairSnapshotMeasurement {
+  baselineInitialized: boolean;
+  baselineStrategy: RunRollbackBaseline['initialization']['strategy'];
+  baselineFilesEnumerated: number;
+  baselineFilesRead: number;
+  baselineFilesHashed: number;
+  baselineBytesRead: number;
+  baselineBytesHashed: number;
+  scopedFilesVisited: number;
+  scopedFilesRead: number;
+  scopedFilesHashed: number;
+  scopedBytesVisited: number;
+  scopedBytesRead: number;
+  scopedBytesHashed: number;
+  outsideScopeFilesVisited: number;
+  outsideScopeFilesRead: number;
+  outsideScopeFilesHashed: number;
+  outsideScopeBytesVisited: number;
+  outsideScopeBytesRead: number;
+  outsideScopeBytesHashed: number;
+  conservativeFallback: boolean;
+}
+
 export interface RepairRoundSnapshot {
   startedAt: string;
   declaredScopes: Record<string, string[] | null>;
@@ -3582,7 +3703,13 @@ export interface RepairRoundSnapshot {
   /** Full preimages make definite unauthorized writes atomically reversible. */
   allFileImages: Map<string, RepairFileImage>;
   files: Map<string, RepairFileImage>;
+  /** Run-scoped baseline + change-journal cursor avoid repeated project walks. */
+  rollbackBaseline: RunRollbackBaseline;
+  journalCursor: number;
+  measurement: RepairSnapshotMeasurement;
 }
+
+const rollbackBaselines = new Map<string, RunRollbackBaseline>();
 
 function normalizedProjectPath(value: string): string | undefined {
   const normalized = posix.normalize(value.trim().replace(/\\/g, '/').replace(/^\.\//, ''));
@@ -3609,6 +3736,20 @@ function listProjectFiles(projectDir: string): string[] {
   };
   walk(projectDir, '');
   return files.sort();
+}
+
+function listProjectFilesAt(projectDir: string, rawRoot: string): string[] {
+  const root = normalizedProjectPath(rawRoot);
+  if (!root) return [];
+  const absoluteRoot = join(projectDir, root);
+  try {
+    const stat = lstatSync(absoluteRoot);
+    if (stat.isSymbolicLink() || stat.isFile()) return [root];
+    if (!stat.isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  return listProjectFiles(absoluteRoot).map((path) => `${root}/${path}`);
 }
 
 function scopeMatchesProjectPath(scope: ParsedScope, path: string): boolean {
@@ -3657,6 +3798,224 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
   }
 }
 
+function repairFileImageBytes(image: RepairFileImage): number {
+  if (!image.exists) return 0;
+  if (image.bytes) return image.bytes.byteLength;
+  return Buffer.byteLength(image.text ?? '', 'utf-8');
+}
+
+function nulPaths(output: string): string[] {
+  return output.split('\0').map((value) => value.replace(/\\/g, '/')).filter(Boolean);
+}
+
+function rollbackListedPaths(output: string): string[] {
+  return nulPaths(output).filter((path) => !path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part)));
+}
+
+function gitIndexEntries(output: string): Map<string, { objectId: string; mode: string }> {
+  const entries = new Map<string, { objectId: string; mode: string }>();
+  for (const record of output.split('\0')) {
+    if (!record) continue;
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, objectId, stage] = record.slice(0, tab).split(' ');
+    const path = record.slice(tab + 1).replace(/\\/g, '/');
+    if (stage === '0' && mode && /^[0-9a-f]{40,64}$/i.test(objectId ?? '') && path) {
+      entries.set(path, { objectId, mode });
+    }
+  }
+  return entries;
+}
+
+function gitOutput(projectDir: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: projectDir,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 15_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function rollbackBaselineKey(projectDir: string, runDirPath?: string): string {
+  return `${resolve(projectDir)}\u0000${runDirPath ? resolve(runDirPath) : '__standalone__'}`;
+}
+
+function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void {
+  const path = normalizedProjectPath(rawPath);
+  if (!path || path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) return;
+  baseline.journalSequence++;
+  baseline.journal.set(path, baseline.journalSequence);
+  if (baseline.runDirPath) {
+    try {
+      appendFileSync(join(baseline.runDirPath, 'rollback_change_journal.jsonl'), `${JSON.stringify({
+        version: 1, sequence: baseline.journalSequence, path, observedAt: new Date().toISOString(),
+      })}\n`, 'utf-8');
+    } catch { /* in-memory journal remains authoritative for this scheduler */ }
+  }
+}
+
+function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRollbackBaseline {
+  const key = rollbackBaselineKey(projectDir, runDirPath);
+  const images = new Map<string, RepairFileImage>();
+  const fingerprints = new Map<string, RepairFileFingerprint>();
+  const cleanTracked = new Set<string>();
+  const indexEntries = new Map<string, { objectId: string; mode: string }>();
+  let filesEnumerated = 0;
+  let filesRead = 0;
+  let filesHashed = 0;
+  let bytesRead = 0;
+  let bytesHashed = 0;
+  let strategy: RunRollbackBaseline['initialization']['strategy'] = 'filesystem-images';
+  let gitRoot: string | undefined;
+  try {
+    gitRoot = gitOutput(projectDir, ['rev-parse', '--show-toplevel']).trim();
+    const trackedEntries = gitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
+    for (const path of [...trackedEntries.keys()]) {
+      if (path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) trackedEntries.delete(path);
+    }
+    const tracked = new Set(trackedEntries.keys());
+    for (const [path, entry] of trackedEntries) indexEntries.set(path, entry);
+    const dirty = new Set([
+      ...rollbackListedPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', 'HEAD', '--', '.'])),
+      ...rollbackListedPaths(gitOutput(projectDir, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.'])),
+      // Ignored files are still pre-existing operator data. Image them once so
+      // an out-of-scope write restores their run-start bytes rather than
+      // mistaking them for newly created disposable paths.
+      ...rollbackListedPaths(gitOutput(projectDir, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.'])),
+    ]);
+    filesEnumerated = tracked.size + [...dirty].filter((path) => !tracked.has(path)).length;
+    for (const path of tracked) if (!dirty.has(path)) cleanTracked.add(path);
+    for (const path of dirty) {
+      const image = readRepairFileImage(projectDir, path);
+      images.set(path, image);
+      const fingerprint = repairFileFingerprint(image);
+      if (fingerprint) fingerprints.set(path, fingerprint);
+      filesRead++;
+      bytesRead += repairFileImageBytes(image);
+      if (image.exists) {
+        filesHashed++;
+        bytesHashed += repairFileImageBytes(image);
+      }
+    }
+    strategy = 'git-index-plus-dirty-images';
+  } catch {
+    gitRoot = undefined;
+    for (const path of listProjectFiles(projectDir)) {
+      filesEnumerated++;
+      const image = readRepairFileImage(projectDir, path);
+      images.set(path, image);
+      const fingerprint = repairFileFingerprint(image);
+      if (fingerprint) fingerprints.set(path, fingerprint);
+      filesRead++;
+      bytesRead += repairFileImageBytes(image);
+      if (image.exists) {
+        filesHashed++;
+        bytesHashed += repairFileImageBytes(image);
+      }
+    }
+  }
+  const baseline: RunRollbackBaseline = {
+    key, projectDir, runDirPath, images, fingerprints, cleanTracked, gitIndexEntries: indexEntries, gitRoot,
+    journal: new Map(), journalSequence: 0, reliable: true,
+    initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
+  };
+  try {
+    baseline.watcher = watch(projectDir, { recursive: true, persistent: false }, (_event, name) => {
+      if (!name) {
+        baseline.reliable = false;
+        return;
+      }
+      const path = name.toString().replace(/\\/g, '/');
+      noteRollbackPath(baseline, path);
+      try {
+        if (lstatSync(join(projectDir, path)).isDirectory()) {
+          for (const nested of listProjectFilesAt(projectDir, path)) noteRollbackPath(baseline, nested);
+        }
+      } catch {
+        // A recursive directory deletion may coalesce to a parent event. Expand
+        // that event through the run-start inventory so every lost child gets
+        // its own restorable candidate.
+        const prefix = `${path.replace(/\/$/, '')}/`;
+        for (const known of new Set([...baseline.cleanTracked, ...baseline.images.keys()])) {
+          if (known.startsWith(prefix)) noteRollbackPath(baseline, known);
+        }
+      }
+    });
+    baseline.watcher.on('error', () => { baseline.reliable = false; });
+  } catch {
+    baseline.reliable = false;
+  }
+  rollbackBaselines.set(key, baseline);
+  return baseline;
+}
+
+function ensureRollbackBaseline(projectDir: string, runDirPath?: string): { baseline: RunRollbackBaseline; initialized: boolean } {
+  const key = rollbackBaselineKey(projectDir, runDirPath);
+  const existing = rollbackBaselines.get(key);
+  if (existing) return { baseline: existing, initialized: false };
+  return { baseline: createRollbackBaseline(projectDir, runDirPath), initialized: true };
+}
+
+function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): RepairFileImage {
+  if (!baseline.gitRoot || !baseline.cleanTracked.has(path)) return { exists: false };
+  try {
+    const entry = baseline.gitIndexEntries.get(path);
+    if (!entry) return { exists: false };
+    const bytes = execFileSync('git', ['cat-file', 'blob', entry.objectId], {
+      cwd: baseline.projectDir, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 15_000, maxBuffer: 64 * 1024 * 1024,
+    });
+    const rawMode = Number.parseInt(entry.mode, 8);
+    const symlink = entry.mode === '120000';
+    let text: string | undefined;
+    if (!bytes.includes(0)) {
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary */ }
+    }
+    const image: RepairFileImage = {
+      exists: true,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      binary: text === undefined,
+      ...(text === undefined ? { bytes } : { text }),
+      ...(symlink ? { symlink: true, type: 'symlink' as const } : { type: 'file' as const }),
+      mode: symlink ? 0o777 : (Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644),
+    };
+    baseline.images.set(path, image);
+    const fingerprint = repairFileFingerprint(image);
+    if (fingerprint) baseline.fingerprints.set(path, fingerprint);
+    return image;
+  } catch {
+    return { exists: false };
+  }
+}
+
+function baselineImage(baseline: RunRollbackBaseline, path: string): RepairFileImage {
+  return baseline.images.get(path) ?? imageFromGitBaseline(baseline, path);
+}
+
+function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
+  const image = readRepairFileImage(projectDir, path);
+  baseline.images.set(path, image);
+  const fingerprint = repairFileFingerprint(image);
+  if (fingerprint) baseline.fingerprints.set(path, fingerprint);
+  else baseline.fingerprints.delete(path);
+  baseline.cleanTracked.delete(path);
+  baseline.gitIndexEntries.delete(path);
+}
+
+/** Commit a scheduler-owned project artifact into the run rollback baseline. */
+function settleFrameworkRollbackPath(projectDir: string, runDirPath: string, path: string): void {
+  const baseline = rollbackBaselines.get(rollbackBaselineKey(projectDir, runDirPath));
+  if (baseline) settleRollbackBaselinePath(baseline, projectDir, path);
+}
+
+function closeRollbackBaseline(projectDir: string, runDirPath: string): void {
+  const key = rollbackBaselineKey(projectDir, runDirPath);
+  const baseline = rollbackBaselines.get(key);
+  baseline?.watcher?.close();
+  rollbackBaselines.delete(key);
+}
+
 function repairFileFingerprint(image: RepairFileImage): RepairFileFingerprint | undefined {
   if (!image.exists || image.sha256 === undefined || image.type === undefined || image.mode === undefined) return undefined;
   return { sha256: image.sha256, type: image.type, mode: image.mode };
@@ -3676,23 +4035,30 @@ function changedProjectPathsSinceSnapshot(
   snapshot: RepairRoundSnapshot,
   projectDir: string,
 ): string[] {
-  const currentFingerprints = new Map<string, RepairFileFingerprint>();
-  for (const path of listProjectFiles(projectDir)) {
-    const fingerprint = repairFileFingerprint(readRepairFileImage(projectDir, path));
-    if (fingerprint) currentFingerprints.set(path, fingerprint);
-  }
-  return [...new Set([
-    ...snapshot.allFileFingerprints.keys(),
-    ...currentFingerprints.keys(),
-  ])]
-    .sort()
-    .filter((path) => !repairFileFingerprintsEqual(
-      snapshot.allFileFingerprints.get(path),
-      currentFingerprints.get(path),
-    ));
+  const baseline = snapshot.rollbackBaseline;
+  const candidates = baseline.reliable
+    ? new Set([
+        ...snapshot.files.keys(),
+        ...[...baseline.journal.entries()]
+          .filter(([, sequence]) => sequence > snapshot.journalCursor)
+          .map(([path]) => path),
+      ])
+    : new Set([...listProjectFiles(projectDir), ...baseline.images.keys(), ...snapshot.files.keys()]);
+  if (!baseline.reliable) snapshot.measurement.conservativeFallback = true;
+  return [...candidates].sort().filter((path) => {
+    const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
+    const after = readRepairFileImage(projectDir, path);
+    return !repairFileFingerprintsEqual(repairFileFingerprint(before), repairFileFingerprint(after));
+  });
 }
 
-export function captureRepairRoundSnapshot(projectDir: string, repairStages: StageConfig[]): RepairRoundSnapshot {
+export function captureRepairRoundSnapshot(
+  projectDir: string,
+  repairStages: StageConfig[],
+  options?: { runDirPath?: string },
+): RepairRoundSnapshot {
+  const ensured = ensureRollbackBaseline(projectDir, options?.runDirPath);
+  const baseline = ensured.baseline;
   const declaredScopes: Record<string, string[] | null> = {};
   const parsedScopes: ParsedScope[] = [];
   let captureAll = false;
@@ -3709,19 +4075,27 @@ export function captureRepairRoundSnapshot(projectDir: string, repairStages: Sta
     }
   }
 
+  const scopedPaths = new Set<string>();
+  if (captureAll) {
+    for (const path of listProjectFiles(projectDir)) scopedPaths.add(path);
+  } else {
+    for (const scope of parsedScopes) {
+      if (scope.kind === 'exact' || scope.kind === 'tree') {
+        for (const path of listProjectFilesAt(projectDir, scope.value)) scopedPaths.add(path);
+        if (scope.kind === 'exact') scopedPaths.add(scope.value);
+      } else if (scope.kind === 'glob') {
+        if (!scope.directoryPrefix) {
+          for (const path of listProjectFiles(projectDir)) scopedPaths.add(path);
+        } else {
+          for (const path of listProjectFilesAt(projectDir, scope.directoryPrefix)) scopedPaths.add(path);
+        }
+      }
+    }
+  }
   const files = new Map<string, RepairFileImage>();
-  const allFileFingerprints = new Map<string, RepairFileFingerprint>();
-  const allFileImages = new Map<string, RepairFileImage>();
-  for (const path of listProjectFiles(projectDir)) {
+  for (const path of scopedPaths) {
     const image = readRepairFileImage(projectDir, path);
-    const fingerprint = repairFileFingerprint(image);
-    if (fingerprint) {
-      allFileFingerprints.set(path, fingerprint);
-      allFileImages.set(path, image);
-    }
-    if (captureAll || parsedScopes.some((scope) => scopeMatchesProjectPath(scope, path))) {
-      files.set(path, image);
-    }
+    files.set(path, image);
   }
   // Exact paths need an explicit absent preimage so a newly-created file is
   // distinguishable from an out-of-scope write whose preimage was unavailable.
@@ -3730,7 +4104,39 @@ export function captureRepairRoundSnapshot(projectDir: string, repairStages: Sta
       files.set(scope.value, readRepairFileImage(projectDir, scope.value));
     }
   }
-  return { startedAt: new Date().toISOString(), declaredScopes, captureAll, allFileFingerprints, allFileImages, files };
+  const scopedBytes = [...files.values()].reduce((total, image) => total + repairFileImageBytes(image), 0);
+  return {
+    startedAt: new Date().toISOString(),
+    declaredScopes,
+    captureAll,
+    allFileFingerprints: baseline.fingerprints,
+    allFileImages: baseline.images,
+    files,
+    rollbackBaseline: baseline,
+    journalCursor: baseline.journalSequence,
+    measurement: {
+      baselineInitialized: ensured.initialized,
+      baselineStrategy: baseline.initialization.strategy,
+      baselineFilesEnumerated: ensured.initialized ? baseline.initialization.filesEnumerated : 0,
+      baselineFilesRead: ensured.initialized ? baseline.initialization.filesRead : 0,
+      baselineFilesHashed: ensured.initialized ? baseline.initialization.filesHashed : 0,
+      baselineBytesRead: ensured.initialized ? baseline.initialization.bytesRead : 0,
+      baselineBytesHashed: ensured.initialized ? baseline.initialization.bytesHashed : 0,
+      scopedFilesVisited: scopedPaths.size,
+      scopedFilesRead: scopedPaths.size,
+      scopedFilesHashed: [...files.values()].filter((image) => image.exists).length,
+      scopedBytesVisited: scopedBytes,
+      scopedBytesRead: scopedBytes,
+      scopedBytesHashed: scopedBytes,
+      outsideScopeFilesVisited: 0,
+      outsideScopeFilesRead: 0,
+      outsideScopeFilesHashed: 0,
+      outsideScopeBytesVisited: 0,
+      outsideScopeBytesRead: 0,
+      outsideScopeBytesHashed: 0,
+      conservativeFallback: !baseline.reliable,
+    },
+  };
 }
 
 function restoreProjectPath(
@@ -3868,7 +4274,18 @@ function decideScopeRevision(input: {
   }
   if (snapshot) {
     const requestedScopes = requestedPaths.map(parseDeclaredScope);
-    const changedPath = changedProjectPathsSinceSnapshot(snapshot, projectDir)
+    const requestedCandidates = new Set(requestedPaths);
+    for (const scope of requestedScopes) {
+      const root = scope.kind === 'glob' ? scope.directoryPrefix
+        : scope.kind === 'unknown' ? undefined : scope.value;
+      if (!root) continue;
+      for (const path of listProjectFilesAt(projectDir, root)) requestedCandidates.add(path);
+    }
+    const directlyChanged = [...requestedCandidates].find((path) => !repairFileFingerprintsEqual(
+      repairFileFingerprint(snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path)),
+      repairFileFingerprint(readRepairFileImage(projectDir, path)),
+    ));
+    const changedPath = directlyChanged ?? changedProjectPathsSinceSnapshot(snapshot, projectDir)
       .find((path) => requestedScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
     if (changedPath) {
       return scopeRevisionRejection(request, priorScope, `requested path changed before scope approval: ${changedPath}`);
@@ -3906,6 +4323,50 @@ function readScopeRevisionDecisions(runDirPath: string, stageIds: string[]): Sco
   return decisions;
 }
 
+function acceptedInheritedScope(
+  runDirPath: string,
+  stage: StageConfig,
+): { scope: string[]; decisionPaths: string[] } {
+  const scope = new Set(stage.scope ?? []);
+  const decisionPaths: string[] = [];
+  const stagePath = join(runDirPath, 'stages', stage.id);
+  let files: string[] = [];
+  try { files = readdirSync(stagePath).filter((name) => /^scope_revision_decision_.*\.json$/.test(name)).sort(); } catch { /* no earlier decision */ }
+  for (const file of files) {
+    const path = join(stagePath, file);
+    const decision = readConstraintDecision(path);
+    if (!decision || decision.kind !== 'scope_revision' || decision.accepted !== true
+      || decision.decision !== 'accepted' || decision.decidedBy !== 'scheduler-policy'
+      || decision.stageId !== stage.id || decision.runId !== basename(runDirPath)) continue;
+    const requestedPaths = Array.isArray(decision.requestedPaths)
+      ? decision.requestedPaths.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (requestedPaths.length === 0 || decision.pathDigest !== scopePathDigest(requestedPaths)) continue;
+    if ((decision.requestedBy !== 'stage' && decision.requestedBy !== 'operator' && decision.requestedBy !== 'supervisor')
+      || !Number.isSafeInteger(decision.attemptIndex) || typeof decision.reason !== 'string') continue;
+    const persistedRequest: ScopeRevisionRequestV1 = {
+      version: 1, kind: 'scope_revision', requestId: decision.requestId,
+      runId: decision.runId, stageId: decision.stageId, attemptIndex: decision.attemptIndex,
+      requestedBy: decision.requestedBy, reason: decision.reason,
+      requestedPaths, pathDigest: decision.pathDigest,
+    };
+    if (decision.identityDigest !== negotiationIdentity(persistedRequest)) continue;
+    const normalized = requestedPaths.map(normalizedProjectPath);
+    if (normalized.some((value) => value === undefined)) continue;
+    for (const pathValue of normalized as string[]) scope.add(pathValue);
+    decisionPaths.push(relative(runDirPath, path).replace(/\\/g, '/'));
+  }
+  return { scope: [...scope], decisionPaths };
+}
+
+/** Rehydrate accepted capability before scheduling so ordinary peer-conflict
+ * checks revalidate the inherited paths in the new batch. */
+export function stageWithInheritedScope(runDirPath: string, stage: StageConfig): StageConfig {
+  const inherited = acceptedInheritedScope(runDirPath, stage);
+  if (stage.scope === undefined && inherited.decisionPaths.length === 0) return stage;
+  return { ...stage, scope: inherited.scope };
+}
+
 function serializableRepairFileMode(mode: number): string {
   return mode.toString(8).padStart(4, '0');
 }
@@ -3933,7 +4394,6 @@ export function writeRepairRoundDiffArtifact(input: {
   statuses: Record<string, StageStatus>;
 }): string {
   const { snapshot, projectDir, runDirPath, iteration, round, repairStages, statuses } = input;
-  const postScope = captureRepairRoundSnapshot(projectDir, repairStages);
   const writeOwners = new Map<string, Set<string>>();
   for (const stage of repairStages) {
     const { files } = latestAttemptWrites(statuses[stage.id]);
@@ -3948,22 +4408,16 @@ export function writeRepairRoundDiffArtifact(input: {
 
   const allPaths = new Set<string>([
     ...snapshot.files.keys(),
-    ...postScope.files.keys(),
+    ...changedProjectPathsSinceSnapshot(snapshot, projectDir),
     ...writeOwners.keys(),
   ]);
-  for (const path of new Set([...snapshot.allFileFingerprints.keys(), ...postScope.allFileFingerprints.keys()])) {
-    if (!repairFileFingerprintsEqual(
-      snapshot.allFileFingerprints.get(path),
-      postScope.allFileFingerprints.get(path),
-    )) allPaths.add(path);
-  }
   const files: Record<string, unknown>[] = [];
   for (const path of [...allPaths].sort()) {
     const before = snapshot.files.get(path);
     const after = readRepairFileImage(projectDir, path);
     const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
-    const beforeFingerprint = repairFileFingerprint(before ?? { exists: false })
-      ?? snapshot.allFileFingerprints.get(path);
+    const baselineBefore = before ?? baselineImage(snapshot.rollbackBaseline, path);
+    const beforeFingerprint = repairFileFingerprint(baselineBefore);
     const afterFingerprint = repairFileFingerprint(after);
     const beforeExisted = before?.exists ?? beforeFingerprint !== undefined;
     const same = beforeExisted === after.exists
@@ -3975,7 +4429,7 @@ export function writeRepairRoundDiffArtifact(input: {
     else if (beforeExisted && !after.exists) status = 'deleted';
     else if (same) status = 'reported-touched';
     else status = 'modified';
-    const declaredScopeMatch = before !== undefined || postScope.files.has(path);
+    const declaredScopeMatch = before !== undefined;
     const preimageAvailable = before !== undefined || (!beforeExisted && declaredScopeMatch);
     files.push({
       path,
@@ -4413,6 +4867,14 @@ export function inspectDispatchAdmission(input: {
   for (const stage of input.dispatched) {
     if (input.research && stage.id === 'research') {
       errors.push(`${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`);
+    }
+    if (!input.research && stage.condition?.trim()) {
+      try {
+        const parsed = parseCondition(stage.condition);
+        if (parsed.stageId === 'research') {
+          errors.push(`${stage.id}.condition: references framework research facts in a non-research run; remove the condition or declare research mode`);
+        }
+      } catch { /* the normal condition validator reports malformed syntax */ }
     }
     for (const [index, scope] of (stage.scope ?? []).entries()) {
       const parsed = parseDeclaredScope(scope);
@@ -5016,7 +5478,7 @@ export function inspectRealityCheckReachability(input: {
         // research protocol lets the same stage emit only the no-candidate
         // sidecar. Hard checks must target the framework's always-emitted
         // manifest instead of assuming which branch the stage will take.
-        errors.push(`reality check ${JSON.stringify(check.name)} references mutable optional result path ${path}; a valid no-candidate round writes only its sidecar, so check the framework-emitted run_manifest.json instead`);
+        errors.push(`reality check ${JSON.stringify(check.name)} references mutable optional result path ${path}; a valid no-candidate round writes only its sidecar ${path}.no_candidate.json instead and never writes ${path}. Use the always-emitted framework manifest ${researchPaths!.manifestFile}, or declare an unconditional producer for a different artifact`);
         continue;
       }
       if (allowedFrameworkPaths.has(path) || existsSync(join(input.projectDir, path))) continue;
@@ -5069,6 +5531,13 @@ function injectDispatchedStages(
 ): StageConfig[] {
   // Read dispatch.yaml from run dir
   const runDirPath = runDir(projectDir, runId);
+  const emitAdmissionRejection = (report: DispatchAdmissionReport): void => {
+    recordRunEvent(projectDir, runId, {
+      type: 'admission_rejected', runId, timestamp: report.checkedAt,
+      stageId: dispatchStageId, detail: report.errors.join('; '),
+      source: 'scheduler', level: 'warning',
+    });
+  };
   const dispatchPath = join(runDirPath, 'dispatch.yaml');
   if (!existsSync(dispatchPath)) return [];
 
@@ -5093,6 +5562,7 @@ function injectDispatchedStages(
       terminalOwners: {},
     };
     writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    emitAdmissionRejection(report);
     log.warn({ errors: report.errors }, 'Failed to parse dispatch.yaml');
     return [];
   }
@@ -5149,6 +5619,7 @@ function injectDispatchedStages(
       terminalOwners: {},
     };
     writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    emitAdmissionRejection(report);
     log.warn({ errors: report.errors }, 'Dynamic dispatch refused before any proposed stage was injected');
     return [];
   }
@@ -5167,6 +5638,7 @@ function injectDispatchedStages(
       terminalOwners: {},
     };
     writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+    emitAdmissionRejection(report);
     return [];
   }
   const admission = inspectDispatchAdmission({
@@ -5197,6 +5669,7 @@ function injectDispatchedStages(
   }
   writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(admission, null, 2)}\n`, 'utf-8');
   if (!admission.pass) {
+    emitAdmissionRejection(admission);
     log.warn({ errors: admission.errors }, 'Dynamic dispatch topology refused before stage injection');
     return [];
   }
@@ -5289,7 +5762,7 @@ export function appendIterationLog(
   mkdirSync(runDirPath, { recursive: true });
   const lines: string[] = [`# Iteration ${iteration}`];
   if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
-    lines.push(`Fix→gate retries used: ${innerRetriesUsed}/${maxInnerRetries}`);
+    lines.push(`Gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}`);
   }
   // Include base stages (e.g. plan) so re-plan iterations have context on failures
   const allIds = [...(baseStageIds ?? []), ...dispatchedStageIds];
@@ -7637,7 +8110,7 @@ export async function runWorkflow(
                   .map((e) => [e.id, e.effectiveVerdict!] as const),
               ),
             );
-            const repairSnapshot = captureRepairRoundSnapshot(projectDir, activeRetryStages);
+            const repairSnapshot = captureRepairRoundSnapshot(projectDir, activeRetryStages, { runDirPath });
 
             // Clear verdict and metric files for all gates referenced by active retry stages
             for (const gid of activeGateIds) {
@@ -7655,7 +8128,7 @@ export async function runWorkflow(
             for (const retryStage of activeRetryStages) {
               state.stages[retryStage.id] = rependStageStatus(state.stages[retryStage.id], 0);
               mkdirSync(join(runDirPath, 'stages', retryStage.id), { recursive: true });
-              // Clear live.log so the SSE feed shows only the current attempt's output
+              // Clear live.log so the SSE feed shows only the current execution's output
               const liveLog = join(runDirPath, 'stages', retryStage.id, 'live.log');
               if (existsSync(liveLog)) unlinkSync(liveLog);
             }
@@ -8254,6 +8727,7 @@ export async function runWorkflow(
   });
   return finalState;
   } finally {
+    closeRollbackBaseline(projectDir, runDirPath);
     if (supervisor) {
       try { supervisor.stop(); } catch (err) { log.warn({ err }, 'Supervisor stop failed'); }
     }
@@ -8268,6 +8742,8 @@ export async function runWorkflow(
 interface ScopeBatchContext {
   snapshot: RepairRoundSnapshot;
   declaredScopes: Map<string, string[] | null>;
+  inheritedScopes: Map<string, string[]>;
+  inheritedDecisionPaths: Map<string, Set<string>>;
   attempts: Map<string, {
     effectiveScope: string[];
     decisionPaths: Set<string>;
@@ -8279,17 +8755,29 @@ function createScopeBatchContext(
   projectDir: string,
   stages: StageConfig[],
   snapshot?: RepairRoundSnapshot,
+  runId?: string,
 ): ScopeBatchContext {
-  const resolvedSnapshot = snapshot ?? captureRepairRoundSnapshot(projectDir, stages);
+  const resolvedSnapshot = snapshot ?? captureRepairRoundSnapshot(
+    projectDir,
+    stages,
+    runId ? { runDirPath: runDir(projectDir, runId) } : undefined,
+  );
   const declaredScopes = new Map<string, string[] | null>();
+  const inheritedScopes = new Map<string, string[]>();
+  const inheritedDecisionPaths = new Map<string, Set<string>>();
   for (const stage of stages) {
     const declared = resolvedSnapshot.declaredScopes[stage.id] ?? stage.scope ?? null;
     const copy = declared === null ? null : [...declared];
     declaredScopes.set(stage.id, copy);
+    const inherited = runId ? acceptedInheritedScope(runDir(projectDir, runId), stage) : undefined;
+    inheritedScopes.set(stage.id, inherited?.scope ?? (copy ?? []));
+    inheritedDecisionPaths.set(stage.id, new Set(inherited?.decisionPaths ?? []));
   }
   return {
     snapshot: resolvedSnapshot,
     declaredScopes,
+    inheritedScopes,
+    inheritedDecisionPaths,
     attempts: new Map(),
   };
 }
@@ -8309,8 +8797,8 @@ function getScopeAttemptContext(
   const declared = context.declaredScopes.get(stageId) ?? null;
   const created = {
     // Missing scope is a closed capability, never an implicit allow-all.
-    effectiveScope: declared === null ? [] : [...declared],
-    decisionPaths: new Set<string>(),
+    effectiveScope: [...(context.inheritedScopes.get(stageId) ?? (declared ?? []))],
+    decisionPaths: new Set(context.inheritedDecisionPaths.get(stageId) ?? []),
     mismatchPaths: new Set<string>(),
   };
   context.attempts.set(key, created);
@@ -8340,15 +8828,26 @@ async function monitorScopeRevisionRequests(input: {
       if (!request) continue;
       const key = negotiationRequestDigest(request);
       if (attemptIndex === undefined) continue;
-      if (request.attemptIndex !== attemptIndex) {
-        // A request slot is transport, not authority. Leaving attempt N's body
-        // in place must never replay N's accepted decision into attempt N+1.
+      if (processed.has(key)) continue;
+      // The request file is a transport slot and commonly survives into a
+      // technical retry. Once this exact request has an immutable decision,
+      // do not reconsider it against the later attempt or emit duplicate
+      // request/decision events. Accepted capability is rehydrated separately
+      // by acceptedInheritedScope().
+      const existingDecision = readConstraintDecision(constraintDecisionPath(stagePath, request));
+      if (
+        existingDecision?.identityDigest === negotiationIdentity(request)
+        && existingDecision.requestDigest === key
+      ) {
         processed.add(key);
-        log.warn({ stage: stage.id, requestAttempt: request.attemptIndex, currentAttempt: attemptIndex }, 'Ignoring stale scope revision request from another attempt');
         continue;
       }
-      if (processed.has(key)) continue;
       const attemptContext = getScopeAttemptContext(input.context, stage.id, attemptIndex);
+      recordRunEvent(input.projectDir, input.runId, {
+        type: 'scope_revision_requested', runId: input.runId, timestamp: new Date().toISOString(),
+        stageId: stage.id, attemptIndex: request.attemptIndex, requestId: request.requestId,
+        detail: `${request.requestedPaths.join(', ')}: ${request.reason}`, source: 'scheduler',
+      });
       const activePeers = input.selected.filter((peer) => (
         peer.id !== stage.id && input.activeStageIds.has(peer.id)
       )).map((peer) => {
@@ -8383,7 +8882,27 @@ async function monitorScopeRevisionRequests(input: {
       if (publication.decision.accepted === true && Array.isArray(publication.decision.effectiveScope)) {
         // The accepted record is durable before the effective scope changes.
         attemptContext.effectiveScope = [...publication.decision.effectiveScope] as string[];
+        input.context.inheritedScopes.set(stage.id, [...attemptContext.effectiveScope]);
+        const inheritedPaths = input.context.inheritedDecisionPaths.get(stage.id) ?? new Set<string>();
+        addScopeArtifactPath(inheritedPaths, publication.path, runDirPath);
+        input.context.inheritedDecisionPaths.set(stage.id, inheritedPaths);
+        stage.scope = [...attemptContext.effectiveScope];
+        appendGuidanceEnvelope({
+          runDir: runDirPath,
+          target: stage.id,
+          source: 'scheduler',
+          knownStageIds: input.selected.map((candidate) => candidate.id),
+          body: `Scope revision ${request.requestId} was accepted. Effective scope ${JSON.stringify(attemptContext.effectiveScope)} is durable and will be revalidated/inherited by the next attempt of this stage.`,
+        });
       }
+      recordRunEvent(input.projectDir, input.runId, {
+        type: 'scope_revision_decided', runId: input.runId,
+        timestamp: publication.decision.decidedAt,
+        stageId: stage.id, attemptIndex: request.attemptIndex, requestId: request.requestId,
+        decision: publication.decision.accepted ? 'accepted' : 'rejected',
+        detail: String(publication.decision.policyBasis), source: 'scheduler',
+        level: publication.decision.accepted ? 'info' : 'warning',
+      });
       log.info(
         { stage: stage.id, requestId: request.requestId, accepted: publication.decision.accepted, reason: publication.decision.rejectionReason },
         'Scope revision decided',
@@ -8391,11 +8910,39 @@ async function monitorScopeRevisionRequests(input: {
     }
   };
 
-  while (!input.isComplete()) {
+  const watchers: import('node:fs').FSWatcher[] = [];
+  let wake: (() => void) | undefined;
+  try {
+    for (const stage of input.selected) {
+      const stagePath = join(runDirPath, 'stages', stage.id);
+      mkdirSync(stagePath, { recursive: true });
+      watchers.push(watch(stagePath, { persistent: false }, () => wake?.()));
+    }
+  } catch { /* one-second reconciliation is the portable fallback */ }
+  try {
+    while (!input.isComplete()) {
+      inspect();
+      await new Promise<void>((resolvePromise) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          wake = undefined;
+          resolvePromise();
+        };
+        wake = finish;
+        timer = setTimeout(finish, 1000);
+        // Close the event-registration race: a synchronous adapter may have
+        // completed after the loop condition but before `wake` was installed.
+        if (input.isComplete()) finish();
+      });
+    }
     inspect();
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  } finally {
+    for (const watcher of watchers) watcher.close();
   }
-  inspect();
 }
 
 function scopeContainsPath(scope: string[], rawPath: string): boolean {
@@ -8468,17 +9015,23 @@ function enforceStageScopeWrites(input: {
       if (definitelyAttributed) rollbackFailures.push(rawPath);
       continue;
     }
-    const beforeFingerprint = input.snapshot.allFileFingerprints.get(normalized);
+    const before = input.snapshot.files.get(normalized)
+      ?? baselineImage(input.snapshot.rollbackBaseline, normalized);
+    const beforeFingerprint = repairFileFingerprint(before);
     const currentFingerprint = repairFileFingerprint(readRepairFileImage(input.projectDir, normalized));
     const changed = !repairFileFingerprintsEqual(beforeFingerprint, currentFingerprint);
     if (ungoverned) {
-      if (changed) durableWrites.push(normalized);
+      if (changed) {
+        durableWrites.push(normalized);
+        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      }
       continue;
     }
     if (scopeContainsPath(input.effectiveScope ?? [], normalized)) {
       if (changed) {
         appliedWrites.push(normalized);
         durableWrites.push(normalized);
+        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
       }
       continue;
     }
@@ -8487,7 +9040,6 @@ function enforceStageScopeWrites(input: {
     // Preserve only paths covered by a peer's capability; every path outside
     // the complete batch capability is safe to restore even when ownership is unknown.
     if (!definitelyAttributed && input.preserveUnverifiedPath(normalized)) continue;
-    const before = input.snapshot.allFileImages.get(normalized) ?? { exists: false };
     if (restoreProjectPath(input.projectDir, normalized, before)) {
       rolledBackWrites.push(normalized);
     } else {
@@ -8663,6 +9215,11 @@ function reconcileStageScope(input: {
       ? canonicalProjectWriteUnion(attributedWrites)
       : [],
   );
+  if (attempt.writeAttribution !== 'structured') {
+    attempt.writes = rawWrites;
+    attempt.writeAttribution = 'snapshot';
+    writeStageStatus(input.projectDir, input.runId, input.stage.id, status);
+  }
   // Three states, not two. A declared scope governs the stage. A missing declaration the
   // stage NEGOTIATED is governed by the resulting decision — accepted paths apply, rejected
   // ones are restored. A missing declaration the stage never negotiated has no policy to
@@ -8839,6 +9396,87 @@ function reconcileCompletedStageAttempts(input: {
   return { status, violation };
 }
 
+function enforceTemporalResearchTestContract(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+): { violation: boolean; reason?: string } {
+  const state = readRunState(projectDir, runId);
+  if (!state.research) return { violation: false };
+  const status = readStageStatus(projectDir, runId, stageId);
+  const attempt = status.attempts?.at(-1);
+  if (status.status !== STAGE_STATUS.COMPLETE || attempt?.exitCode !== 0) return { violation: false };
+  const findings = inspectTemporalResearchTests({
+    projectDir,
+    writes: attempt.writes ?? status.writes ?? [],
+    resultFile: state.research.resultFile,
+    terminalPaths: Object.values(state.terminalStates ?? {}).flatMap((entry) => entry.paths),
+  });
+  if (findings.length === 0) return { violation: false };
+  const reason = `Temporal test contract rejected ${findings.length} generated test(s): ${findings.map((finding) => `${finding.file}: ${finding.reason}`).join('; ')}`;
+  const guardPath = join(runDir(projectDir, runId), 'stages', stageId, 'temporal_test_guard.json');
+  try {
+    writeFileSync(guardPath, `${JSON.stringify({ version: 1, pass: false, findings }, null, 2)}\n`, 'utf-8');
+  } catch { /* the status remains authoritative */ }
+  status.status = STAGE_STATUS.FAILED;
+  status.exitCode = 1;
+  status.error = reason;
+  if (attempt) {
+    attempt.status = STAGE_STATUS.FAILED;
+    attempt.exitCode = 1;
+    attempt.error = reason;
+  }
+  writeStageStatus(projectDir, runId, stageId, status);
+  recordRunEvent(projectDir, runId, {
+    type: 'attempt_failed', runId, timestamp: new Date().toISOString(), stageId,
+    attemptIndex: attempt?.index, attemptStartedAt: attempt?.startedAt,
+    status: STAGE_STATUS.FAILED, detail: reason, source: 'scheduler', level: 'warning',
+  });
+  return { violation: true, reason };
+}
+
+/**
+ * A scheduler-owned failure can happen before `runStage` starts (for example,
+ * while loading a late-bound role) or while an adapter call is throwing.  In
+ * either case the worker cannot publish its normal attempt-failed event.  Keep
+ * the stage ledger and the canonical event feed in lock-step before the error
+ * is propagated or converted into the ordinary retry/failure path.
+ */
+function recordThrownStageAttempt(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  retries: number,
+  error: unknown,
+): StageStatus | undefined {
+  const detail = error instanceof Error ? error.message : String(error);
+  try {
+    const final = completeStageAttempt(projectDir, runId, stageId, retries, {
+      exitCode: 1,
+      duration_ms: 0,
+      error: detail,
+      writeAttribution: 'unknown',
+    });
+    const attempt = final.attempts?.at(-1);
+    recordRunEvent(projectDir, runId, {
+      type: 'attempt_failed',
+      runId,
+      timestamp: attempt?.completedAt ?? new Date().toISOString(),
+      stageId,
+      attemptIndex: attempt?.index,
+      attemptStartedAt: attempt?.startedAt,
+      status: STAGE_STATUS.FAILED,
+      detail,
+      source: 'scheduler',
+      level: 'warning',
+    });
+    return final;
+  } catch (recordingError) {
+    log.error({ stage: stageId, err: recordingError }, 'Could not record thrown stage attempt');
+    return undefined;
+  }
+}
+
 async function runScopeSafeStageGroup(
   stages: StageConfig[],
   projectDir: string,
@@ -8847,7 +9485,8 @@ async function runScopeSafeStageGroup(
   execute: (stage: StageConfig) => Promise<void>,
   snapshot?: RepairRoundSnapshot,
 ): Promise<void> {
-  let pending = [...stages];
+  const runDirPath = runDir(projectDir, runId);
+  let pending = stages.map((stage) => stageWithInheritedScope(runDirPath, stage));
   while (pending.length > 0) {
     const { selected, deferred } = selectRunnableBatch(pending);
     for (const { stage, conflict } of deferred) {
@@ -8860,10 +9499,18 @@ async function runScopeSafeStageGroup(
       });
     }
     const activeStageIds = new Set(selected.map((stage) => stage.id));
-    const context = createScopeBatchContext(projectDir, selected, snapshot);
+    const context = createScopeBatchContext(projectDir, selected, snapshot, runId);
     let complete = false;
     const executions = Promise.all(selected.map(async (stage) => {
       try { await execute(stage); }
+      catch (error) {
+        const retries = (() => {
+          try { return readStageStatus(projectDir, runId, stage.id).retries; }
+          catch { return 0; }
+        })();
+        recordThrownStageAttempt(projectDir, runId, stage.id, retries, error);
+        throw error;
+      }
       finally { activeStageIds.delete(stage.id); }
     }));
     const monitor = monitorScopeRevisionRequests({
@@ -8884,7 +9531,13 @@ async function runScopeSafeStageGroup(
       await monitor;
     }
     if (executionError) throw executionError;
-    for (const stage of selected) reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
+    // Let recursive filesystem notifications queued by a synchronous adapter
+    // reach the run-scoped journal before reconciliation reads its cursor.
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    for (const stage of selected) {
+      reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
+      enforceTemporalResearchTestContract(projectDir, runId, stage.id);
+    }
     const statuses: Record<string, StageStatus> = {};
     for (const stage of selected) {
       try { statuses[stage.id] = readStageStatus(projectDir, runId, stage.id); } catch { /* missing status */ }
@@ -9191,13 +9844,15 @@ function createSchedulerTechnicalRetryState(
     || isRunningStageStatus(priorStatus?.status ?? '')
   );
   const retries = retryRecovery ? Math.max(0, priorStatus?.retries ?? 0) : 0;
-  const priorTimeout = retries > 0 ? priorStatus?.attempts?.at(-1)?.timeout : undefined;
+  const priorAttempt = retries > 0 ? priorStatus?.attempts?.at(-1) : undefined;
+  const priorTimeout = priorAttempt?.timeout;
   const persistedBudget = priorTimeout?.budgetMs;
   const previousBudgetMs = Number.isSafeInteger(persistedBudget) && Number(persistedBudget) > 0
     ? Number(persistedBudget)
     : budgetAfterTimeouts(initialBudgetMs, Math.max(0, retries - 1));
   const priorTimedOut = retries > 0 && (
     priorTimeout?.terminationCause === 'attempt_timeout'
+    || priorAttempt?.error?.startsWith('timed out after') === true
     || priorStatus?.error?.startsWith('timed out after') === true
   );
   return createTechnicalRetryBudgetState({
@@ -9305,6 +9960,7 @@ async function executeSingleStage(
 
   resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
   resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
+  resolvedPrompt = appendResearchTemporalPathContract(resolvedPrompt, state.research, state.terminalStates);
   if (stage.dynamic_dispatch) {
     resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
@@ -9335,12 +9991,7 @@ async function executeSingleStage(
     // call and must never overwrite a just-recorded timeout/failure.
     let latestStageStatus = state.stages[stage.id];
     try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
-    state.stages[stage.id] = {
-      ...latestStageStatus,
-      status: STAGE_STATUS.RUNNING,
-      retries,
-      startedAt: latestStageStatus?.startedAt ?? new Date().toISOString(),
-    };
+    state.stages[stage.id] = freshRunningStageProjection(latestStageStatus, retries);
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
@@ -9378,6 +10029,7 @@ async function executeSingleStage(
       resumeSessionId: resumeSession?.sessionId,
       sessionOwnerStageId: resumeSession?.ownerStageId,
       preserveSession: retries === 0 && shouldPreserveSession(stage, allStages, sessionReuseEnabled),
+      projectWriteScope: stage.scope ?? [],
     });
 
     const retryableTimeout = recordSchedulerTechnicalAttemptResult(
@@ -9775,6 +10427,7 @@ async function executeIteration(
                 runId,
                 timestamp: new Date().toISOString(),
                 iteration: state.currentIteration ?? 1,
+                stageId: stage.id,
                 detail: `plan retry ${decision.nextRetry}/${maxPlanRetries}: ${decision.detail}`,
               });
               break; // restart the while(true) loop → ready stages now include the re-pended plan stage
@@ -9791,6 +10444,7 @@ async function executeIteration(
               runId,
               timestamp: state.completedAt,
               iteration: state.currentIteration ?? 1,
+              stageId: stage.id,
               detail: `${decision.status}: ${decision.reason}`,
             });
             return state;
@@ -9870,7 +10524,8 @@ async function executeIteration(
       runnableCandidates.push(stage);
     }
 
-    const { selected: toRun, deferred: scopeDeferred } = selectRunnableBatch(runnableCandidates);
+    const inheritedCandidates = runnableCandidates.map((stage) => stageWithInheritedScope(runDirPath, stage));
+    const { selected: toRun, deferred: scopeDeferred } = selectRunnableBatch(inheritedCandidates);
     for (const { stage, conflict } of scopeDeferred) {
       const detail = `${stage.id} deferred behind ${conflict.leftStageId}: ${conflict.reason}`;
       log.info({ stage: stage.id, conflict }, 'Serializing ready stage because declared scopes are not provably disjoint');
@@ -9890,16 +10545,11 @@ async function executeIteration(
 
     for (const stage of toRun) {
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
-      state.stages[stage.id] = {
-        ...state.stages[stage.id],
-        status: STAGE_STATUS.RUNNING,
-        retries: currentRetries,
-        startedAt: state.stages[stage.id]?.startedAt ?? new Date().toISOString(),
-      };
+      state.stages[stage.id] = freshRunningStageProjection(state.stages[stage.id], currentRetries);
     }
     writeRunState(projectDir, runId, state);
 
-    const ordinaryScopeContext = createScopeBatchContext(projectDir, toRun);
+    const ordinaryScopeContext = createScopeBatchContext(projectDir, toRun, undefined, runId);
     const activeScopeStageIds = new Set(toRun.map((stage) => stage.id));
     let ordinaryBatchComplete = false;
     const ordinaryScopeMonitor = monitorScopeRevisionRequests({
@@ -10014,6 +10664,7 @@ async function executeIteration(
       // Prepend retry context if this is a retry (timeout or supervisor abort)
       resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
       resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
+      resolvedPrompt = appendResearchTemporalPathContract(resolvedPrompt, state.research, state.terminalStates);
       if (stage.dynamic_dispatch) {
         resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
         resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
@@ -10074,6 +10725,7 @@ async function executeIteration(
         resumeSessionId: resumeSession?.sessionId,
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
+        projectWriteScope: stage.scope ?? [],
       });
       recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);
       return { stage, result, currentRetries };
@@ -10085,14 +10737,7 @@ async function executeIteration(
        const retriesNow = state.stages[stage.id]?.retries ?? 0;
        const msg = err instanceof Error ? err.message : String(err);
        log.error({ stage: stage.id, err: msg }, 'Stage threw before completion — degrading to failed');
-       try {
-         completeStageAttempt(projectDir, runId, stage.id, retriesNow, {
-           exitCode: 1,
-           duration_ms: 0,
-           error: msg,
-           writeAttribution: 'unknown',
-         });
-       } catch { /* non-critical */ }
+       recordThrownStageAttempt(projectDir, runId, stage.id, retriesNow, err);
        const failedResult: RunResult = { output: '', exitCode: 1, duration_ms: 0, timedOut: false, adapterError: false };
        return { stage, result: failedResult, currentRetries: retriesNow };
      } finally {
@@ -10101,6 +10746,7 @@ async function executeIteration(
     }));
     ordinaryBatchComplete = true;
     await ordinaryScopeMonitor;
+    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
     for (const item of results) {
       const reconciled = reconcileCompletedStageAttempts({
         stage: item.stage,
@@ -10114,37 +10760,10 @@ async function executeIteration(
         item.result.timedOut = false;
         item.result.timeoutTerminationCause = 'failed';
       }
-      if (state.research && item.result.exitCode === 0) {
-        const status = readStageStatus(projectDir, runId, item.stage.id);
-        const findings = inspectTemporalResearchTests({
-          projectDir,
-          writes: status.attempts?.at(-1)?.writes ?? status.writes ?? [],
-          resultFile: state.research.resultFile,
-          terminalPaths: Object.values(state.terminalStates ?? {}).flatMap((entry) => entry.paths),
-        });
-        if (findings.length > 0) {
-          const reason = `Temporal test contract rejected ${findings.length} generated test(s): ${findings.map((finding) => `${finding.file}: ${finding.reason}`).join('; ')}`;
-          try {
-            writeFileSync(join(runDirPath, 'stages', item.stage.id, 'temporal_test_guard.json'), `${JSON.stringify({
-              version: 1,
-              pass: false,
-              findings,
-            }, null, 2)}\n`, 'utf-8');
-          } catch { /* non-critical */ }
-          status.status = STAGE_STATUS.FAILED;
-          status.exitCode = 1;
-          status.error = reason;
-          const attempt = status.attempts?.at(-1);
-          if (attempt) {
-            attempt.status = STAGE_STATUS.FAILED;
-            attempt.exitCode = 1;
-            attempt.error = reason;
-          }
-          writeStageStatus(projectDir, runId, item.stage.id, status);
-          item.result.exitCode = 1;
-          item.result.timedOut = false;
-          item.result.timeoutTerminationCause = 'failed';
-        }
+      if (item.result.exitCode === 0 && enforceTemporalResearchTestContract(projectDir, runId, item.stage.id).violation) {
+        item.result.exitCode = 1;
+        item.result.timedOut = false;
+        item.result.timeoutTerminationCause = 'failed';
       }
     }
 

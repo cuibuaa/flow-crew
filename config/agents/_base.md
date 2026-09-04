@@ -44,6 +44,9 @@
 - If a build or compile error occurs in a file you did NOT modify, it may be caused by a parallel agent's in-progress work. Report the error in your handoff note but do NOT modify files outside your task scope to fix it. Only fix errors in files you changed.
 - Clean up any temporary test files or scripts you created during verification
 
+## Research test stability
+- A research test must never load, assert the existence of, or pin a label in the campaign's mutable latest-round result or its no-candidate sidecar. Those shared slots legitimately change every round. Use the scheduler-resolved immutable round evidence or the framework-owned run manifest supplied in the stage prompt instead. This rule applies to every role that writes tests, not only the planner.
+
 ## Safety
 - Never modify files outside the project directory except at explicitly authorized task-local run paths and the operating system temporary root for ephemeral evidence. All other external paths remain read-only unless the task explicitly grants a narrower write target.
 - Never read or expose secrets (.env, credentials, API keys) in output

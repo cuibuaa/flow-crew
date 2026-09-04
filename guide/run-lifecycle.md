@@ -46,6 +46,11 @@ CLI exits successfully for all three. A foreground command also exits zero when
 `parked` so a service manager does not mistake a deliberate suspension for a
 crash, but `parked` is neither terminal nor successful.
 
+Operator terminology is intentionally unambiguous: a daemon task may have multiple
+**launches**, a stage may have multiple **executions**, and a repair loop may cause a gate
+**re-evaluation**. `flowcrew status`, task list/show, the dashboard, and `flowcrew events`
+all expose the same bounded operational projection and the latest reason-bearing event.
+
 ## Stage readiness and settlement
 
 Stage status answers two different questions. For dispatch readiness, only a

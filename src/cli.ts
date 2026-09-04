@@ -5,10 +5,31 @@ import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 
+function earlyCommandHelp(input: string[]): string | undefined {
+  if (!input.includes('--help') && !input.includes('-h')) return undefined;
+  const command = input[0];
+  const subcommand = input[1];
+  if (command === 'task') {
+    if (subcommand === 'list') return 'Usage: flowcrew task list [--status active|all|<status>] [--limit N] [--with-summary]';
+    if (subcommand === 'show') return 'Usage: flowcrew task show <id> [--summary-only | --raw]\nShows bounded run/stage detail; raw tick JSON is opt-in.';
+    return 'Usage: flowcrew task list|show|cancel|retry|tail ...';
+  }
+  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
+  if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--supervise] [--max-iterations N]';
+  if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
+  if (command === 'campaign') return 'Usage: flowcrew campaign run|list|show|stop ...';
+  if (command === 'brief') return 'Usage: flowcrew brief head|diff|rollback|log ...';
+  return undefined;
+}
+
 const bootstrapArgs = process.argv.slice(2);
+const bootstrapHelp = earlyCommandHelp(bootstrapArgs);
 // A status surface invokes this path repeatedly. Keep it ahead of the orchestration imports so
 // rendering does not pay to initialize the scheduler, dashboard, YAML, and adapter modules.
-if (bootstrapArgs[0] === 'fc_tasks') {
+if (bootstrapHelp !== undefined) {
+  process.stdout.write(`${bootstrapHelp}\n`);
+  process.exitCode = 0;
+} else if (bootstrapArgs[0] === 'fc_tasks') {
   try {
     const { cmdFcTasks } = await import('./cli-fc-tasks.js');
     process.exitCode = cmdFcTasks(bootstrapArgs);
@@ -33,6 +54,7 @@ const [
   cliDoctorModule,
   runLockModule,
   terminalArtifactStatusModule,
+  cliEventsModule,
 ] = await Promise.all([
   import('node:fs'),
   import('node:path'),
@@ -49,6 +71,7 @@ const [
   import('./cli-doctor.js'),
   import('./run-lock.js'),
   import('./terminal-artifact-status.js'),
+  import('./cli-events.js'),
 ]);
 
 const {
@@ -64,7 +87,7 @@ const {
   statSync,
   renameSync: fsRenameSync,
 } = fsModule;
-const { dirname, join, relative, resolve } = pathModule;
+const { join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
 const { createInterface } = readlineModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
@@ -76,6 +99,7 @@ const {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   resolveRunStatus,
+  readRunState,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
@@ -96,6 +120,7 @@ const {
 const { detectSupervisorBackend } = cliDoctorModule;
 const { isLiveFlowcrewSchedulerForRun, parseSchedulerPidMarker } = runLockModule;
 const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
+const { formatHumanDuration, readOperationalProjection } = cliEventsModule;
 
 const args = bootstrapArgs;
 const command = args[0];
@@ -1276,6 +1301,7 @@ function printResearchProgress(runDir: string): void {
 
 interface StatusSelection {
   all: boolean;
+  details: boolean;
   projectDir?: string;
 }
 
@@ -1288,22 +1314,27 @@ interface StatusRun {
     status?: string;
     currentIteration?: number;
     maxIterations?: number;
-    stages?: Record<string, { status?: string; duration_ms?: number }>;
+    startedAt?: string;
+    completedAt?: string;
+    failureReason?: string;
+    stages?: Record<string, { status?: string; duration_ms?: number; startedAt?: string; retries?: number; attempts?: unknown[] }>;
     terminalArtifact?: string;
     terminalStates?: Record<string, { paths?: string[] }>;
   };
 }
 
 function printStatusUsage(): void {
-  console.log('Usage: flowcrew status [--all | --project <path>]');
+  console.log('Usage: flowcrew status [--all | --project <path>] [--details]');
   console.log('');
   console.log('Shows the latest run for the current project by default.');
   console.log('  --all              Show the latest run across all projects');
   console.log('  --project <path>   Show the latest run for another project');
+  console.log('  --details          Include generated summary/progress and research journals');
 }
 
 function parseStatusSelection(): StatusSelection | undefined {
   let all = false;
+  let details = false;
   let project: string | undefined;
   for (let index = 1; index < args.length; index++) {
     const value = args[index];
@@ -1313,6 +1344,10 @@ function parseStatusSelection(): StatusSelection | undefined {
     }
     if (value === '--all') {
       all = true;
+      continue;
+    }
+    if (value === '--details') {
+      details = true;
       continue;
     }
     if (value === '--project') {
@@ -1349,8 +1384,8 @@ function parseStatusSelection(): StatusSelection | undefined {
     return undefined;
   }
   return all
-    ? { all: true }
-    : { all: false, projectDir: canonicalProjectPath(project ?? detectProjectDir()) };
+    ? { all: true, details }
+    : { all: false, details, projectDir: canonicalProjectPath(project ?? detectProjectDir()) };
 }
 
 function canonicalProjectPath(path: string): string {
@@ -1388,35 +1423,37 @@ function cmdStatus() {
   const { id, directory: runDir, state } = selected;
   const statusResolution = resolveRunStatus(state.status);
   const mismatch = terminalArtifactStatusMismatch(state, { runDir });
-  if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
-  if (statusResolution.kind === 'unknown') {
-    console.log(`Status: unrecognized archived value ${statusResolution.display}; no lifecycle meaning was inferred`);
-  }
-
-  // Show summary.md if generated (best overview of what was done)
-  const summaryPath = join(runDir, 'summary.md');
-  if (existsSync(summaryPath)) { console.log(readFileSync(summaryPath, 'utf-8')); printResearchProgress(runDir); return; }
-
-  // Show progress.md if supervisor generated one
-  const progressPath = join(runDir, 'progress.md');
-  if (!isTerminalRunStatus(state.status ?? '') && existsSync(progressPath)) {
-    console.log(readFileSync(progressPath, 'utf-8'));
-    printResearchProgress(runDir);
-    return;
-  }
-
-  // Fallback: show run.json summary
-  console.log(`# Run: ${id}\n`);
+  const operational = readOperationalProjection(runDir, { state });
+  console.log(`Run: ${id}`);
   console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
   console.log(`Status: ${statusResolution.kind === 'known' ? statusResolution.status : `unrecognized ${statusResolution.display}`}`);
-  console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}\n`);
-  console.log('## Stages');
+  console.log(`Project: ${state.projectDir ?? 'unknown'}`);
+  console.log(`Elapsed: ${formatHumanDuration(operational.runElapsedMs)}`);
+  if (operational.activeStages.length === 0) console.log('Now: no stage executing');
+  else for (const stage of operational.activeStages) {
+    console.log(`Now: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}`);
+  }
+  if (operational.latestReason) console.log(`Latest reason: ${operational.latestReason.detail}`);
+  if (operational.lastRejection) console.log(`Latest rejection: ${operational.lastRejection.detail}`);
+  if (operational.lastGuidance) console.log(`Latest guidance: ${operational.lastGuidance.detail}`);
+  for (const pending of operational.pendingScope) console.log(`Pending scope: ${pending.requestId}${pending.stageId ? ` · ${pending.stageId}` : ''}`);
+  if (operational.pendingApproval) console.log(`Pending approval: ${operational.pendingApproval.detail}`);
+  console.log(`Evidence: state ${operational.sourceCoverage.runState}; events ${operational.sourceCoverage.events}; ${operational.sourceCoverage.stageCount} stages`);
+  if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
+  console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}`);
+  console.log('Stages:');
   for (const [id, ss] of Object.entries(state.stages ?? {})) {
-    const dur = ss.duration_ms ? ` (${(ss.duration_ms / 1000).toFixed(0)}s)` : '';
+    const dur = ss.duration_ms ? ` (${formatHumanDuration(ss.duration_ms)})` : '';
     const icon = ss.status === STAGE_STATUS.COMPLETE ? '✓' : ss.status === STAGE_STATUS.RUNNING ? '⟳' : ss.status === STAGE_STATUS.FAILED ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
   }
-  printResearchProgress(runDir);
+  if (selection.details) {
+    const summaryPath = join(runDir, 'summary.md');
+    const progressPath = join(runDir, 'progress.md');
+    if (existsSync(summaryPath)) console.log(`\n${readFileSync(summaryPath, 'utf-8').trimEnd()}`);
+    else if (!isTerminalRunStatus(state.status ?? '') && existsSync(progressPath)) console.log(`\n${readFileSync(progressPath, 'utf-8').trimEnd()}`);
+    printResearchProgress(runDir);
+  }
 }
 
 function cmdList() {
@@ -1441,7 +1478,7 @@ function cmdList() {
       const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
       const startMs = new Date(state.startedAt).getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
-      const duration = `${Math.round((endMs - startMs) / 1000)}s`.padEnd(8);
+      const duration = formatHumanDuration(endMs - startMs).padEnd(8);
       const taskDesc = (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 40);
       console.log(`  ${status}  ${duration}  ${runId}  ${taskDesc}`);
     } catch { /* non-critical */ console.log(`  ? unknown   —         ${runId}`); }
@@ -1582,7 +1619,7 @@ function cmdGuide() {
   writeFileSync(join(root, selected.id, 'user_input.md'), message, 'utf-8');
   console.log(`Guidance sent to run ${selected.id}:`);
   console.log(`  "${message}"`);
-  console.log(`\nThe supervisor will pick this up on its next tick (within 15s).`);
+  console.log(`\nThe supervisor will pick this up on its next heartbeat (normally within 30s).`);
 }
 
 function cmdClean() {
@@ -1629,7 +1666,9 @@ function cmdExport() {
   if (!existsSync(runDir)) { console.error(`Run not found: ${runId}\nRun \`flowcrew list\` to see available runs.`); process.exit(1); }
 
   const bundle: Record<string, unknown> = { runId, exportedAt: new Date().toISOString() };
-  try { bundle.state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')); } catch { /* non-critical */ }
+  // v2 run.json is intentionally a compact projection. Export the hydrated
+  // state so acknowledged append-only history does not disappear from bundles.
+  try { bundle.state = readRunState('', runId); } catch { /* non-critical */ }
   const stagesDir = join(runDir, 'stages');
   if (existsSync(stagesDir)) {
     const stages: Record<string, unknown> = {};
@@ -1902,6 +1941,7 @@ Commands:
   land      Audit terminal artifacts and every unique worktree item before safe removal
   audit-report  Re-derive supported numeric and path-bearing claims from a terminal report
   watch     Report edge-triggered stall judgements for live runs
+  events    Read or follow the canonical run event feed
   rehearse  Wind-tunnel a research brief pre-launch: real scheduler + scripted fake agent, 0 tokens
   brief     Inspect, diff, or roll back versioned briefs
   doctor    Check system requirements; repair/compact the task registry (dry-run by default)
@@ -1934,6 +1974,7 @@ Examples:
   flowcrew land --run <run-id>
   flowcrew audit-report --report docs/final.md --run-dir <run-dir>
   flowcrew watch --once
+  flowcrew events --follow
   flowcrew brief head docs/brief
 
 Options:
@@ -2202,6 +2243,11 @@ switch (command) {
     break;
   case 'watch':
     import('./cli-watch.js').then(({ cmdWatch }) => cmdWatch(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'events':
+    import('./cli-events.js').then(({ cmdEvents }) => cmdEvents(args))
       .then((code) => { process.exitCode = code; })
       .catch((err) => { console.error(err); process.exit(1); });
     break;

@@ -26,6 +26,8 @@ export interface DaemonIdentity {
   pid: number;
   startedAt: string;
   socketPath: string;
+  /** Exact deployed runtime root. Optional only for legacy metadata. */
+  distDir?: string;
   build: DaemonBuildFingerprint;
 }
 
@@ -33,6 +35,20 @@ export interface SocketOwnerLookupOptions {
   procRoot?: string;
   netUnixPath?: string;
   platform?: NodeJS.Platform;
+}
+
+export interface DeployedDistConsumer {
+  pid: number;
+  kind: 'daemon' | 'run' | 'process';
+  label: string;
+  runId?: string;
+}
+
+export interface DeployedDistConsumerOptions {
+  fcHome?: string;
+  procRoot?: string;
+  processAlive?: (pid: number) => boolean;
+  diskBuildHash?: string;
 }
 
 /**
@@ -78,6 +94,7 @@ export function createDaemonIdentity(input: {
     pid: input.pid ?? process.pid,
     startedAt: input.startedAt ?? new Date().toISOString(),
     socketPath: resolve(input.socketPath),
+    distDir: resolve(input.distDir),
     build: computeBuildFingerprint(input.distDir),
   };
 }
@@ -194,6 +211,97 @@ export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLook
   return owners.values().next().value as number | undefined;
 }
 
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function runIdFromArguments(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--existing-run-id' && args[index + 1]) return args[index + 1];
+    if (argument.startsWith('--existing-run-id=')) return argument.slice('--existing-run-id='.length) || undefined;
+  }
+  return undefined;
+}
+
+function argumentReferencesDist(argument: string, distDir: string): boolean {
+  const normalized = distDir.endsWith(sep) ? distDir : `${distDir}${sep}`;
+  return argument === distDir
+    || argument.startsWith(normalized)
+    || argument.includes(`file://${normalized}`)
+    || argument.includes(normalized);
+}
+
+/**
+ * Identify live processes that are executing this checkout's deployed dist.
+ * Linux process arguments provide the strong path binding. The daemon's
+ * persisted build hash is a portable fallback and is accepted only while its
+ * recorded PID is alive and the on-disk generation still matches.
+ */
+export function findDeployedDistConsumers(
+  distDir: string,
+  options: DeployedDistConsumerOptions = {},
+): DeployedDistConsumer[] {
+  const root = resolve(distDir);
+  const processAlive = options.processAlive ?? pidIsAlive;
+  const consumers = new Map<number, DeployedDistConsumer>();
+  let diskBuildHash = options.diskBuildHash;
+  if (!diskBuildHash) {
+    try { diskBuildHash = computeBuildFingerprint(root).hash; } catch { /* an empty dist has no deployed consumers */ }
+  }
+
+  if (options.fcHome) {
+    const metadataPath = join(resolve(options.fcHome), DAEMON_METADATA_FILENAME);
+    try {
+      const value = JSON.parse(readFileSync(metadataPath, 'utf-8')) as unknown;
+      if (isDaemonIdentity(value)) {
+        const boundToDist = value.distDir !== undefined
+          ? resolve(value.distDir) === root
+          : diskBuildHash !== undefined && value.build.hash === diskBuildHash;
+        if (boundToDist && processAlive(value.pid)) {
+          consumers.set(value.pid, {
+            pid: value.pid,
+            kind: 'daemon',
+            label: `daemon pid ${value.pid} (${value.socketPath})`,
+          });
+        }
+      }
+    } catch { /* no valid identity at this state root */ }
+  }
+
+  const procRoot = options.procRoot ?? (process.platform === 'linux' ? '/proc' : undefined);
+  if (!procRoot) return [...consumers.values()].sort((left, right) => left.pid - right.pid);
+  let entries: string[];
+  try { entries = readdirSync(procRoot); } catch { return [...consumers.values()]; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number.parseInt(entry, 10);
+    let args: string[];
+    try {
+      args = readFileSync(join(procRoot, entry, 'cmdline'))
+        .toString('utf-8')
+        .split('\0')
+        .filter(Boolean);
+    } catch {
+      continue;
+    }
+    if (!args.some((argument) => argumentReferencesDist(argument, root))) continue;
+    const runId = runIdFromArguments(args);
+    const daemon = args.some((argument, index) => argument === 'daemon' && args[index + 1] === 'serve');
+    consumers.set(pid, daemon
+      ? { pid, kind: 'daemon', label: `daemon pid ${pid}` }
+      : runId
+        ? { pid, kind: 'run', runId, label: `run ${runId} (pid ${pid})` }
+        : { pid, kind: 'process', label: `process pid ${pid}` });
+  }
+  return [...consumers.values()].sort((left, right) => left.pid - right.pid);
+}
+
 function collectJavaScriptFiles(root: string): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -211,6 +319,8 @@ function isDaemonIdentity(value: unknown): value is DaemonIdentity {
   return Number.isInteger(identity.pid) && (identity.pid ?? 0) > 0
     && typeof identity.startedAt === 'string' && Number.isFinite(Date.parse(identity.startedAt))
     && typeof identity.socketPath === 'string'
+    && (identity.distDir === undefined
+      || (typeof identity.distDir === 'string' && identity.distDir.length > 0))
     && build?.algorithm === 'sha256'
     && typeof build.hash === 'string' && /^[a-f0-9]{64}$/.test(build.hash)
     && Number.isInteger(build.files) && (build.files ?? -1) >= 0

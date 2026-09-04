@@ -9,6 +9,7 @@ export const MAX_WATCH_POLL_MS = 3_600_000;
 interface ParsedWatchArgs {
   help: boolean;
   once: boolean;
+  all: boolean;
   pollMs: number;
 }
 
@@ -34,6 +35,7 @@ function optionValue(args: string[], index: number, option: string): { value: st
 export function parseWatchArgs(args: string[]): ParsedWatchArgs {
   let help = false;
   let once = false;
+  let all = false;
   let pollMs = DEFAULT_WATCH_POLL_MS;
   const start = args[0] === 'watch' ? 1 : 0;
   for (let index = start; index < args.length;) {
@@ -45,6 +47,11 @@ export function parseWatchArgs(args: string[]): ParsedWatchArgs {
     }
     if (argument === '--once') {
       once = true;
+      index += 1;
+      continue;
+    }
+    if (argument === '--all') {
+      all = true;
       index += 1;
       continue;
     }
@@ -64,13 +71,14 @@ export function parseWatchArgs(args: string[]): ParsedWatchArgs {
     }
     throw new Error(`unknown watch option: ${argument}`);
   }
-  return { help, once, pollMs };
+  return { help, once, all, pollMs };
 }
 
 export function watchUsage(): string {
   return [
-    'Usage: flowcrew watch [--once] [--poll <seconds>]',
+    'Usage: flowcrew watch [--once] [--poll <seconds>] [--all]',
     'Reports a first-pass heartbeat and edge-triggered stall judgements, evidence gaps, and status contradictions.',
+    'The default scans indexed operational runs. --all audits every entry under the runs directory.',
     `Poll interval must be between ${MIN_WATCH_POLL_MS / 1_000} and ${MAX_WATCH_POLL_MS / 1_000} seconds (default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
   ].join('\n');
 }
@@ -183,7 +191,7 @@ export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDepend
   let state = createWatchState();
   let polling = true;
   while (polling) {
-    const result = pollWatch(state, overrides);
+    const result = pollWatch(state, parsed.all ? { ...overrides, candidateRunIds: () => null } : overrides);
     state = result.state;
     for (const line of formatWatchPoll(result)) stdout.write(`${line}\n`);
     if (parsed.once) polling = false;

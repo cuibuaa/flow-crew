@@ -32,8 +32,10 @@ import {
 import {
   runProjectValidationBaseline,
   type ProjectValidationBaseline,
+  type ValidationProgressObserver,
   type ValidationCommandRunner,
 } from './project-validation.js';
+import { inspectRunScheduler } from './run-lock.js';
 import {
   verifyBriefInputs,
   inspectBriefOutputs,
@@ -49,6 +51,7 @@ import {
   runsRoot,
   type RunStatus,
   type StoreState,
+  isRunningRunStatus,
 } from './store.js';
 
 export { extractBriefInputPaths } from './ship-inputs.js';
@@ -85,6 +88,7 @@ export interface ShipPreflightDependencies {
   readCampaignEntries?: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
+  inspectLiveRun?: (runId: string, runPath: string) => boolean;
 }
 
 interface ResolvedDependencies {
@@ -106,6 +110,7 @@ interface ResolvedDependencies {
   readCampaignEntries: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
+  inspectLiveRun: (runId: string, runPath: string) => boolean;
 }
 
 export interface PreviousRunEvidence {
@@ -126,6 +131,8 @@ export interface PreviousRunReport {
     path?: string;
     evidence: unknown;
   };
+  /** Identity-verified schedulers sharing the exact canonical project path. */
+  liveMatchingRunIds?: string[];
   scan: {
     entries: number;
     readable: number;
@@ -191,6 +198,7 @@ export interface ShipPreflightReport {
 interface ParsedArgs {
   json: boolean;
   help: boolean;
+  noBaseline: boolean;
   project?: string;
   campaign?: string;
   brief?: string;
@@ -271,6 +279,8 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     readCampaignEntries: overrides.readCampaignEntries ?? readCampaignEntries,
     probeDaemon: overrides.probeDaemon ?? probeRunningDaemon,
     runValidationCommand: overrides.runValidationCommand,
+    inspectLiveRun: overrides.inspectLiveRun
+      ?? ((runId, runPath) => inspectRunScheduler(runId, runPath).kind === 'live'),
   };
 }
 
@@ -289,7 +299,7 @@ function optionValue(args: string[], index: number, name: string): { value: stri
 
 function parseArgs(args: string[]): ParsedArgs {
   const input = args[0] === 'ship-preflight' ? args.slice(1) : [...args];
-  const parsed: ParsedArgs = { json: false, help: false };
+  const parsed: ParsedArgs = { json: false, help: false, noBaseline: false };
   for (let index = 0; index < input.length;) {
     const arg = input[index];
     if (arg === '--json') {
@@ -299,6 +309,11 @@ function parseArgs(args: string[]): ParsedArgs {
     }
     if (arg === '--help' || arg === '-h') {
       parsed.help = true;
+      index += 1;
+      continue;
+    }
+    if (arg === '--no-baseline') {
+      parsed.noBaseline = true;
       index += 1;
       continue;
     }
@@ -430,6 +445,7 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
     canonicalFallbacks: 0,
   };
   let latest: { id: string; path: string; state: Partial<StoreState>; mtimeMs: number } | undefined;
+  const liveMatchingRunIds: string[] = [];
 
   for (const id of ids) {
     const runPath = join(root, id);
@@ -444,6 +460,7 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
       const mtimeMs = deps.stat(statePath).mtimeMs;
       scan.readable += 1;
       if (runProject.path !== project) continue;
+      if (isRunningRunStatus(state.status) && deps.inspectLiveRun(id, runPath)) liveMatchingRunIds.push(id);
       if (!latest || mtimeMs > latest.mtimeMs || (mtimeMs === latest.mtimeMs && id > latest.id)) {
         latest = { id, path: runPath, state, mtimeMs };
       }
@@ -454,7 +471,11 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
     }
   }
 
-  if (!latest) return { state: 'none', scan };
+  if (!latest) return {
+    state: 'none',
+    scan,
+    ...(liveMatchingRunIds.length > 0 ? { liveMatchingRunIds } : {}),
+  };
   const status = latest.state.status as string;
   const statusResolution = resolveRunStatus(status);
   const evidenceAction = statusResolution.kind === 'known'
@@ -466,6 +487,7 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
     status,
     ...(statusResolution.kind === 'unknown' ? { statusReason: statusResolution.reason } : {}),
     runDir: latest.path,
+    ...(liveMatchingRunIds.length > 0 ? { liveMatchingRunIds } : {}),
     ...(evidenceAction === 'inspect'
       ? {
           evidence: priorRunEvidence(latest.path, latest.state, deps),
@@ -760,6 +782,26 @@ function inspectOutputInventory(
     }),
   };
 }
+
+function validationProgressObserver(writer: Writer): ValidationProgressObserver {
+  return {
+    onCommandStart: (command) => {
+      writer.write(`Validation baseline: START ${command.role} — ${command.display}\n`);
+    },
+    onCommandOutput: (_command, _stream, chunk) => {
+      writer.write(chunk);
+      if (chunk.length > 0 && !chunk.endsWith('\n')) writer.write('\n');
+    },
+    onCommandHeartbeat: (command, elapsedMs) => {
+      writer.write(`Validation baseline: RUNNING ${command.role} — ${Math.floor(elapsedMs / 1_000)}s elapsed\n`);
+    },
+    onCommandFinish: (command, response) => {
+      const duration = response.durationMs === undefined ? '' : ` after ${(response.durationMs / 1_000).toFixed(1)}s`;
+      writer.write(`Validation baseline: FINISH ${command.role} — exit ${response.exitCode ?? 'none'}${duration}\n`);
+    },
+  };
+}
+
 export async function collectShipPreflight(
   args: string[],
   overrides: ShipPreflightDependencies = {},
@@ -776,9 +818,21 @@ export async function collectShipPreflight(
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
   const briefInputs = inspectBriefInputs(canonicalProject.path, parsed.brief, deps);
   const outputInventory = inspectOutputInventory(canonicalProject.path, parsed.brief, deps);
+  if ((previousRun.liveMatchingRunIds?.length ?? 0) > 0) {
+    deps.stderr.write(
+      `WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. `
+      + (parsed.noBaseline
+        ? '--no-baseline is set, so preflight will not launch project commands.\n'
+        : 'The validation commands may change files those runs can observe.\n'),
+    );
+  }
+  const observer = validationProgressObserver(deps.stderr);
+  if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED by --no-baseline; no project command was launched.\n');
   const validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
     fs: { exists: deps.exists, readText: deps.readText },
     ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+    observer,
+    skipExecution: parsed.noBaseline,
   });
 
   return {
@@ -822,6 +876,9 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     `Run scan: ${prior.scan.readable}/${prior.scan.entries} readable, ${prior.scan.unreadable} unreadable `
     + `(missing run.json ${prior.scan.missingState}, invalid/unreadable state ${prior.scan.invalidState})\n`,
   );
+  if ((prior.liveMatchingRunIds?.length ?? 0) > 0) {
+    writer.write(`Live-project warning: verified live run(s) ${prior.liveMatchingRunIds!.join(', ')} share this project\n`);
+  }
 
   const campaign = report.campaign;
   if (campaign.state === 'unknown') writer.write(`Campaign hygiene: UNKNOWN — ${campaign.reason}\n`);
@@ -879,7 +936,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     }
   }
 
-  writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
+  writer.write(`Validation baseline: ${report.validationBaseline.execution === 'skipped' ? 'SKIPPED' : report.validationBaseline.discovery.state.toUpperCase()}\n`);
   for (const result of report.validationBaseline.results) {
     const exit = result.exitCode === undefined ? '' : ` exit=${result.exitCode}`;
     writer.write(`  ${result.role}: ${result.state.toUpperCase()}${exit}${result.display ? ` — ${result.display}` : ''}${result.reason ? ` — ${result.reason}` : ''}\n`);
@@ -889,10 +946,11 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   }
 }
 
-function usage(): string {
+export function shipPreflightUsage(): string {
   return [
-    'Usage: flowcrew ship-preflight [--json] [--project <path>] [--campaign <name>] [--brief <path>]',
+    'Usage: flowcrew ship-preflight [--json] [--no-baseline] [--project <path>] [--campaign <name>] [--brief <path>]',
     'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and the untouched validation baseline.',
+    'Validation output streams as commands run. --no-baseline skips every project build/test/lint command.',
   ].join('\n');
 }
 
@@ -904,7 +962,7 @@ export async function cmdShipPreflightWithDeps(
   try {
     const parsed = parseArgs(args);
     if (parsed.help) {
-      deps.stdout.write(`${usage()}\n`);
+      deps.stdout.write(`${shipPreflightUsage()}\n`);
       return 0;
     }
     const { report, json } = await collectShipPreflight(args, overrides);

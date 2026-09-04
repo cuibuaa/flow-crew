@@ -1,7 +1,16 @@
 # Sole operator control for a scheduled stage attempt. The deadline is immutable
 # once an attempt starts; a timeout retry gets a larger derived attempt budget.
 # Longer values reduce premature timeouts but also delay terminal failure.
-default_timeout_ms: 3600000
+default_timeout_ms: 10800000
+
+# Wall clock a single validation command (build/test/lint) may take before it is
+# killed. ship-setup runs the suite twice -- source baseline and target baseline
+# -- so this must exceed the slowest of them under whatever else the machine is
+# doing. Raised from a hardcoded 15 minutes on 2026-08-23: a project whose gate
+# had grown to 366 tests and ~11.5 minutes could not establish a baseline while
+# two other jobs were running, and the refusal named the timeout rather than the
+# load.
+default_validation_timeout_ms: 2700000
 default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1

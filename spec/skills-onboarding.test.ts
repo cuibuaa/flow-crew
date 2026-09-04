@@ -207,7 +207,7 @@ function runDoctor(fixture: OnboardingFixture, packageRoot = repositoryRoot) {
   prepareDoctorProject(fixture);
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), 'doctor'],
+    [join(repositoryRoot, 'dist', 'cli.js'), 'doctor'],
     {
       cwd: repositoryRoot,
       env: {

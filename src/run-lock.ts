@@ -33,9 +33,10 @@ import {
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { getItem, isPendingInboxItemState } from './inbox.js';
 import { fcGlobalDir, isPausedRunStatus, runsRoot } from './store.js';
+import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
 
 // Process identity is a control-plane primitive and must not disappear when a
@@ -454,6 +455,10 @@ function schedulerIdentityPath(runPath: string): string {
   return join(runPath, SCHEDULER_IDENTITY_FILE);
 }
 
+function indexedRunId(runPath: string): string | undefined {
+  return resolve(dirname(runPath)) === resolve(runsRoot()) ? basename(runPath) : undefined;
+}
+
 /** Record the scheduler/run binding after scheduler.pid has been claimed. */
 export function writeSchedulerProcessIdentity(runPath: string, runId: string, pid = process.pid): void {
   if (!processIsAlive(pid)) throw new Error(`Cannot identify non-live scheduler pid ${pid}`);
@@ -467,6 +472,9 @@ export function writeSchedulerProcessIdentity(runPath: string, runId: string, pi
     ...(command ? { command } : {}),
   };
   writeFileSync(schedulerIdentityPath(runPath), JSON.stringify(identity, null, 2) + '\n', 'utf-8');
+  if (indexedRunId(runPath) === runId) {
+    try { setRunSchedulerActive('', runId, true); } catch { /* index is a rebuildable accelerator */ }
+  }
 }
 
 /** Remove only this process's identity, unless an unconditional stale cleanup is requested. */
@@ -479,9 +487,13 @@ export function removeSchedulerProcessIdentity(runPath: string, expectedPid?: nu
     } catch { return; }
   }
   try { unlinkSync(path); } catch { /* missing or concurrently removed */ }
+  const runId = indexedRunId(runPath);
+  if (runId) {
+    try { setRunSchedulerActive('', runId, false); } catch { /* best effort */ }
+  }
 }
 
-type SchedulerIdentityBinding = 'absent' | 'bound' | 'unbound';
+type SchedulerIdentityBinding = 'absent' | 'bound' | 'reused' | 'corrupt' | 'unverifiable';
 
 function identityBindsSchedulerToRun(
   pid: number,
@@ -499,32 +511,78 @@ function identityBindsSchedulerToRun(
       startToken?: unknown;
       command?: unknown;
     };
-    if (identity.pid !== pid || identity.runId !== runId) return 'unbound';
+    if (identity.pid !== pid || identity.runId !== runId) return 'corrupt';
     const currentToken = processStartToken(pid);
     if (identity.version === 1) {
       const recorded = typeof identity.linuxStartTimeTicks === 'string'
         ? { kind: 'linux' as const, value: identity.linuxStartTimeTicks }
         : undefined;
-      return processStartTokensMatch(recorded, currentToken) ? 'bound' : 'unbound';
+      if (!recorded) return 'corrupt';
+      if (!currentToken) return 'unverifiable';
+      return processStartTokensMatch(recorded, currentToken) ? 'bound' : 'reused';
     }
-    if (identity.version !== 2) return 'unbound';
+    if (identity.version !== 2) return 'corrupt';
     const recorded = identity.startToken && typeof identity.startToken === 'object'
       ? identity.startToken as Partial<ProcessStartToken>
       : undefined;
-    if (!recorded || (recorded.kind !== 'linux' && recorded.kind !== 'posix-lstart')) return 'unbound';
-    if (typeof recorded.value !== 'string') return 'unbound';
+    if (!recorded || (recorded.kind !== 'linux' && recorded.kind !== 'posix-lstart')) return 'corrupt';
+    if (typeof recorded.value !== 'string') return 'corrupt';
     const validatedRecorded: ProcessStartToken = { kind: recorded.kind, value: recorded.value };
-    if (!processStartTokensMatch(validatedRecorded, currentToken)) return 'unbound';
+    if (!currentToken) return 'unverifiable';
+    if (!processStartTokensMatch(validatedRecorded, currentToken)) return 'reused';
     // BSD lstart has only second precision, so the persisted command is a
     // required second factor. A missing/unreadable command is unbound, never a
     // reason to call the process dead.
-    return recorded.kind !== 'posix-lstart'
-      || (typeof identity.command === 'string' && processCommandMatches(pid, identity.command))
-      ? 'bound'
-      : 'unbound';
+    if (recorded.kind !== 'posix-lstart') return 'bound';
+    if (typeof identity.command !== 'string') return 'corrupt';
+    const command = processCommandBinding(pid, identity.command);
+    return command === 'bound' ? 'bound' : command === 'unbound' ? 'reused' : 'unverifiable';
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unbound';
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'corrupt';
   }
+}
+
+export type RunSchedulerObservation =
+  | { kind: 'missing' }
+  | { kind: 'dead'; pid: number }
+  | { kind: 'reused'; pid: number }
+  | { kind: 'live'; pid: number }
+  | { kind: 'corrupt'; detail: string; pid?: number }
+  | { kind: 'unverifiable'; detail: string; pid: number };
+
+/**
+ * Classify the scheduler marker without treating an arbitrary live PID as the
+ * run owner. Recovery may proceed only for missing/dead/reused observations;
+ * corrupt or unreadable identity evidence remains fail-closed.
+ */
+export function inspectRunScheduler(runId: string, runPath: string): RunSchedulerObservation {
+  let marker: string;
+  try {
+    marker = readFileSync(join(runPath, 'scheduler.pid'), 'utf-8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'corrupt', detail: 'scheduler.pid cannot be read' };
+  }
+  const pid = parseSchedulerPidMarker(marker);
+  if (pid === null) return { kind: 'corrupt', detail: 'scheduler.pid is not a positive integer' };
+  if (!processIsAlive(pid)) return { kind: 'dead', pid };
+
+  const identity = identityBindsSchedulerToRun(pid, runId, runPath);
+  if (identity === 'bound') return { kind: 'live', pid };
+  if (identity === 'reused') return { kind: 'reused', pid };
+  if (identity === 'corrupt') {
+    return { kind: 'corrupt', pid, detail: 'scheduler identity does not bind this PID and run' };
+  }
+  if (identity === 'unverifiable') {
+    return { kind: 'unverifiable', pid, detail: 'scheduler process identity is unreadable' };
+  }
+
+  const args = processArguments(pid);
+  if (args === null) return { kind: 'unverifiable', pid, detail: 'legacy scheduler arguments are unreadable' };
+  return commandLooksLikeFlowcrewScheduler(pid, runId) || legacyDirectCommandBindsRun(pid, runPath)
+    ? { kind: 'live', pid }
+    : { kind: 'reused', pid };
 }
 
 export function isLiveFlowcrewSchedulerPid(pid: number): boolean {
@@ -577,7 +635,7 @@ export function describeLiveRunOwner(owner: Pick<LiveRunOwner, 'runId' | 'pid'>)
 function scanLiveRunOwners(): LiveRunOwner[] {
   const owners: LiveRunOwner[] = [];
   let dirs: string[];
-  try { dirs = readdirSync(runsRoot()); } catch { return owners; }
+  try { dirs = listOperationalRunIdsFromIndex('') ?? readdirSync(runsRoot()); } catch { return owners; }
   for (const dir of dirs) {
     try {
       const runPath = join(runsRoot(), dir);
@@ -587,7 +645,10 @@ function scanLiveRunOwners(): LiveRunOwner[] {
         readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'),
       );
       if (pid === null) continue;
-      if (!isLiveFlowcrewSchedulerForRun(pid, dir, runPath)) continue;
+      if (!isLiveFlowcrewSchedulerForRun(pid, dir, runPath)) {
+        try { setRunSchedulerActive('', dir, false); } catch { /* index is best effort */ }
+        continue;
+      }
       owners.push({ runId: dir, pid, projectDir: normalizedProjectDir(rs.projectDir) });
     } catch { /* missing or unreadable run metadata / pid -> skip */ }
   }
@@ -672,7 +733,7 @@ export function findParkedRunForProject(projectDir: string, sinceIso?: string): 
   // never pin unrelated future work.
   if (!Number.isFinite(since)) return null;
   let dirs: string[];
-  try { dirs = readdirSync(runsRoot()); } catch { return null; }
+  try { dirs = listOperationalRunIdsFromIndex('') ?? readdirSync(runsRoot()); } catch { return null; }
   for (const dir of dirs.sort().reverse()) {
     try {
       const rs = JSON.parse(readFileSync(join(runsRoot(), dir, 'run.json'), 'utf-8')) as {

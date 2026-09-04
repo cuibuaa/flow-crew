@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import {
@@ -28,6 +29,7 @@ import {
   renderGuidanceEnvelope,
   RUN_WIDE_GUIDANCE_TARGET,
 } from './guidance.js';
+import { recordRunEvent } from './run-events.js';
 
 const log = createLogger({ name: 'supervisor' });
 
@@ -226,6 +228,113 @@ function currentRunningAttempt(status: StageStatus | undefined): { index: number
   return undefined;
 }
 
+function operationalDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+export interface SupervisorEvidenceBinding {
+  version: 1;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  generation: string;
+  emittedDeliverable: boolean;
+}
+
+interface AttemptGenerationRecord {
+  version: 1;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  segmentStart: number;
+  artifactBaselines?: Record<string, string | null>;
+}
+
+function readAttemptGeneration(runDirectory: string, stageId: string): AttemptGenerationRecord | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(runDirectory, 'stages', stageId, 'attempt_generation.json'), 'utf-8')) as AttemptGenerationRecord;
+    if (parsed.version !== 1 || parsed.stageId !== stageId || !Number.isSafeInteger(parsed.attemptIndex)
+      || typeof parsed.attemptStartedAt !== 'string' || !Number.isSafeInteger(parsed.segmentStart) || parsed.segmentStart < 0) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function isEnginePlaceholderMetric(path: string): boolean {
+  if (!/metric\.json$/.test(path)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { source?: { kind?: unknown } };
+    return parsed.source?.kind === 'engine_attempt_default';
+  } catch {
+    return false;
+  }
+}
+
+/** Bind a rejection to exactly one scheduler attempt and its current evidence
+ * bytes. Engine-written placeholder metrics never count as deliverables. */
+export function computeSupervisorEvidenceBinding(
+  runDirectory: string,
+  stageId: string,
+  status: StageStatus,
+): SupervisorEvidenceBinding | undefined {
+  const attempt = [...(status.attempts ?? [])].reverse().find((candidate) => (
+    candidate.status === STAGE_STATUS.RUNNING || candidate.status === STAGE_STATUS.COMPLETE || candidate.status === STAGE_STATUS.FAILED
+  ));
+  if (!attempt) return undefined;
+  const record = readAttemptGeneration(runDirectory, stageId);
+  if (!record || record.attemptIndex !== attempt.index || record.attemptStartedAt !== attempt.startedAt) return undefined;
+  const stagePath = join(runDirectory, 'stages', stageId);
+  const logPath = join(stagePath, 'live.log');
+  const outputPath = join(stagePath, `output_attempt_${attempt.index}.md`);
+  const verdictPath = join(runDirectory, `verdict_${stageId}.json`);
+  const metricPath = join(stagePath, 'metric.json');
+  const hash = createHash('sha256').update(JSON.stringify(record));
+  try {
+    const bytes = readFileSync(logPath);
+    hash.update(bytes.subarray(Math.min(record.segmentStart, bytes.length)));
+  } catch { /* an empty current segment remains a valid generation */ }
+  let emittedDeliverable = false;
+  for (const [kind, path] of [['output', outputPath], ['verdict', verdictPath], ['metric', metricPath]] as const) {
+    if (!existsSync(path) || isEnginePlaceholderMetric(path)) continue;
+    try {
+      const bytes = readFileSync(path);
+      const fingerprint = createHash('sha256').update(bytes).digest('hex');
+      if ((record.artifactBaselines?.[kind] ?? null) === fingerprint) continue;
+      if (bytes.length > 0) emittedDeliverable = true;
+      hash.update(path.slice(runDirectory.length)).update(bytes);
+    } catch { /* ignore a file racing an atomic replacement */ }
+  }
+  return {
+    version: 1,
+    stageId,
+    attemptIndex: attempt.index,
+    attemptStartedAt: attempt.startedAt,
+    generation: hash.digest('hex'),
+    emittedDeliverable,
+  };
+}
+
+export function supervisorEvidenceDigest(input: {
+  tails: ReadonlyMap<string, string>;
+  artifacts: readonly { path: string; content: string }[];
+  anomalySignals: readonly string[];
+  attemptKeys: readonly string[];
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    tails: [...input.tails.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    artifacts: [...input.artifacts].sort((a, b) => a.path.localeCompare(b.path)),
+    anomalySignals: [...input.anomalySignals].sort(),
+    attemptKeys: [...input.attemptKeys].sort(),
+  })).digest('hex');
+}
+
 /**
  * Inspect only durable, current-attempt evidence. An output/verdict left by an
  * older attempt cannot make a new execution permanently immune to supervision.
@@ -366,6 +475,10 @@ Rules:
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
 }
 
+export function buildSupervisorRolePrompt(stuckThresholdMs: number, taskDescription: string): string {
+  return `${buildSupervisorSystemPrompt(stuckThresholdMs)}\n\n# Original Goal\n${taskDescription}`;
+}
+
 export type SupervisorAssessmentTrigger = 'anomaly' | 'routine' | 'none';
 
 export function selectSupervisorAssessmentTrigger(input: {
@@ -436,6 +549,11 @@ export function detectSupervisorAnomalySignals(input: {
 export class Supervisor {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private byteOffsets = new Map<string, number>();
+  private attemptEvidenceKeys = new Map<string, string>();
+  private attemptSegmentFloors = new Map<string, number>();
+  private stageEvidenceDigests = new Map<string, string>();
+  private artifactEvidenceDigests = new Map<string, string>();
+  private lastAssessmentEvidenceDigest?: string;
   private lastActionTime = 0;
   private assessmentCount = 0;
   /** Consecutive failed assessments (null returns from assess()). After a
@@ -657,7 +775,7 @@ export class Supervisor {
 
   private writeProgress(): void {
     const state = this.lastState;
-    const elapsed = Math.round((Date.now() - this.startTime) / 1000);
+    const elapsed = operationalDuration(Date.now() - this.startTime);
     const status = state?.status ?? 'unknown';
     const iteration = state?.currentIteration ?? 1;
     const maxIter = state?.maxIterations ?? '?';
@@ -678,7 +796,19 @@ export class Supervisor {
       ? SUPERVISOR_PROGRESS_OUTCOME_LABELS[statusResolution.status]
       : `Unrecognized status ${statusResolution.display}`;
     lines.push('## Outcome');
-    lines.push(`${outcomeLabel} (${elapsed}s, iteration ${iteration}/${maxIter}, ${retries} interventions)`);
+    lines.push(`${outcomeLabel} (${elapsed}, iteration ${iteration}/${maxIter}, ${retries} supervisor interventions)`);
+    lines.push('');
+
+    lines.push('## Current work');
+    const running = Object.entries(state?.stages ?? {})
+      .flatMap(([stageId, stage]) => {
+        if (!isRunningStageStatus(stage.status)) return [];
+        const execution = currentRunningAttempt(stage);
+        const startedAt = execution ? Date.parse(execution.startedAt) : NaN;
+        const runningFor = Number.isFinite(startedAt) ? operationalDuration(Date.now() - startedAt) : 'unknown duration';
+        return [`- ${stageId}: execution ${execution?.index ?? '?'} · ${runningFor}`];
+      });
+    lines.push(...(running.length > 0 ? running : ['- No stage is executing.']));
     lines.push('');
 
     if (this.decisions.length > 0) {
@@ -961,10 +1091,26 @@ export class Supervisor {
       .filter(([, s]) => isRunningStageStatus(s.status))
       .map(([id]) => id);
 
+    // Freeze the rejection authority before reading any prompt evidence. If
+    // an output/verdict/metric changes during tail collection, artifact scan,
+    // prompt assembly, or the model call, act()'s fresh comparison suppresses
+    // REJECT instead of binding a judgement to bytes the assessor never saw.
+    const observedEvidenceBindings = new Map<string, SupervisorEvidenceBinding>();
+    for (const [stageId, fallback] of Object.entries(state.stages)) {
+      try {
+        const binding = computeSupervisorEvidenceBinding(
+          this.runDir(),
+          stageId,
+          this.authoritativeStageStatus(stageId, fallback),
+        );
+        if (binding) observedEvidenceBindings.set(stageId, binding);
+      } catch { /* a racing artifact cannot become reject authority */ }
+    }
+
     // Read and ACCUMULATE live.log tails across cheap heartbeats. The previous
     // implementation advanced byte offsets every 30s, so a 180s LLM cadence
     // would otherwise see only the final 30s and miss the wrong-direction arc.
-    const tails = this.readStageTails(runningStages);
+    const tails = this.readStageTails(runningStages, state);
     const totalDelta = [...tails.values()].reduce((sum, text) => sum + Buffer.byteLength(text), 0);
     this.accumulatedOutputBytes += totalDelta;
     for (const [stageId, text] of tails) {
@@ -1065,7 +1211,13 @@ export class Supervisor {
     // call. Failed gates are immediate anomaly signals; ordinary artifacts stay
     // in the pending prompt for the next routine call.
     const recentArtifacts = this.readRecentArtifacts();
-    for (const artifact of recentArtifacts) this.pendingArtifacts.set(artifact.path, artifact);
+    for (const artifact of recentArtifacts) {
+      this.pendingArtifacts.set(artifact.path, artifact);
+      this.artifactEvidenceDigests.set(
+        artifact.path,
+        createHash('sha256').update(artifact.content).digest('hex'),
+      );
+    }
 
     const detectedSignals = detectSupervisorAnomalySignals({
       state,
@@ -1100,10 +1252,6 @@ export class Supervisor {
       return;
     }
 
-    if (trigger === 'routine') {
-      this.lastRoutineAssessmentAt = now;
-      this.iterationAssessmentCount++;
-    }
     let extraContext = anomalySignals.length > 0
       ? `\n\n# Immediate anomaly signals\n${anomalySignals.map((signal) => `- ${signal}`).join('\n')}\nAssess now; this call bypassed routine throttling.`
       : '';
@@ -1112,6 +1260,36 @@ export class Supervisor {
     }
     const assessmentTails = new Map(this.pendingTails);
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
+    const evidenceDigest = supervisorEvidenceDigest({
+      // The prompt contains only deltas, but novelty is cumulative. Otherwise
+      // clearing a delivered tail would itself look like new evidence and
+      // trigger a second static WAIT call.
+      tails: new Map(runningStages.map((stageId) => [
+        stageId,
+        this.stageEvidenceDigests.get(stageId) ?? this.attemptEvidenceKeys.get(stageId) ?? stageId,
+      ])),
+      artifacts: [...this.artifactEvidenceDigests].map(([path, content]) => ({ path, content })),
+      // Edge-triggered anomalies remain part of the cumulative semantic state
+      // after delivery. Otherwise their disappearance on the next heartbeat
+      // would itself look novel and spend another call concluding WAIT.
+      anomalySignals: [...this.seenAnomalySignals],
+      attemptKeys: runningStages.map((stageId) => {
+        const facts = stageFacts.get(stageId);
+        return `${stageId}:${facts?.attemptIndex ?? 'unknown'}:${facts?.attemptStartedAt ?? 'unknown'}`;
+      }),
+    });
+    if (trigger === 'routine' && evidenceDigest === this.lastAssessmentEvidenceDigest) {
+      // Advance cadence without spending a semantic-call budget slot. The
+      // evidence was already assessed, but a later novel byte/artifact/attempt
+      // must still retain the iteration's remaining review capacity.
+      this.lastRoutineAssessmentAt = now;
+      this.writeProgress();
+      return;
+    }
+    if (trigger === 'routine') {
+      this.lastRoutineAssessmentAt = now;
+      this.iterationAssessmentCount++;
+    }
     const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
     const assessmentStartedAt = Date.now();
     let assessment = await this.assess(prompt);
@@ -1137,6 +1315,7 @@ export class Supervisor {
       this.writeProgress();
       return;
     }
+    this.lastAssessmentEvidenceDigest = evidenceDigest;
     if (userInput && addressedOperatorTarget && assessment.verdict === 'GUIDE') {
       const targetIsKnown = addressedOperatorTarget === RUN_WIDE_GUIDANCE_TARGET
         || Object.hasOwn(state.stages, addressedOperatorTarget);
@@ -1157,7 +1336,12 @@ export class Supervisor {
 
     // Validate any consequential verdict against fresh on-disk facts before it
     // becomes an action, log entry, dashboard state, or signal.
-    const effectiveAssessment = await this.act(assessment, assessmentStartedAt, userInput ? 'operator' : 'supervisor');
+    const effectiveAssessment = await this.act(
+      assessment,
+      assessmentStartedAt,
+      userInput ? 'operator' : 'supervisor',
+      observedEvidenceBindings,
+    );
     this.recordEffectiveAssessment(effectiveAssessment);
 
     // Keep WAIT streak telemetry, but do not let it slow the 30s anomaly heartbeat.
@@ -1207,7 +1391,7 @@ export class Supervisor {
     this.writeProgress();
   }
 
-  private readStageTails(stageIds: string[]): Map<string, string> {
+  private readStageTails(stageIds: string[], state: StoreState): Map<string, string> {
     const tails = new Map<string, string>();
     for (const stageId of stageIds) {
       const logPath = join(this.runDir(), 'stages', stageId, 'live.log');
@@ -1215,17 +1399,40 @@ export class Supervisor {
 
       try {
         const stat = statSync(logPath);
-        const prevOffset = this.byteOffsets.get(stageId) ?? Math.max(0, stat.size - this.config.tailBytes);
+        const attempt = currentRunningAttempt(state.stages[stageId]);
+        const generation = readAttemptGeneration(this.runDir(), stageId);
+        const generationMatches = Boolean(attempt && generation
+          && generation.attemptIndex === attempt.index
+          && generation.attemptStartedAt === attempt.startedAt);
+        const attemptKey = generationMatches
+          ? `${stageId}:${generation!.attemptIndex}:${generation!.attemptStartedAt}`
+          : `${stageId}:unbound:${attempt?.index ?? 'unknown'}:${attempt?.startedAt ?? 'unknown'}`;
+        const previousKey = this.attemptEvidenceKeys.get(stageId);
+        if (previousKey !== attemptKey) {
+          this.attemptEvidenceKeys.set(stageId, attemptKey);
+          this.pendingTails.delete(stageId);
+          // Without a current generation record, fail closed by observing only
+          // future appends. Never inherit a prior attempt's tail.
+          const boundary = generationMatches ? generation!.segmentStart : stat.size;
+          this.attemptSegmentFloors.set(stageId, boundary);
+          this.byteOffsets.set(stageId, boundary);
+          this.stageEvidenceDigests.set(stageId, createHash('sha256').update(attemptKey).digest('hex'));
+        }
+        const floor = this.attemptSegmentFloors.get(stageId) ?? stat.size;
+        const prevOffset = Math.max(floor, this.byteOffsets.get(stageId) ?? floor);
         const bytesToRead = Math.min(this.config.tailBytes, stat.size - prevOffset);
         if (bytesToRead <= 0) continue;
 
         const fd = openSync(logPath, 'r');
         const buf = Buffer.alloc(bytesToRead);
-        readSync(fd, buf, 0, bytesToRead, prevOffset);
+        const bytesRead = readSync(fd, buf, 0, bytesToRead, prevOffset);
         closeSync(fd);
 
-        this.byteOffsets.set(stageId, stat.size);
-        tails.set(stageId, buf.toString('utf-8'));
+        const delta = buf.subarray(0, bytesRead);
+        this.byteOffsets.set(stageId, prevOffset + bytesRead);
+        const previousDigest = this.stageEvidenceDigests.get(stageId) ?? attemptKey;
+        this.stageEvidenceDigests.set(stageId, createHash('sha256').update(previousDigest).update(delta).digest('hex'));
+        tails.set(stageId, delta.toString('utf-8'));
       } catch { /* file access error, skip */ }
     }
     return tails;
@@ -1240,18 +1447,15 @@ export class Supervisor {
   ): string {
     const parts: string[] = [];
 
-    // Goal: include the FULL task brief so every success criterion, banned string,
-    // and acceptance test is visible to the supervisor (no truncation).
-    parts.push(`# Goal\n${this.taskDescription}`);
-    parts.push(`\n# Iteration ${state.currentIteration ?? 1}/${state.maxIterations ?? 5}`);
+    parts.push(`# Iteration ${state.currentIteration ?? 1}/${state.maxIterations ?? 5}`);
 
     // Running stages with output (8 KB per stage so silent fallbacks are visible in stdout)
     parts.push('\n# Running Stages');
     for (const stageId of runningStages) {
       const ss = state.stages[stageId];
-      const elapsed = ss?.startedAt ? Math.round((Date.now() - new Date(ss.startedAt).getTime()) / 1000) : 0;
-      const tail = tails.get(stageId) ?? '(no output yet)';
       const facts = stageFacts.get(stageId);
+      const elapsed = facts?.attemptStartedAt ? Math.round((Date.now() - new Date(facts.attemptStartedAt).getTime()) / 1000) : 0;
+      const tail = tails.get(stageId) ?? '(no output yet)';
       parts.push(`\n## ${stageId} — ${elapsed}s elapsed`);
       if (facts) parts.push(`Verified facts: ${describeStageExecutionFacts(facts)}.`);
       parts.push(`\`\`\`\n${tail.slice(-8000)}\n\`\`\``);
@@ -1346,7 +1550,7 @@ export class Supervisor {
 
     // Most recent first, cap at 5 files, 4 KB each to keep prompt bounded.
     found.sort((a, b) => b.mtime - a.mtime);
-    const top = found.slice(0, 5);
+    const top = found.filter(({ path }) => !isEnginePlaceholderMetric(path)).slice(0, 5);
     return top.map(({ path }) => {
       let content: string;
       try {
@@ -1364,7 +1568,7 @@ export class Supervisor {
       model: this.config.model,
       reasoning_effort: this.config.reasoningEffort,
       tools: [],
-      prompt: buildSupervisorSystemPrompt(this.config.stuckThresholdMs),
+      prompt: buildSupervisorRolePrompt(this.config.stuckThresholdMs, this.taskDescription),
     };
 
     const startedAt = new Date().toISOString();
@@ -1419,7 +1623,7 @@ export class Supervisor {
     }
     const authoritativeStatus = this.authoritativeStageStatus(stageId, status);
     if (!isRunningStageStatus(authoritativeStatus.status)) {
-      return { written: false, reason: `ABORT suppressed for ${stageId}: no active running attempt observed.` };
+      return { written: false, reason: `ABORT suppressed for ${stageId}: no active running execution observed.` };
     }
     const facts = this.inspectFacts(stageId, authoritativeStatus, progressSinceMs, state.baseCommit);
     const factSummary = describeStageExecutionFacts(facts);
@@ -1429,13 +1633,13 @@ export class Supervisor {
     if (facts.finalizing) {
       return {
         written: false,
-        reason: `ABORT suppressed for ${stageId}: ${factSummary}; the current attempt is in its finalization window.`,
+        reason: `ABORT suppressed for ${stageId}: ${factSummary}; the current execution is in its finalization window.`,
       };
     }
     if (basis.kind === 'idle' && facts.protectedFromIdleAbort) {
       return {
         written: false,
-        reason: `Idle ABORT suppressed for ${stageId}: durable current-attempt completion evidence exists; ${factSummary}.`,
+        reason: `Idle ABORT suppressed for ${stageId}: durable current-execution completion evidence exists; ${factSummary}.`,
       };
     }
     if (basis.kind === 'idle' && facts.artifactProgressThisTick) {
@@ -1492,6 +1696,7 @@ export class Supervisor {
     assessment: SupervisorAssessment,
     progressSinceMs = Date.now(),
     source: 'supervisor' | 'operator' = 'supervisor',
+    observedEvidenceBindings?: ReadonlyMap<string, SupervisorEvidenceBinding>,
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
 
@@ -1576,13 +1781,54 @@ export class Supervisor {
         // The scheduler-side consumer re-pends the target stage so the work is
         // re-done rather than accepted. Bounded there by a max reject count.
         if (assessment.targetStage) {
+          let current: SupervisorEvidenceBinding | undefined;
+          try {
+            const state = readRunState(this.projectDir, this.runId);
+            const status = state.stages[assessment.targetStage];
+            if (status) current = computeSupervisorEvidenceBinding(this.runDir(), assessment.targetStage, this.authoritativeStageStatus(assessment.targetStage, status));
+          } catch { /* fail closed below */ }
+          // Production assessments supply the generation captured immediately
+          // before the model call. Direct unit callers retain the historical
+          // immediate-check behavior by omitting the map.
+          const observed = observedEvidenceBindings
+            ? observedEvidenceBindings.get(assessment.targetStage)
+            : current;
+          if (!observed?.emittedDeliverable) {
+            return {
+              verdict: 'WAIT',
+              targetStage: assessment.targetStage,
+              guidance: null,
+              reason: `REJECT suppressed for ${assessment.targetStage}: no emitted deliverable was bound to the evidence assessed for the current execution.`,
+            };
+          }
+          if (
+            !current?.emittedDeliverable
+            || current.stageId !== observed.stageId
+            || current.attemptIndex !== observed.attemptIndex
+            || current.attemptStartedAt !== observed.attemptStartedAt
+            || current.generation !== observed.generation
+          ) {
+            return {
+              verdict: 'WAIT',
+              targetStage: assessment.targetStage,
+              guidance: null,
+              reason: `REJECT suppressed for ${assessment.targetStage}: its attempt evidence changed while the assessment was running.`,
+            };
+          }
+          const timestamp = new Date().toISOString();
           writeFileSync(join(signalDir, `reject_${assessment.targetStage}.json`),
-            JSON.stringify({ stage: assessment.targetStage, reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+            JSON.stringify({ version: 2, stage: assessment.targetStage, reason: assessment.reason, timestamp, evidence: observed }), 'utf-8');
+          recordRunEvent(this.projectDir, this.runId, {
+            type: 'supervisor_reject_requested', runId: this.runId, timestamp,
+            stageId: assessment.targetStage, attemptIndex: observed.attemptIndex,
+            attemptStartedAt: observed.attemptStartedAt, evidenceGeneration: observed.generation,
+            detail: assessment.reason, source: 'supervisor', level: 'warning',
+          });
         } else {
-          // No target named: write a run-level reject the scheduler can map to the
-          // most-recently-completed stage. Still bounded by the same max count.
-          writeFileSync(join(signalDir, 'reject.json'),
-            JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+          return {
+            verdict: 'WAIT', targetStage: null, guidance: null,
+            reason: 'REJECT suppressed: the assessment named no target stage, so no attempt-bound evidence can be identified.',
+          };
         }
         this.lastActionTime = Date.now();
         return assessment;
@@ -1599,7 +1845,7 @@ export class Supervisor {
     const entry = [
       `## Tick ${action.tick} — ${action.timestamp}`,
       `Running: ${action.runningStages.join(', ')}`,
-      `Source: ${action.source ?? 'supervisor (legacy)'}${action.targetAttemptIndex === undefined ? '' : ` · attempt ${action.targetAttemptIndex}`}`,
+      `Source: ${action.source ?? 'supervisor (legacy)'}${action.targetAttemptIndex === undefined ? '' : ` · execution ${action.targetAttemptIndex}`}`,
       `Verdict: **${action.assessment.verdict}**${action.assessment.targetStage ? ` → ${action.assessment.targetStage}` : ''}`,
       `Reason: ${action.assessment.reason}`,
     ];

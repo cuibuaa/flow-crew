@@ -5,6 +5,8 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "declaration": true,
+    "incremental": true,
+    "tsBuildInfoFile": ".cache/tsc.tsbuildinfo",
     "outDir": "dist",
     "rootDir": "src",
     "skipLibCheck": true,

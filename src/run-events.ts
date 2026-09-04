@@ -1,10 +1,20 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJsonlFile } from './jsonl.js';
-import type { StageStatus } from './store.js';
+import type { StageStatus, StoreState } from './store.js';
 import { atomicWrite, isSettledStageStatus, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'attempt_started'
+  | 'attempt_finished'
+  | 'attempt_failed'
+  | 'guidance_written'
+  | 'scope_revision_requested'
+  | 'scope_revision_decided'
+  | 'admission_rejected'
+  | 'run_status_changed'
+  | 'supervisor_reject_requested'
+  | 'supervisor_reject_discarded'
   | 'stage_complete'
   | 'stage_failed'
   | 'stage_skipped'
@@ -41,6 +51,13 @@ export interface RunEvent {
   level?: 'info' | 'warning';
   stageIds?: string[];
   files?: string[];
+  attemptIndex?: number;
+  attemptStartedAt?: string;
+  requestId?: string;
+  decision?: 'accepted' | 'rejected' | 'discarded';
+  evidenceGeneration?: string;
+  source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';
+  runStatus?: StoreState['status'];
 }
 
 export interface AttemptSummaryRefreshState {
@@ -80,6 +97,7 @@ function inferSummaryRefreshReasons(event: RunEvent): string[] {
     case 'attempt_results_updated':
     case 'iteration_completed':
     case 'run_completed':
+    case 'run_status_changed':
       reasons.add(event.type);
       break;
     default:
@@ -120,6 +138,14 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
   const dir = runDir(projectDir, runId);
   mkdirSync(dir, { recursive: true });
   appendFileSync(eventsPath(projectDir, runId), JSON.stringify(event) + '\n', 'utf-8');
+}
+
+/** Append when a caller already owns the exact run directory. This keeps
+ * guidance and negotiation events canonical without reverse-engineering the
+ * project root from an arbitrary run path. */
+export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): void {
+  mkdirSync(runDirectory, { recursive: true });
+  appendFileSync(join(runDirectory, 'events.jsonl'), JSON.stringify(event) + '\n', 'utf-8');
 }
 
 export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
@@ -215,6 +241,27 @@ function buildArtifactEvents(runId: string, event: RunEvent): RunEvent[] {
   return artifactEvents;
 }
 
+function observeRunStatusChange(projectDir: string, runId: string): RunEvent | undefined {
+  const directory = runDir(projectDir, runId);
+  const cursorPath = join(directory, 'run_event_status.json');
+  try {
+    const status = (JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StoreState).status;
+    const prior = existsSync(cursorPath)
+      ? (JSON.parse(readFileSync(cursorPath, 'utf-8')) as { status?: StoreState['status'] }).status
+      : undefined;
+    if (prior === status) return undefined;
+    const timestamp = new Date().toISOString();
+    atomicWrite(cursorPath, `${JSON.stringify({ version: 1, status, observedAt: timestamp }, null, 2)}\n`);
+    return {
+      type: 'run_status_changed', runId, timestamp, runStatus: status,
+      detail: `run status ${prior === undefined ? 'initialized' : `changed from ${prior}`} to ${status}`,
+      source: 'scheduler',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function recordStageOutcome(
   projectDir: string,
   runId: string,
@@ -244,6 +291,11 @@ export function recordStageOutcome(
 
   const events = [stageEvent, ...buildArtifactEvents(runId, stageEvent)];
   for (const event of events) appendRunEvent(projectDir, runId, event);
+  const statusEvent = observeRunStatusChange(projectDir, runId);
+  if (statusEvent) {
+    appendRunEvent(projectDir, runId, statusEvent);
+    events.push(statusEvent);
+  }
   requestAttemptSummaryRefresh(projectDir, runId, events, options);
 }
 
@@ -254,7 +306,15 @@ export function recordRunEvent(
   options?: { debounceMs?: number },
 ): void {
   appendRunEvent(projectDir, runId, event);
-  requestAttemptSummaryRefresh(projectDir, runId, [event], options);
+  const events = [event];
+  if (event.type !== 'run_status_changed') {
+    const statusEvent = observeRunStatusChange(projectDir, runId);
+    if (statusEvent) {
+      appendRunEvent(projectDir, runId, statusEvent);
+      events.push(statusEvent);
+    }
+  }
+  requestAttemptSummaryRefresh(projectDir, runId, events, options);
 }
 
 export function clearAttemptSummaryRefreshDebounce(projectDir?: string, runId?: string): void {

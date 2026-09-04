@@ -105,6 +105,12 @@ prompt: |
   or one script — the engine journals one result per round, so batched measurements are lost and
   the loop's progress/ceiling counting breaks. N candidate mechanisms = N rounds.
 
+  Temporal test rule (all roles, all rounds): never author a test or hard check that loads,
+  asserts the existence/absence of, or pins a label in the mutable latest `round_result` path
+  or its `.no_candidate.json` sidecar. A later legitimate round replaces that shared slot.
+  Use the exact scheduler-resolved immutable round evidence or framework-owned manifest paths
+  injected into the stage prompt. This is enforced after every test-writing stage as well as here.
+
   Round record artifact: the engine writes the cross-round record to the exact resolved research
   report directory (project-relative, shape `{"runId": ..., "rounds": [{"label", "outcome", ...}]}`).
   An explicit `report_dir` wins; otherwise the directory containing `result_file` is used. The default

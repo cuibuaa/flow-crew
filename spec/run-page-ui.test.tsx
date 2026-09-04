@@ -50,7 +50,7 @@ describe("run-page canonical scenes", () => {
     expect(out).toContain(`data-testid="canonical-run-status">${status}`);
     expect(out).not.toContain("generated after the run completed");
     expect(out).toContain("Stall signal unknown");
-    expect(out).toContain("Current attempt: unknown");
+    expect(out).toContain("Current execution: unknown");
   });
 
   it.each(TERMINAL_RUN_STATUSES)("renders %s literally as a terminal result", (status) => {

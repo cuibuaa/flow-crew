@@ -727,6 +727,8 @@ describe('persistent blockers and quiet active commands', () => {
 });
 
 describe('temporal tests, output inventory, reachability, and stage prose', () => {
+  // Stable workload ID; depends_on_shared_presence is the replacement
+  // assertion added after this historical title was registered.
   it('rejects tests that pin mutable round state or require terminal absence', () => {
     const projectDir = temporaryRoot();
     mkdirSync(join(projectDir, 'spec'), { recursive: true });
@@ -741,7 +743,11 @@ describe('temporal tests, output inventory, reachability, and stage prose', () =
       resultFile: 'docs/round_result.json',
       terminalPaths: ['docs/final.md'],
     });
-    expect(findings.map((finding) => finding.kind).sort()).toEqual(['asserts_terminal_absence', 'pins_shared_result']);
+    expect(findings.map((finding) => finding.kind).sort()).toEqual([
+      'asserts_terminal_absence',
+      'depends_on_shared_presence',
+      'pins_shared_result',
+    ]);
   });
 
   it('blocks an occupied create-only output, permits explicit update, and never trusts a symlink', () => {

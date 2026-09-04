@@ -9,7 +9,7 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `init` | Initialize FlowCrew configuration and storage in a project. |
 | `adapter` | Show or explicitly set the project adapter choice. |
 | `quick` | Run or enqueue one task brief. |
-| `status` | Show the latest run. |
+| `status` | Show the latest project run's current stage execution, elapsed time, and latest reason. |
 | `list` | List recent runs. |
 | `guide` | Send guidance to one explicitly selected running supervisor. |
 | `clean` | Delete old run directories. |
@@ -27,6 +27,7 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `land` | Audit terminal artifacts and unique worktree state; optionally remove a proven-safe linked worktree. |
 | `audit-report` | Re-derive supported numeric and path-bearing claims from a terminal report. |
 | `watch` | Report edge-triggered stall judgements for live runs. |
+| `events` | Read or follow the canonical, filterable run event feed. |
 | `rehearse` | Exercise a brief with the real scheduler and a scripted agent. |
 | `brief` | Inspect, diff, or roll back a versioned brief. |
 | `doctor` | Check the runtime, configuration, builds, and agent CLIs. |
@@ -59,6 +60,7 @@ flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base 
 flowcrew land --run <run-id>
 flowcrew audit-report --report docs/final.md --run-dir <run-dir>
 flowcrew watch --once
+flowcrew events --follow
 flowcrew brief head <briefDir>
 flowcrew doctor
 flowcrew clean
@@ -78,6 +80,7 @@ Gather the facts needed before authoring or launching a FlowCrew handoff:
 flowcrew ship-preflight
 flowcrew ship-preflight --brief docs/task_brief.md --json
 flowcrew ship-preflight --campaign <name> --brief docs/task_brief.md
+flowcrew ship-preflight --no-baseline --brief docs/task_brief.md
 ```
 
 Campaign resolution follows launch precedence: explicit `--campaign`, parsed
@@ -89,7 +92,11 @@ For a requested brief, preflight distinguishes inputs from outputs and checks ev
 input for existence and readability. Mechanically bound row-count, date-span, recursive
 file-count, and SHA-256 claims are reported as confirmed, refuted, or not checkable. It also
 discovers the target's build, test, and lint scripts from checked-in configuration, executes
-that untouched baseline, and states later gate criteria as a delta from the observed result.
+that untouched baseline, streams each command's output and ten-second heartbeat as it runs,
+and states later gate criteria as a delta from the observed result. `--no-baseline` performs
+discovery but launches none of those project commands and records the baseline as skipped.
+When a process-identity-verified live run shares the canonical project, a warning is printed
+before any validation command starts.
 The report separately records daemon→`dist` and `src`→`dist` freshness.
 
 Structurally declared outputs are inventoried separately. A non-empty create-only file, any
@@ -283,10 +290,13 @@ Watch all FlowCrew runs continuously, or perform one deterministic pass:
 flowcrew watch
 flowcrew watch --once
 flowcrew watch --poll 15
+flowcrew watch --all --once
 ```
 
-The first pass always prints a heartbeat with entry, readable-run, live-run, and scan-time
-counts. Later output is edge-triggered: an unchanged condition is silent, and ordinary stage
+The default candidate set comes from the persistent run index and contains only operational or
+identity-owned runs, so old fixtures do not turn every poll into a full archive scan. `--all`
+explicitly audits every entry under the runs directory. The first pass always prints a heartbeat
+with entry, readable-run, live-run, and scan-time counts. Later output is edge-triggered: an unchanged condition is silent, and ordinary stage
 transitions are not reported. The heartbeat makes a quiet healthy scan distinguishable from a
 watcher too slow to finish its first pass. A run counts as live only when `run.json` says `running`
 and its `scheduler.pid` names a process that is alive. A known-dead scheduler suppresses live-run
@@ -321,7 +331,7 @@ The watch command makes these judgements, including when already present on the 
 Nine minutes rounds the independently re-derived current-contract terminal-lag tail up to the
 45-second polling cadence; the final verification report records the population, full distribution,
 and sensitivity strata. A future healthy run quiet beyond that historical tail will alert once even
-if it later terminates normally. Attempt count is deliberately not a stall judgement: attempts three
+if it later terminates normally. Execution count is deliberately not a stall judgement: executions three
 and four can still be converging, while a plateau or regression can be visible after only two
 comparable gate rounds.
 
@@ -330,6 +340,22 @@ existing stalls, status mismatches, and evidence gaps, then exits. The command i
 **does not write run or task status**, decide whether wrap-up is complete, accept a terminal status,
 or depend on an operator home-directory layout. A judgement only reports durable evidence; it never
 changes that evidence.
+
+## `flowcrew events`
+
+Read the same canonical event records used by task and dashboard projections:
+
+```bash
+flowcrew events --run <run-id>
+flowcrew events --project <path> --stage verify --type admission_rejected,attempt_failed
+flowcrew events --run <run-id> --json --follow
+```
+
+`--run`, `--project`, `--stage`, and `--type` filter the feed; `--limit` bounds initial
+history; `--follow` continues from the last emitted record. JSON retains every field. Human
+output retains the run, stage, execution number, and detail. Maintenance refresh records are
+hidden unless `--include-maintenance` is supplied. Without `--run`, selection uses the indexed
+operational runs for the selected or current project.
 
 ## `flowcrew rehearse`
 
@@ -386,7 +412,8 @@ flowcrew guide --run 2026-08-02T12-00-00-a1b2c3 "try the isolated reproduction"
 Without `--run`, guidance is sent only when exactly one readable run is currently
 executing. With no running run or multiple candidates, the command exits non-zero
 without writing any `user_input.md`; the ambiguous case lists the candidate run IDs
-and task titles. Explicit targets must exist and still be running.
+and task titles. Explicit targets must exist and still be running. The selected supervisor
+consumes the input on its next heartbeat, normally within 30 seconds.
 
 ## `flowcrew quick`
 
@@ -440,7 +467,7 @@ Common flags:
 
 Unknown adapter names fail before a task runs and list the registered values. The `mock` adapter reads deterministic per-stage JSON files from `MOCK_FIXTURE_DIR` and never invokes a model; use the isolated example in [`examples/README.md`](../examples/README.md) to see a complete zero-token loop.
 
-Stage attempt duration is configured only by
+Stage execution duration is configured only by
 `config/defaults.yaml::default_timeout_ms`. The removed `--timeout` run override
 fails with a migration hint instead of silently creating a second control.
 
@@ -564,7 +591,7 @@ Additional task operations are:
 
 ```bash
 flowcrew task list [--status active|all|<task-status>] [--limit N] [--with-summary]
-flowcrew task show <id> [--summary-only]
+flowcrew task show <id> [--summary-only | --raw]
 flowcrew task retry <id>
 flowcrew task tail <id> [--tail N] [--follow|-f]
 ```
@@ -573,6 +600,12 @@ flowcrew task tail <id> [--tail N] [--follow|-f]
 recorded terminal artifact maps unambiguously to a different declared terminal status, they
 display that artifact status beside the lifecycle status rather than silently presenting the
 contradiction as an ordinary completion.
+
+Both commands use a bounded operational projection: task launch number, bound run, current
+stage execution, elapsed time, latest reason/rejection/guidance, pending scope or approval
+decisions, and source coverage. `task show` hides the tick-log JSON by default; `--raw` is the
+explicit escape hatch for its path and recent records. A task retry creates another **launch**;
+a stage retry is another **execution**; a repeated gate after repair is a **re-evaluation**.
 
 `task tail` reads the run's captured output. Where a systemd user journal exists, `--follow` streams it
 through `journalctl`; where it does not — macOS, or any Linux without a systemd session — it follows the

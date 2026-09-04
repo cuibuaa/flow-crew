@@ -285,7 +285,7 @@ describe('planner reality-check contract', () => {
 describe('public gate and launch-workspace contract', () => {
   it('documents attempt-fresh metrics, durable verdicts, recursive overlays, and population parity', () => {
     const guide = readFileSync(BRIEF_CONTRACT_PATH, 'utf-8');
-    expect(guide).toMatch(/Before each attempt, the scheduler replaces any older metric artifact\s+with an engine-owned `hasMetric:false` marker/);
+    expect(guide).toMatch(/Before each execution, the scheduler replaces any older metric artifact\s+with an engine-owned `hasMetric:false` marker/);
     expect(guide).toMatch(/omission fails the run at that first gate\s+evaluation[\s\S]*before any product repair\s+or outer re-plan is dispatched/);
     expect(guide).toMatch(/Gate prompts\s+receive the exact durable path where a rejection will be archived/);
     expect(guide).toMatch(/setup walks the source directory, materializes missing subdirectories, and\s+copies their files into the target/);

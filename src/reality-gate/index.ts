@@ -1,7 +1,6 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
+import { REALITY_CHECK_REGISTRY } from './registry.js';
 import type {
   CheckContext,
   CheckDecl,
@@ -276,18 +275,7 @@ function invalidArtifact(artifactPath: string, detail: string): never {
 }
 
 async function loadHandlers(): Promise<Map<string, RealityCheck>> {
-  const dir = join(dirname(fileURLToPath(import.meta.url)), 'checks');
-  const entries = readdirSync(dir)
-    .filter((file) => file.endsWith('.js') || (file.endsWith('.ts') && !file.endsWith('.d.ts')))
-    .filter((file) => !file.startsWith('_'));
-  const handlers = new Map<string, RealityCheck>();
-  for (const file of entries) {
-    const type = file.replace(/\.(js|ts)$/, '');
-    const mod = await import(pathToFileURL(join(dir, file)).href);
-    const Klass = mod.default;
-    if (typeof Klass === 'function') handlers.set(type, new Klass() as RealityCheck);
-  }
-  return handlers;
+  return new Map(REALITY_CHECK_REGISTRY.map(({ type, check }) => [type, check]));
 }
 
 export interface CheckTypeInfo { type: string; description: string; params: string; }
@@ -301,20 +289,10 @@ let _checkTypesCache: CheckTypeInfo[] | null = null;
  */
 export async function listCheckTypes(): Promise<CheckTypeInfo[]> {
   if (_checkTypesCache) return _checkTypesCache;
-  const dir = join(dirname(fileURLToPath(import.meta.url)), 'checks');
-  const entries = readdirSync(dir)
-    .filter((file) => file.endsWith('.js') || (file.endsWith('.ts') && !file.endsWith('.d.ts')))
-    .filter((file) => !file.startsWith('_'));
-  const out: CheckTypeInfo[] = [];
-  for (const file of entries) {
-    const type = file.replace(/\.(js|ts)$/, '');
-    try {
-      const mod = await import(pathToFileURL(join(dir, file)).href);
-      const meta = (mod.default && (mod.default as { meta?: { description?: string; params?: string } }).meta) || {};
-      out.push({ type, description: meta.description ?? '', params: meta.params ?? '' });
-    } catch { /* skip unloadable check */ }
-  }
-  out.sort((a, b) => a.type.localeCompare(b.type));
-  _checkTypesCache = out;
-  return out;
+  _checkTypesCache = REALITY_CHECK_REGISTRY.map(({ type, description, params }) => ({
+    type,
+    description,
+    params,
+  }));
+  return _checkTypesCache;
 }

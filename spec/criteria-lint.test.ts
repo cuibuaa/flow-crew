@@ -181,10 +181,13 @@ describe('Vitest experimental API upgrade guard', () => {
     // Re-based again on 2026-08-10 after the published config stopped collecting the
     // private machine-local suite. That include-scope change did not touch the #41
     // worker implementation, and every mitigation asserted below was verified first.
+    // Re-based on 2026-09-03 after permanent UX/performance replays rejoined the
+    // current full suite while the frozen baseline population received its own
+    // explicit timing command. This changes discovery only, not worker startup.
     // Re-base this pin ONLY after checking the four assertions that follow still hold —
     // they, not the digest, are what keeps #41 closed.
     expect(createHash('sha256').update(normalized).digest('hex')).toBe(
-      '707baf7415d51f0ad9092186a3840b588d65aba9fc3156269879ac65d60464ea',
+      '81fde17f2c63efe8dccfd2544c6c9fa19cee2d7c51244a9029e503cfea757035',
     );
     expect(source).toContain('Vitest experimental');
     expect(source).toContain('createPoolWorker contract');

@@ -73,6 +73,8 @@ export class AttemptDeadlineController {
   constructor(input: {
     budgetMs: number;
     ledgerDir?: string;
+    /** Human-facing one-based execution number used only for the journal name. */
+    executionIndex?: number;
     attemptId?: string;
     clock?: AttemptDeadlineClock;
   }) {
@@ -87,7 +89,10 @@ export class AttemptDeadlineController {
     this.signal = this.controller.signal;
     if (input.ledgerDir) {
       mkdirSync(input.ledgerDir, { recursive: true });
-      this.ledgerPath = join(input.ledgerDir, `attempt_deadline_${this.attemptId}.jsonl`);
+      const journalIdentity = input.executionIndex === undefined
+        ? this.attemptId
+        : `execution_${positiveSafeInteger(input.executionIndex, 'execution index')}_budget`;
+      this.ledgerPath = join(input.ledgerDir, `attempt_deadline_${journalIdentity}.jsonl`);
     }
     this.append('attempt_deadline_created', {
       budgetMs: this.budgetMs,

@@ -230,12 +230,15 @@ Successful statuses still pass Reality-Gate before commit. A research
 does not end the run.
 
 For a dynamically dispatched run, every declared terminal path must appear in
-the scope of exactly one stage, all terminal paths must have that same owner,
-and that owner must be a non-gate DAG sink downstream of every mandatory stage.
+the scope of exactly one stage. Terminal snapshot basenames must also be unique,
+even when their parent directories differ. Each owner must be a non-gate,
+non-repair DAG sink downstream of every mandatory stage; different terminal
+paths may have different valid owners.
 The scheduler accepts the artifact only when the admitted owner's latest
-completed attempt attributes a write to that exact path. A research terminal
-owner additionally uses the exact condition `research.decision != continue`;
-the policy publishes the selected status and path before re-pending that owner.
+completed execution attributes a write to that exact path. A research terminal
+owner additionally needs a condition that is mechanically false while the policy
+continues; `research.terminalPath == "<that exact path>"` is the preferred form.
+The policy publishes the selected status and path before re-pending that owner.
 
 ## `research` (or `objective`)
 
@@ -394,24 +397,24 @@ artifacts remain in the selected project.
 | `dispatch.yaml` | Dynamic planner stage | Scheduler | `<runDir>/dispatch.yaml`; read after planning, replaced on a later re-plan. |
 | `brief_criteria.json` | Scheduler from exact brief bytes | Planner, workers, gates, dispatch admission | Canonical criterion IDs and brief digest; created before dynamic planning. |
 | `dispatch_admission.json` | Scheduler | Scheduler and operator | Atomic schema/topology/criterion/reality-path result; a failed report injects no proposed stage. |
-| `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; live evidence for the current attempt. A retry or later planner iteration may replace it. |
-| `stages/<stageId>/metric.json` | Scheduler, then optionally the gate stage | Scheduler | Seeded before every gate attempt as `hasMetric:false`; the gate replaces it only when that attempt has a trustworthy numeric metric. |
+| `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; live evidence for the current execution. A technical retry or later planner iteration may replace it. |
+| `stages/<stageId>/metric.json` | Scheduler, then optionally the gate stage | Scheduler | Seeded before every gate execution as `hasMetric:false`; the gate replaces it only when that execution has a trustworthy numeric metric. |
 | Rejected gate evidence | Scheduler | Repairs, reports, operator | `<runDir>/gate_reevaluation/iteration_<n>/round_<n>/`; durable copies of the rejected verdict, evaluated metric, gate output, and engine-effective verdict. |
 | Re-plan stage evidence | Scheduler | Summary, dashboard, campaign accounting, operator | `run.json.stageEvidence` keys each retired dynamic stage by iteration and stage ID and points to immutable status, output, attempt-output, and optional verdict copies under `<runDir>/stage_evidence/iteration_<n>/`. |
 | Round result | Measurement stage | Research advance gate | Path from `research.result_file`, or the mutually exclusive `.no_candidate.json` sidecar. After ingestion it is moved to an outcome-named `<runDir>/research_round_<N>_*consumed.json` and journaled. |
 | `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
 | `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
 | `handoff_<stageId>.md` | Each stage on completion | The next stage that depends on it | `<runDir>/handoff_<stageId>.md`; what a stage passes forward, rather than the next stage re-reading its predecessor's full output. |
-| `scope_revision_request.json` | A stage needing a path outside its declared scope | Scheduler policy, which writes `scope_revision_decision_*.json` beside it | `<runDir>/stages/<stageId>/`; answered by a deterministic predicate chain — matching run and live attempt, digest-verified paths, no collision with a running peer, and the requested file not already modified — never by the supervisor. |
+| `scope_revision_request.json` | A stage needing a path outside its declared scope | Scheduler policy, which writes `scope_revision_decision_*.json` beside it | `<runDir>/stages/<stageId>/`; answered by a deterministic predicate chain — matching run and live execution index (`attemptIndex` in the machine contract), digest-verified paths, no collision with a running peer, and the requested file not already modified — never by the supervisor. |
 | Guidance | Supervisor, scheduler, or operator path | Exact target stage and explicit run-wide consumers | Targeted envelopes in `supervisor_guidance.md` plus optional `stages/<stageId>/guidance.md`; filtered per consumer and archived by iteration. |
-| Terminal artifact | Sole admitted terminal-owner stage (or the static-workflow compatibility path) | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; accepted only with owner-attributed latest-attempt write evidence and snapshotted as `<runDir>/terminal_<basename>`. |
-| Stage output | Every stage attempt | Retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest attempt. A retry that needs to read what an *earlier* attempt actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered attempt — `output.md` alone was overwritten by each new attempt, so a passing attempt's output could be destroyed by a later one that failed in seconds. |
+| Terminal artifact | Exactly one admitted owner for that terminal path (or the static-workflow compatibility path) | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; accepted only with owner-attributed latest-execution write evidence and snapshotted as `<runDir>/terminal_<basename>`. |
+| Stage output | Every stage execution | Technical retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest execution. A retry that needs to read what an *earlier* execution actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered execution — `output.md` alone was overwritten by each new execution, so a passing execution's output could be destroyed by a later one that failed in seconds. |
 
 The `stages` map and `stages/<stageId>/` files are live aliases for the active
 DAG. At an outer re-plan boundary, the scheduler first materializes the
 iteration-qualified stage-evidence files and then publishes those references in
 the same atomic `run.json` replacement that removes the old dynamic stages.
-Reusing a stage ID starts a fresh live attempt ledger; it cannot redirect the
+Reusing a stage ID starts a fresh live execution ledger; it cannot redirect the
 older record or inherit its completed status. Campaign costs and summaries read
 the archived status through `stageEvidence`, with `retiredStageUsage` retained
 only as a compatibility fallback for older runs.
@@ -488,6 +491,8 @@ and `criterion_refs`.
 For research workflows, `research` is reserved as the framework-owned policy
 fact namespace (for example, `research.decision`) and cannot be used as a
 dynamically dispatched stage ID.
+In a non-research run, a condition that references this namespace rejects the
+whole proposal with a remedy: remove the condition or declare research mode.
 
 Admission is atomic. One unknown role, duplicate ID, malformed stage, unknown
 edge, cycle, incoherent repair/gate edge, unowned terminal path, or criterion
@@ -541,15 +546,15 @@ relying only on prose.
 ```
 
 `scope` is a list of project-relative paths or globs. A write outside the stage's
-declared scope is reverted to its pre-stage contents once the attempt ends — this is
+declared scope is reverted to its pre-stage contents once the execution ends — this is
 what backs the "do not edit the project while a run is working in it" rule: your edit and
 the stage's are indistinguishable in the snapshot diff that scope enforcement reads.
 
 The same limitation governs parallel-write warnings. A shared-worktree snapshot says
 only that a path changed while a stage was running; it is observation, not ownership
-proof. The scheduler reports a parallel write conflict only when both latest attempts
+proof. The scheduler reports a parallel write conflict only when both latest executions
 directly attribute the same normalized path (`writeAttribution: structured`). Snapshot
-and unknown attribution remain in attempt history and constraint audits as reduced-
+and unknown attribution remain in execution history and constraint audits as reduced-
 confidence evidence, but neither is used to claim that two stages authored one file.
 Consequently, a real write by an adapter that cannot report structured paths may go
 unwarned; its snapshot overlap could equally have been caused entirely by its peer.
@@ -559,16 +564,18 @@ including planning and gates. Brief preflight warns when the mapping is absent; 
 choose the correct paths for the author. The planner still translates that contract into each
 generated stage's `scope`.
 
-Three states, not two:
+For dynamically dispatched stages, `scope` is required; omitting it rejects the
+whole proposal before execution. The static-workflow compatibility parser can
+still represent three historical states:
 
 - **declared** — `scope` is present. Only those paths (and, once negotiated, any
   accepted revision) survive.
 - **missing but negotiated** — `scope` is absent, but the stage requested and was
   granted a path at runtime (below). Enforcement governs exactly the granted set.
-- **missing and never negotiated** — `scope` is absent and no request was made.
-  Nothing is reverted; this is the only case in which "undeclared" means "unrestricted",
-  and it is deliberately not the default outcome of forgetting to set `scope` once a
-  stage has negotiated even once.
+- **missing and never negotiated** — legacy static configuration omitted `scope` and no
+  request was made. With no declared preimage boundary, the scheduler audits but does not
+  roll back those writes. This compatibility state is not available to a dynamic plan; the
+  worker prompt treats it as closed, and authored work must request an explicit capability.
 
 A stage that needs a path outside its declared scope writes one JSON object to
 `stages/<stageId>/scope_revision_request.json`, then waits for
@@ -576,14 +583,18 @@ A stage that needs a path outside its declared scope writes one JSON object to
 path. The request, the decision, and the outcome are all recorded in the run directory —
 this is the mechanism behind "a stage that needs something outside its boundary can ask"
 mentioned in the project README.
+The worker yields while waiting for that exact request ID. The scheduler wakes it through
+the decision file plus a bounded fallback check; an agent must not implement a tight poll.
+A mismatched run, stage, execution index, or path digest receives a rejected decision file.
+An accepted revision is inherited and revalidated by later executions of the same stage.
 
-The attempt budget comes only from `config/defaults.yaml::default_timeout_ms`.
-It is immutable after an attempt starts and covers adapter retries, backoff,
+The stage-execution budget comes only from `config/defaults.yaml::default_timeout_ms`.
+It is immutable after an execution starts and covers adapter retries, backoff,
 fallback loading, and fallback execution. A timed-out technical retry receives
-a strictly larger derived attempt budget; there is no aggregate technical-chain
+a strictly larger derived execution budget; there is no aggregate technical-chain
 cap. Legacy timeout fields in a plan and runtime extension requests are rejected
 with a migration message, so a plan cannot make its first timeout fatal or move
-a running attempt's deadline without bound.
+a running execution's deadline without bound.
 
 Every `retry_to` target is normalized to a gate and added to the repair stage's
 dependencies. Only a completed, validated `pass:false` verdict makes that
@@ -606,9 +617,9 @@ listed in their prompt. The path is specific to the gate stage, so concurrent
 gates do not overwrite one another.
 
 A numeric metric is optional unless a `gate_contract.json` contract applies to
-that gate. Before each attempt, the scheduler replaces any older metric artifact
+that gate. Before each execution, the scheduler replaces any older metric artifact
 with an engine-owned `hasMetric:false` marker. This makes “no metric for this
-attempt” explicit and prevents a failing metric from an earlier planner
+execution” explicit and prevents a failing metric from an earlier planner
 iteration from contradicting a new qualitative verdict. When an applicable
 contract names a metric and threshold, the current verdict or metric artifact
 must contain the numeric value; omission fails the run at that first gate
@@ -616,7 +627,7 @@ evaluation, naming the missing metric and threshold, before any product repair
 or outer re-plan is dispatched.
 
 When a gate does write a metric, the verdict must agree with it. In particular,
-a passing verdict paired with a failing metric from the same attempt remains an
+a passing verdict paired with a failing metric from the same execution remains an
 engine rejection. This freshness rule does not relax the measure-round
 self-deception guard.
 
@@ -691,6 +702,10 @@ already exist, be a framework-owned research/terminal path, or be owned by an
 admitted stage. This prevents a check from requiring an artifact that no stage
 can create before the check runs. Terminal candidates are materialized before
 their final reality checks and quarantined into the run directory if rejected.
+For research runs, the mutable latest-round `result_file` is not automatically
+a safe hard-check target: it is consumed and may be absent when the check runs.
+Use the resolved report directory's framework-owned `run_manifest.json`, or an
+artifact with an admitted producer, when the check needs durable round evidence.
 
 ### Guidance
 
@@ -719,14 +734,16 @@ run guidance.
 Inspect and rehearse the exact bytes before a live launch, then create the launch worktree:
 
 ```bash
-flowcrew ship-preflight --brief <brief.md> [--campaign <name>]
+flowcrew ship-preflight --brief <brief.md> [--campaign <name>] [--no-baseline]
 flowcrew rehearse <brief.md>
 flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name> [--project <source>]
 flowcrew watch --once
 ```
 
 Preflight reports prior-run and campaign facts, verifies declared input claims, and records the
-configuration-discovered validation baseline as a delta contract. Rehearsal validates the
+configuration-discovered validation baseline as a delta contract. The baseline streams command
+output and warns before touching a project shared by a verified live run; `--no-baseline` launches
+no project command and records the omission. Rehearsal validates the
 frontmatter and exercises the terminal, confirmation, floor, and round-file paths with a
 scripted adapter. It does not validate research quality; see [Zero-token rehearsal](rehearse.md).
 

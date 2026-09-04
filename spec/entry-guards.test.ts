@@ -875,7 +875,7 @@ function runQuickSync(isolated: CliFixture, quickArgs: string[]) {
 function runCliSync(isolated: CliFixture, cliArgs: string[], input?: string) {
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), ...cliArgs],
+    [join(repositoryRoot, 'dist', 'cli.js'), ...cliArgs],
     {
       cwd: repositoryRoot,
       env: {
@@ -902,7 +902,7 @@ async function runQuick(
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), ...quickArgs],
+    [join(repositoryRoot, 'dist', 'cli.js'), ...quickArgs],
     {
       cwd: repositoryRoot,
       env: {

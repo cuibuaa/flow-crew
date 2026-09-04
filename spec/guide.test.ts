@@ -45,7 +45,7 @@ function writeRun(runId: string, status: string, title: string, mtimeOffsetSecon
 function runGuide(...guideArgs: string[]) {
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(process.cwd(), 'src', 'cli.ts'), 'guide', ...guideArgs],
+    [join(process.cwd(), 'dist', 'cli.js'), 'guide', ...guideArgs],
     {
       cwd: process.cwd(),
       env: {

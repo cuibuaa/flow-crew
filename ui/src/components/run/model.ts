@@ -327,7 +327,16 @@ function eventContext(event: RunEvent): string {
   const stage = typeof rawStage === "string" ? rawStage.trim() : "";
   const message = typeof event.message === "string" ? event.message.trim() : "";
   const detail = typeof event.detail === "string" ? event.detail.trim() : "";
-  return [stage ? `Stage ${stage}` : "", message || detail].filter(Boolean).join(" · ");
+  const reason = typeof event.reason === "string" ? event.reason.trim() : "";
+  const execution = typeof event.attemptIndex === "number" && Number.isFinite(event.attemptIndex)
+    ? `Execution ${event.attemptIndex}` : "";
+  const decision = typeof event.decision === "string" ? `Decision ${event.decision}` : "";
+  const status = typeof event.runStatus === "string"
+    ? `Run status ${event.runStatus}`
+    : typeof event.status === "string" ? `Status ${event.status}` : "";
+  return [stage ? `Stage ${stage}` : "", execution, message || detail || reason, decision, status]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function humanizeRunEvents(events: RunEvent[] | null | undefined): HumanRunEvent[] {
@@ -341,19 +350,29 @@ export function humanizeRunEvents(events: RunEvent[] | null | undefined): HumanR
     const context = eventContext(event);
     const known: Record<string, [string, HumanRunEvent["kind"]]> = {
       stage_complete: ["Stage completed", "complete"],
+      attempt_started: ["Stage execution started", "neutral"],
+      attempt_finished: ["Stage execution finished", "complete"],
+      attempt_failed: ["Stage execution failed", "error"],
       complete: ["Work completed", "complete"],
       stage_failed: ["Stage failed", "error"],
       stage_error: ["Stage reported an error", "error"],
       error: ["An execution error was recorded", "error"],
       stage_skipped: ["Stage was skipped", "neutral"],
       verdict_written: ["A gate verdict was recorded", "guide"],
-      attempt_results_updated: ["Attempt results were updated", "neutral"],
+      attempt_results_updated: ["Execution results were updated", "neutral"],
       iteration_completed: ["An iteration completed", "complete"],
       run_completed: ["The run reached its recorded outcome", "complete"],
       campaign_alert: ["The campaign raised an alert", "warning"],
       research_injected: ["New research guidance was added", "guide"],
       supervisor_replan: ["The supervisor changed the execution plan", "guide"],
-      supervisor_reject: ["The supervisor requested another attempt", "warning"],
+      supervisor_reject: ["The supervisor requested another execution", "warning"],
+      supervisor_reject_requested: ["The supervisor requested another execution", "warning"],
+      supervisor_reject_discarded: ["A stale supervisor rejection was discarded", "warning"],
+      guidance_written: ["Stage guidance was recorded", "guide"],
+      scope_revision_requested: ["A scope revision was requested", "warning"],
+      scope_revision_decided: ["A scope revision was decided", "guide"],
+      admission_rejected: ["Admission rejected a proposal", "error"],
+      run_status_changed: ["The canonical run status changed", "neutral"],
       supervisor_guide: ["The supervisor recorded guidance", "guide"],
       guide: ["Execution guidance was recorded", "guide"],
       plan_dispatch_retry: ["Plan dispatch was retried", "warning"],

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
+import { loadProjectDefaults } from './config.js';
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type PackageRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -47,6 +48,14 @@ export interface ValidationDiscovery {
 
 export interface ValidationRunRequest extends ValidationCommand {
   cwd: string;
+  observer?: ValidationProgressObserver;
+}
+
+export interface ValidationProgressObserver {
+  onCommandStart?: (command: ValidationCommand) => void;
+  onCommandOutput?: (command: ValidationCommand, stream: 'stdout' | 'stderr', chunk: string) => void;
+  onCommandHeartbeat?: (command: ValidationCommand, elapsedMs: number) => void;
+  onCommandFinish?: (command: ValidationCommand, response: ValidationRunResponse) => void;
 }
 
 export interface ValidationRunResponse {
@@ -86,6 +95,7 @@ export interface ValidationGateCriterion {
 
 export interface ProjectValidationBaseline {
   version: 1;
+  execution?: 'executed' | 'skipped';
   projectDir: string;
   discovery: ValidationDiscovery;
   results: ValidationCommandResult[];
@@ -98,6 +108,8 @@ export interface ProjectValidationDependencies {
   declaredCommands?: readonly BriefValidationCommand[];
   now?: () => number;
   maxOutputBytes?: number;
+  observer?: ValidationProgressObserver;
+  skipExecution?: boolean;
 }
 
 export interface ValidationDeltaResult {
@@ -551,16 +563,28 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
   let stderr = '';
   let settled = false;
   let timedOut = false;
-  const timeoutMs = 15 * 60 * 1000;
+  // A project's suite grows as rounds add tests, and ship-setup runs it twice.
+  // Hardcoding this meant the refusal named the timeout while the cause was the
+  // suite's size plus whatever else the machine was doing.
+  let timeoutMs = 45 * 60 * 1000;
+  try {
+    const configured = loadProjectDefaults(request.cwd).validation_timeout_ms;
+    if (Number.isFinite(configured) && configured > 0) timeoutMs = configured;
+  } catch { /* fall back to the built-in when the project has no defaults file */ }
   const timeout = setTimeout(() => {
     timedOut = true;
     child.kill();
   }, timeoutMs);
   timeout.unref();
+  const heartbeat = setInterval(() => {
+    try { request.observer?.onCommandHeartbeat?.(request, Date.now() - started); } catch { /* display callbacks cannot change validation */ }
+  }, 10_000);
+  heartbeat.unref();
   const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
     if (settled) return;
     settled = true;
     clearTimeout(timeout);
+    clearInterval(heartbeat);
     resolveResult({
       exitCode,
       stdout,
@@ -572,10 +596,14 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
     });
   };
   child.stdout?.on('data', (chunk: Buffer | string) => {
-    stdout = boundedOutput(stdout + chunk.toString(), 256 * 1024);
+    const value = chunk.toString();
+    stdout = boundedOutput(stdout + value, 256 * 1024);
+    try { request.observer?.onCommandOutput?.(request, 'stdout', value); } catch { /* display callbacks cannot change validation */ }
   });
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr = boundedOutput(stderr + chunk.toString(), 256 * 1024);
+    const value = chunk.toString();
+    stderr = boundedOutput(stderr + value, 256 * 1024);
+    try { request.observer?.onCommandOutput?.(request, 'stderr', value); } catch { /* display callbacks cannot change validation */ }
   });
   child.once('error', (error) => { settle(null, null, error.message); });
   child.once('close', (code, signal) => {
@@ -743,13 +771,28 @@ export async function runProjectValidationBaseline(
       });
       continue;
     }
+    if (dependencies.skipExecution) {
+      results.push({
+        role,
+        display: command.display,
+        state: 'unresolved',
+        durationMs: 0,
+        output: '',
+        failureIdentifiers: [],
+        failureIdentity: 'unknown',
+        reason: 'Baseline execution was skipped by operator request (--no-baseline)',
+      });
+      continue;
+    }
     const started = now();
     let response: ValidationRunResponse;
+    try { dependencies.observer?.onCommandStart?.(command); } catch { /* display callbacks cannot change validation */ }
     try {
-      response = await runner({ ...command, cwd: root });
+      response = await runner({ ...command, cwd: root, observer: dependencies.observer });
     } catch (error) {
       response = { exitCode: null, error: errorMessage(error) };
     }
+    try { dependencies.observer?.onCommandFinish?.(command, response); } catch { /* display callbacks cannot change validation */ }
     const durationMs = response.durationMs ?? Math.max(0, now() - started);
     const rawOutput = [response.stdout, response.stderr]
       .filter((value): value is string => Boolean(value))
@@ -803,6 +846,7 @@ export async function runProjectValidationBaseline(
 
   return {
     version: 1,
+    execution: dependencies.skipExecution ? 'skipped' : 'executed',
     projectDir: root,
     discovery,
     results,

@@ -1,4 +1,6 @@
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
@@ -273,6 +275,104 @@ function globalCodexConfigValue(key: string): string | undefined {
  */
 export const CLI_BUILTIN_DEFAULT = '__cli_builtin_default__';
 
+export interface CodexCapabilityIdentity {
+  executable: string;
+  version: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+}
+
+export interface CodexCapabilityMemory {
+  version: 1;
+  capability: 'reasoning_effort_unsupported';
+  identity: CodexCapabilityIdentity;
+  learnedAt: string;
+}
+
+let cachedCodexVersion: string | undefined;
+
+function detectedCodexVersion(executable: string): string {
+  if (cachedCodexVersion !== undefined && executable === 'codex') return cachedCodexVersion;
+  let version = 'unknown';
+  try {
+    version = execFileSync(executable, ['--version'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }).trim() || 'unknown';
+  } catch { /* an unavailable CLI will fail normally when the adapter starts */ }
+  if (executable === 'codex') cachedCodexVersion = version;
+  return version;
+}
+
+/** Stable scope for learned adapter capabilities. A changed CLI, provider, or
+ * model deliberately produces a different key and therefore gets re-probed. */
+export function resolveCodexCapabilityIdentity(
+  role: Pick<AgentConfig, 'model' | 'reasoning_effort'>,
+  overrides: Partial<CodexCapabilityIdentity> = {},
+): CodexCapabilityIdentity {
+  const executable = overrides.executable ?? 'codex';
+  const model = overrides.model ?? (
+    role.model === CLI_BUILTIN_DEFAULT
+      ? CLI_BUILTIN_DEFAULT
+      : role.model && role.model !== 'default'
+        ? role.model
+        : globalCodexConfigValue('model') ?? 'cli_builtin_default'
+  );
+  const reasoningEffort = overrides.reasoningEffort ?? (
+    role.reasoning_effort === CLI_BUILTIN_DEFAULT
+      ? CLI_BUILTIN_DEFAULT
+      : role.reasoning_effort && role.reasoning_effort !== 'default'
+        ? role.reasoning_effort
+        : globalCodexConfigValue('model_reasoning_effort') ?? 'cli_builtin_default'
+  );
+  return {
+    executable,
+    version: overrides.version ?? detectedCodexVersion(executable),
+    provider: overrides.provider ?? globalCodexConfigValue('model_provider') ?? 'codex',
+    model,
+    reasoningEffort,
+  };
+}
+
+function codexCapabilityPath(runDir: string, identity: CodexCapabilityIdentity): string {
+  const digest = createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24);
+  return join(runDir, 'adapter_capabilities', `codex_${digest}.json`);
+}
+
+export function readCodexCapabilityMemory(
+  runDir: string,
+  identity: CodexCapabilityIdentity,
+): CodexCapabilityMemory | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(codexCapabilityPath(runDir, identity), 'utf-8')) as CodexCapabilityMemory;
+    if (parsed.version !== 1 || parsed.capability !== 'reasoning_effort_unsupported') return undefined;
+    if (JSON.stringify(parsed.identity) !== JSON.stringify(identity)) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+export function rememberCodexUnsupportedEffort(runDir: string, identity: CodexCapabilityIdentity): void {
+  const target = codexCapabilityPath(runDir, identity);
+  try {
+    mkdirSync(join(runDir, 'adapter_capabilities'), { recursive: true });
+    if (existsSync(target)) return;
+    const memory: CodexCapabilityMemory = {
+      version: 1,
+      capability: 'reasoning_effort_unsupported',
+      identity,
+      learnedAt: new Date().toISOString(),
+    };
+    // Immutable create-only publication is sufficient: all writers publish the
+    // same capability for this identity, and a crash cannot acknowledge a
+    // partially written record as valid JSON.
+    writeFileSync(target, `${JSON.stringify(memory, null, 2)}\n`, { encoding: 'utf-8', flag: 'wx' });
+  } catch { /* a lost optimization must not change adapter correctness */ }
+}
+
 export function writeCodexConfig(codexHome: string, role: AgentConfig): string {
   mkdirSync(codexHome, { recursive: true });
   syncCodexAuthFiles(codexHome);
@@ -356,8 +456,11 @@ export class CodexAdapter implements Adapter {
       // retry that re-sends the request the server just rejected (and, with a
       // 30-minute stage timeout, burns real wall time to fail identically).
       // At most 2 fixes, each fix applied at most once.
-      let effectiveRole = role;
+      const capabilityIdentity = resolveCodexCapabilityIdentity(role);
+      const rememberedEffortRejection = readCodexCapabilityMemory(opts.runDir, capabilityIdentity) !== undefined;
+      let effectiveRole = rememberedEffortRejection ? applyFix(role, 'drop_effort') : role;
       const applied = new Set<AdapterFix>();
+      if (rememberedEffortRejection) applied.add('drop_effort');
       let diagnosis: Diagnosis = { fix: 'none', friendly: '', matched: '' };
       for (;;) {
         writeCodexConfig(codexHome, effectiveRole);
@@ -385,6 +488,7 @@ export class CodexAdapter implements Adapter {
         diagnosis = diagnoseAdapterFailure(result.output, result.exitCode);
         if (diagnosis.fix === 'none' || applied.has(diagnosis.fix) || applied.size >= 2) break;
         applied.add(diagnosis.fix);
+        if (diagnosis.fix === 'drop_effort') rememberCodexUnsupportedEffort(opts.runDir, capabilityIdentity);
         effectiveRole = applyFix(effectiveRole, diagnosis.fix);
         if (diagnosis.fix === 'fresh_session') {
           resumeSessionId = undefined;

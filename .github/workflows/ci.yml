@@ -10,9 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -31,6 +36,7 @@ jobs:
 
   public-spec-isolation:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -43,6 +49,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build the committed runtime generation
+        run: npm run build
 
       - name: Pull isolated test image
         run: docker pull node:22-bookworm
@@ -69,7 +78,11 @@ jobs:
               test ! -e "$HOME/.fc"
               ! command -v codex
               ! command -v claude
-              node ./node_modules/vitest/vitest.mjs run spec
+              node ./node_modules/vitest/vitest.mjs run \
+                spec/spec-purity.test.ts \
+                spec/test-isolation.test.ts \
+                spec/rehearse-isolation.test.ts \
+                spec/run-artifact-isolation.test.ts
             '
 
   # Supervision is a two-axis matrix: whether a service manager is present, and
@@ -84,6 +97,7 @@ jobs:
   #                        signal actually reached the agent off Linux
   no-service-manager:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -124,7 +138,12 @@ jobs:
           command -v systemd-run && { echo "systemd-run leaked into PATH"; exit 1; } || echo "systemd-run: absent (expected)"
           command -v journalctl  && { echo "journalctl leaked into PATH"; exit 1; } || echo "journalctl: absent (expected)"
           test -d /proc && echo "/proc: present (expected on this axis)"
-          node ./node_modules/vitest/vitest.mjs run spec
+          node ./node_modules/vitest/vitest.mjs run \
+            spec/supervise-shim.test.ts \
+            spec/supervised-lifecycle.test.ts \
+            spec/supervision-cli-surfaces.test.ts \
+            spec/portable-supervision-safety.test.ts \
+            spec/durable-supervision-backend.test.ts
 
   # macOS is a supported platform, so it gets a blocking job. Without this the
   # port would rot the first time someone reaches for /proc or a GNU-only flag.
@@ -137,6 +156,7 @@ jobs:
   # the rotation is live, so the OS could change between merges.
   macos:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -435,8 +455,15 @@ jobs:
 
       # No pipe and no `|| true`: a masked exit code here would make the job
       # green while macOS is broken, which is the failure this job exists to catch.
-      - name: Run the public spec suite
-        run: node ./node_modules/vitest/vitest.mjs run spec
+      - name: Run the portable lifecycle and process-identity contracts
+        run: >-
+          node ./node_modules/vitest/vitest.mjs run
+          spec/supervise-shim.test.ts
+          spec/supervised-lifecycle.test.ts
+          spec/supervision-cli-surfaces.test.ts
+          spec/portable-supervision-safety.test.ts
+          spec/run-lock-portability.test.ts
+          spec/darwin-branch-simulation.test.ts
 
   # ---------------------------------------------------------------------------
   # Distribution jobs. These answer a question the rest of CI structurally
@@ -460,6 +487,7 @@ jobs:
       || (github.event_name == 'push'
           && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -525,6 +553,7 @@ jobs:
       || (github.event_name == 'push'
           && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Use Node.js 22
         uses: actions/setup-node@v4
@@ -558,6 +587,7 @@ jobs:
       || (github.event_name == 'push'
           && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:

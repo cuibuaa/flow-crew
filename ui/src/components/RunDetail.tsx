@@ -178,7 +178,7 @@ function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: num
               <ol className="attempt-ledger">
                 {ledger.rows.map((attempt) => (
                   <li key={attempt.key} className={attempt.status === "failed" ? "failed" : ""}>
-                    <span>Attempt {attempt.index}{attempt.current ? " · current" : ""}</span>
+                    <span>Execution {attempt.index}{attempt.current ? " · current" : ""}</span>
                     <code>{attempt.status}</code>
                     <span>{formatDuration(attempt.durationMs)}</span>
                     {attempt.current && !attempt.recorded ? <span className="run-muted">start time unavailable in this view</span> : null}
@@ -187,7 +187,7 @@ function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: num
                 ))}
               </ol>
             ) : ledger.legacyAggregate ? (
-              <p className="run-muted">Legacy aggregate: {stage.status} · {formatDuration(ledger.aggregateDurationMs)} cumulative. Per-attempt history is unavailable.</p>
+              <p className="run-muted">Legacy aggregate: {stage.status} · {formatDuration(ledger.aggregateDurationMs)} cumulative. Per-execution history is unavailable.</p>
             ) : <p className="run-muted">This stage has no recorded execution.</p>}
           </article>
         );
@@ -412,9 +412,9 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         <span className={`outcome-badge ${stageStatusTone(selected.status)}`}>{selected.status}</span>
       </div>
       <p className="stage-summary" data-testid="stage-summary">
-        {selectedLedger?.recordedAttempts ?? 0} recorded {(selectedLedger?.recordedAttempts ?? 0) === 1 ? "attempt" : "attempts"}
+        {selectedLedger?.recordedAttempts ?? 0} recorded {(selectedLedger?.recordedAttempts ?? 0) === 1 ? "execution" : "executions"}
         {selectedLedger?.current ? " + current execution" : ""}; {selectedLedger?.failedAttemptsExact === false ? `at least ${selectedLedger.failedAttempts}` : selectedLedger?.failedAttempts ?? 0} failed.
-        {selectedLedger?.current ? ` Current attempt duration: ${formatDuration(selectedLedger.rows.find((row) => row.current)?.durationMs)}.` : ""}
+        {selectedLedger?.current ? ` Current execution duration: ${formatDuration(selectedLedger.rows.find((row) => row.current)?.durationMs)}.` : ""}
       </p>
       <details className="stage-output-disclosure" open={logOpen} onToggle={(event) => setLogOpen((event.currentTarget as HTMLDetailsElement).open)}>
         <summary>Show stage log</summary>
@@ -483,7 +483,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         <div className="run-total-answer" data-testid="run-wall-time">
           <span>{terminalRun ? "Total wall time" : "Run elapsed"}</span>
           <strong>{formatDuration(elapsed)}</strong>
-          <p>{terminalRun ? "From run start to recorded completion." : "Wall clock since the run started; not the current attempt duration."}</p>
+          <p>{terminalRun ? "From run start to recorded completion." : "Wall clock since the run started; not the current stage-execution duration."}</p>
         </div>
         <div className="run-total-answer" data-testid="run-cost-summary">
           <span>{usage.complete ? "Total recorded usage" : "Known recorded usage"}</span>
@@ -491,6 +491,30 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <p>{usage.complete ? "Complete run total, including supervisor." : "Known portion only, including recorded supervisor usage; unsettled or unavailable fields are not treated as zero."}</p>
         </div>
       </section>
+
+      {run.operational ? (
+        <section className="run-operational-projection" data-testid="operational-projection" aria-label="Operational run projection">
+          <div>
+            <span>Latest reason</span>
+            <strong>{run.operational.latestReason?.detail ?? "No rejection, guidance, or status reason is recorded."}</strong>
+          </div>
+          <div>
+            <span>Latest rejection</span>
+            <strong>{run.operational.lastRejection?.detail ?? "none recorded"}</strong>
+          </div>
+          <div>
+            <span>Pending decisions</span>
+            <strong>{run.operational.pendingApproval
+              ? `Approval: ${run.operational.pendingApproval.detail}`
+              : run.operational.pendingScope.length > 0
+                ? `${run.operational.pendingScope.length} scope revision ${run.operational.pendingScope.length === 1 ? "request" : "requests"}`
+                : "none"}</strong>
+          </div>
+          <small>Evidence: state {run.operational.sourceCoverage.runState}; events {run.operational.sourceCoverage.events}; {run.operational.sourceCoverage.stageCount} stages.</small>
+        </section>
+      ) : (
+        <div className="run-local-alert warning" data-testid="operational-projection-unavailable">Operational projection is unavailable from this dashboard build; stage history below remains authoritative.</div>
+      )}
 
       {refreshError ? (
         <div className="run-local-alert error" role="alert" data-testid="run-refresh-error">
@@ -518,8 +542,8 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <section className="run-signal-bar" aria-label="Run signals" data-testid="run-signals" data-answers="Q2 Q5">
             <div className="run-signal unknown"><strong>Stall signal unknown</strong><span>No trustworthy worker heartbeat is recorded.</span></div>
             <div className={failures.failedAttempts > 0 ? "run-signal error" : "run-signal neutral"}>
-              <strong>{failures.failedAttemptsExact ? failures.failedAttempts : `at least ${failures.failedAttempts}`} recorded failed {failures.failedAttempts === 1 ? "attempt" : "attempts"}</strong>
-              <span>{failures.stageIds.length > 0 ? `Affected: ${failures.stageIds.join(", ")}` : "No failed attempt is present in the available ledger."}</span>
+              <strong>{failures.failedAttemptsExact ? failures.failedAttempts : `at least ${failures.failedAttempts}`} recorded failed {failures.failedAttempts === 1 ? "execution" : "executions"}</strong>
+              <span>{failures.stageIds.length > 0 ? `Affected: ${failures.stageIds.join(", ")}` : "No failed execution is present in the available ledger."}</span>
             </div>
             {failedChecks.length > 0 ? <div className="run-signal error"><strong>{failedChecks.length} non-passing gate {failedChecks.length === 1 ? "check" : "checks"}</strong><span>{failedChecks.map((check) => check.name).join(", ")}</span></div> : null}
           </section>
@@ -537,8 +561,8 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
                       <button type="button" className={selected?.id === stage.id ? "active" : ""} key={stage.id} onClick={() => selectStage(stage.id)} aria-pressed={selected?.id === stage.id}>
                         <strong>{stage.id}</strong>
                         <span>{stage.role || "role unknown"}{stage.is_gate ? " · gate" : ""}</span>
-                        <span>{ledger.recordedAttempts} recorded {ledger.recordedAttempts === 1 ? "attempt" : "attempts"} + current execution</span>
-                        <span>Current attempt: {formatDuration(currentDuration)}</span>
+                        <span>{ledger.recordedAttempts} recorded {ledger.recordedAttempts === 1 ? "execution" : "executions"} + current execution</span>
+                        <span>Current execution: {formatDuration(currentDuration)}</span>
                       </button>
                     );
                   })}
@@ -603,7 +627,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <aside className="run-terminal-facts" aria-labelledby="terminal-facts-title" data-answers="Q3 Q5">
             <div className="run-section-heading"><div><span className="run-card-label">EXECUTION HISTORY</span><h2 id="terminal-facts-title">Failures and intervention</h2></div></div>
             <dl className="terminal-fact-list">
-              <div><dt>Failed attempts</dt><dd data-testid="failed-attempt-count">{failures.failedAttemptsExact ? failures.failedAttempts : `at least ${failures.failedAttempts}`}</dd></div>
+              <div><dt>Failed executions</dt><dd data-testid="failed-attempt-count">{failures.failedAttemptsExact ? failures.failedAttempts : `at least ${failures.failedAttempts}`}</dd></div>
               <div><dt>Stages that failed at least once</dt><dd>{failures.stageIds.length > 0 ? failures.stageIds.join(", ") : "none recorded"}</dd></div>
               <div><dt>Final failed stages</dt><dd>{failures.failedStageIds.length > 0 ? failures.failedStageIds.join(", ") : "none recorded"}</dd></div>
               <div><dt>Operator intervention</dt><dd>{needsIntervention ? "Review this non-success outcome." : "No intervention is implied by the successful terminal status."}</dd></div>
@@ -632,7 +656,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         <summary>Execution history and diagnostics</summary>
         <div className="run-audit-body">
           <section aria-labelledby="attempt-history-title">
-            <h2 id="attempt-history-title">Stage attempt history</h2>
+            <h2 id="attempt-history-title">Stage execution history</h2>
             <StageAttemptHistory stages={stages} nowMs={nowMs} />
           </section>
           <section aria-labelledby="execution-structure-title">
@@ -654,7 +678,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
                 <div className="sd-meta-row"><span className="k">role</span><span>{selected.role || "unknown"}</span></div>
                 <div className="sd-meta-row"><span className="k">gate</span><span>{selected.is_gate ? "yes" : "no"}</span></div>
                 <div className="sd-meta-row"><span className="k">depends on</span><span className="mono">{selected.depends_on?.join(", ") || "none"}</span></div>
-                <div className="sd-meta-row"><span className="k">retry target</span><span className="mono">{selected.retry_to?.join(", ") || "none"}</span></div>
+                <div className="sd-meta-row"><span className="k">re-evaluation target</span><span className="mono">{selected.retry_to?.join(", ") || "none"}</span></div>
               </div>
             ) : null}
           </section>

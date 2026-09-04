@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
 import {
   resolveRunStatus,
+  readRunState,
   RUN_STATUS,
   runsRoot,
   TERMINAL_STATUSES as STORE_TERMINAL_STATUSES,
@@ -462,7 +463,7 @@ export async function generateRunSummary(
   if (!existsSync(join(runDir, 'run.json'))) return null;
 
   try {
-    const state: StoreState = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8'));
+    const state: StoreState = readRunState(projectDir, runId);
     if (!TERMINAL_STATUSES.has(state.status)) return null;
 
     const { joined: stageOutputs, raw: rawOutputs } = collectStageOutputs(runDir, state);

@@ -69,7 +69,7 @@ describe('flowcrew start signal lifecycle', () => {
       writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'adapter: mock\n', 'utf-8');
       const child = spawn(
         process.execPath,
-        ['--import', 'tsx', join(process.cwd(), 'src', 'cli.ts'), 'start'],
+        [join(process.cwd(), 'dist', 'cli.js'), 'start'],
         {
           cwd: process.cwd(),
           env: {

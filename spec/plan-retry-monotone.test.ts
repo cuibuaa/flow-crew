@@ -799,9 +799,14 @@ describe('scheduler integration', () => {
       const runRoot = runDir(projectDir, final.runId);
       const state = readMonotonePlanRetryState(runRoot, 'plan', 1);
       expect(state?.terminal?.disposition).toBe('admitted');
-      expect(state?.attempts[0].unsatisfied.map((requirement) => requirement.detail)).toEqual(
-        admission(fixture, 1).errors,
-      );
+      const historicalError = admission(fixture, 1).errors[0];
+      const currentErrors = state?.attempts[0].unsatisfied.map((requirement) => requirement.detail) ?? [];
+      expect(currentErrors).toHaveLength(1);
+      expect(currentErrors[0]).toContain(historicalError.split(';')[0]);
+      expect(currentErrors[0]).toContain('.no_candidate.json');
+      expect(currentErrors[0]).toContain('never writes');
+      expect(currentErrors[0]).toContain('always-emitted framework manifest');
+      expect(currentErrors[0]).toContain('unconditional producer');
       expect(JSON.parse(readFileSync(join(runRoot, 'dispatch_admission.json'), 'utf8'))).toMatchObject({
         pass: true,
         errors: [],

@@ -13,7 +13,6 @@ import {
   TaskRegistry,
   TASK_LIST_STATUS,
   TASK_STATUS,
-  isActiveTaskStatus,
   type TaskCreateInput,
   type TaskEntry,
 } from './task-registry.js';
@@ -21,6 +20,7 @@ import { parseTaskSummary } from './task-summary-parser.js';
 import {
   claimLaunchIntent,
   findParkedRunForProject,
+  inspectRunScheduler,
   invalidateRunLockCache,
   isProjectBusy,
   processCommandMatches,
@@ -317,13 +317,22 @@ export class Orchestrator {
     return backend.isActive(task.systemd_unit);
   }
 
-  status(): { uptime: number; watched_tasks: number; registry_unreadable_records: number } {
-    const snapshot = this.registry.snapshot();
-    const watched = snapshot.tasks.filter((task) => isActiveTaskStatus(task.status)).length;
+  status(): {
+    uptime: number;
+    watched_tasks: number;
+    registry_unreadable_records: number;
+    registry_bytes: number;
+    registry_records: number;
+    registry_tasks: number;
+  } {
+    const metrics = this.registry.metrics();
     return {
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
-      watched_tasks: watched,
-      registry_unreadable_records: snapshot.unreadableRecords,
+      watched_tasks: metrics.activeTasks,
+      registry_unreadable_records: metrics.unreadableRecords,
+      registry_bytes: metrics.bytes,
+      registry_records: metrics.records,
+      registry_tasks: metrics.tasks,
     };
   }
 
@@ -385,18 +394,31 @@ export class Orchestrator {
     }
     if (task.not_before && this.now().getTime() < Date.parse(task.not_before)) return;
 
-    // Any readable, non-terminal bound run is still the original execution:
-    // running means the approval CLI owns the resume; parked means it is
-    // awaiting that resume; other lifecycle states are likewise not authority
-    // to create a brand-new run from the brief.
     if (bound) {
-      const reason = isPausedRunStatus(bound.status)
-        ? `bound run ${bound.runId} is awaiting approval resume`
-        : `bound run ${bound.runId} is ${bound.status}; waiting for existing run`;
-      this.defer(task, reason, 'wait', task.run_id);
-      return;
+      const resolution = resolveRunStatus(bound.status);
+      if (resolution.kind === 'unknown') {
+        this.defer(
+          task,
+          `${resolution.reason}; refusing to replay or reconcile the bound run`,
+          'wait',
+          task.run_id,
+        );
+        return;
+      }
+      if (isPausedRunStatus(bound.status)) {
+        this.defer(task, `bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
+        return;
+      }
+      const recovery = this.boundRunRecoveryDecision(task, bound);
+      if (recovery.kind === 'stop') return;
+      if (task.defer_kind !== 'retry') {
+        task = this.registry.update(task.id, {
+          defer_kind: 'retry',
+          defer_reason: recovery.reason,
+        });
+      }
     }
-    if (task.kind !== 'campaign' && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
+    if (!bound && task.kind !== 'campaign' && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
       this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
       return;
     }
@@ -655,16 +677,64 @@ export class Orchestrator {
         await this.reconcileTerminalBoundRun(task, bound);
         return true;
       }
-      const detail = isPausedRunStatus(bound.status)
-        ? `bound run ${bound.runId} is awaiting approval resume`
-        : `bound run ${bound.runId} is ${bound.status}; waiting for existing run`;
-      this.defer(task, `${reason}; ${detail}`, 'wait', task.run_id);
+      if (isPausedRunStatus(bound.status)) {
+        this.defer(task, `${reason}; bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
+        return true;
+      }
+      const recovery = this.boundRunRecoveryDecision(task, bound, reason);
+      if (recovery.kind === 'resume') await this.retryOrStuck(task, recovery.reason);
       return true;
     }
     if (!task.run_id) return false; // legacy early crash
     if (readRunReservation(task.projectDir, task.run_id, this.now().getTime())) return false;
     this.failClosed(task, `${reason}; bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
     return true;
+  }
+
+  /**
+   * Decide from PID/start identity whether a non-terminal bound run still has
+   * an owner. `resume` means it is safe to launch only this existing run;
+   * corrupt/unreadable identity is terminally visible rather than an endless
+   * defer or an unsafe replay.
+   */
+  private boundRunRecoveryDecision(
+    task: TaskEntry,
+    bound: BoundRun,
+    prefix?: string,
+  ): { kind: 'resume'; reason: string } | { kind: 'stop' } {
+    const observed = inspectRunScheduler(bound.runId, bound.path);
+    const leading = prefix ? `${prefix}; ` : '';
+    if (observed.kind === 'live') {
+      this.defer(
+        task,
+        `${leading}bound run ${bound.runId} still owns live scheduler pid ${observed.pid}; waiting for that exact process`,
+        'retry',
+        task.run_id,
+      );
+      return { kind: 'stop' };
+    }
+    if (observed.kind === 'corrupt' || observed.kind === 'unverifiable') {
+      const pid = observed.pid === undefined ? '' : ` pid ${observed.pid}`;
+      this.failClosed(
+        task,
+        `${leading}bound run ${bound.runId} has ${observed.kind} scheduler identity${pid}: ${observed.detail}; `
+        + `inspect ${join(bound.path, 'scheduler.pid')} and then run flowcrew task retry ${task.id}`,
+      );
+      return { kind: 'stop' };
+    }
+    if (task.kind === 'campaign') {
+      this.failClosed(
+        task,
+        `${leading}bound campaign run ${bound.runId} has no live scheduler, but campaign relaunch cannot prove same-run resume; `
+        + `resume explicitly with flowcrew quick --existing-run-id ${bound.runId}`,
+      );
+      return { kind: 'stop' };
+    }
+    const pid = observed.kind === 'missing' ? '' : ` pid ${observed.pid}`;
+    return {
+      kind: 'resume',
+      reason: `${leading}bound run ${bound.runId} scheduler is ${observed.kind}${pid}; resuming that exact run`,
+    };
   }
 
   private async reconcileTerminalBoundRun(task: TaskEntry, bound: BoundRun): Promise<void> {
@@ -833,8 +903,10 @@ export class Orchestrator {
       return;
     }
     const completed = this.now().toISOString();
-    this.registry.update(task.id, { status: 'stuck', completed_at: completed, notes: reason });
-    this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: reason });
+    const exhausted = `${reason}; retry budget exhausted (${task.attempt}/${task.max_retries}); `
+      + `inspect with flowcrew task show ${task.id}, then explicitly run flowcrew task retry ${task.id} after resolving the cause`;
+    this.registry.update(task.id, { status: 'stuck', completed_at: completed, notes: exhausted });
+    this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: exhausted });
   }
 
   /**

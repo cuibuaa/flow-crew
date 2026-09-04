@@ -85,12 +85,12 @@ const RULES: Rule[] = [
     all: ['reasoning', 'not supported'],
     any: ['400', 'invalid_request', 'stream error', 'reasoning effort'],
     fix: 'drop_effort',
-    friendly: 'This model rejected the reasoning-effort setting. Retried once without it; set reasoning_effort: default in config/defaults.yaml to make it permanent.',
+    friendly: 'This model rejected the reasoning-effort setting. Retried once without it and remembered that capability for later stages in this run.',
   },
   {
     all: ['reasoning_effort', 'unsupported'],
     fix: 'drop_effort',
-    friendly: 'The reasoning-effort value was rejected. Retried once without it; set reasoning_effort: default in config/defaults.yaml.',
+    friendly: 'The reasoning-effort value was rejected. Retried once without it and remembered that capability for later stages in this run.',
   },
   {
     // codex CLI + ChatGPT-account model gating (the June-2026 gpt-5.3-codex incident).

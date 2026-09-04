@@ -9,10 +9,13 @@ import type { PoolOptions, PoolWorker, WorkerRequest } from 'vitest/node';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { startDashboard } from '../src/dashboard.js';
 import vitestConfig, {
+  NINE_P_FILESYSTEM_MAGIC,
   READY_AWARE_STARTUP_DEADLINE_MS,
   READY_AWARE_STARTUP_EXTENSION_MS,
   ReadyAwareForkWorker,
+  VITEST_MAX_WORKERS,
   readyAwareForkPool,
+  resolveVitestWorkerCount,
 } from '../vitest.config.js';
 
 interface VitestIsolationRegistry {
@@ -110,7 +113,27 @@ describe('root-suite file isolation', () => {
   it('keeps file isolation and three-worker concurrency without suite retry', () => {
     expect(vitestConfig.test?.pool).toBe(readyAwareForkPool);
     expect(vitestConfig.test?.fileParallelism).toBe(true);
-    expect(vitestConfig.test?.maxWorkers).toBe(3);
+    expect(vitestConfig.test?.maxWorkers).toBe(VITEST_MAX_WORKERS);
+    expect(resolveVitestWorkerCount({
+      logicalCpuCount: 6,
+      platform: 'linux',
+      filesystemType: 0xef53,
+    })).toBe(6);
+    expect(resolveVitestWorkerCount({
+      logicalCpuCount: 2,
+      platform: 'linux',
+      filesystemType: 0xef53,
+    })).toBe(2);
+    expect(resolveVitestWorkerCount({
+      logicalCpuCount: 6,
+      platform: 'linux',
+      filesystemType: NINE_P_FILESYSTEM_MAGIC,
+    })).toBe(3);
+    expect(resolveVitestWorkerCount({
+      logicalCpuCount: 6,
+      platform: 'win32',
+      filesystemType: 0,
+    })).toBe(3);
     expect(vitestConfig.test).not.toHaveProperty('retry');
   });
 

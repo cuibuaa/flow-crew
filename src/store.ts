@@ -1,9 +1,27 @@
-import { appendFileSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, existsSync, statSync, rmdirSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { stripVTControlCharacters } from 'node:util';
+import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
@@ -509,6 +527,24 @@ export interface RealityGateDiagnostics {
   results: RealityGateCheckDiagnostic[];
 }
 
+export interface RunHistoryRef {
+  version: 1;
+  path: 'run-history.v1.jsonl';
+  /** Only this durable prefix is acknowledged by the atomic projection. */
+  committedBytes: number;
+  counts: {
+    supervisorAttempts: number;
+    retiredStageUsage: number;
+    stageEvidence: number;
+  };
+}
+
+export interface RunStateFormat {
+  version: 2;
+  revision: number;
+  history?: RunHistoryRef;
+}
+
 export interface StoreState {
   runId: string;
   workflowName: string;
@@ -605,6 +641,8 @@ export interface StoreState {
     usedTokens?: number;
     usedTimeMs?: number;
   };
+  /** Compact projection format. Readers hydrate referenced history transparently. */
+  stateFormat?: RunStateFormat;
 }
 
 /** Parsed archive shape before the status text has been trusted. */
@@ -940,10 +978,31 @@ export function stageDir(projectDir: string, runId: string, stageId: string): st
 
 export function atomicWrite(filePath: string, data: string): void {
   const tmp = filePath + '.tmp.' + randomBytes(4).toString('hex');
+  let fd: number | undefined;
   try {
-    writeFileSync(tmp, data, 'utf-8');
+    fd = openSync(tmp, 'wx');
+    const bytes = Buffer.from(data, 'utf-8');
+    let written = 0;
+    while (written < bytes.length) {
+      const count = writeSync(fd, bytes, written, bytes.length - written);
+      if (count <= 0) throw new Error(`Atomic write made no progress for ${filePath}`);
+      written += count;
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, filePath);
+    // Commit the rename itself. Some filesystems persist file contents but
+    // lose an unsynced directory entry across a crash.
+    let parent: number | undefined;
+    try {
+      parent = openSync(dirname(filePath), 'r');
+      fsyncSync(parent);
+    } finally {
+      try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
+    }
   } catch (err) {
+    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
     try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
     throw err;
   }
@@ -1052,8 +1111,7 @@ export function initializeReservedRun(
   };
   const baseCommit = captureGitHead(normalizedProjectDir);
   if (baseCommit) state.baseCommit = baseCommit;
-  atomicWrite(join(dir, 'run.json'), JSON.stringify(state, null, 2));
-  try { upsertRunIndex(normalizedProjectDir, state); } catch { /* index is best-effort */ }
+  writeRunState(normalizedProjectDir, runId, state);
   atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
   try { unlinkSync(join(dir, RUN_RESERVATION_FILE)); } catch { /* initialized state is authoritative */ }
   return { runId, runDirPath: dir };
@@ -1084,10 +1142,465 @@ export function createRun(
   return initializeReservedRun(projectDir, reservation.runId, workflowName, workflowYaml, stageIds);
 }
 
+const RUN_HISTORY_FILE = 'run-history.v1.jsonl' as const;
+const RUN_STATE_LOCK_FILE = '.run-state.lock';
+const RUN_STATE_LOCK_TIMEOUT_MS = 5_000;
+const RUN_STATE_STALE_LOCK_MS = 30_000;
+
+type RunHistoryKind = keyof RunHistoryRef['counts'];
+
+interface RunHistoryRecord {
+  version: 1;
+  kind: RunHistoryKind;
+  index: number;
+  value: unknown;
+}
+
+interface RunHistories {
+  supervisorAttempts: SupervisorAttempt[];
+  retiredStageUsage: RetiredStageUsage[];
+  stageEvidence: StageEvidenceRecord[];
+}
+
+class RunStateProjectionConflictError extends Error {}
+
+interface RunStateProjectionExpectation {
+  raw: string;
+}
+
+function emptyRunHistories(): RunHistories {
+  return { supervisorAttempts: [], retiredStageUsage: [], stageEvidence: [] };
+}
+
+function historyRef(value: unknown): RunHistoryRef | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const format = value as Partial<RunStateFormat>;
+  if (format.version !== 2) throw new Error(`Unsupported run state projection version: ${String(format.version)}`);
+  if (!Number.isSafeInteger(format.revision) || (format.revision ?? -1) < 0) {
+    throw new Error('Invalid run state projection revision in run.json');
+  }
+  if (!format.history) return undefined;
+  const ref = format.history as Partial<RunHistoryRef>;
+  const counts = ref.counts as Partial<RunHistoryRef['counts']> | undefined;
+  if (
+    ref.version !== 1
+    || ref.path !== RUN_HISTORY_FILE
+    || !Number.isSafeInteger(ref.committedBytes)
+    || (ref.committedBytes ?? -1) < 0
+    || !counts
+    || !Number.isSafeInteger(counts.supervisorAttempts) || (counts.supervisorAttempts ?? -1) < 0
+    || !Number.isSafeInteger(counts.retiredStageUsage) || (counts.retiredStageUsage ?? -1) < 0
+    || !Number.isSafeInteger(counts.stageEvidence) || (counts.stageEvidence ?? -1) < 0
+  ) throw new Error('Invalid run history reference in run.json');
+  return ref as RunHistoryRef;
+}
+
+function readPrefix(path: string, length: number): Buffer {
+  if (length === 0) return Buffer.alloc(0);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    if (size < length) {
+      throw new Error(`Run history is truncated: ${path} has ${size} bytes; run.json acknowledges ${length}`);
+    }
+    const out = Buffer.allocUnsafe(length);
+    let offset = 0;
+    while (offset < length) {
+      const count = readSync(fd, out, offset, length - offset, offset);
+      if (count <= 0) throw new Error(`Run history ended before acknowledged byte ${length}: ${path}`);
+      offset += count;
+    }
+    return out;
+  } finally {
+    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
+function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunHistories {
+  if (!ref) return emptyRunHistories();
+  const slots: Record<RunHistoryKind, Map<number, unknown>> = {
+    supervisorAttempts: new Map(),
+    retiredStageUsage: new Map(),
+    stageEvidence: new Map(),
+  };
+  const raw = readPrefix(join(runPath, ref.path), ref.committedBytes).toString('utf-8');
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let record: Partial<RunHistoryRecord>;
+    try { record = JSON.parse(line) as Partial<RunHistoryRecord>; } catch {
+      throw new Error(`Malformed acknowledged run history record in ${join(runPath, ref.path)}`);
+    }
+    if (
+      record.version !== 1
+      || (record.kind !== 'supervisorAttempts' && record.kind !== 'retiredStageUsage' && record.kind !== 'stageEvidence')
+      || !Number.isSafeInteger(record.index)
+      || (record.index ?? -1) < 0
+      || !Object.prototype.hasOwnProperty.call(record, 'value')
+    ) throw new Error(`Invalid acknowledged run history record in ${join(runPath, ref.path)}`);
+    slots[record.kind].set(record.index as number, record.value);
+  }
+
+  const materialize = <T>(kind: RunHistoryKind, count: number): T[] => {
+    const values: T[] = [];
+    for (let index = 0; index < count; index += 1) {
+      if (!slots[kind].has(index)) throw new Error(`Run history ${kind}[${index}] is missing from acknowledged prefix`);
+      values.push(slots[kind].get(index) as T);
+    }
+    return values;
+  };
+  return {
+    supervisorAttempts: materialize<SupervisorAttempt>('supervisorAttempts', ref.counts.supervisorAttempts),
+    retiredStageUsage: materialize<RetiredStageUsage>('retiredStageUsage', ref.counts.retiredStageUsage),
+    stageEvidence: materialize<StageEvidenceRecord>('stageEvidence', ref.counts.stageEvidence),
+  };
+}
+
+function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): ArchivedStoreState {
+  if (!parsed.stateFormat) return parsed;
+  const ref = historyRef(parsed.stateFormat);
+  const histories = readRunHistories(runPath, ref);
+  if (histories.supervisorAttempts.length > 0) {
+    if (!parsed.supervisor) throw new Error('Run projection has supervisor history without a supervisor summary');
+    parsed.supervisor.attempts = histories.supervisorAttempts;
+  } else if (parsed.supervisor) {
+    parsed.supervisor.attempts = [];
+  }
+  if (histories.retiredStageUsage.length > 0) parsed.retiredStageUsage = histories.retiredStageUsage;
+  if (histories.stageEvidence.length > 0) parsed.stageEvidence = histories.stageEvidence;
+  return parsed;
+}
+
+function processExistsForStateLock(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function stateLockSleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withRunStateLock<T>(projectDir: string, runId: string, fn: () => T): T {
+  const path = join(runDir(projectDir, runId), RUN_STATE_LOCK_FILE);
+  const token = randomBytes(12).toString('hex');
+  const started = Date.now();
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = openSync(path, 'wx');
+      try {
+        writeFileSync(fd, `${JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() })}\n`, 'utf-8');
+      } catch (error) {
+        try { closeSync(fd); } catch { /* best effort */ }
+        fd = undefined;
+        try { unlinkSync(path); } catch { /* best effort */ }
+        throw error;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let stale = false;
+      try {
+        const owner = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown; acquiredAt?: unknown };
+        const acquiredAt = typeof owner.acquiredAt === 'string' ? Date.parse(owner.acquiredAt) : Number.NaN;
+        stale = typeof owner.pid === 'number'
+          ? !processExistsForStateLock(owner.pid)
+          : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= RUN_STATE_STALE_LOCK_MS;
+      } catch {
+        try { stale = Date.now() - statSync(path).mtimeMs >= RUN_STATE_STALE_LOCK_MS; } catch { /* leave the lock non-stale */ }
+      }
+      if (stale) {
+        try { unlinkSync(path); } catch { /* another owner won */ }
+        continue;
+      }
+      if (Date.now() - started >= RUN_STATE_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for run state lock ${path}`, { cause: error });
+      }
+      stateLockSleep(10);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+    try {
+      const owner = JSON.parse(readFileSync(path, 'utf-8')) as { token?: unknown };
+      if (owner.token === token) unlinkSync(path);
+    } catch { /* an old owner never removes a replacement lock */ }
+  }
+}
+
+function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | undefined): T[] {
+  if (!incoming) return current;
+  const overlap = Math.min(current.length, incoming.length);
+  for (let index = 0; index < overlap; index += 1) {
+    if (!isDeepStrictEqual(current[index], incoming[index])) {
+      throw new Error(`Refusing to rewrite acknowledged append-only ${name}[${index}]`);
+    }
+  }
+  return incoming.length > current.length ? incoming : current;
+}
+
+function mergeSupervisorAttempts(current: SupervisorAttempt[], incoming: SupervisorAttempt[] | undefined): SupervisorAttempt[] {
+  if (!incoming) return current;
+  const merged = current.map((attempt) => ({ ...attempt }));
+  for (let index = 0; index < incoming.length; index += 1) {
+    const next = incoming[index];
+    const prior = merged[index];
+    if (!prior) {
+      merged.push(next);
+      continue;
+    }
+    if (prior.index !== next.index || prior.startedAt !== next.startedAt) {
+      throw new Error(`Refusing to rewrite acknowledged supervisorAttempts[${index}] identity`);
+    }
+    const combined: SupervisorAttempt = { ...prior, ...next };
+    if (next.unverifiedAssessment === undefined && prior.unverifiedAssessment !== undefined) {
+      combined.unverifiedAssessment = prior.unverifiedAssessment;
+    }
+    if (next.verdict === undefined && prior.verdict !== undefined) combined.verdict = prior.verdict;
+    if (next.effectiveReason === undefined && prior.effectiveReason !== undefined) {
+      combined.effectiveReason = prior.effectiveReason;
+    }
+    if (next.error === undefined && prior.error !== undefined) combined.error = prior.error;
+    merged[index] = combined;
+  }
+  return merged;
+}
+
+function mergeStateHistories(current: StoreState | undefined, incoming: StoreState): StoreState {
+  const currentAttempts = current?.supervisor?.attempts ?? [];
+  const attempts = mergeSupervisorAttempts(currentAttempts, incoming.supervisor?.attempts);
+  let supervisor = incoming.supervisor;
+  if (!supervisor && current?.supervisor) supervisor = current.supervisor;
+  else if (supervisor && current?.supervisor) {
+    const base = supervisor.calls >= current.supervisor.calls ? supervisor : current.supervisor;
+    const completedAt = supervisor.completedAt ?? current.supervisor.completedAt;
+    supervisor = {
+      ...base,
+      status: supervisor.status === 'complete' || current.supervisor.status === 'complete' ? 'complete' : 'running',
+      calls: Math.max(supervisor.calls, current.supervisor.calls, attempts.length),
+      tokens_in: Math.max(supervisor.tokens_in, current.supervisor.tokens_in),
+      tokens_out: Math.max(supervisor.tokens_out, current.supervisor.tokens_out),
+      duration_ms: Math.max(supervisor.duration_ms, current.supervisor.duration_ms),
+      attempts,
+    };
+    if (completedAt !== undefined) supervisor.completedAt = completedAt;
+  } else if (supervisor) {
+    supervisor = { ...supervisor, attempts };
+  }
+
+  return {
+    ...incoming,
+    ...(supervisor ? { supervisor: { ...supervisor, attempts } } : {}),
+    ...(current?.supervisor && !supervisor ? { supervisor: current.supervisor } : {}),
+    retiredStageUsage: mergeImmutableHistory(
+      'retiredStageUsage',
+      current?.retiredStageUsage ?? [],
+      incoming.retiredStageUsage,
+    ),
+    stageEvidence: mergeImmutableHistory(
+      'stageEvidence',
+      current?.stageEvidence ?? [],
+      incoming.stageEvidence,
+    ),
+  };
+}
+
+function historiesFromState(state: StoreState): RunHistories {
+  return {
+    supervisorAttempts: state.supervisor?.attempts ?? [],
+    retiredStageUsage: state.retiredStageUsage ?? [],
+    stageEvidence: state.stageEvidence ?? [],
+  };
+}
+
+function normalizeHistoryTail(runPath: string, committedBytes: number): void {
+  const path = join(runPath, RUN_HISTORY_FILE);
+  if (!existsSync(path)) {
+    if (committedBytes > 0) throw new Error(`Acknowledged run history is missing: ${path}`);
+    return;
+  }
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r+');
+    const size = fstatSync(fd).size;
+    if (size < committedBytes) {
+      throw new Error(`Run history is truncated: ${path} has ${size} bytes; run.json acknowledges ${committedBytes}`);
+    }
+    if (size > committedBytes) {
+      // Bytes beyond the projection's commit pointer came from a crashed,
+      // unacknowledged write. Removing only that tail cannot erase an
+      // acknowledged record and makes the next append transactionally clean.
+      ftruncateSync(fd, committedBytes);
+      fsyncSync(fd);
+    }
+  } finally {
+    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
+function appendHistoryDelta(
+  runPath: string,
+  committed: RunHistories,
+  desired: RunHistories,
+  committedBytes: number,
+): number {
+  const records: RunHistoryRecord[] = [];
+  for (const kind of ['supervisorAttempts', 'retiredStageUsage', 'stageEvidence'] as const) {
+    for (let index = 0; index < desired[kind].length; index += 1) {
+      if (index >= committed[kind].length || !isDeepStrictEqual(committed[kind][index], desired[kind][index])) {
+        records.push({ version: 1, kind, index, value: desired[kind][index] });
+      }
+    }
+  }
+  if (records.length === 0) return committedBytes;
+
+  const path = join(runPath, RUN_HISTORY_FILE);
+  const existed = existsSync(path);
+  const bytes = Buffer.from(records.map((record) => JSON.stringify(record)).join('\n') + '\n', 'utf-8');
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'a');
+    if (fstatSync(fd).size !== committedBytes) throw new Error(`Run history append offset changed for ${path}`);
+    let written = 0;
+    while (written < bytes.length) {
+      const count = writeSync(fd, bytes, written, bytes.length - written);
+      if (count <= 0) throw new Error(`Run history append made no progress for ${path}`);
+      written += count;
+    }
+    fsyncSync(fd);
+  } finally {
+    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+  }
+  if (!existed) {
+    let parent: number | undefined;
+    try {
+      parent = openSync(runPath, 'r');
+      fsyncSync(parent);
+    } finally {
+      try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
+    }
+  }
+  return committedBytes + bytes.length;
+}
+
+function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, revision: number): StoreState {
+  const projection: StoreState = { ...state };
+  delete projection.retiredStageUsage;
+  delete projection.stageEvidence;
+  if (projection.supervisor) projection.supervisor = { ...projection.supervisor, attempts: [] };
+  projection.stateFormat = {
+    version: 2,
+    revision,
+    ...(ref ? { history: ref } : {}),
+  };
+  return projection;
+}
+
+function copyPersistedHistoryState(target: StoreState, source: StoreState): void {
+  target.stateFormat = source.stateFormat;
+  target.supervisor = source.supervisor;
+  target.retiredStageUsage = source.retiredStageUsage;
+  target.stageEvidence = source.stageEvidence;
+}
+
+function persistRunStateUnlocked(
+  projectDir: string,
+  runId: string,
+  state: StoreState,
+  expectation?: RunStateProjectionExpectation,
+): void {
+  const runPath = runDir(projectDir, runId);
+  const runJsonPath = join(runPath, 'run.json');
+  requireKnownRunStatus(state.status, `write run state ${runId}`);
+  if (state.runId !== runId) throw new Error(`Run state id ${state.runId} does not match target ${runId}`);
+
+  let currentProjection: ArchivedStoreState | undefined;
+  let currentState: StoreState | undefined;
+  let currentRaw: string | undefined;
+  if (existsSync(runJsonPath)) {
+    let parsed: ArchivedStoreState | undefined;
+    try {
+      currentRaw = readFileSync(runJsonPath, 'utf-8');
+      parsed = JSON.parse(currentRaw) as ArchivedStoreState;
+    } catch { /* malformed legacy state may be replaced */ }
+    if (parsed) {
+      const currentStatus = resolveRunStatus(parsed.status);
+      if (currentStatus.kind === 'unknown') {
+        throw new UnknownRunStatusError(
+          parsed.status,
+          `overwrite archived run ${runId}; update the tool or migrate the archive explicitly`,
+        );
+      }
+      currentProjection = parsed;
+      currentState = hydrateRunProjection(runPath, structuredClone(parsed)) as StoreState;
+    }
+  }
+  if (expectation && currentRaw !== expectation.raw) {
+    throw new RunStateProjectionConflictError(`Run state changed before mutation commit for ${runId}`);
+  }
+
+  const currentRef = currentProjection?.stateFormat ? historyRef(currentProjection.stateFormat) : undefined;
+  const committedBytes = currentRef?.committedBytes ?? 0;
+  normalizeHistoryTail(runPath, committedBytes);
+  const committedHistories = readRunHistories(runPath, currentRef);
+  const merged = mergeStateHistories(currentState, state);
+  const desiredHistories = historiesFromState(merged);
+  const nextCommittedBytes = appendHistoryDelta(
+    runPath,
+    committedHistories,
+    desiredHistories,
+    committedBytes,
+  );
+  const counts: RunHistoryRef['counts'] = {
+    supervisorAttempts: desiredHistories.supervisorAttempts.length,
+    retiredStageUsage: desiredHistories.retiredStageUsage.length,
+    stageEvidence: desiredHistories.stageEvidence.length,
+  };
+  const hasHistory = nextCommittedBytes > 0 || Object.values(counts).some((count) => count > 0);
+  const ref: RunHistoryRef | undefined = hasHistory
+    ? { version: 1, path: RUN_HISTORY_FILE, committedBytes: nextCommittedBytes, counts }
+    : undefined;
+  const currentRevision = currentProjection?.stateFormat?.version === 2
+    ? currentProjection.stateFormat.revision
+    : 0;
+  const comparable = compactProjection(merged, ref, currentRevision);
+
+  const assertProjectionUnchanged = (): void => {
+    let latestRaw: string | undefined;
+    try { latestRaw = readFileSync(runJsonPath, 'utf-8'); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (latestRaw !== currentRaw) {
+      throw new RunStateProjectionConflictError(`Run state changed during mutation commit for ${runId}`);
+    }
+  };
+
+  if (currentProjection && isDeepStrictEqual(currentProjection, comparable)) {
+    assertProjectionUnchanged();
+    copyPersistedHistoryState(state, { ...merged, stateFormat: comparable.stateFormat });
+    try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
+    emitCampaignEnvelopeEvents(projectDir, runId, merged);
+    return;
+  }
+
+  const projection = compactProjection(merged, ref, currentRevision + 1);
+  assertProjectionUnchanged();
+  atomicWrite(runJsonPath, JSON.stringify(projection) + '\n');
+  copyPersistedHistoryState(state, { ...merged, stateFormat: projection.stateFormat });
+  try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
+  emitCampaignEnvelopeEvents(projectDir, runId, merged);
+}
+
 export function readArchivedRunState(projectDir: string, runId: string): ArchivedRunStateRead {
-  const parsed = JSON.parse(
-    readFileSync(join(runDir(projectDir, runId), 'run.json'), 'utf-8'),
-  ) as ArchivedStoreState;
+  const path = runDir(projectDir, runId);
+  const parsed = hydrateRunProjection(path, JSON.parse(
+    readFileSync(join(path, 'run.json'), 'utf-8'),
+  ) as ArchivedStoreState);
   return { state: parsed, status: resolveRunStatus(parsed?.status) };
 }
 
@@ -1101,50 +1614,29 @@ export function readRunState(projectDir: string, runId: string): StoreState {
 }
 
 export function writeRunState(projectDir: string, runId: string, state: StoreState): void {
-  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
-  requireKnownRunStatus(state.status, `write run state ${runId}`);
-  if (existsSync(runJsonPath)) {
-    try {
-      const current = JSON.parse(readFileSync(runJsonPath, 'utf-8')) as { status?: unknown };
-      const currentStatus = resolveRunStatus(current.status);
-      if (currentStatus.kind === 'unknown') {
-        throw new UnknownRunStatusError(
-          current.status,
-          `overwrite archived run ${runId}; update the tool or migrate the archive explicitly`,
-        );
-      }
-    } catch (error) {
-      if (error instanceof UnknownRunStatusError) throw error;
-      // Preserve existing recovery behavior for malformed JSON. Unknown but
-      // well-formed status text is handled above and never reaches this arm.
-    }
-  }
-  atomicWrite(runJsonPath, JSON.stringify(state, null, 2));
-  try { upsertRunIndex(projectDir, state); } catch { /* index is best-effort */ }
-  emitCampaignEnvelopeEvents(projectDir, runId, state);
+  withRunStateLock(projectDir, runId, () => persistRunStateUnlocked(projectDir, runId, state));
 }
 
 export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void): StoreState {
-  // Compare-and-swap: another process (e.g. dashboard cancel vs scheduler write)
-  // can rename run.json between our read and write, so a plain read-modify-write
-  // silently loses one side's update (last-writer-wins). Re-read + re-apply the
-  // mutator if the file changed since we read it. atomicWrite makes each write
-  // atomic; this shrinks the lost-update window to the tiny check→rename gap.
-  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
-  const mtimeOf = (): number => { try { return statSync(runJsonPath).mtimeMs; } catch { return -1; } };
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const mtimeBefore = mtimeOf();
-    const state = readRunState(projectDir, runId);
-    mutator(state);
-    if (mtimeOf() !== mtimeBefore) continue; // raced — re-read and re-apply
-    writeRunState(projectDir, runId, state);
-    return state;
-  }
-  // Retries exhausted (heavy contention) — apply once more best-effort.
-  const state = readRunState(projectDir, runId);
-  mutator(state);
-  writeRunState(projectDir, runId, state);
-  return state;
+  // Serialize read/mutate/commit under the run-local lock. This closes the old
+  // mtime check-to-rename race while retaining a byte-exact CAS for a legacy
+  // writer that does not yet participate in the lock.
+  return withRunStateLock(projectDir, runId, () => {
+    const runPath = runDir(projectDir, runId);
+    const runJsonPath = join(runPath, 'run.json');
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const raw = readFileSync(runJsonPath, 'utf-8');
+      const state = hydrateRunProjection(runPath, JSON.parse(raw) as ArchivedStoreState) as StoreState;
+      mutator(state);
+      try {
+        persistRunStateUnlocked(projectDir, runId, state, { raw });
+        return state;
+      } catch (error) {
+        if (!(error instanceof RunStateProjectionConflictError)) throw error;
+      }
+    }
+    throw new RunStateProjectionConflictError(`Run state changed during five mutation attempts for ${runId}`);
+  });
 }
 
 export function readStageStatus(projectDir: string, runId: string, stageId: string): StageStatus {

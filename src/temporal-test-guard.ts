@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, relative } from 'node:path';
 export interface TemporalTestFinding {
   file: string;
   mutablePath: string;
-  kind: 'pins_shared_result' | 'asserts_terminal_absence';
+  kind: 'pins_shared_result' | 'depends_on_shared_presence' | 'asserts_terminal_absence';
   reason: string;
 }
 
@@ -55,6 +55,17 @@ export function inspectTemporalResearchTests(input: {
           reason: 'test pins the shared latest-round result to a particular label; a later valid round must replace it',
         });
       }
+      const sidecar = `${input.resultFile}.no_candidate.json`;
+      const namesSidecar = source.includes(sidecar) || source.includes(basename(sidecar));
+      const readsOrChecksPresence = /(?:existsSync|readFileSync|readFile|load_json|json\.load|open)\s*\(|\.(?:exists|is_file|isFile)\s*\(/i.test(source);
+      if ((namesResult || namesSidecar) && readsOrChecksPresence) {
+        findings.push({
+          file,
+          mutablePath: input.resultFile,
+          kind: 'depends_on_shared_presence',
+          reason: 'test reads or asserts existence of the mutable latest-round result/sidecar; a later valid round must replace that shared slot',
+        });
+      }
     }
     for (const terminalPath of input.terminalPaths) {
       const mentions = source.includes(terminalPath) || source.includes(basename(terminalPath));
@@ -72,4 +83,3 @@ export function inspectTemporalResearchTests(input: {
   }
   return findings;
 }
-

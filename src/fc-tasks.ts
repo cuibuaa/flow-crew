@@ -178,6 +178,8 @@ export interface LedgerWriteOptions {
   flowcrewTaskId?: number;
   taskRunResolver?: FcTaskRunResolver;
   clearFlowcrewTaskLink?: boolean;
+  /** Call-local timing dependency for deterministic contention tests. */
+  lockTiming?: { waitMs: number; pollMs: number };
 }
 
 export interface LedgerUpdateOptions extends LedgerWriteOptions {
@@ -1651,7 +1653,18 @@ function ledgerLockPath(storeRoot: string, session: string): string {
   return join(storeRoot, `.fc-tasks-lock-${digest}`);
 }
 
-function acquireLedgerLock(storeRoot: string, session: string): LedgerLock {
+function acquireLedgerLock(
+  storeRoot: string,
+  session: string,
+  timing: { waitMs: number; pollMs: number } = {
+    waitMs: LEDGER_LOCK_WAIT_MS,
+    pollMs: LEDGER_LOCK_POLL_MS,
+  },
+): LedgerLock {
+  if (!Number.isFinite(timing.waitMs) || timing.waitMs < 0
+      || !Number.isFinite(timing.pollMs) || timing.pollMs <= 0) {
+    throw new FcTasksRefusal('ledger lock timing must use finite non-negative wait and positive poll milliseconds');
+  }
   const path = ledgerLockPath(storeRoot, session);
   const ownerPath = join(path, 'owner');
   const token = randomBytes(16).toString('hex');
@@ -1678,10 +1691,10 @@ function acquireLedgerLock(storeRoot: string, session: string): LedgerLock {
       }
       if (recoverDefinitelyStaleLedgerLock(path, ownerPath)) continue;
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
-      if (elapsedMs >= LEDGER_LOCK_WAIT_MS) {
+      if (elapsedMs >= timing.waitMs) {
         throw new FcTasksRefusal('ledger lock is busy; retry after the concurrent writer finishes');
       }
-      Atomics.wait(lockWaitCell, 0, 0, LEDGER_LOCK_POLL_MS);
+      Atomics.wait(lockWaitCell, 0, 0, timing.pollMs);
     }
   }
 }
@@ -1753,8 +1766,13 @@ function releaseLedgerLock(lock: LedgerLock): void {
   }
 }
 
-function withLedgerLock<T>(storeRoot: string, session: string, action: () => T): T {
-  const lock = acquireLedgerLock(storeRoot, session);
+function withLedgerLock<T>(
+  storeRoot: string,
+  session: string,
+  action: () => T,
+  timing?: LedgerWriteOptions['lockTiming'],
+): T {
+  const lock = acquireLedgerLock(storeRoot, session, timing);
   try {
     return action();
   } finally {
@@ -1815,7 +1833,7 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
     } finally {
       try { unlinkSync(temporaryPath); } catch { /* published link or already absent */ }
     }
-  });
+  }, options.lockTiming);
 }
 
 export function updateTaskEntry(options: LedgerUpdateOptions): string {
@@ -1923,7 +1941,7 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
         try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
       }
     }
-  });
+  }, options.lockTiming);
 }
 
 export function publicTaskEntries(result: LedgerReadResult): FcTaskEntry[] {

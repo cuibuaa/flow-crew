@@ -1,5 +1,6 @@
 // Module: worker
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { loadAdapterByName } from './adapters/loader.js';
@@ -9,13 +10,14 @@ import { parseStageAbortSignal } from './abort-signal.js';
 import {
   beginStageAttempt,
   completeStageAttempt,
+  writeStageStatus,
   writeStageInput,
   writeStageOutput,
   TERMINAL_STATUSES,
   VERDICT_CONTRACT_DOC,
   PHASE_METADATA_FIELDS,
 } from './store.js';
-import type { StageAttemptTimeoutSummary } from './store.js';
+import type { StageAttemptTimeoutSummary, StageStatus } from './store.js';
 import {
   negotiationRequestDigest,
   parseTimeoutExtensionRequest,
@@ -29,6 +31,7 @@ import {
   type AttemptDeadlineClock,
 } from './attempt-deadline.js';
 import { guidanceForStageFromText, readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
+import { recordRunEvent } from './run-events.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -65,6 +68,10 @@ export interface StageOpts {
   resumeSessionId?: string;
   sessionOwnerStageId?: string;
   preserveSession?: boolean;
+  /** Scheduler-resolved effective project-write capability. Snapshot fallback
+   * observes only these roots; run-level scope enforcement owns global change
+   * detection and rollback. */
+  projectWriteScope?: string[];
 }
 
 const ADAPTER_ERROR_PATTERNS = ['403 Forbidden', 'connection refused', 'ECONNREFUSED', 'ECONNRESET', 'rate limit', 'ETIMEDOUT', '429 Too Many', '502 Bad Gateway', '503 Service Unavailable', 'overloaded'];
@@ -145,12 +152,21 @@ function inferAdapterName(adapter: Adapter): string | undefined {
   return lower.endsWith('adapter') ? lower.slice(0, -'adapter'.length) : lower;
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fc', '.next', '.cache', 'coverage', '__pycache__', '.venv', 'venv', '.tox', 'target', 'out', '.gradle']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fc', '.next', '.cache', '.pytest_cache', 'coverage', '__pycache__', '.venv', 'venv', '.tox', 'target', 'out', '.gradle']);
 
-function snapshotMtimes(projectDir: string, extraFiles: string[] = []): Map<string, number> {
+function literalScopeRoot(scope: string): string | undefined {
+  const normalized = scope.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')) return undefined;
+  const meta = normalized.search(/[!*?{}[\]()]/);
+  const prefix = (meta < 0 ? normalized : normalized.slice(0, meta)).replace(/\/+$/, '');
+  if (!prefix) return undefined;
+  return prefix;
+}
+
+function snapshotScopedMtimes(projectDir: string, scopes: readonly string[], extraFiles: string[] = []): Map<string, number> {
   const snap = new Map<string, number>();
   function walk(dir: string, depth: number) {
-    if (depth > 5) return; // limit depth to avoid scanning huge trees
+    if (depth > 20) return;
     let entries: string[];
     try { entries = readdirSync(dir); } catch { return; }
     for (const e of entries) {
@@ -163,7 +179,16 @@ function snapshotMtimes(projectDir: string, extraFiles: string[] = []): Map<stri
       } catch { /* skip */ }
     }
   }
-  walk(projectDir, 0);
+  for (const scope of scopes) {
+    const root = literalScopeRoot(scope);
+    if (!root) continue;
+    const absolute = join(projectDir, root);
+    try {
+      const stat = statSync(absolute);
+      if (stat.isDirectory()) walk(absolute, 0);
+      else if (stat.isFile()) snap.set(absolute, stat.mtimeMs);
+    } catch { /* an exact declared output may not exist yet */ }
+  }
   for (const file of extraFiles) {
     try {
       const st = statSync(file);
@@ -173,16 +198,107 @@ function snapshotMtimes(projectDir: string, extraFiles: string[] = []): Map<stri
   return snap;
 }
 
-function diffArtifacts(before: Map<string, number>, projectDir: string, extraFiles: string[] = []): string[] {
-  const after = snapshotMtimes(projectDir, extraFiles);
+function diffScopedArtifacts(
+  before: Map<string, number>,
+  projectDir: string,
+  scopes: readonly string[],
+  extraFiles: string[] = [],
+  runDirectory?: string,
+): string[] {
+  const after = snapshotScopedMtimes(projectDir, scopes, extraFiles);
   const changed: string[] = [];
   for (const [path, mtime] of after) {
     const prev = before.get(path);
     if (prev === undefined || mtime > prev) {
-      changed.push(relative(projectDir, path));
+      const runRelative = runDirectory ? relative(runDirectory, path) : undefined;
+      changed.push(runRelative !== undefined && runRelative !== '' && !runRelative.startsWith('..')
+        ? `run:${runRelative.replace(/\\/g, '/')}`
+        : relative(projectDir, path).replace(/\\/g, '/'));
     }
   }
   return changed;
+}
+
+/** Keep history in attempts while ensuring the live top level describes only the new execution. */
+export function freshRunningStageProjection(
+  previous: StageStatus | undefined,
+  retries: number,
+  startedAt = new Date().toISOString(),
+): StageStatus {
+  const next: StageStatus = {
+    ...(previous ?? { status: 'pending', retries }),
+    status: 'running',
+    retries,
+    startedAt,
+  };
+  for (const field of [
+    'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
+    'kgChanged', 'writes', 'writeAttribution', 'constraintAudit', 'timeout',
+  ] as const) delete next[field];
+  return next;
+}
+
+export function renderSupervisorAbortOutput(
+  output: string,
+  stageId: string,
+  executionIndex: number,
+  reason?: string,
+): string {
+  if (output.trim().length > 0) return output;
+  return [
+    '# Execution aborted by supervisor',
+    '',
+    reason?.trim() || 'The supervisor stopped this execution before it produced output.',
+    '',
+    `Stage: ${stageId}`,
+    `Execution: ${executionIndex}`,
+  ].join('\n');
+}
+
+export interface AttemptEvidenceGeneration {
+  version: 1;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  segmentStart: number;
+  /** Content fingerprints at the boundary for shared artifact slots. An
+   * unchanged prior-attempt verdict/metric is therefore never current evidence. */
+  artifactBaselines: Record<string, string | null>;
+  recordedAt: string;
+}
+
+function attemptArtifactFingerprint(path: string): string | null {
+  try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; }
+}
+
+/** Delimit the append-only live log so every supervisor read can prove which
+ * scheduler attempt produced its bytes. */
+export function beginAttemptEvidenceGeneration(
+  runDirectory: string,
+  stageId: string,
+  attemptIndex: number,
+  attemptStartedAt: string,
+): AttemptEvidenceGeneration {
+  const stagePath = join(runDirectory, 'stages', stageId);
+  const logPath = join(stagePath, 'live.log');
+  mkdirSync(stagePath, { recursive: true });
+  const marker = `\n<!-- flowcrew-attempt ${JSON.stringify({ version: 1, stageId, attemptIndex, attemptStartedAt })} -->\n`;
+  appendFileSync(logPath, marker, 'utf-8');
+  const generation: AttemptEvidenceGeneration = {
+    version: 1,
+    stageId,
+    attemptIndex,
+    attemptStartedAt,
+    segmentStart: statSync(logPath).size,
+    artifactBaselines: {
+      output: attemptArtifactFingerprint(join(stagePath, `output_attempt_${attemptIndex}.md`)),
+      verdict: attemptArtifactFingerprint(join(runDirectory, `verdict_${stageId}.json`)),
+      metric: attemptArtifactFingerprint(join(stagePath, 'metric.json')),
+    },
+    recordedAt: new Date().toISOString(),
+  };
+  writeFileSync(join(stagePath, 'attempt_generation.json'), `${JSON.stringify(generation, null, 2)}\n`, 'utf-8');
+  return generation;
 }
 
 /**
@@ -205,7 +321,7 @@ export async function runStage(
   opts: StageOpts,
 ): Promise<RunResult> {
   const skillNames = opts.stageSkills ?? [];
-  const prompt = buildStagePrompt({
+  let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
     promptTemplate: opts.promptTemplate,
     projectDir: opts.projectDir,
@@ -223,13 +339,29 @@ export async function runStage(
     handoffVisibility: opts.role.handoff_visibility,
   });
 
-  writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
-
   const runningStatus = beginStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries);
   const attemptIndex = runningStatus.attempts?.at(-1)?.index;
-  if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an attempt index`);
+  if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an execution index`);
   const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
-  if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an attempt start timestamp`);
+  if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
+  // Compatibility aggregates remain in the attempt ledger; live top-level
+  // outcome fields must describe this execution, not the one it retried.
+  const freshRunningStatus = freshRunningStageProjection(runningStatus, opts.retries, attemptStartedAt);
+  writeStageStatus(opts.projectDir, opts.runId, opts.stageId, freshRunningStatus);
+  prompt = prompt
+    .replace(/<current execution index>/g, String(attemptIndex))
+    .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
+  writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
+  beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
+  recordRunEvent(opts.projectDir, opts.runId, {
+    type: 'attempt_started',
+    runId: opts.runId,
+    timestamp: attemptStartedAt,
+    stageId: opts.stageId,
+    attemptIndex,
+    attemptStartedAt,
+    source: 'worker',
+  });
 
   // Auto-prepend task brief to the role's system prompt so the brief sits in
   // a stable prefix position across stages. This:
@@ -297,17 +429,23 @@ export async function runStage(
     const delivered = renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId));
     const stageDirPath = join(opts.runDir, 'stages', opts.stageId);
     mkdirSync(stageDirPath, { recursive: true });
-    writeFileSync(join(stageDirPath, 'guidance_consumed.md'), delivered ? `${delivered}\n` : '', 'utf-8');
+    writeFileSync(
+      join(stageDirPath, 'guidance_consumed.md'),
+      delivered ? `${delivered}\n` : 'No supervisor guidance was delivered to this execution.\n',
+      'utf-8',
+    );
   } catch { /* non-critical */ }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
-  const beforeSnapshot = snapshotMtimes(opts.projectDir, [kgPath]);
+  const projectWriteScope = opts.projectWriteScope ?? [];
+  const beforeSnapshot = snapshotScopedMtimes(opts.projectDir, projectWriteScope, [kgPath]);
 
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
     ledgerDir: join(opts.runDir, 'stages', opts.stageId),
+    executionIndex: attemptIndex,
     ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
   });
   const attemptStartedWallMs = Date.parse(attemptDeadline.attemptStartedAt);
@@ -490,7 +628,18 @@ export async function runStage(
   pollAbortSignal();
   pollTimeoutExtensionRequests();
   const abortPollTimer = setInterval(pollAbortSignal, 2000);
-  const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 20);
+  const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 1000);
+  const requestWatchers: import('node:fs').FSWatcher[] = [];
+  try {
+    const signalsDir = join(opts.runDir, 'signals');
+    mkdirSync(signalsDir, { recursive: true });
+    for (const directory of [join(opts.runDir, 'stages', opts.stageId), signalsDir]) {
+      requestWatchers.push(watch(directory, { persistent: false }, (_event, fileName) => {
+        const name = fileName?.toString() ?? '';
+        if (!name || name.includes('timeout_extension')) pollTimeoutExtensionRequests();
+      }));
+    }
+  } catch { /* one-second reconciliation remains the portable fallback */ }
   const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, attemptDeadline.signal]);
   const PHASE_ABORTED = Symbol('phase-aborted');
   const racePhaseWithAbort = <T>(phase: Promise<T>): Promise<T | typeof PHASE_ABORTED> => {
@@ -681,6 +830,7 @@ export async function runStage(
     pollAbortSignal();
     clearInterval(abortPollTimer);
     clearInterval(extensionPollTimer);
+    for (const watcher of requestWatchers) watcher.close();
     cleanupAbortSignalAtExit();
     // The execution attempt ends when adapter/fallback child settlement ends.
     // A blocked event loop can settle after the immutable boundary before its
@@ -713,12 +863,13 @@ export async function runStage(
   } else {
     terminationCause ??= 'failed';
   }
+  if (supervisorAborted) result.output = renderSupervisorAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
   result.effectiveTimeoutMs = effectiveBudgetMs;
   result.timeoutTerminationCause = terminationCause;
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
-  const artifacts = diffArtifacts(beforeSnapshot, opts.projectDir, [kgPath]);
+  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope, [kgPath], opts.runDir);
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const writes = structuredWrites ?? artifacts;
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
@@ -772,6 +923,17 @@ export async function runStage(
     writes,
     writeAttribution,
     timeout: timeoutSummary,
+  });
+  recordRunEvent(opts.projectDir, opts.runId, {
+    type: result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
+    runId: opts.runId,
+    timestamp: final.attempts?.at(-1)?.completedAt ?? new Date().toISOString(),
+    stageId: opts.stageId,
+    attemptIndex,
+    attemptStartedAt,
+    status: final.status,
+    detail: result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
+    source: 'worker',
   });
 
   // Surface fallback attribution to callers without changing adapter semantics.

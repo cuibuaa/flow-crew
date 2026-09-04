@@ -71,10 +71,29 @@ type ExecOpts = {
   onStdout?: (text: string) => void;
   env?: NodeJS.ProcessEnv;
   abortSignal?: AbortSignal;
+  terminationTiming?: ChildTerminationTiming;
 };
 
 /** Bounded cleanup opportunity after an attempt deadline or supervisor abort. */
 export const ATTEMPT_TERMINATION_GRACE_MS = 5_000;
+export const ATTEMPT_TERMINATION_POLL_MS = 25;
+
+export interface ChildTerminationTiming {
+  graceMs?: number;
+  pollMs?: number;
+}
+
+export function resolveChildTerminationTiming(
+  timing: ChildTerminationTiming = {},
+): Required<ChildTerminationTiming> {
+  const graceMs = Number.isFinite(timing.graceMs)
+    ? Math.max(0, Math.floor(timing.graceMs!))
+    : ATTEMPT_TERMINATION_GRACE_MS;
+  const pollMs = Number.isFinite(timing.pollMs)
+    ? Math.max(1, Math.floor(timing.pollMs!))
+    : ATTEMPT_TERMINATION_POLL_MS;
+  return { graceMs, pollMs };
+}
 
 function hardKillChild(child: ChildProcess): void {
   try {
@@ -91,7 +110,11 @@ interface ChildTerminator {
   settleAfterChildClose(): Promise<void>;
 }
 
-function createChildTerminator(child: ChildProcess): ChildTerminator {
+function createChildTerminator(
+  child: ChildProcess,
+  timingOverrides: ChildTerminationTiming = {},
+): ChildTerminator {
+  const timing = resolveChildTerminationTiming(timingOverrides);
   let terminationStarted = false;
   let terminationCompleted = false;
   let escalationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -140,7 +163,7 @@ function createChildTerminator(child: ChildProcess): ChildTerminator {
     escalationTimer = setTimeout(() => {
       hardKill();
       completeTermination();
-    }, ATTEMPT_TERMINATION_GRACE_MS);
+    }, timing.graceMs);
   };
 
   const settleAfterChildClose = (): Promise<void> => {
@@ -155,9 +178,9 @@ function createChildTerminator(child: ChildProcess): ChildTerminator {
           completeTermination();
           return;
         }
-        groupPollTimer = setTimeout(pollGroup, 25);
+        groupPollTimer = setTimeout(pollGroup, timing.pollMs);
       };
-      groupPollTimer = setTimeout(pollGroup, 25);
+      groupPollTimer = setTimeout(pollGroup, timing.pollMs);
     });
   };
 
@@ -183,7 +206,7 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
     });
-    const terminator = createChildTerminator(child);
+    const terminator = createChildTerminator(child, opts.terminationTiming);
     const chunks: Buffer[] = [];
     let aborted = false;
     const timer = setTimeout(() => {
@@ -242,7 +265,7 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
 export function execWithTimeout(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; onStdout?: (text: string) => void; abortSignal?: AbortSignal },
+  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; onStdout?: (text: string) => void; abortSignal?: AbortSignal; terminationTiming?: ChildTerminationTiming },
 ): Promise<RunResult> {
   return execChild(cmd, args, opts);
 }
@@ -261,6 +284,7 @@ export function execWithStdin(
      *  force-exit a hung subprocess after detecting a success event in stdout). */
     onChild?: (handles: { kill: () => void }) => void;
     abortSignal?: AbortSignal;
+    terminationTiming?: ChildTerminationTiming;
   },
 ): Promise<RunResult> {
   const start = Date.now();
@@ -278,7 +302,7 @@ export function execWithStdin(
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
     });
-    const terminator = createChildTerminator(child);
+    const terminator = createChildTerminator(child, opts.terminationTiming);
     // This handle is used after Claude's separate post-result grace, so it
     // intentionally remains an immediate hard stop rather than adding another.
     if (opts.onChild) opts.onChild({ kill: terminator.hardKill });

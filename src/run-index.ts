@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fcGlobalDir, runsRoot, type StoreState } from './store.js';
+import { TERMINAL_STATUSES } from './lifecycle-status.js';
 
 const require = createRequire(import.meta.url);
 
@@ -28,6 +29,7 @@ export interface RunIndexRecord {
   campaignSeq?: number;
   campaignIteration?: number;
   jsonMtime?: number;
+  schedulerActive?: boolean;
 }
 
 const rebuildAttempted = new Set<string>();
@@ -87,6 +89,7 @@ function openDb(projectDir: string): DatabaseSync | null {
       campaign_name TEXT,
       campaign_seq INTEGER,
       campaign_iteration INTEGER,
+      scheduler_active INTEGER NOT NULL DEFAULT 0,
       json_mtime REAL NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -94,6 +97,10 @@ function openDb(projectDir: string): DatabaseSync | null {
     CREATE INDEX IF NOT EXISTS idx_runs_campaign ON runs(campaign_storage_key, campaign_seq);
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
   `);
+  // Existing indexes predate scheduler ownership. Schema extension is
+  // additive; duplicate-column is the expected path after first migration.
+  try { db.exec('ALTER TABLE runs ADD COLUMN scheduler_active INTEGER NOT NULL DEFAULT 0;'); } catch { /* already present */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_runs_scheduler_active ON runs(scheduler_active);');
   dbHandles.set(path, db);
   return db;
 }
@@ -137,6 +144,7 @@ function rowToRecord(row: Record<string, unknown>): RunIndexRecord {
     campaignSeq: asNumber(row.campaign_seq),
     campaignIteration: asNumber(row.campaign_iteration),
     jsonMtime: asNumber(row.json_mtime),
+    schedulerActive: Number(row.scheduler_active ?? 0) === 1,
   };
 }
 
@@ -165,12 +173,13 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
     const runJson = join(runsRoot(projectDir), state.runId, 'run.json');
     const jsonMtime = existsSync(runJson) ? statSync(runJson).mtimeMs : Date.now();
     const campaignStorageKey = campaignStorageKeyForState(state);
+    const schedulerActive = existsSync(join(runsRoot(projectDir), state.runId, 'scheduler.pid')) ? 1 : 0;
     db.prepare(`
       INSERT INTO runs (
         run_id, status, workflow_name, task_description, started_at, completed_at,
         campaign_id, campaign_storage_key, campaign_name, campaign_seq, campaign_iteration,
-        json_mtime, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        scheduler_active, json_mtime, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id) DO UPDATE SET
         status=excluded.status,
         workflow_name=excluded.workflow_name,
@@ -196,6 +205,7 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
       state.campaignName ?? null,
       state.campaignSeq ?? null,
       state.campaignIteration ?? null,
+      schedulerActive,
       jsonMtime,
       Date.now(),
     );
@@ -226,20 +236,21 @@ export function rebuildRunIndex(projectDir: string): number {
             INSERT OR REPLACE INTO runs (
               run_id, status, workflow_name, task_description, started_at, completed_at,
               campaign_id, campaign_storage_key, campaign_name, campaign_seq, campaign_iteration,
-              json_mtime, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              scheduler_active, json_mtime, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             state.runId || runId,
-            state.status,
-            state.workflowName,
+            typeof state.status === 'string' ? state.status : null,
+            state.workflowName ?? null,
             state.taskDescription ?? null,
-            state.startedAt,
+            state.startedAt ?? null,
             state.completedAt ?? null,
             state.campaignId ?? null,
             campaignStorageKey ?? null,
             state.campaignName ?? null,
             state.campaignSeq ?? null,
             state.campaignIteration ?? null,
+            existsSync(join(runsRoot(projectDir), runId, 'scheduler.pid')) ? 1 : 0,
             jsonMtime,
             Date.now(),
           );
@@ -259,9 +270,9 @@ export function rebuildRunIndex(projectDir: string): number {
   }
 }
 
-function ensureIndexSeeded(projectDir: string): void {
+function ensureIndexSeeded(projectDir: string, forceFreshnessCheck = false): void {
   const last = seedCheckedAt.get(projectDir);
-  if (last !== undefined && Date.now() - last < SEED_CHECK_TTL_MS) return;
+  if (!forceFreshnessCheck && last !== undefined && Date.now() - last < SEED_CHECK_TTL_MS) return;
   const db = openDb(projectDir);
   if (!db) return;
   // Every createRun/writeRunState upserts into the index, so under normal operation
@@ -326,6 +337,43 @@ export function listRunningRunIdsFromIndex(projectDir: string): string[] | null 
   return db.prepare("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id DESC")
     .all()
     .map((row) => String(row.run_id));
+}
+
+/**
+ * Bounded candidates for watch and ownership probes. Unknown/non-terminal
+ * statuses remain visible, and a scheduler marker keeps a terminal-status run
+ * visible until process identity proves that its owner is gone.
+ */
+export function listOperationalRunIdsFromIndex(projectDir: string): string[] | null {
+  // Liveness may change between two calls inside the ordinary seed TTL. A
+  // single directory enumeration is cheap and prevents a newly created run
+  // from being omitted; only a count mismatch triggers per-run hydration.
+  ensureIndexSeeded(projectDir, true);
+  const db = openDb(projectDir);
+  if (!db) return null;
+  const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+  return db.prepare(
+    `SELECT run_id FROM runs
+     WHERE scheduler_active = 1 OR status IS NULL OR status NOT IN (${placeholders})
+     ORDER BY run_id DESC`,
+  ).all(...TERMINAL_STATUSES).map((row) => String(row.run_id));
+}
+
+/** Maintain the process-ownership bit without touching run.json. */
+export function setRunSchedulerActive(projectDir: string, runId: string, active: boolean): void {
+  const db = openDb(projectDir);
+  if (!db) return;
+  const now = Date.now();
+  if (active) {
+    db.prepare(`
+      INSERT INTO runs (run_id, status, scheduler_active, json_mtime, updated_at)
+      VALUES (?, NULL, 1, 0, ?)
+      ON CONFLICT(run_id) DO UPDATE SET scheduler_active = 1, updated_at = excluded.updated_at
+    `).run(runId, now);
+  } else {
+    db.prepare('UPDATE runs SET scheduler_active = 0, updated_at = ? WHERE run_id = ?')
+      .run(now, runId);
+  }
 }
 
 /** Max updated_at across all rows — a cheap cross-process "anything changed?" token for cache keys. */

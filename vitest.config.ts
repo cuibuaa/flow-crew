@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { statfsSync } from "node:fs";
+import { availableParallelism } from "node:os";
 // Upgrade warning: the custom pool/worker exports below are Vitest experimental
 // APIs. Before upgrading Vitest, verify the vitest/node exports and types, the
 // createPoolWorker contract, the real `started` handshake, and the ready-aware
@@ -15,6 +17,39 @@ import { defineConfig } from "vitest/config";
 
 export const READY_AWARE_STARTUP_EXTENSION_MS = 50_000;
 export const READY_AWARE_STARTUP_DEADLINE_MS = 120_000;
+export const NINE_P_FILESYSTEM_MAGIC = 0x01021997;
+
+interface WorkerCapacityDependencies {
+  logicalCpuCount?: number;
+  platform?: NodeJS.Platform;
+  filesystemType?: number | bigint;
+}
+
+export function resolveVitestWorkerCount(
+  dependencies: WorkerCapacityDependencies = {},
+): number {
+  const logicalCpuCount = Math.max(
+    1,
+    Math.floor(dependencies.logicalCpuCount ?? availableParallelism()),
+  );
+  const platform = dependencies.platform ?? process.platform;
+  let filesystemType = dependencies.filesystemType;
+  if (filesystemType === undefined) {
+    try { filesystemType = statfsSync(process.cwd()).type; } catch { /* use CPU capacity */ }
+  }
+  const slowWindowsMount = platform === "win32"
+    || Number(filesystemType) === NINE_P_FILESYSTEM_MAGIC;
+  // Native filesystems use the full capacity measured in the review. The
+  // ready-aware startup boundary already fails closed if child-heavy workers
+  // cannot initialize; reserving an otherwise idle core missed the 35% wall
+  // target on the six-core reference machine.
+  const readySafeCapacity = logicalCpuCount;
+  return slowWindowsMount
+    ? Math.min(3, readySafeCapacity)
+    : readySafeCapacity;
+}
+
+export const VITEST_MAX_WORKERS = resolveVitestWorkerCount();
 
 interface ReadyAwareForkWorkerDependencies {
   delegate?: PoolWorker;
@@ -189,22 +224,26 @@ export default defineConfig({
     ],
   },
   test: {
-    // spec/ is the machine-independent public contract suite.
+    // spec/ is the machine-independent public contract suite. The recorded
+    // UX/performance replays are permanent regressions and therefore belong
+    // to the current full suite. `npm run test:baseline-identities` excludes
+    // only those additive cases when timing the frozen baseline population.
     include: [
       "spec/**/*.test.ts",
       "spec/**/*.test.tsx",
+      "spec/ux-perf-*.replay.ts",
+      "spec/ux-perf-*.replay.tsx",
     ],
     setupFiles: [
       "./vitest.setup.ts",
-      new URL("./node_modules/@testing-library/jest-dom/dist/vitest.mjs", import.meta.url).pathname,
     ],
+    globalSetup: ["./scripts/vitest-global-setup.ts"],
     pool: readyAwareForkPool,
     fileParallelism: true,
-    // The ready-aware pool passed 18/18 loaded invocations at this original
-    // three-worker cap (the two-file probe exercised 12 concurrent forks).
-    // Keep that cap: reducing it to one added serialization without carrying
-    // the startup fix.
-    maxWorkers: 3,
+    // Derive capacity from the machine. Windows and
+    // WSL 9p/drvfs retain the measured three-worker safety cap, while the
+    // ready-aware pool continues to guard slow worker initialization.
+    maxWorkers: VITEST_MAX_WORKERS,
     isolate: true,
     clearMocks: true,
     mockReset: true,

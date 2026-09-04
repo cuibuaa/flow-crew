@@ -14,6 +14,7 @@ import {
   ATTEMPT_TERMINATION_GRACE_MS,
   execWithStdin,
   execWithTimeout,
+  resolveChildTerminationTiming,
   type Adapter,
   type AgentConfig,
   type RunResult,
@@ -28,8 +29,10 @@ import { runStage } from '../src/worker.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.js';
 
 const CLEANUP_TRIALS = 3;
-const FIXTURE_TIMEOUT_MS = 600;
+const FIXTURE_TIMEOUT_MS = 350;
 const ABORT_FIXTURE_TIMEOUT_MS = 10_000;
+const TEST_TERMINATION_GRACE_MS = 150;
+const TEST_TERMINATION_TIMING = { graceMs: TEST_TERMINATION_GRACE_MS, pollMs: 5 } as const;
 
 const FIXTURE_ROLE: AgentConfig = {
   name: 'fixture',
@@ -122,6 +125,7 @@ async function runCleanupTrial(
       FC_HOME: join(root, 'fc-home'),
     },
     ...(controller ? { abortSignal: controller.signal } : {}),
+    terminationTiming: TEST_TERMINATION_TIMING,
   };
   const settlementStarted = performance.now();
   const execution = execKind === 'with-stdin'
@@ -133,7 +137,7 @@ async function runCleanupTrial(
     controller?.abort('supervisor_abort');
     const result = await awaitBounded(
       execution,
-      timeoutMs + ATTEMPT_TERMINATION_GRACE_MS + 2_000,
+      timeoutMs + TEST_TERMINATION_GRACE_MS + 2_000,
     );
     return {
       trial,
@@ -171,7 +175,7 @@ interface DeadlineObservation {
   cleanupWritten: boolean;
 }
 
-const IGNORE_TERM_TIMEOUT_MS = 600;
+const IGNORE_TERM_TIMEOUT_MS = 350;
 
 function processSurvived(pid: number | undefined): boolean {
   if (!pid) return false;
@@ -225,20 +229,27 @@ async function runIgnoredSignalTrial(
       FC_HOME: join(root, 'fc-home'),
     },
     ...(controller ? { abortSignal: controller.signal } : {}),
+    terminationTiming: TEST_TERMINATION_TIMING,
   });
   let abortTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
     await waitForFile(readyPath, IGNORE_TERM_TIMEOUT_MS - 50);
     if (controller) {
+      // Schedule from the execution deadline, not from readiness observation.
+      // Under full-suite load the latter can consume most of the short local
+      // grace and let SIGKILL settle before the intended timeout/abort race.
+      const abortAt = settlementStarted
+        + IGNORE_TERM_TIMEOUT_MS
+        + Math.floor(TEST_TERMINATION_GRACE_MS / 2);
       abortTimer = setTimeout(
         () => controller.abort('supervisor_abort'),
-        IGNORE_TERM_TIMEOUT_MS + 150,
+        Math.max(0, abortAt - performance.now()),
       );
     }
     const result = await awaitBounded(
       execution,
-      IGNORE_TERM_TIMEOUT_MS + ATTEMPT_TERMINATION_GRACE_MS + 2_500,
+      IGNORE_TERM_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_500,
     );
     const pid = fixturePid(pidPath);
     return {
@@ -264,6 +275,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-cleanup-'));
     try {
       const observations: CleanupObservation[] = [];
+      expect(resolveChildTerminationTiming().graceMs).toBe(ATTEMPT_TERMINATION_GRACE_MS);
       for (let trial = 1; trial <= CLEANUP_TRIALS; trial++) {
         observations.push(await runCleanupTrial(root, trial));
       }
@@ -316,9 +328,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       process.stdout.write(`SIGTERM_IGNORED_SAMPLES=${JSON.stringify(observations)}\n`);
 
       const minimumEscalationDuration = IGNORE_TERM_TIMEOUT_MS
-        + ATTEMPT_TERMINATION_GRACE_MS - 100;
+        + TEST_TERMINATION_GRACE_MS - 100;
       const maximumEscalationDuration = IGNORE_TERM_TIMEOUT_MS
-        + ATTEMPT_TERMINATION_GRACE_MS + 3_000;
+        + TEST_TERMINATION_GRACE_MS + 3_000;
       expect(observations.every(({ termCount }) => termCount === 1)).toBe(true);
       expect(observations.every(({ survived }) => !survived)).toBe(true);
       expect(observations.every(({ settlementElapsedMs }) => (
@@ -372,17 +384,18 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       cwd: root,
       timeout_ms: FIXTURE_TIMEOUT_MS,
       env: { HOME: root, FC_HOME: join(root, 'fc-home') },
+      terminationTiming: TEST_TERMINATION_TIMING,
     });
 
     try {
       await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
       const result = await awaitBounded(
         execution,
-        FIXTURE_TIMEOUT_MS + ATTEMPT_TERMINATION_GRACE_MS + 2_000,
+        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
       );
       expect(result.exitCode).toBe(124);
       expect(performance.now() - settlementStarted).toBeGreaterThanOrEqual(
-        FIXTURE_TIMEOUT_MS + ATTEMPT_TERMINATION_GRACE_MS - 100,
+        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
       );
       expect(existsSync(cleanupPath)).toBe(true);
       expect(existsSync(descendantTermPath)).toBe(true);

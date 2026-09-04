@@ -190,12 +190,12 @@ describe('dashboard signal shutdown', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)('releases the listening port and exits zero after the first %s', { timeout: 20_000 }, async (signal) => {
     const childHome = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-home-'));
     const childProject = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-project-'));
-    const dashboardUrl = pathToFileURL(join(process.cwd(), 'src', 'dashboard.ts')).href;
+    const dashboardUrl = pathToFileURL(join(process.cwd(), 'dist', 'dashboard.js')).href;
     const source = `
       import { startDashboard } from ${JSON.stringify(dashboardUrl)};
       await startDashboard(process.env.P6_PROJECT_DIR, 0, { distDir: process.env.P6_DIST_DIR });
     `;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
       cwd: process.cwd(),
       env: {
         ...process.env,

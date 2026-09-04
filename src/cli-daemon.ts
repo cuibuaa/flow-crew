@@ -27,6 +27,7 @@ import {
 import type { CancellationResult } from './run-control.js';
 import { runsRoot } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
+import { readOperationalProjection, type OperationalRunState } from './cli-events.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
 
@@ -50,6 +51,10 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
   const sub = args[1];
+  if (args.includes('--help') || args.includes('-h')) {
+    stdout.write(`${daemonUsage()}\n`);
+    return 0;
+  }
   const socketPath = resolve(
     valueAfter(args, '--port')
       ?? valueAfter(args, '--socket')
@@ -122,7 +127,16 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
       return 0;
     }
 
-    stderr.write([
+    stderr.write(`${daemonUsage()}\n`);
+    return 1;
+  } catch (err) {
+    stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return rpcErrorExitCode(err);
+  }
+}
+
+export function daemonUsage(): string {
+  return [
       'Usage: flowcrew daemon <command> [options]',
       '  restart [--force]  Reload the background orchestrator (operator entry point)',
       '  status             Prove listener pid, loaded build, and registry health',
@@ -130,13 +144,7 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
       '  stop               Stop the background orchestrator',
       '  serve              Run the orchestrator in the foreground (internal/service entry)',
       '  logs [--tail N]    Read daemon.log',
-      '',
-    ].join('\n'));
-    return 1;
-  } catch (err) {
-    stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    return rpcErrorExitCode(err);
-  }
+    ].join('\n');
 }
 
 export function createDaemonRpcErrorLogger(
@@ -179,7 +187,7 @@ export function mergeTaskWithRunState(
   if (!task.run_id) return { ...task };
   const runPath = isAbsolute(task.run_id) ? task.run_id : join(runRoot, task.run_id);
   try {
-    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as {
+    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as OperationalRunState & {
       status?: unknown;
       completedAt?: unknown;
       failureReason?: unknown;
@@ -194,6 +202,7 @@ export function mergeTaskWithRunState(
     return {
       ...task,
       status: state.status,
+      operational: readOperationalProjection(runPath, { state }),
       // A terminal registry timestamp may record a later control-plane action
       // (for example an already-terminal cancellation). Preserve it when
       // present; otherwise project the run's authoritative completion time.
@@ -238,8 +247,6 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   };
   const registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
   const orchestrator = new Orchestrator({ registry });
-  let server: Awaited<ReturnType<typeof startRpcServer>>;
-
   const handler = async (req: RpcRequest): Promise<RpcResponse> => {
     appendFileSync(logPath, `${new Date().toISOString()} ${req.cmd}\n`, 'utf-8');
     if (req.cmd === 'register') {
@@ -258,7 +265,10 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
       const unitStatus = await orchestrator.unitStatus(req.id);
       return {
         task: mergeTaskWithRunState(task),
-        recent_ticks: registry.readRecentTicks(req.id),
+        // New clients state whether raw evidence was requested. Keep absent
+        // compatible with older clients, but avoid reading/transferring it for
+        // the concise default path.
+        recent_ticks: req.raw === false ? [] : registry.readRecentTicks(req.id),
         unit_status: unitStatus,
         ...(unitStatus.kind === 'terminal' ? { exit_code: unitStatus.exitCode } : {}),
       };
@@ -287,7 +297,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     return { error: 'unknown command' };
   };
 
-  server = await startRpcServer(socketPath, handler, {
+  const server = await startRpcServer(socketPath, handler, {
     onHandlerError: createDaemonRpcErrorLogger(logPath),
   });
   writeDaemonIdentity(socketPath, identity);
@@ -373,7 +383,9 @@ async function reportDaemonStatus(
   stdout.write(`uptime: ${uptime ?? 'UNVERIFIED'}s\n`);
   stdout.write(`watched_tasks: ${watched ?? 'UNVERIFIED'}\n`);
   stdout.write(`registry_unreadable_records: ${unreadable ?? 'UNVERIFIED'}\n`);
-  reportRegistryScale(dirname(socketPath), stdout);
+  const cachedScale = registryScaleFromRpc(response);
+  if (cachedScale) reportRegistryScaleValues(cachedScale, stdout);
+  else reportRegistryScale(dirname(socketPath), stdout); // legacy daemon compatibility
   if ((unreadable ?? 0) > 0) {
     stdout.write(`WARNING: registry has ${unreadable} unreadable records; task state may be incomplete.\n`);
   }
@@ -493,12 +505,26 @@ interface RegistryScale {
   tasks: number;
 }
 
+function registryScaleFromRpc(response: RpcResponse): RegistryScale | undefined {
+  const bytes = readNumber(response, 'registry_bytes');
+  const records = readNumber(response, 'registry_records');
+  const tasks = readNumber(response, 'registry_tasks');
+  return bytes !== undefined && bytes >= 0
+    && records !== undefined && Number.isInteger(records) && records >= 0
+    && tasks !== undefined && Number.isInteger(tasks) && tasks >= 0
+    ? { bytes, records, tasks }
+    : undefined;
+}
+
+function reportRegistryScaleValues(scale: RegistryScale, stdout: NodeJS.WriteStream): void {
+  stdout.write(`registry_bytes: ${scale.bytes}\n`);
+  stdout.write(`registry_records: ${scale.records}\n`);
+  stdout.write(`registry_tasks: ${scale.tasks}\n`);
+}
+
 function reportRegistryScale(baseDir: string, stdout: NodeJS.WriteStream): void {
   try {
-    const scale = readRegistryScale(baseDir);
-    stdout.write(`registry_bytes: ${scale.bytes}\n`);
-    stdout.write(`registry_records: ${scale.records}\n`);
-    stdout.write(`registry_tasks: ${scale.tasks}\n`);
+    reportRegistryScaleValues(readRegistryScale(baseDir), stdout);
   } catch (error) {
     stdout.write('registry_bytes: UNVERIFIED\n');
     stdout.write('registry_records: UNVERIFIED\n');

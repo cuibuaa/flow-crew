@@ -20,7 +20,7 @@ function fixture(): { root: string; home: string; fcHome: string; temp: string }
 function rehearse(args: string[], env: { home: string; fcHome: string; temp: string }) {
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), 'rehearse', ...args],
+    [join(repositoryRoot, 'dist', 'cli.js'), 'rehearse', ...args],
     {
       cwd: repositoryRoot,
       env: {

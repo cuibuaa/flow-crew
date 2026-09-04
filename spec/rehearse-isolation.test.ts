@@ -50,7 +50,7 @@ function runRehearsal(
 ) {
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), 'rehearse', briefPath],
+    [join(repositoryRoot, 'dist', 'cli.js'), 'rehearse', briefPath],
     {
       cwd: repositoryRoot,
       env: {

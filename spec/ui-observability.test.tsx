@@ -72,8 +72,8 @@ describe("run-detail execution observability", () => {
 
     const history = byTestId("attempt-ledger-acceptance_gate");
     expect(history.textContent).toContain("2 executions · 1 failed");
-    expect(history.textContent).toContain("Attempt 1failed1.5m");
-    expect(history.textContent).toContain("Attempt 2complete1.0m");
+    expect(history.textContent).toContain("Execution 1failed1.5m");
+    expect(history.textContent).toContain("Execution 2complete1.0m");
   });
 
   it("labels a legacy aggregate when per-attempt history is absent", () => {
@@ -90,7 +90,7 @@ describe("run-detail execution observability", () => {
     const history = byTestId("attempt-ledger-build");
     expect(history.textContent).toContain("1 execution · 0 failed");
     expect(history.textContent).toContain("Legacy aggregate: complete · 45.0s cumulative");
-    expect(history.textContent).toContain("Per-attempt history is unavailable");
+    expect(history.textContent).toContain("Per-execution history is unavailable");
   });
 
   it("includes supervisor usage once in the run total without a stage row or DAG node", () => {

@@ -58,7 +58,7 @@ function runBackgroundSubmit(extraArgs: readonly string[]): { code: number | nul
   const result = spawnSync(
     process.execPath,
     [
-      '--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'),
+      join(repositoryRoot, 'dist', 'cli.js'),
       'quick', '--background', '--acknowledge-brief-warnings',
       '--project', join(root, 'project'),
       ...extraArgs,

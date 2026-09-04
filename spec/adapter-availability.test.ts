@@ -70,7 +70,7 @@ function runCli(
 ) {
   return spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'), ...cliArgs],
+    [join(repositoryRoot, 'dist', 'cli.js'), ...cliArgs],
     {
       cwd: repositoryRoot,
       env: {

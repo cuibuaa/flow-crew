@@ -15,6 +15,12 @@ export interface FlowCrewPaths {
 
 export interface ProjectDefaults {
   timeout_ms: number;
+  /** Wall clock a single validation command (build/test/lint) may take before it
+   * is killed. A project's suite grows as rounds add tests, and ship-setup runs
+   * the suite twice -- source baseline and target baseline -- so this has to
+   * exceed the slowest of them under whatever else the machine is doing. See
+   * defaults.yaml. */
+  validation_timeout_ms: number;
   max_iterations: number;
   gate_retry_loops: number;
   stage_technical_retries: number;
@@ -236,6 +242,7 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
   const templatePaths = template.paths as Partial<FlowCrewPaths> | undefined;
   const parsed: ProjectDefaults = {
     timeout_ms: numberValue(raw, template, 'default_timeout_ms'),
+    validation_timeout_ms: numberValue(raw, template, 'default_validation_timeout_ms'),
     max_iterations: numberValue(raw, template, 'default_max_iterations'),
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
     stage_technical_retries: numberValue(raw, template, 'default_stage_technical_retries'),

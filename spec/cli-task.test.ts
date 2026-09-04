@@ -59,6 +59,8 @@ describe('cmdTask', () => {
     expect(out.errorText()).toContain('registry has 3 unreadable records');
   });
 
+  // Keep the preregistered item-17 workload ID stable. The assertion below is
+  // the documented replacement for the obsolete raw-by-default behavior.
   it('shows task details and recent ticks', async () => {
     server = await startRpcServer(socketPath, () => ({ task: task({ id: 3, status: 'done' }), recent_ticks: ['- tick'] }));
     const out = new Capture();
@@ -67,7 +69,14 @@ describe('cmdTask', () => {
 
     expect(code).toBe(0);
     expect(out.text()).toContain('Task #3');
-    expect(out.text()).toContain('- tick');
+    expect(out.text()).toContain('Raw ticks: hidden (pass --raw)');
+    expect(out.text()).not.toContain('- tick');
+
+    const raw = new Capture();
+    const rawCode = await cmdTask(['task', 'show', '3', '--raw', '--port', socketPath], { stdout: raw.stream as any, stderr: raw.err as any });
+    expect(rawCode).toBe(0);
+    expect(raw.text()).toContain('Recent ticks (raw JSON):');
+    expect(raw.text()).toContain('- tick');
   });
 
   it('projects a durable terminal exit without merging run.json', async () => {

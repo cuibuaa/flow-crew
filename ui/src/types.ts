@@ -320,6 +320,35 @@ export interface RunEvent {
   stageId?: string;
   message?: string;
   detail?: string;
+  reason?: string;
+  attemptIndex?: number;
+  requestId?: string;
+  decision?: "accepted" | "rejected" | "discarded";
+  runStatus?: string;
+  status?: string;
+  source?: string;
+}
+
+export interface OperationalReason {
+  type: string;
+  at?: string;
+  stageId?: string;
+  detail: string;
+}
+
+export interface OperationalProjection {
+  version: 1;
+  runId?: string;
+  projectDir?: string;
+  runStatus: string;
+  runElapsedMs?: number;
+  activeStages: Array<{ id: string; status: string; execution: number; startedAt?: string; elapsedMs?: number }>;
+  latestReason?: OperationalReason;
+  lastRejection?: OperationalReason;
+  lastGuidance?: OperationalReason;
+  pendingScope: Array<{ requestId: string; stageId?: string; requestedAt?: string; detail?: string }>;
+  pendingApproval?: { requestId: string; stageId?: string; requestedAt?: string; detail: string };
+  sourceCoverage: { runState: "read" | "unavailable"; events: "read" | "missing" | "unreadable"; stageCount: number };
 }
 
 export interface RunDetailData {
@@ -340,6 +369,7 @@ export interface RunDetailData {
   supervisor?: SupervisorUsage;
   kg: { nodes: CampaignKGNode[]; edges: CampaignKGEdge[] };
   events: RunEvent[];
+  operational?: OperationalProjection;
   stage_outputs: Record<string, string>;
 }
 

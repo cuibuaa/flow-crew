@@ -1,4 +1,4 @@
-import { afterAll } from "vitest";
+import { afterAll, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,7 +72,6 @@ const previousUserProfile = process.env.USERPROFILE;
 const previousFcHome = process.env.FC_HOME;
 const previousIsolationRoot = process.env.FLOWCREW_VITEST_ROOT;
 const isolation = createVitestFileIsolation();
-const lateCallbackGraceMs = 300;
 
 // setupFiles run before the test module graph. HOME covers modules that call
 // homedir() directly; the setter covers store.ts's process-level override.
@@ -82,17 +81,23 @@ delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
 
 const store = await import("./src/store.js");
+const runEvents = await import("./src/run-events.js");
 store.setFcGlobalDir(isolation.fcHome);
 
-afterAll(async () => {
+// Only browser-environment files pay to install DOM matchers. Test-file
+// environment pragmas are resolved before setupFiles run.
+if (expect.getState().environment === "jsdom") {
+  await import("@testing-library/jest-dom/vitest");
+}
+
+afterAll(() => {
   // Keep the loaded store pointed at the disposable root while teardown runs;
-  // a late callback must never fall back to the developer's real ~/.fc. The
-  // summary-refresh debounce is 250ms, so wait through that window and remove
-  // the root again if such a callback recreates it. The process registry is a
-  // final fallback for later callbacks.
+  // a late callback must never fall back to the developer's real ~/.fc.
+  // Cancel the known 250ms summary-refresh debounce synchronously instead of
+  // sleeping in every spec file. The process registry remains the final
+  // fallback for unrelated callbacks that outlive teardown.
   store.setFcGlobalDir(isolation.fcHome);
-  isolation.cleanup();
-  await new Promise<void>((resolve) => setTimeout(resolve, lateCallbackGraceMs));
+  runEvents.clearAttemptSummaryRefreshDebounce();
   isolation.cleanup();
   restoreEnv("HOME", previousHome);
   restoreEnv("USERPROFILE", previousUserProfile);

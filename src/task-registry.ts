@@ -6,17 +6,19 @@ import {
   copyFileSync,
   existsSync,
   fstatSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { readJsonlFileWithDiagnostics } from './jsonl.js';
 import { fcGlobalDir } from './store.js';
 import { TASK_STATUS, isActiveTaskStatus, type TaskStatus } from './lifecycle-status.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
@@ -134,7 +136,21 @@ export interface TaskRegistryMetrics extends TaskRegistryHealth {
   bytes: number;
   records: number;
   tasks: number;
+  activeTasks: number;
   compactRecommended: boolean;
+}
+
+/** Observable counters for proving that hot reads consume only appended bytes. */
+export interface TaskRegistryCacheDiagnostics {
+  generation: number;
+  identity?: string;
+  readOffset: number;
+  pendingBytes: number;
+  lastBytesParsed: number;
+  totalBytesParsed: number;
+  rebuilds: number;
+  durableAppends: number;
+  suppressedAppends: number;
 }
 
 export type RegistryMaintenanceActionKind = 'repair' | 'quarantine' | 'drop-obsolete' | 'drop-blank';
@@ -175,6 +191,8 @@ export interface TaskRegistryOptions {
   staleLockMs?: number;
   lockPollMs?: number;
   warn?: (message: string) => void;
+  /** Fault-injection seam. Returning means the append is durable and may be acknowledged. */
+  syncFile?: (fd: number) => void;
 }
 
 export class TaskRegistryIntegrityError extends Error {
@@ -208,6 +226,30 @@ interface RegistryLockObservation {
 
 interface RegistryReadResult extends TaskRegistryHealth {
   tasks: Map<number, TaskEntry>;
+  /** True only when the unreadable record is the unacknowledged final fragment. */
+  unreadableTail: boolean;
+}
+
+interface RegistryCache {
+  dev: number;
+  ino: number;
+  generation: number;
+  readOffset: number;
+  fileSize: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  pending: Buffer;
+  pendingReadable: boolean;
+  pendingTask?: TaskEntry;
+  completeUnreadableRecords: number;
+  completeRecords: number;
+  tasks: Map<number, TaskEntry>;
+}
+
+interface TickProjection {
+  status: string;
+  message?: string;
+  stages?: Record<string, unknown>;
 }
 
 interface PhysicalRegistryLine {
@@ -267,6 +309,15 @@ export class TaskRegistry {
   private readonly staleLockMs: number;
   private readonly lockPollMs: number;
   private readonly warn: (message: string) => void;
+  private readonly syncFile: (fd: number) => void;
+  private registryCache?: RegistryCache;
+  private cacheGeneration = 0;
+  private cacheLastBytesParsed = 0;
+  private cacheTotalBytesParsed = 0;
+  private cacheRebuilds = 0;
+  private durableAppends = 0;
+  private suppressedAppends = 0;
+  private readonly tickProjections = new Map<number, TickProjection>();
 
   constructor(opts: TaskRegistryOptions = {}) {
     this.baseDir = opts.baseDir ?? defaultFcDir();
@@ -279,11 +330,19 @@ export class TaskRegistry {
     this.staleLockMs = opts.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
     this.lockPollMs = opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     this.warn = opts.warn ?? ((message) => console.warn(message));
+    this.syncFile = opts.syncFile ?? fsyncSync;
     mkdirSync(this.tasksDir, { recursive: true });
   }
 
   create(input: TaskCreateInput): TaskEntry {
     return this.withLock(() => {
+      const registry = this.readLatestUnlocked();
+      // A complete damaged historical row cannot be mistaken for a partially
+      // written newer value, so allocating a new id and appending is safe. A
+      // torn tail is different: appending would acknowledge ambiguous bytes.
+      if (registry.unreadableTail) {
+        throw new TaskRegistryIntegrityError(this.registryPath, registry.unreadableRecords);
+      }
       const id = this.nextIdUnlocked();
       const taskDir = join(this.tasksDir, String(id));
       mkdirSync(taskDir, { recursive: true });
@@ -314,8 +373,8 @@ export class TaskRegistry {
         tick_log_path: join(taskDir, 'tick_log.md'),
         launch_args: input.launch_args,
       };
-      this.appendEntry(entry);
-      return entry;
+      this.appendEntry(entry, { allowCompleteUnreadable: true });
+      return structuredClone(entry);
     });
   }
 
@@ -331,7 +390,10 @@ export class TaskRegistry {
   }
 
   get(id: number): TaskEntry | undefined {
-    return this.withLock(() => this.readLatestUnlocked().tasks.get(id));
+    return this.withLock(() => {
+      const task = this.readLatestUnlocked().tasks.get(id);
+      return task ? structuredClone(task) : undefined;
+    });
   }
 
   update(id: number, patch: Partial<Omit<TaskEntry, 'id' | 'created_at' | 'tick_log_path'>>): TaskEntry {
@@ -349,8 +411,12 @@ export class TaskRegistry {
         created_at: current.created_at,
         tick_log_path: current.tick_log_path,
       });
+      if (JSON.stringify(next) === JSON.stringify(current)) {
+        this.suppressedAppends += 1;
+        return structuredClone(current);
+      }
       this.appendEntry(next);
-      return next;
+      return structuredClone(next);
     });
   }
 
@@ -358,7 +424,9 @@ export class TaskRegistry {
     return this.withLock(() => {
       const registry = this.readLatestUnlocked();
       return {
-        tasks: Array.from(registry.tasks.values()).sort((a, b) => a.id - b.id),
+        tasks: Array.from(registry.tasks.values())
+          .sort((a, b) => a.id - b.id)
+          .map((task) => structuredClone(task)),
         unreadableRecords: registry.unreadableRecords,
       };
     });
@@ -369,7 +437,22 @@ export class TaskRegistry {
   }
 
   metrics(): TaskRegistryMetrics {
-    return this.withLock(() => this.metricsFromRaw(this.readRegistryRaw()));
+    return this.withLock(() => this.metricsFromCache(this.readLatestUnlocked()));
+  }
+
+  cacheDiagnostics(): TaskRegistryCacheDiagnostics {
+    const cache = this.registryCache;
+    return {
+      generation: cache?.generation ?? this.cacheGeneration,
+      ...(cache ? { identity: `${cache.dev}:${cache.ino}:${cache.generation}` } : {}),
+      readOffset: cache?.readOffset ?? 0,
+      pendingBytes: cache?.pending.length ?? 0,
+      lastBytesParsed: this.cacheLastBytesParsed,
+      totalBytesParsed: this.cacheTotalBytesParsed,
+      rebuilds: this.cacheRebuilds,
+      durableAppends: this.durableAppends,
+      suppressedAppends: this.suppressedAppends,
+    };
   }
 
   /**
@@ -472,22 +555,88 @@ export class TaskRegistry {
     const task = this.get(id);
     if (!task) throw new Error(`Task not found: ${id}`);
     mkdirSync(dirname(task.tick_log_path), { recursive: true });
+    const stages = tick.stages === undefined ? undefined : this.compactStages(tick.stages);
+    const previous = this.tickProjections.get(id);
+    const current: TickProjection = {
+      status: tick.status,
+      ...(tick.message ? { message: tick.message } : {}),
+      ...(stages ? { stages } : {}),
+    };
+    if (previous && isDeepStrictEqual(previous, current)) return;
+
+    const stageDelta = stages ? this.diffStages(previous?.stages, stages) : undefined;
     const ts = tick.ts ?? this.now().toISOString();
     const parts = [`- ${ts} status=${tick.status}`];
     if (tick.message) parts.push(` ${tick.message}`);
-    if (tick.stages !== undefined) parts.push(` stages=${JSON.stringify(tick.stages)}`);
+    if (stageDelta && Object.keys(stageDelta).length > 0) {
+      parts.push(` stage_delta=${JSON.stringify(stageDelta)}`);
+    }
     appendFileSync(task.tick_log_path, `${parts.join('')}\n`, 'utf-8');
+    this.tickProjections.set(id, current);
   }
 
   readRecentTicks(id: number, limit = 20): string[] {
     const task = this.get(id);
     if (!task || !existsSync(task.tick_log_path)) return [];
-    const lines = readFileSync(task.tick_log_path, 'utf-8').split(/\r?\n/).filter(Boolean);
-    return lines.slice(Math.max(0, lines.length - limit));
+    if (limit <= 0) return [];
+    let fd: number | undefined;
+    try {
+      fd = openSync(task.tick_log_path, 'r');
+      const size = fstatSync(fd).size;
+      const chunks: Buffer[] = [];
+      let offset = size;
+      let newlineCount = 0;
+      while (offset > 0 && newlineCount <= limit) {
+        const length = Math.min(64 * 1024, offset);
+        offset -= length;
+        const chunk = Buffer.allocUnsafe(length);
+        const bytesRead = readSync(fd, chunk, 0, length, offset);
+        const used = bytesRead === length ? chunk : chunk.subarray(0, bytesRead);
+        chunks.unshift(used);
+        for (const byte of used) if (byte === 0x0a) newlineCount += 1;
+      }
+      const lines = Buffer.concat(chunks).toString('utf-8').split(/\r?\n/).filter(Boolean);
+      return lines.slice(Math.max(0, lines.length - limit));
+    } finally {
+      try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+    }
   }
 
   nextId(): number {
     return this.withLock(() => this.nextIdUnlocked());
+  }
+
+  private compactStages(value: unknown): Record<string, unknown> | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const compact: Record<string, unknown> = {};
+    for (const stageId of Object.keys(value as Record<string, unknown>).sort()) {
+      const raw = (value as Record<string, unknown>)[stageId];
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const stage = raw as Record<string, unknown>;
+      const projection: Record<string, unknown> = {};
+      for (const key of ['status', 'retries', 'reruns', 'startedAt', 'completedAt', 'error'] as const) {
+        const candidate = stage[key];
+        if (typeof candidate === 'number') projection[key] = candidate;
+        else if (typeof candidate === 'string') {
+          projection[key] = key === 'error' && candidate.length > 500 ? `${candidate.slice(0, 497)}...` : candidate;
+        }
+      }
+      if (Array.isArray(stage.attempts)) projection.executions = stage.attempts.length;
+      compact[stageId] = projection;
+    }
+    return compact;
+  }
+
+  private diffStages(
+    previous: Record<string, unknown> | undefined,
+    current: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const delta: Record<string, unknown> = {};
+    for (const stageId of new Set([...Object.keys(previous ?? {}), ...Object.keys(current)])) {
+      if (!(stageId in current)) delta[stageId] = null;
+      else if (!previous || !isDeepStrictEqual(previous[stageId], current[stageId])) delta[stageId] = current[stageId];
+    }
+    return delta;
   }
 
   private readRegistryRaw(): string {
@@ -535,7 +684,25 @@ export class TaskRegistry {
       bytes,
       records,
       tasks: tasks.size,
+      activeTasks: Array.from(tasks.values()).filter((task) => isActiveTaskStatus(task.status)).length,
       unreadableRecords,
+      compactRecommended: bytes >= REGISTRY_COMPACTION_THRESHOLDS.bytes
+        || records >= REGISTRY_COMPACTION_THRESHOLDS.records,
+    };
+  }
+
+  private metricsFromCache(registry: RegistryReadResult): TaskRegistryMetrics {
+    const cache = this.registryCache;
+    const tasks = Array.from(registry.tasks.values());
+    const hasPendingRecord = Boolean(cache && cache.pending.toString('utf-8').trim().length > 0);
+    const records = (cache?.completeRecords ?? 0) + (hasPendingRecord ? 1 : 0);
+    const bytes = cache?.fileSize ?? 0;
+    return {
+      bytes,
+      records,
+      tasks: tasks.length,
+      activeTasks: tasks.filter((task) => isActiveTaskStatus(task.status)).length,
+      unreadableRecords: registry.unreadableRecords,
       compactRecommended: bytes >= REGISTRY_COMPACTION_THRESHOLDS.bytes
         || records >= REGISTRY_COMPACTION_THRESHOLDS.records,
     };
@@ -725,20 +892,162 @@ export class TaskRegistry {
   }
 
   private readLatestUnlocked(): RegistryReadResult {
-    const tasks = new Map<number, TaskEntry>();
-    if (!existsSync(this.registryPath)) return { tasks, unreadableRecords: 0 };
-    const result = readJsonlFileWithDiagnostics<unknown>(this.registryPath);
-    for (const row of result.rows) {
-      if (!row || typeof row !== 'object') continue;
-      const parsed = row as TaskEntry;
-      if (typeof parsed.id === 'number') tasks.set(parsed.id, parsed);
+    this.cacheLastBytesParsed = 0;
+    let fd: number | undefined;
+    try {
+      fd = openSync(this.registryPath, 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (this.registryCache) this.cacheGeneration += 1;
+      this.registryCache = undefined;
+      return { tasks: new Map(), unreadableRecords: 0, unreadableTail: false };
     }
-    return { tasks, unreadableRecords: result.unreadableRecords };
+
+    try {
+      const stat = fstatSync(fd);
+      const cached = this.registryCache;
+      const sameIdentity = cached?.dev === stat.dev && cached.ino === stat.ino;
+      const sameSizeWasRewritten = Boolean(
+        cached
+        && sameIdentity
+        && stat.size === cached.readOffset
+        && (stat.mtimeMs !== cached.mtimeMs || stat.ctimeMs !== cached.ctimeMs),
+      );
+      const rebuild = !cached
+        || !sameIdentity
+        || stat.size < cached.readOffset
+        || sameSizeWasRewritten;
+      if (rebuild) {
+        this.cacheGeneration += 1;
+        this.cacheRebuilds += 1;
+        this.registryCache = {
+          dev: stat.dev,
+          ino: stat.ino,
+          generation: this.cacheGeneration,
+          readOffset: 0,
+          fileSize: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+          pending: Buffer.alloc(0),
+          pendingReadable: true,
+          completeUnreadableRecords: 0,
+          completeRecords: 0,
+          tasks: new Map(),
+        };
+      }
+
+      const cache = this.registryCache!;
+      if (stat.size > cache.readOffset) {
+        const chunk = Buffer.allocUnsafe(stat.size - cache.readOffset);
+        let consumed = 0;
+        while (consumed < chunk.length) {
+          const count = readSync(fd, chunk, consumed, chunk.length - consumed, cache.readOffset + consumed);
+          if (count === 0) break;
+          consumed += count;
+        }
+        const bytes = consumed === chunk.length ? chunk : chunk.subarray(0, consumed);
+        this.applyRegistryBytes(cache, bytes);
+        cache.readOffset += consumed;
+        this.cacheLastBytesParsed = consumed;
+        this.cacheTotalBytesParsed += consumed;
+      }
+      const after = fstatSync(fd);
+      cache.fileSize = after.size;
+      cache.mtimeMs = after.mtimeMs;
+      cache.ctimeMs = after.ctimeMs;
+
+      const tasks = new Map(cache.tasks);
+      if (cache.pendingTask) tasks.set(cache.pendingTask.id, cache.pendingTask);
+      const pendingUnreadable = cache.pending.length > 0 && !cache.pendingReadable ? 1 : 0;
+      return {
+        tasks,
+        unreadableRecords: cache.completeUnreadableRecords + pendingUnreadable,
+        unreadableTail: pendingUnreadable > 0,
+      };
+    } finally {
+      try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+    }
   }
 
-  private appendEntry(entry: TaskEntry): void {
+  private appendEntry(entry: TaskEntry, opts: { allowCompleteUnreadable?: boolean } = {}): void {
     mkdirSync(dirname(this.registryPath), { recursive: true });
-    appendFileSync(this.registryPath, `${JSON.stringify(entry)}\n`, 'utf-8');
+    const current = this.readLatestUnlocked();
+    if (current.unreadableRecords > 0 && !(opts.allowCompleteUnreadable && !current.unreadableTail)) {
+      throw new TaskRegistryIntegrityError(this.registryPath, current.unreadableRecords);
+    }
+    const cache = this.registryCache;
+    const needsSeparator = Boolean(cache && cache.pending.length > 0 && cache.pending.toString('utf-8').trim().length > 0);
+    const bytes = Buffer.from(`${needsSeparator ? '\n' : ''}${JSON.stringify(entry)}\n`, 'utf-8');
+    const existed = existsSync(this.registryPath);
+    let fd: number | undefined;
+    try {
+      fd = openSync(this.registryPath, 'a');
+      let written = 0;
+      while (written < bytes.length) {
+        const count = writeSync(fd, bytes, written, bytes.length - written);
+        if (count <= 0) throw new Error(`Task registry append made no progress for ${this.registryPath}`);
+        written += count;
+      }
+      this.syncFile(fd);
+    } finally {
+      try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
+    }
+    if (!existed) {
+      let parent: number | undefined;
+      try {
+        parent = openSync(dirname(this.registryPath), 'r');
+        fsyncSync(parent);
+      } finally {
+        try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
+      }
+    }
+    this.durableAppends += 1;
+    // Acknowledgement follows sync. Folding the newly durable suffix keeps the
+    // hot cache coherent without rereading any historical byte.
+    this.readLatestUnlocked();
+  }
+
+  private applyRegistryBytes(cache: RegistryCache, bytes: Buffer): void {
+    const combined = cache.pending.length > 0 ? Buffer.concat([cache.pending, bytes]) : bytes;
+    const finalNewline = combined.lastIndexOf(0x0a);
+    const complete = finalNewline >= 0 ? combined.subarray(0, finalNewline) : Buffer.alloc(0);
+    cache.pending = finalNewline >= 0 ? combined.subarray(finalNewline + 1) : Buffer.from(combined);
+
+    if (complete.length > 0) {
+      for (const rawLine of complete.toString('utf-8').split('\n')) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        cache.completeRecords += 1;
+        let value: unknown;
+        try {
+          value = JSON.parse(trimmed) as unknown;
+        } catch {
+          cache.completeUnreadableRecords += 1;
+          continue;
+        }
+        if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number') {
+          const task = value as TaskEntry;
+          cache.tasks.set(task.id, task);
+        }
+      }
+    }
+
+    cache.pendingTask = undefined;
+    cache.pendingReadable = true;
+    const pending = cache.pending.toString('utf-8').trim();
+    if (!pending) return;
+    try {
+      const value = JSON.parse(pending) as unknown;
+      if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number') {
+        cache.pendingTask = value as TaskEntry;
+      }
+    } catch {
+      cache.pendingReadable = false;
+    }
+  }
+
+  private invalidateRegistryCache(): void {
+    this.registryCache = undefined;
   }
 
   private writeBriefSidecar(id: number, brief: string): string {

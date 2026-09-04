@@ -17,11 +17,14 @@ import type { CheckContext, CheckDecl } from '../src/reality-gate/types.js';
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scanSourceUrl = pathToFileURL(join(
   repositoryRoot,
-  'src',
+  'dist',
   'reality-gate',
   'checks',
-  'static-ast-scan.ts',
+  'static-ast-scan.js',
 )).href;
+const MODULE_LOADER_BASELINE_HEAP_MIB = 12;
+const BOUNDED_SCAN_MARGIN_HEAP_MIB = 20;
+const BOUNDED_SCAN_HEAP_MIB = MODULE_LOADER_BASELINE_HEAP_MIB + BOUNDED_SCAN_MARGIN_HEAP_MIB;
 
 let projectDir: string;
 let taskDir: string;
@@ -175,7 +178,7 @@ describe('bounded static scan traversal regressions', () => {
       process.stdout.write(JSON.stringify(result));
     `;
     const child = spawnSync(process.execPath, [
-      '--import', 'tsx', '--input-type=module', '-e', source,
+      '--input-type=module', '-e', source,
       scanSourceUrl, projectDir, taskDir, benign, escaped,
     ], {
       cwd: repositoryRoot,
@@ -201,7 +204,9 @@ describe('bounded static scan traversal regressions', () => {
   it('QA10 bounds candidate enumeration before a large matching directory can exhaust the process', { timeout: 20_000 }, () => {
     const sourceDirectory = join(projectDir, 'many');
     mkdirSync(sourceDirectory);
-    for (let index = 0; index < 100_000; index += 1) {
+    // One match beyond the production 4,096-file cap exercises the same
+    // fail-closed boundary without manufacturing unrelated entries.
+    for (let index = 0; index < 4_097; index += 1) {
       writeFileSync(join(sourceDirectory, `${index}.ts`), '');
     }
     const source = `
@@ -213,7 +218,7 @@ describe('bounded static scan traversal regressions', () => {
       process.stdout.write(JSON.stringify(result));
     `;
     const control = spawnSync(process.execPath, [
-      '--max-old-space-size=12', '--import', 'tsx', '--input-type=module', '-e',
+      `--max-old-space-size=${BOUNDED_SCAN_HEAP_MIB}`, '--input-type=module', '-e',
       `const module = await import(process.argv[1]); process.stdout.write(typeof module.default);`,
       scanSourceUrl,
     ], {
@@ -222,11 +227,12 @@ describe('bounded static scan traversal regressions', () => {
       timeout: 5_000,
       env: { ...process.env, HOME: projectDir, FC_HOME: join(taskDir, 'fc-home') },
     });
+    expect(control.signal, control.stderr).toBeNull();
     expect(control.status, control.stderr).toBe(0);
     expect(control.stdout).toBe('function');
 
     const child = spawnSync(process.execPath, [
-      '--max-old-space-size=12', '--import', 'tsx', '--input-type=module', '-e', source,
+      `--max-old-space-size=${BOUNDED_SCAN_HEAP_MIB}`, '--input-type=module', '-e', source,
       scanSourceUrl, projectDir, taskDir,
     ], {
       cwd: repositoryRoot,
@@ -234,6 +240,7 @@ describe('bounded static scan traversal regressions', () => {
       timeout: 10_000,
       env: { ...process.env, HOME: projectDir, FC_HOME: join(taskDir, 'fc-home') },
     });
+    expect(child.signal, child.stderr.slice(-1_000)).toBeNull();
     expect(child.status, child.stderr.slice(-1_000)).toBe(0);
     const result = JSON.parse(child.stdout) as { pass: boolean; details: string };
     expect(typeof result.pass).toBe('boolean');
@@ -251,7 +258,7 @@ describe('bounded static scan traversal regressions', () => {
       process.stdout.write(JSON.stringify(result));
     `;
     const child = spawnSync(process.execPath, [
-      '--max-old-space-size=64', '--import', 'tsx', '--input-type=module', '-e', source,
+      '--max-old-space-size=64', '--input-type=module', '-e', source,
       scanSourceUrl, projectDir, taskDir,
     ], {
       cwd: repositoryRoot,

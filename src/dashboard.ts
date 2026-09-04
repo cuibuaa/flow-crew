@@ -79,6 +79,7 @@ import { readKG, readKGSafe, addNode, updateNode, removeNode, addEdge, summarize
 import { readTraceEvents, readAllTraceEvents, summarizeTrace } from './trace.js';
 import { appendPendingReview, consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
 import type { PendingReviewEntry } from './campaign-review.js';
+import { readOperatorEvents, readOperationalProjection, type EventLike } from './cli-events.js';
 import { getEdges as getCrossCampaignEdges, getNodes as getCrossCampaignNodes } from './cross-campaign-kg.js';
 import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
 import {
@@ -1256,21 +1257,8 @@ function stageArtifactCount(projectDir: string, runId: string, stageId: string):
   }
 }
 
-function readRunEvents(runId: string): { ts: string; event: string; stage?: string; message?: string }[] {
-  const events: { ts: string; event: string; stage?: string; message?: string }[] = [];
-  for (const entry of readJsonlFile(join(runsRoot(), runId, 'events.jsonl'))) {
-    if (!entry || typeof entry !== 'object') continue;
-    const row = entry as Record<string, unknown>;
-    const ts = stringValue(row.ts) ?? stringValue(row.timestamp) ?? '';
-    const event = stringValue(row.event) ?? stringValue(row.type) ?? 'event';
-    const normalized: { ts: string; event: string; stage?: string; message?: string } = { ts, event };
-    const stage = stringValue(row.stage) ?? stringValue(row.stageId);
-    const message = stringValue(row.message) ?? stringValue(row.reason) ?? stringValue(row.status);
-    if (stage !== undefined) normalized.stage = stage;
-    if (message !== undefined) normalized.message = message;
-    events.push(normalized);
-  }
-  return events.slice(-200);
+function readRunEvents(runId: string): EventLike[] {
+  try { return readOperatorEvents(join(runsRoot(), runId), 200); } catch { return []; }
 }
 
 function readStageOutputPreviews(runId: string): Record<string, string> {
@@ -1352,6 +1340,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     });
   }
   const kg = readKGSafe(projectDir, state.runId);
+  const runDirectory = join(runsRoot(), state.runId);
   return {
     runId: state.runId,
     workflowName: state.workflowName,
@@ -1376,6 +1365,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     stageEvidence: state.stageEvidence ?? [],
     kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
     events: readRunEvents(state.runId),
+    operational: readOperationalProjection(runDirectory, { state }),
     stage_outputs: readStageOutputPreviews(state.runId),
   };
 }

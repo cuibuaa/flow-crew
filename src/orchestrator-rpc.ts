@@ -6,6 +6,7 @@ import type { TaskCreateInput, TaskEntry, TaskListFilter } from './task-registry
 import { fcGlobalDir } from './store.js';
 import type { CancellationResult } from './run-control.js';
 import type { SupervisorLogSource, UnitStatus } from './supervision.js';
+import type { OperationalProjection } from './cli-events.js';
 
 export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
 
@@ -38,7 +39,7 @@ export function rpcErrorExitCode(error: unknown): number {
 export type RpcRequest =
   | { cmd: 'register'; task: TaskCreateInput }
   | { cmd: 'list'; filter?: TaskListFilter }
-  | { cmd: 'show'; id: number }
+  | { cmd: 'show'; id: number; raw?: boolean }
   | { cmd: 'cancel'; id: number }
   | { cmd: 'cancel-run'; runId: string; unit?: string }
   | { cmd: 'retry'; id: number }
@@ -61,6 +62,7 @@ export interface TaskListRpcResponse {
 /** Registry fields plus authoritative run.json fields merged by the daemon read path. */
 export interface TaskShowEntry extends Omit<TaskEntry, 'status'> {
   status: string;
+  operational?: OperationalProjection;
   run_verdict?: string;
   failure_reason?: string;
   terminal_status_mismatch?: {
@@ -86,6 +88,10 @@ export interface DaemonStatusRpcResponse {
   uptime: number;
   watched_tasks: number;
   registry_unreadable_records: number;
+  /** Cached by the daemon's incremental registry reader; absent on legacy daemons. */
+  registry_bytes?: number;
+  registry_records?: number;
+  registry_tasks?: number;
   pid: number;
   startedAt: string;
   socketPath: string;
@@ -139,8 +145,6 @@ export async function sendRpc<T extends RpcResponse = RpcResponse>(
     let raw = '';
     let requestWritten = false;
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
-
     const clearTimer = () => {
       if (timer) clearTimeout(timer);
     };
@@ -161,7 +165,7 @@ export async function sendRpc<T extends RpcResponse = RpcResponse>(
       requestWritten ? new RpcOutcomeUnknownError(detail) : new DaemonUnavailableError()
     );
 
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       rejectOnce(transportFailure(`daemon response timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
 
