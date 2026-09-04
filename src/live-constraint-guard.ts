@@ -1,5 +1,16 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, watch, type FSWatcher } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readlinkSync,
+  readSync,
+  watch,
+  type FSWatcher,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { scopePathDigest } from './runtime-negotiation.js';
 
@@ -41,13 +52,108 @@ export function scopeRevisionInstruction(input: ScopeRevisionContractInput & {
 }): string {
   const paths = [...new Set(input.violatingPaths.map((path) => path.replace(/\\/g, '/')))].sort();
   const digest = scopePathDigest(paths);
-  return `The live constraint guard detected and reverted project write${paths.length === 1 ? '' : 's'} outside the effective scope: ${JSON.stringify(paths)}. `
+  return `The live constraint guard detected project content change${paths.length === 1 ? '' : 's'} outside the effective scope: ${JSON.stringify(paths)}. `
+    + `Each incident records whether exact preimage restoration succeeded; an unrestored path is never described as reverted. `
     + `Do not rewrite ${paths.length === 1 ? 'that path' : 'those paths'} unless a scope revision is accepted. `
     + `If the declared work requires ${paths.length === 1 ? 'it' : 'them'}, write exactly one request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`
     + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(paths)},"pathDigest":"${digest}",`
     + `"reason":"<why the declared work requires it>"}. Wait without hot-polling for scope_revision_decision_<requestId>.json and write only after acceptance. `
     + `This is the same instruction recorded by the post-attempt constraint audit, which remains the backstop.`;
+}
+
+export type LiveConstraintContentIdentity =
+  | { state: 'absent' }
+  | { state: 'unavailable'; reason: string }
+  | {
+      state: 'present';
+      type: 'file' | 'symlink';
+      byteLength: number;
+      sha256: string;
+    };
+
+export type LiveConstraintContentComparison = 'equal' | 'different' | 'unavailable';
+
+function errorReason(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = 'code' in error && typeof error.code === 'string' ? `${error.code}: ` : '';
+  return `${code}${error.message}`;
+}
+
+function hashRegularFile(path: string): LiveConstraintContentIdentity {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(path, 'r');
+      const before = fstatSync(descriptor);
+      if (!before.isFile()) return { state: 'unavailable', reason: 'path changed type while its content was read' };
+      const hash = createHash('sha256');
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      let byteLength = 0;
+      while (true) {
+        const count = readSync(descriptor, chunk, 0, chunk.length, null);
+        if (count === 0) break;
+        hash.update(chunk.subarray(0, count));
+        byteLength += count;
+      }
+      const after = fstatSync(descriptor);
+      if (before.size === after.size
+        && before.mtimeMs === after.mtimeMs
+        && before.ctimeMs === after.ctimeMs
+        && byteLength === after.size) {
+        return { state: 'present', type: 'file', byteLength, sha256: hash.digest('hex') };
+      }
+    } catch (error) {
+      return { state: 'unavailable', reason: `could not read regular-file content: ${errorReason(error)}` };
+    } finally {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor); } catch { /* the content result already captures the useful failure */ }
+      }
+    }
+  }
+  return { state: 'unavailable', reason: 'regular-file content changed during two consecutive reads' };
+}
+
+/** Metadata can nominate a path for inspection; only this identity proves a write. */
+export function readLiveConstraintContentIdentity(path: string): LiveConstraintContentIdentity {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { state: 'absent' };
+    return { state: 'unavailable', reason: `could not inspect path: ${errorReason(error)}` };
+  }
+  if (stat.isSymbolicLink()) {
+    try {
+      const bytes = readlinkSync(path, { encoding: 'buffer' });
+      return {
+        state: 'present',
+        type: 'symlink',
+        byteLength: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    } catch (error) {
+      return { state: 'unavailable', reason: `could not read symbolic-link target: ${errorReason(error)}` };
+    }
+  }
+  if (!stat.isFile()) return { state: 'unavailable', reason: 'path is neither a regular file nor a symbolic link' };
+  return hashRegularFile(path);
+}
+
+export function compareLiveConstraintContentIdentities(
+  before: LiveConstraintContentIdentity,
+  after: LiveConstraintContentIdentity,
+): LiveConstraintContentComparison {
+  if (before.state === 'unavailable' || after.state === 'unavailable') return 'unavailable';
+  if (before.state === 'absent' || after.state === 'absent') {
+    return before.state === after.state ? 'equal' : 'different';
+  }
+  return before.type === after.type
+    && before.byteLength === after.byteLength
+    && before.sha256 === after.sha256
+    ? 'equal'
+    : 'different';
 }
 
 interface WriterLeaseState {

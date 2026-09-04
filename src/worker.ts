@@ -1,5 +1,5 @@
 // Module: worker
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
@@ -34,7 +34,10 @@ import { guidanceForStageFromText, readGuidanceForStage, renderGuidanceDelivery 
 import { recordRunEvent } from './run-events.js';
 import {
   acquireAttributableWriterLease,
+  compareLiveConstraintContentIdentities,
   LIVE_CONSTRAINT_MAX_REINVOCATIONS,
+  readLiveConstraintContentIdentity,
+  type LiveConstraintContentIdentity,
   type LiveConstraintGuardFactory,
   type LiveConstraintInvocationResult,
 } from './live-constraint-guard.js';
@@ -171,8 +174,12 @@ function literalScopeRoot(scope: string): string | undefined {
   return prefix;
 }
 
-function snapshotScopedMtimes(projectDir: string, scopes: readonly string[], extraFiles: string[] = []): Map<string, number> {
-  const snap = new Map<string, number>();
+function snapshotScopedContent(
+  projectDir: string,
+  scopes: readonly string[],
+  extraFiles: string[] = [],
+): Map<string, LiveConstraintContentIdentity> {
+  const snap = new Map<string, LiveConstraintContentIdentity>();
   function walk(dir: string, depth: number) {
     if (depth > 20) return;
     let entries: string[];
@@ -181,9 +188,9 @@ function snapshotScopedMtimes(projectDir: string, scopes: readonly string[], ext
       if (SKIP_DIRS.has(e)) continue;
       const full = join(dir, e);
       try {
-        const st = statSync(full);
+        const st = lstatSync(full);
         if (st.isDirectory()) walk(full, depth + 1);
-        else snap.set(full, st.mtimeMs);
+        else snap.set(full, readLiveConstraintContentIdentity(full));
       } catch { /* skip */ }
     }
   }
@@ -192,39 +199,36 @@ function snapshotScopedMtimes(projectDir: string, scopes: readonly string[], ext
     if (!root) continue;
     const absolute = join(projectDir, root);
     try {
-      const stat = statSync(absolute);
+      const stat = lstatSync(absolute);
       if (stat.isDirectory()) walk(absolute, 0);
-      else if (stat.isFile()) snap.set(absolute, stat.mtimeMs);
+      else snap.set(absolute, readLiveConstraintContentIdentity(absolute));
     } catch { /* an exact declared output may not exist yet */ }
   }
   for (const file of extraFiles) {
-    try {
-      const st = statSync(file);
-      if (st.isFile()) snap.set(file, st.mtimeMs);
-    } catch { /* optional file may not exist yet */ }
+    const identity = readLiveConstraintContentIdentity(file);
+    if (identity.state !== 'absent') snap.set(file, identity);
   }
   return snap;
 }
 
 function diffScopedArtifacts(
-  before: Map<string, number>,
+  before: Map<string, LiveConstraintContentIdentity>,
   projectDir: string,
   scopes: readonly string[],
   extraFiles: string[] = [],
   runDirectory?: string,
 ): string[] {
-  const after = snapshotScopedMtimes(projectDir, scopes, extraFiles);
+  const after = snapshotScopedContent(projectDir, scopes, extraFiles);
   const changed: string[] = [];
-  for (const [path, mtime] of after) {
-    const prev = before.get(path);
-    if (prev === undefined || mtime > prev) {
-      const runRelative = runDirectory ? relative(runDirectory, path) : undefined;
-      changed.push(runRelative !== undefined && runRelative !== '' && !runRelative.startsWith('..')
-        ? `run:${runRelative.replace(/\\/g, '/')}`
-        : relative(projectDir, path).replace(/\\/g, '/'));
-    }
+  const absent: LiveConstraintContentIdentity = { state: 'absent' };
+  for (const path of new Set([...before.keys(), ...after.keys()])) {
+    if (compareLiveConstraintContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
+    const runRelative = runDirectory ? relative(runDirectory, path) : undefined;
+    changed.push(runRelative !== undefined && runRelative !== '' && !runRelative.startsWith('..')
+      ? `run:${runRelative.replace(/\\/g, '/')}`
+      : relative(projectDir, path).replace(/\\/g, '/'));
   }
-  return changed;
+  return changed.sort();
 }
 
 /** Keep history in attempts while ensuring the live top level describes only the new execution. */
@@ -470,7 +474,7 @@ async function runStageWithWriterLease(
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
-  const beforeSnapshot = snapshotScopedMtimes(opts.projectDir, projectWriteScope, [kgPath]);
+  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope, [kgPath]);
 
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,

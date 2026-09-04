@@ -3637,17 +3637,26 @@ const REPAIR_DIFF_SKIP_DIRS = new Set([
 interface RepairFileImage {
   exists: boolean;
   sha256?: string;
+  byteLength?: number;
   binary?: boolean;
   text?: string;
   /** In-memory rollback bytes; omitted from serialized audit artifacts. */
   bytes?: Buffer;
   symlink?: boolean;
   type?: 'file' | 'symlink';
+  /** Git blob identity proves bytes even when the blob cannot be materialized. */
+  gitObjectId?: string;
+  /** Exact preimage bytes could not be obtained; never interpret this as absence. */
+  materializationFailure?: string;
+  /** Existence/content could not be inspected at all. */
+  inspectionFailure?: string;
+  /** Retained only as restoration metadata; never part of content equality. */
   mode?: number;
 }
 
 interface RepairFileFingerprint {
   sha256: string;
+  byteLength: number;
   type: 'file' | 'symlink';
   mode: number;
 }
@@ -3702,7 +3711,7 @@ export interface RepairRoundSnapshot {
   startedAt: string;
   declaredScopes: Record<string, string[] | null>;
   captureAll: boolean;
-  /** Full-tree fingerprints detect content, type, and mode changes, including scope escapes. */
+  /** Full-tree fingerprints detect content-object changes, including scope escapes. */
   allFileFingerprints: Map<string, RepairFileFingerprint>;
   /** Full preimages make definite unauthorized writes atomically reversible. */
   allFileImages: Map<string, RepairFileImage>;
@@ -3768,26 +3777,52 @@ function scopeMatchesProjectPath(scope: ParsedScope, path: string): boolean {
   return path === scope.value || path.startsWith(`${scope.value}/`);
 }
 
+function describeRepairError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = 'code' in error && typeof error.code === 'string' ? `${error.code}: ` : '';
+  return `${code}${error.message}`;
+}
+
 function readRepairFileImage(projectDir: string, relativePath: string): RepairFileImage {
   const normalized = normalizedProjectPath(relativePath);
   if (!normalized) return { exists: false };
   const absolute = join(projectDir, normalized);
+  let stat: ReturnType<typeof lstatSync>;
   try {
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink()) {
-      const target = readlinkSync(absolute);
-      const bytes = Buffer.from(target, 'utf-8');
+    stat = lstatSync(absolute);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    return code === 'ENOENT' || code === 'ENOTDIR'
+      ? { exists: false }
+      : { exists: false, inspectionFailure: `could not inspect ${normalized}: ${describeRepairError(error)}` };
+  }
+  if (stat.isSymbolicLink()) {
+    try {
+      const bytes = readlinkSync(absolute, { encoding: 'buffer' });
+      let text: string | undefined;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* raw non-UTF8 target */ }
       return {
         exists: true,
         sha256: createHash('sha256').update(bytes).digest('hex'),
-        binary: false,
-        text: target,
+        byteLength: bytes.byteLength,
+        binary: text === undefined,
+        bytes,
+        ...(text === undefined ? {} : { text }),
         symlink: true,
         type: 'symlink',
         mode: stat.mode & 0o7777,
       };
+    } catch (error) {
+      return {
+        exists: true,
+        type: 'symlink',
+        mode: stat.mode & 0o7777,
+        materializationFailure: `could not read symbolic-link preimage ${normalized}: ${describeRepairError(error)}`,
+      };
     }
-    if (!stat.isFile()) return { exists: false };
+  }
+  if (!stat.isFile()) return { exists: false };
+  try {
     const bytes = readFileSync(absolute);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     let text: string | undefined;
@@ -3795,10 +3830,15 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary/non-UTF8 */ }
     }
     return text === undefined
-      ? { exists: true, sha256, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777 }
-      : { exists: true, sha256, binary: false, text, type: 'file', mode: stat.mode & 0o7777 };
-  } catch {
-    return { exists: false };
+      ? { exists: true, sha256, byteLength: bytes.byteLength, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777 }
+      : { exists: true, sha256, byteLength: bytes.byteLength, binary: false, text, type: 'file', mode: stat.mode & 0o7777 };
+  } catch (error) {
+    return {
+      exists: true,
+      type: 'file',
+      mode: stat.mode & 0o7777,
+      materializationFailure: `could not read regular-file preimage ${normalized}: ${describeRepairError(error)}`,
+    };
   }
 }
 
@@ -3963,15 +4003,23 @@ function ensureRollbackBaseline(projectDir: string, runDirPath?: string): { base
 
 function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): RepairFileImage {
   if (!baseline.gitRoot || !baseline.cleanTracked.has(path)) return { exists: false };
+  const entry = baseline.gitIndexEntries.get(path);
+  if (!entry) {
+    const image: RepairFileImage = {
+      exists: true,
+      type: 'file',
+      materializationFailure: `Git index preimage metadata is unavailable for ${path}`,
+    };
+    baseline.images.set(path, image);
+    return image;
+  }
+  const rawMode = Number.parseInt(entry.mode, 8);
+  const symlink = entry.mode === '120000';
   try {
-    const entry = baseline.gitIndexEntries.get(path);
-    if (!entry) return { exists: false };
     const bytes = execFileSync('git', ['cat-file', 'blob', entry.objectId], {
       cwd: baseline.projectDir, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 15_000, maxBuffer: 64 * 1024 * 1024,
     });
-    const rawMode = Number.parseInt(entry.mode, 8);
-    const symlink = entry.mode === '120000';
     let text: string | undefined;
     if (!bytes.includes(0)) {
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary */ }
@@ -3979,8 +4027,10 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     const image: RepairFileImage = {
       exists: true,
       sha256: createHash('sha256').update(bytes).digest('hex'),
+      byteLength: bytes.byteLength,
       binary: text === undefined,
-      ...(text === undefined ? { bytes } : { text }),
+      ...(symlink || text === undefined ? { bytes } : {}),
+      ...(text === undefined ? {} : { text }),
       ...(symlink ? { symlink: true, type: 'symlink' as const } : { type: 'file' as const }),
       mode: symlink ? 0o777 : (Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644),
     };
@@ -3988,8 +4038,16 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     const fingerprint = repairFileFingerprint(image);
     if (fingerprint) baseline.fingerprints.set(path, fingerprint);
     return image;
-  } catch {
-    return { exists: false };
+  } catch (error) {
+    const image: RepairFileImage = {
+      exists: true,
+      type: symlink ? 'symlink' : 'file',
+      mode: symlink ? 0o777 : (Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644),
+      gitObjectId: entry.objectId,
+      materializationFailure: `could not materialize Git preimage for ${path}: ${describeRepairError(error)}`,
+    };
+    baseline.images.set(path, image);
+    return image;
   }
 }
 
@@ -4021,18 +4079,58 @@ function closeRollbackBaseline(projectDir: string, runDirPath: string): void {
 }
 
 function repairFileFingerprint(image: RepairFileImage): RepairFileFingerprint | undefined {
-  if (!image.exists || image.sha256 === undefined || image.type === undefined || image.mode === undefined) return undefined;
-  return { sha256: image.sha256, type: image.type, mode: image.mode };
+  if (!image.exists || image.sha256 === undefined || image.byteLength === undefined || image.type === undefined || image.mode === undefined) return undefined;
+  return { sha256: image.sha256, byteLength: image.byteLength, type: image.type, mode: image.mode };
 }
 
-function repairFileFingerprintsEqual(
-  before: RepairFileFingerprint | undefined,
-  after: RepairFileFingerprint | undefined,
-): boolean {
-  if (before === undefined || after === undefined) return before === after;
-  return before.sha256 === after.sha256
-    && before.type === after.type
-    && before.mode === after.mode;
+type RepairFileContentComparison = 'equal' | 'different' | 'unavailable';
+
+function repairFileMaterializedBytes(image: RepairFileImage): Buffer | undefined {
+  if (!image.exists) return undefined;
+  if (image.bytes !== undefined) return image.bytes;
+  if (image.text !== undefined) return Buffer.from(image.text, 'utf8');
+  return undefined;
+}
+
+function gitBlobObjectId(bytes: Buffer, expectedObjectId: string): string | undefined {
+  const algorithm = expectedObjectId.length === 40 ? 'sha1'
+    : expectedObjectId.length === 64 ? 'sha256'
+    : undefined;
+  if (!algorithm) return undefined;
+  return createHash(algorithm)
+    .update(`blob ${bytes.byteLength}\0`)
+    .update(bytes)
+    .digest('hex');
+}
+
+function compareRepairFileContents(
+  before: RepairFileImage,
+  after: RepairFileImage,
+): RepairFileContentComparison {
+  if (before.inspectionFailure || after.inspectionFailure) return 'unavailable';
+  if (before.exists !== after.exists) return 'different';
+  if (!before.exists) return 'equal';
+  if (!before.type || !after.type) return 'unavailable';
+  if (before.type !== after.type) return 'different';
+  if (before.sha256 !== undefined && after.sha256 !== undefined) {
+    return before.sha256 === after.sha256 && before.byteLength === after.byteLength
+      ? 'equal'
+      : 'different';
+  }
+  if (before.gitObjectId && after.gitObjectId) {
+    return before.gitObjectId === after.gitObjectId ? 'equal' : 'different';
+  }
+  const beforeBytes = repairFileMaterializedBytes(before);
+  const afterBytes = repairFileMaterializedBytes(after);
+  if (before.gitObjectId && afterBytes) {
+    const actual = gitBlobObjectId(afterBytes, before.gitObjectId);
+    return actual === undefined ? 'unavailable' : actual === before.gitObjectId ? 'equal' : 'different';
+  }
+  if (after.gitObjectId && beforeBytes) {
+    const actual = gitBlobObjectId(beforeBytes, after.gitObjectId);
+    return actual === undefined ? 'unavailable' : actual === after.gitObjectId ? 'equal' : 'different';
+  }
+  return 'unavailable';
 }
 
 function changedProjectPathsSinceSnapshot(
@@ -4052,7 +4150,7 @@ function changedProjectPathsSinceSnapshot(
   return [...candidates].sort().filter((path) => {
     const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
     const after = readRepairFileImage(projectDir, path);
-    return !repairFileFingerprintsEqual(repairFileFingerprint(before), repairFileFingerprint(after));
+    return compareRepairFileContents(before, after) === 'different';
   });
 }
 
@@ -4143,37 +4241,74 @@ export function captureRepairRoundSnapshot(
   };
 }
 
+interface ProjectPathRestoreResult {
+  restored: boolean;
+  failure?: string;
+}
+
+let rollbackReplacementSequence = 0;
+
 function restoreProjectPath(
   projectDir: string,
   rawPath: string,
   before: RepairFileImage,
-): boolean {
+): ProjectPathRestoreResult {
   const normalized = normalizedProjectPath(rawPath);
-  if (!normalized) return false;
+  if (!normalized) return { restored: false, failure: `cannot restore non-project path ${rawPath}` };
   const absolute = join(projectDir, normalized);
+  if (before.inspectionFailure) {
+    return { restored: false, failure: `preimage state is unavailable for ${normalized}: ${before.inspectionFailure}` };
+  }
+  let temporary: string | undefined;
   try {
     let currentIsDirectory = false;
     try { currentIsDirectory = lstatSync(absolute).isDirectory(); } catch { /* absent */ }
     // Never recursively erase an unexpected directory as part of rollback.
-    if (currentIsDirectory) return false;
+    if (currentIsDirectory) {
+      return { restored: false, failure: `refused to replace unexpected directory at ${normalized}` };
+    }
     if (!before.exists) {
       rmSync(absolute, { force: true });
-      return !readRepairFileImage(projectDir, normalized).exists;
+      const after = readRepairFileImage(projectDir, normalized);
+      return !after.exists && !after.inspectionFailure
+        ? { restored: true }
+        : { restored: false, failure: `new path ${normalized} remained after removal` };
     }
-    rmSync(absolute, { force: true });
+    const bytes = repairFileMaterializedBytes(before);
+    if (bytes === undefined) {
+      return {
+        restored: false,
+        failure: before.materializationFailure
+          ?? `preimage content is unavailable for ${normalized}`,
+      };
+    }
     mkdirSync(dirname(absolute), { recursive: true });
+    rollbackReplacementSequence++;
+    const token = createHash('sha256')
+      .update(`${process.pid}\0${Date.now()}\0${rollbackReplacementSequence}\0${normalized}`)
+      .digest('hex')
+      .slice(0, 16);
+    temporary = join(dirname(absolute), `.${basename(absolute)}.flowcrew-restore-${token}`);
     if (before.symlink) {
-      symlinkSync(before.text ?? '', absolute);
+      symlinkSync(bytes, temporary);
     } else {
-      writeFileSync(absolute, before.binary ? (before.bytes ?? Buffer.alloc(0)) : (before.text ?? ''));
-      if (before.mode !== undefined) chmodSync(absolute, before.mode);
+      writeFileSync(temporary, bytes, { flag: 'wx', mode: before.mode ?? 0o600 });
+      if (before.mode !== undefined) chmodSync(temporary, before.mode);
     }
-    return repairFileFingerprintsEqual(
-      repairFileFingerprint(before),
-      repairFileFingerprint(readRepairFileImage(projectDir, normalized)),
-    );
-  } catch {
-    return false;
+    if (compareRepairFileContents(before, readRepairFileImage(projectDir, relative(projectDir, temporary))) !== 'equal') {
+      return { restored: false, failure: `staged preimage verification failed for ${normalized}` };
+    }
+    renameSync(temporary, absolute);
+    temporary = undefined;
+    return compareRepairFileContents(before, readRepairFileImage(projectDir, normalized)) === 'equal'
+      ? { restored: true }
+      : { restored: false, failure: `restored content verification failed for ${normalized}` };
+  } catch (error) {
+    return { restored: false, failure: `could not restore ${normalized}: ${describeRepairError(error)}` };
+  } finally {
+    if (temporary) {
+      try { rmSync(temporary, { force: true }); } catch { /* target was never removed; cleanup is best effort */ }
+    }
   }
 }
 
@@ -4285,10 +4420,10 @@ function decideScopeRevision(input: {
       if (!root) continue;
       for (const path of listProjectFilesAt(projectDir, root)) requestedCandidates.add(path);
     }
-    const directlyChanged = [...requestedCandidates].find((path) => !repairFileFingerprintsEqual(
-      repairFileFingerprint(snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path)),
-      repairFileFingerprint(readRepairFileImage(projectDir, path)),
-    ));
+    const directlyChanged = [...requestedCandidates].find((path) => compareRepairFileContents(
+      snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path),
+      readRepairFileImage(projectDir, path),
+    ) === 'different');
     const changedPath = directlyChanged ?? changedProjectPathsSinceSnapshot(snapshot, projectDir)
       .find((path) => requestedScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
     if (changedPath) {
@@ -4376,16 +4511,31 @@ function serializableRepairFileMode(mode: number): string {
 }
 
 function serializableRepairFileImage(image: RepairFileImage): Record<string, unknown> {
-  if (!image.exists) return { exists: false };
+  if (!image.exists) return {
+    exists: false,
+    ...(image.inspectionFailure ? { contentAvailable: false, inspectionFailure: image.inspectionFailure } : {}),
+  };
   return {
     exists: true,
     sha256: image.sha256,
+    byteLength: image.byteLength,
     binary: image.binary === true,
     type: image.type,
     mode: image.mode === undefined ? undefined : serializableRepairFileMode(image.mode),
+    ...(image.gitObjectId ? { gitObjectId: image.gitObjectId } : {}),
+    ...(image.materializationFailure ? {
+      contentAvailable: false,
+      materializationFailure: image.materializationFailure,
+    } : { contentAvailable: true }),
     ...(image.symlink ? { symlink: true } : {}),
-    ...(image.binary ? {} : { text: image.text ?? '' }),
+    ...(image.text === undefined ? {} : { text: image.text }),
   };
+}
+
+function repairFilePreimageAvailable(image: RepairFileImage): boolean {
+  if (image.inspectionFailure) return false;
+  if (!image.exists) return true;
+  return repairFileMaterializedBytes(image) !== undefined;
 }
 
 export function writeRepairRoundDiffArtifact(input: {
@@ -4421,20 +4571,28 @@ export function writeRepairRoundDiffArtifact(input: {
     const after = readRepairFileImage(projectDir, path);
     const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
     const baselineBefore = before ?? baselineImage(snapshot.rollbackBaseline, path);
-    const beforeFingerprint = repairFileFingerprint(baselineBefore);
-    const afterFingerprint = repairFileFingerprint(after);
-    const beforeExisted = before?.exists ?? beforeFingerprint !== undefined;
-    const same = beforeExisted === after.exists
-      && repairFileFingerprintsEqual(beforeFingerprint, afterFingerprint);
+    const comparison = compareRepairFileContents(baselineBefore, after);
+    const beforeExisted = baselineBefore.exists;
+    // Mode remains useful descriptive audit evidence, but it is not content
+    // identity and never nominates a live violation by itself.
+    const modeChanged = beforeExisted && after.exists
+      && baselineBefore.mode !== undefined
+      && after.mode !== undefined
+      && baselineBefore.mode !== after.mode;
+    const same = comparison === 'equal' && !modeChanged;
     if (same && authoritativeOwners.length === 0) continue;
 
     let status: string;
     if (!beforeExisted && after.exists) status = 'added';
     else if (beforeExisted && !after.exists) status = 'deleted';
     else if (same) status = 'reported-touched';
+    else if (comparison === 'unavailable') status = 'content-unavailable';
     else status = 'modified';
     const declaredScopeMatch = before !== undefined;
-    const preimageAvailable = before !== undefined || (!beforeExisted && declaredScopeMatch);
+    // This public field means the declared-scope capture owns full preimage
+    // bytes. A run baseline may privately retain more for safe rollback, but
+    // the repair-diff artifact must not claim that as stage-captured content.
+    const preimageAvailable = before !== undefined && repairFilePreimageAvailable(before);
     files.push({
       path,
       status,
@@ -4446,14 +4604,16 @@ export function writeRepairRoundDiffArtifact(input: {
         : beforeExisted
           ? {
               exists: true,
-              sha256: beforeFingerprint?.sha256,
-              type: beforeFingerprint?.type,
-              mode: beforeFingerprint === undefined ? undefined : serializableRepairFileMode(beforeFingerprint.mode),
+              sha256: baselineBefore.sha256,
+              byteLength: baselineBefore.byteLength,
+              type: baselineBefore.type,
+              mode: baselineBefore.mode === undefined ? undefined : serializableRepairFileMode(baselineBefore.mode),
+              ...(baselineBefore.gitObjectId ? { gitObjectId: baselineBefore.gitObjectId } : {}),
               contentCaptured: false,
             }
           : { exists: false, contentCaptured: false },
       after: serializableRepairFileImage(after),
-      ...(!preimageAvailable ? { note: 'The path was outside the captured declared scope. Its full-tree fingerprint proves the change; the complete postimage is included when present, but preimage content was unavailable.' } : {}),
+      ...(!preimageAvailable ? { note: 'Preimage identity is retained separately from restoration bytes. No unavailable preimage is treated as a known-absent path.' } : {}),
     });
   }
 
@@ -8957,9 +9117,11 @@ function scopeContainsPath(scope: string[], rawPath: string): boolean {
 
 interface ScopeWriteEnforcement {
   rawWrites: string[];
+  contentChangedWrites: string[];
   appliedWrites: string[];
   rolledBackWrites: string[];
   rollbackFailures: string[];
+  rollbackFailureReasons: Record<string, string>;
   durableWrites: string[];
 }
 
@@ -9008,22 +9170,38 @@ function enforceStageScopeWrites(input: {
 }): ScopeWriteEnforcement {
   const ungoverned = input.effectiveScope === null;
   const rawWrites = [...new Set(input.rawWrites)];
+  const contentChangedWrites: string[] = [];
   const appliedWrites: string[] = [];
   const rolledBackWrites: string[] = [];
   const rollbackFailures: string[] = [];
+  const rollbackFailureReasons: Record<string, string> = {};
   const durableWrites: string[] = [];
   for (const rawPath of rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
     const definitelyAttributed = input.definiteWrites.has(normalized ?? rawPath);
     if (!normalized) {
-      if (definitelyAttributed) rollbackFailures.push(rawPath);
+      if (definitelyAttributed) {
+        rollbackFailures.push(rawPath);
+        rollbackFailureReasons[rawPath] = 'write attribution named a non-project path';
+      }
       continue;
     }
     const before = input.snapshot.files.get(normalized)
       ?? baselineImage(input.snapshot.rollbackBaseline, normalized);
-    const beforeFingerprint = repairFileFingerprint(before);
-    const currentFingerprint = repairFileFingerprint(readRepairFileImage(input.projectDir, normalized));
-    const changed = !repairFileFingerprintsEqual(beforeFingerprint, currentFingerprint);
+    const current = readRepairFileImage(input.projectDir, normalized);
+    const contentChanged = compareRepairFileContents(before, current) === 'different';
+    if (contentChanged) contentChangedWrites.push(normalized);
+    // Preserve the established rollback of an explicitly attributed
+    // executable-bit mutation, but do not promote metadata into content truth.
+    // In particular, this path is absent from contentChangedWrites and cannot
+    // by itself create a post-attempt constraint violation.
+    const attributedModeChange = definitelyAttributed
+      && before.exists
+      && current.exists
+      && before.mode !== undefined
+      && current.mode !== undefined
+      && before.mode !== current.mode;
+    const changed = contentChanged || attributedModeChange;
     if (ungoverned) {
       if (changed) {
         durableWrites.push(normalized);
@@ -9044,14 +9222,24 @@ function enforceStageScopeWrites(input: {
     // Preserve only paths covered by a peer's capability; every path outside
     // the complete batch capability is safe to restore even when ownership is unknown.
     if (!definitelyAttributed && input.preserveUnverifiedPath(normalized)) continue;
-    if (restoreProjectPath(input.projectDir, normalized, before)) {
+    const restoration = restoreProjectPath(input.projectDir, normalized, before);
+    if (restoration.restored) {
       rolledBackWrites.push(normalized);
     } else {
       rollbackFailures.push(normalized);
+      rollbackFailureReasons[normalized] = restoration.failure ?? `could not restore ${normalized}`;
       durableWrites.push(normalized);
     }
   }
-  return { rawWrites, appliedWrites, rolledBackWrites, rollbackFailures, durableWrites };
+  return {
+    rawWrites,
+    contentChangedWrites,
+    appliedWrites,
+    rolledBackWrites,
+    rollbackFailures,
+    rollbackFailureReasons,
+    durableWrites,
+  };
 }
 
 function createSchedulerLiveConstraintGuardFactory(input: {
@@ -9110,7 +9298,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         const violations = [...candidates].sort().flatMap((path) => {
           const before = baselineImage(baseline, path);
           const current = readRepairFileImage(input.projectDir, path);
-          if (repairFileFingerprintsEqual(repairFileFingerprint(before), repairFileFingerprint(current))) return [];
+          if (compareRepairFileContents(before, current) !== 'different') return [];
           if (scopeContainsPath(attemptContext.effectiveScope, path)) {
             // Commit an authorized write into the shared run baseline before
             // the next lease owner starts. The round snapshot still preserves
@@ -9118,14 +9306,14 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             settleRollbackBaselinePath(baseline, input.projectDir, path);
             return [];
           }
-          const restored = restoreProjectPath(input.projectDir, path, before);
+          const restoration = restoreProjectPath(input.projectDir, path, before);
           return [{
             path,
-            reason: restored
+            reason: restoration.restored
               ? 'adapter attributed an unauthorized project write; live enforcement restored its preimage before the invocation ended'
               : 'adapter attributed an unauthorized project write; live enforcement could not restore its preimage',
-            restored,
-            ...(restored ? {} : { rollbackFailure: `could not restore ${path}` }),
+            restored: restoration.restored,
+            ...(restoration.restored ? {} : { rollbackFailure: restoration.failure ?? `could not restore ${path}` }),
           }];
         });
         for (const violation of violations) {
@@ -9372,7 +9560,7 @@ function reconcileStageScope(input: {
   const ordinaryGovernedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
   // A terminal finalizer may declare generated/report-support paths so it can
   // rerun validation after authoring the terminal candidate. Those paths are
-  // touch-only: a content/type/mode delta would be new work performed after
+  // touch-only: a content-object delta would be new work performed after
   // the last gate. Reconcile against the terminal/evidence subset so any such
   // durable delta is restored from the pre-attempt snapshot and fails the
   // attempt before terminal evaluation.
@@ -9389,6 +9577,7 @@ function reconcileStageScope(input: {
     definiteWrites,
     preserveUnverifiedPath: (path) => peerScopeContainsPath(input.context, input.stage.id, path),
   });
+  const contentChangedPaths = new Set(enforcement.contentChangedWrites);
   const violations: Array<{
     path: string;
     certainty: 'definite' | 'unverified';
@@ -9406,6 +9595,11 @@ function reconcileStageScope(input: {
     const liveReverted = restoredLivePaths.has(normalized ?? rawPath)
       && !enforcement.rolledBackWrites.includes(normalized ?? rawPath)
       && !enforcement.rollbackFailures.includes(normalized ?? rawPath);
+    const invalidAttributedPath = normalized === undefined
+      && enforcement.rollbackFailures.includes(rawPath);
+    if (!liveReverted
+      && !contentChangedPaths.has(normalized ?? rawPath)
+      && !invalidAttributedPath) continue;
     // The incident's captured effective scope is the authority for the moment
     // of violation. A later accepted revision permits the corrected write; it
     // does not erase the fact that the first write was unauthorized.
@@ -9525,6 +9719,7 @@ function reconcileStageScope(input: {
     appliedWrites: enforcement.appliedWrites,
     rolledBackWrites: allRolledBackWrites,
     rollbackFailures: enforcement.rollbackFailures,
+    rollbackFailureReasons: enforcement.rollbackFailureReasons,
     durableWrites: enforcement.durableWrites,
     planningDigests,
     stateTransitions,
