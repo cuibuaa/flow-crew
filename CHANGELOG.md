@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.8.6] - 2026-09-04
+
+Two engine fixes found by real runs the day 0.8.5 went live, and the loop change the 0.8.5
+review pointed at: the engine now closes its own loop. Every change carries a replay that fails
+on 0.8.5 and passes now. No new brief syntax.
+
+### Fixed — a prompt too large for a command line
+
+Four parallel stages of one run failed within a second of starting with `spawn E2BIG`. Their
+assembled prompts were 372 KB, 370 KB of it predecessor context the engine had injected, and
+every adapter passed the whole prompt as a single command-line argument, above the Linux
+per-argument limit of 128 KiB. The prompt now reaches the child through stdin on every shipped
+adapter, spawn errors keep their diagnostics, and the context injected from a predecessor stage
+is bounded per dependency with the omitted material reachable by path. Separately, the
+`node_modules` link that `ship-setup` places in a target worktree is now ignored as a link as
+well as a directory, after a commit made in a worktree carried the link into a merge.
+
+### Changed — the loop closes on its own
+
+Four behaviours observed across a week of real runs are replaced by properties.
+
+A write outside the effective scope, to a protected path, or to an existing test the scope
+does not list, is detected during the attempt, the offending path alone is restored, the
+child is terminated and reinvoked inside the same attempt with the scope-revision
+instruction the post-attempt audit would have given; the audit stays as the backstop. On the
+recorded incident, restore latency is about 25 ms where the write had previously survived a
+3.2-hour attempt.
+
+The supervisor assesses only on deterministic events — a stage transition, a gate verdict, an
+artifact change above a stated size, a deadline within a margin, a guidance or scope request,
+an adapter failure — and every verdict records the event that triggered it; a tick with no
+event makes no model call. Elapsed time is the attempt's, not the stage's; the two false
+ABORTs on the evidence run no longer occur.
+
+`status`, `watch`, and `task show` render the same six measured rows — the training dose
+against the brief's floor and its trend, first-plan admission, supervisor rejections and how
+many were overturned, engine overhead per attempt, registry and log growth — each with its
+threshold, provenance, and crossing state. A crossing is marked, never acted on.
+
+A campaign declares its goal, yardstick, and budget once. When a run ends short of the goal,
+the engine derives the successor brief from the terminal artifact, the guidance history, and
+the declined items — goal and yardstick unchanged, guidances promoted to constraints, a
+criterion that never failed while its quantity stayed flat converted into a graded floor —
+records the diff, passes preflight, rehearsal, and admission, and launches; the campaign stops
+at its budget or its no-progress rule with an escalation.
+
+### Fixed — the live guard acts on content, not timestamps
+
+The first research run on the new guard, on a project mounted over 9p, saw a read-only
+scouting stage with an empty scope terminated twice: the guard's fallback trigger read a
+newer timestamp as a write and reported nearly every repository file as reverted, and a failed
+restore left six tracked files deleted. A write is now a content change, live and in the
+post-attempt reconciliation alike; an empty scope is protected by the same rule; a restore
+failure is diagnosed and recorded and never deletes a tracked file or by itself terminates an
+attempt whose content equals its preimage.
+
+### Known — an unchanged rewrite of a terminal artifact is not yet credited
+
+Under the content-based write rule, a terminal stage that rewrites its report with identical
+bytes on a later attempt records no write, and the run ends `incomplete` with the correct
+report on disk. Violation detection and terminal attribution share one definition of a write
+and need two; that separation is the next fix.
+
 ## [0.8.5] - 2026-09-04
 
 A day of watching the engine run for real — a seventeen-hour research campaign and an
