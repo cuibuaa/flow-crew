@@ -1,5 +1,120 @@
 # Changelog
 
+## [0.8.5] - 2026-09-04
+
+A day of watching the engine run for real — a seventeen-hour research campaign and an
+implementation batch, each with the daemon, supervisor, and gates in the loop — produced a
+review of eighteen behaviours that wasted the operator's hours. Seventeen are changed here,
+one is deliberately declined, and each change carries a replay that fails on 0.8.4 and passes
+now. Two engine fixes that preceded the batch are included, as is one configuration change.
+No new brief syntax.
+
+### Fixed — a supervisor rejection built from two different attempts
+
+When a gate attempt failed and the engine retried it, the retry started with a placeholder
+metric file while the previous attempt's closing words were still the tail of the shared live
+log. The supervisor read both, concluded the stage was contradicting itself, and its rejection
+was then applied to the retry's correct output; repairs chased a phantom for two hours.
+Supervisor evidence is now bound to the attempt it observed, and a rejection whose target has
+moved on is dropped rather than applied.
+
+### Fixed — scope revisions that vanished, stalled, or flooded the log
+
+A revision request carrying the wrong attempt index was silently ignored, so the agent waited
+for a decision that never came; a scope accepted in one attempt was forgotten by the next, so a
+repair that reused it was rolled back as a violation; and the contract told the agent to wait
+without saying how. Every request now receives a decision file, accepted scope survives into the
+next attempt of the same stage, the contract names the attempt and the wait, and a stale
+request is logged once — not on every twenty-millisecond poll, which had filled a task log to
+168 MB.
+
+### Fixed — tests pinned to the round that wrote them
+
+Research rounds kept writing verifiers that asserted the shared result file named their own
+round, true when written and false as soon as the next round succeeded, so every round repaired
+the previous round's test. The rule reached only the planner and a post-hoc guard that missed
+assertions of the shared artifact's existence. The temporal-test contract now reaches the stage
+that writes tests, with the resolved paths, and the guard covers existence assertions.
+
+### Fixed — a crash at the terminal gate left the daemon waiting forever
+
+A scheduler that died between writing its terminal artifact and committing the run status left
+the run marked running with no process behind it, and the daemon deferred on it every thirty
+seconds indefinitely. The daemon now reconciles a dead scheduler against a non-terminal run
+under the task's retry policy. The crash itself came from a rebuild deleting `dist` under a
+live scheduler that loaded its reality-gate checks lazily; the build is now atomic through a
+manifest, the checks are registered statically, and a build warns when it would touch a
+deployed `dist`.
+
+### Fixed — research conditions copied into non-research runs
+
+A `research.*` dispatch condition copied into a run with no research block was admitted,
+evaluated false forever, skipped the terminal owner, and ended a run `incomplete` with its
+correct report on disk while the failure reason named neither cause nor remedy. Admission now
+rejects the condition, and a skipped stage records why.
+
+### Changed — the operator can see what a run is doing
+
+`task list` shows the run, the current stage and attempt, and elapsed time; `task show` renders
+the stage table, the last rejection reason, the current guidance, and pending scope requests
+instead of hundreds of kilobytes of raw tick JSON; `status` carries a Now line. The run event
+log is the canonical feed — guidance, attempt failures, scope decisions, admission rejections,
+and status changes are emitted, every stage-scoped event carries its stage id, and a follow mode
+streams them as JSON lines. `ship-preflight` announces each baseline command with elapsed time,
+can skip the baseline, and warns when a live run shares the project. Help exits are consistent,
+`watch` no longer reports test fixtures as unreadable runs, deadline journals and empty outputs
+say what they are, and the three meanings of "attempt" are named apart.
+
+### Changed — engine overhead no longer scales with the project tree
+
+Every attempt walked the whole project tree twice and hashed every file once more, regardless
+of the declared scope — about a minute per attempt on a 9p-mounted project, three times per
+gate re-evaluation round. Snapshots are now scoped, shared between the closing walk and the
+next opening one, and a large file contributes its size and mtime rather than its bytes. The
+codex reasoning-effort diagnosis is remembered for the run instead of failing once per stage;
+the supervisor's static goal is placed where the provider caches it, its elapsed clock is the
+attempt's, and a tick with nothing new skips the call; the task registry no longer appends an
+unchanged record every tick and readers no longer re-parse its whole history; two
+twenty-millisecond polling loops watch the filesystem instead; the run state file is compact.
+
+### Changed — the test suite runs in under a minute
+
+The worker cap that assumed a 9p checkout is gone in favour of the machine's CPU count; the
+fixed 300 ms sleep at the end of every spec file is replaced by flushing the pending refresh;
+specs that execute `dist` assert its freshness instead of passing against a stale build; the
+heap-bound child fixtures run with headroom and assert the signal they die by; and CI cancels
+superseded runs and times out stuck ones. Measured on the same machine against the 0.8.4 suite,
+the wall time fell by 41.8% at the median with no test identity regressing.
+
+### Declined — rewriting a plan's mutable result path automatically
+
+A fresh research campaign's first plan is still rejected when a hard reality check references
+the optional numeric result path, which a valid no-candidate round never writes. Rewriting it to
+the framework manifest automatically would admit a check whose producer is not guaranteed, so
+the fail-closed admission stays; the rejection now carries the resolved rule and the remedy, and
+the planner is told the rule with the resolved paths before it plans.
+
+### Fixed — plan retries ratchet
+
+A rejected plan's retry could repair one admission requirement while losing another it had
+already satisfied, and oscillate. A requirement once satisfied is now held across retries while
+the remaining ones are repaired.
+
+### Fixed — a fresh campaign directory is plannable
+
+Two admission rules pointed at each other for a campaign directory that did not exist yet: one
+demanded the framework-emitted manifest instead of the mutable result path, the other refused
+the manifest because nothing owned it. The framework's manifest emitter is now credited for
+fresh directories; a path nothing will ever write is still rejected.
+
+### Changed — the validation-command timeout comes from project configuration
+
+`ship-setup` runs a project's build, test, and lint twice, and a project's suite grows as
+research rounds add tests; the hardcoded fifteen-minute limit refused baselines and named the
+timeout rather than the load. The limit is `default_validation_timeout_ms` in
+`config/defaults.yaml` (forty-five minutes here), and the stage timeout `default_timeout_ms`
+rises from one hour to three.
+
 ## [0.8.4] - 2026-09-01
 
 Five fixes, all found by watching real runs on the day 0.8.3 went live. Four repair the engine's
