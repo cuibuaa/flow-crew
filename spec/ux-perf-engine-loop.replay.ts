@@ -75,7 +75,9 @@ function temporaryRoot(prefix = 'flowcrew-ux-loop-'): string {
 
 const GIT_FIXTURE_SCRIPT = [
   "import { spawnSync } from 'node:child_process';",
-  'const result = spawnSync(\'git\', JSON.parse(process.argv[1]), { encoding: \'utf8\' });',
+  // gc.auto=0: a background `git gc --auto` spawned by a fixture commit can still be writing
+  // under .git when afterEach removes the root, which surfaced on CI as ENOTEMPTY.
+  'const result = spawnSync(\'git\', [\'-c\', \'gc.auto=0\', ...JSON.parse(process.argv[1])], { encoding: \'utf8\' });',
   'if (result.error) throw result.error;',
   'if (result.status !== 0) { process.stderr.write(result.stderr ?? \'\'); process.exit(result.status ?? 1); }',
 ].join('\n');
@@ -103,7 +105,8 @@ afterEach(() => {
     }
     priorEnvironment = undefined;
   }
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  // Retry: a fixture's git child may still hold or write files under .git for a moment.
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 function stage(raw: Record<string, unknown>) {
