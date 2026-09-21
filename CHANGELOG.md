@@ -89,6 +89,10 @@ Operator notes that unambiguously name canonical criteria now follow those crite
 later evaluations. A failing verdict must quote and reason about each matching ruling.
 Quantified sample/block/iteration remedies carry known-or-unknown cost evidence, with known
 cost arithmetic checked against an attributed completed attempt and the target stage budget.
+Structured cost discovery traverses JSON arrays and accepts array-indexed JSON Pointer
+citations. The target must be a stage admitted to the run (a pending stage uses the project
+default budget), and the verdict prose must include the computed numeric wall time rather than
+only calling the remedy feasible or infeasible.
 Stage-authored checks with reliable criterion attribution must be assessed against matching
 rulings; declared conflicts emit `criterion_check_conflict` naming the check, author,
 criterion, and guidance through `criterionId`, `checkPath`, `authorStageId`, and `guidanceId`.
@@ -100,6 +104,16 @@ only paths matched by the requested glob, so an already-authorized sibling write
 an unrelated dotfile capability impossible to approve. A generated literal already contained
 by a stable declared tree is returned in `alreadyAuthorizedPaths` without widening effective
 scope or requiring an impossible rotating-literal preimage.
+
+### Known — rollback must not treat an uncaptured ignored path as absent
+
+Run `2026-09-18T07-00-46-e0468d` exposed a separate guard defect while verifying these
+controls: a rollback sweep deleted 379 pre-existing files across nine ignored dependency trees
+after treating uncaptured preimages as absent, then stopped partway and left the installation
+unusable. The dependency trees were restored from a byte-matching install for this run; the
+guard itself is deliberately unchanged here. A follow-up must permit delete-on-rollback only
+for a path whose absent preimage was explicitly captured, refuse deletion when capture was
+unavailable, and record each path already changed if a rollback sweep aborts.
 
 ### Fixed — clean worktree setup and repeatable staging builds
 

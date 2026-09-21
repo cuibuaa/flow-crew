@@ -145,7 +145,10 @@ a structured `{ pass: false, reason }` the retry loop can act on.
 A rejecting verdict that prescribes a sample, block, or iteration quantity must also say
 whether its cost is known. Known costs cite an artifact attributed to a completed attempt and
 state the checked multiplication, implied wall time, applicable stage budget, fit, and
-feasible/infeasible disposition. Unknown costs say so explicitly. Operator notes that name an
+feasible/infeasible disposition. Cost discovery traverses structured arrays, and citations may
+use array-indexed JSON Pointers. The target must name an admitted stage; a stage with no attempt
+yet uses the project default budget. The narrative includes the computed numeric duration, not
+only a qualitative disposition. Unknown costs say so explicitly. Operator notes that name an
 unambiguous canonical criterion follow that criterion into later gate prompts; a gate may still
 disagree, but a failure must quote the ruling and explain why it does not apply. Reliably
 attributed stage-authored checks are likewise assessed against matching rulings, with conflicts

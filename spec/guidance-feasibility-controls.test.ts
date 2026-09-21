@@ -17,6 +17,7 @@ import type {
   RunResult,
 } from '../src/adapters/base.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
+import { loadProjectDefaults } from '../src/config.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { readGateVerdict } from '../src/scheduler.js';
@@ -93,6 +94,81 @@ function events(runDir: string): Array<Record<string, unknown>> {
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+const remedyCriterionId = 'criterion_acceptance_criteria_4_feedface';
+
+function makeRemedyFixture(options: { nestedCost?: boolean } = {}) {
+  const created = makeRun(['measure', 'repair', 'qa']);
+  const sourcePath = join(projectDir, 'docs', 'unit-cost.json');
+  writeFileSync(sourcePath, JSON.stringify(options.nestedCost
+    ? { measurements: [{ unitCostMs: 400, unit: 'blocks' }] }
+    : { unitCostMs: 400, unit: 'blocks' }), 'utf-8');
+  writeStageStatus(projectDir, created.runId, 'measure', {
+    status: 'complete', retries: 0, writeAttribution: 'snapshot', writes: ['docs/unit-cost.json'],
+    attempts: [{
+      index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
+      completedAt: '2026-09-18T00:00:01.000Z', writes: ['docs/unit-cost.json'],
+    }],
+  });
+  writeStageStatus(projectDir, created.runId, 'repair', {
+    status: 'complete', retries: 0,
+    attempts: [{
+      index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
+      completedAt: '2026-09-18T00:00:01.000Z',
+      timeout: {
+        attemptId: 'repair:1', budgetMs: 11_000,
+        attemptStartedAt: '2026-09-18T00:00:00.000Z', deadlineAt: '2026-09-18T00:00:11.000Z',
+        elapsedMs: 1_000, remainingMs: 10_000, rejectedExtensionCount: 0,
+        decisionPaths: [], mismatchPaths: [], terminationCause: 'complete',
+      },
+    }],
+  });
+  writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    version: 1, pass: true, checkedAt: 'now', terminalOwners: {}, errors: [],
+    criterionGateRefs: { qa: [remedyCriterionId] },
+  }), 'utf-8');
+  const verdictPath = join(created.runDirPath, 'verdict_qa.json');
+  const baseVerdict = {
+    pass: false,
+    reason: 'Increase the run to 40 blocks before acceptance.',
+    criteria: {
+      [remedyCriterionId]: { status: 'fail', evidence: 'The repair must run 40 blocks.' },
+    },
+  };
+  const sourcePrefix = options.nestedCost ? '/measurements/0/' : '';
+  const knownEntry = {
+    criterionId: remedyCriterionId,
+    targetStageId: 'repair',
+    targetQuantity: 40,
+    unit: 'blocks',
+    cost: {
+      status: 'known', unitCostMs: 400, costedQuantity: 40, unit: 'blocks',
+      source: {
+        stageId: 'measure', attemptIndex: 1, path: 'docs/unit-cost.json',
+        unitCostPath: `${sourcePrefix}unitCostMs`, unitCostUnit: 'ms',
+        unitPath: `${sourcePrefix}unit`,
+      },
+    },
+    impliedWallTimeMs: 16_000,
+    stageBudgetMs: 11_000,
+    fitsStageBudget: false,
+    disposition: 'infeasible',
+  };
+  return { created, sourcePath, verdictPath, baseVerdict, knownEntry };
+}
+
+function verdictWithRemedy(
+  fixture: ReturnType<typeof makeRemedyFixture>,
+  entry: Record<string, unknown>,
+  statement: string,
+) {
+  return {
+    ...fixture.baseVerdict,
+    reason: statement,
+    criteria: { [remedyCriterionId]: { status: 'fail', evidence: statement } },
+    remedyFeasibility: [{ ...entry, statement }],
+  };
 }
 
 describe('live guidance and feasibility controls', () => {
@@ -303,80 +379,27 @@ describe('live guidance and feasibility controls', () => {
   });
 
   it('[J4] requires implied wall time for a quantified remedy with recorded unit cost', () => {
-    const criterionId = 'criterion_acceptance_criteria_4_feedface';
-    const created = makeRun(['measure', 'repair', 'qa']);
-    const sourcePath = join(projectDir, 'docs', 'unit-cost.json');
-    writeFileSync(sourcePath, '{"unitCostMs":400,"unit":"blocks"}\n', 'utf-8');
-    writeStageStatus(projectDir, created.runId, 'measure', {
-      status: 'complete', retries: 0, writeAttribution: 'snapshot', writes: ['docs/unit-cost.json'],
-      attempts: [{
-        index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
-        completedAt: '2026-09-18T00:00:01.000Z', writes: ['docs/unit-cost.json'],
-      }],
-    });
-    writeStageStatus(projectDir, created.runId, 'repair', {
-      status: 'complete', retries: 0,
-      attempts: [{
-        index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
-        completedAt: '2026-09-18T00:00:01.000Z',
-        timeout: {
-          attemptId: 'repair:1', budgetMs: 11_000,
-          attemptStartedAt: '2026-09-18T00:00:00.000Z', deadlineAt: '2026-09-18T00:00:11.000Z',
-          elapsedMs: 1_000, remainingMs: 10_000, rejectedExtensionCount: 0,
-          decisionPaths: [], mismatchPaths: [], terminationCause: 'complete',
-        },
-      }],
-    });
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-      version: 1, pass: true, checkedAt: 'now', terminalOwners: {}, errors: [],
-      criterionGateRefs: { qa: [criterionId] },
-    }), 'utf-8');
-    const verdictPath = join(created.runDirPath, 'verdict_qa.json');
-    const baseVerdict = {
-      pass: false,
-      reason: 'Increase the run to 40 blocks before acceptance.',
-      criteria: { [criterionId]: { status: 'fail', evidence: 'The repair must run 40 blocks.' } },
-    };
-    writeFileSync(verdictPath, JSON.stringify(baseVerdict), 'utf-8');
+    const fixture = makeRemedyFixture();
+    writeFileSync(fixture.verdictPath, JSON.stringify(fixture.baseVerdict), 'utf-8');
 
-    expect(readGateVerdict(projectDir, 'qa', created.runId)?.reason)
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
       .toContain('quantified remedy has no remedyFeasibility entry');
 
     const knownStatement = 'The 40-block target implies 16000 ms and is infeasible within the 11000 ms stage budget.';
-    writeFileSync(verdictPath, JSON.stringify({
-      ...baseVerdict,
-      reason: knownStatement,
-      criteria: { [criterionId]: { status: 'fail', evidence: knownStatement } },
-      remedyFeasibility: [{
-        criterionId,
-        targetStageId: 'repair',
-        targetQuantity: 40,
-        unit: 'blocks',
-        cost: {
-          status: 'known', unitCostMs: 400, costedQuantity: 40, unit: 'blocks',
-          source: {
-            stageId: 'measure', attemptIndex: 1, path: 'docs/unit-cost.json',
-            unitCostPath: 'unitCostMs', unitCostUnit: 'ms', unitPath: 'unit',
-          },
-        },
-        impliedWallTimeMs: 16_000,
-        stageBudgetMs: 11_000,
-        fitsStageBudget: false,
-        disposition: 'infeasible',
-        statement: knownStatement,
-      }],
-    }), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', created.runId)).toMatchObject({
+    writeFileSync(fixture.verdictPath, JSON.stringify(
+      verdictWithRemedy(fixture, fixture.knownEntry, knownStatement),
+    ), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
       pass: false, reason: knownStatement,
     });
 
     const unknownStatement = 'The cost and implied wall time for the 40-block target are unknown.';
     const unknownVerdict = {
-      ...baseVerdict,
+      ...fixture.baseVerdict,
       reason: unknownStatement,
-      criteria: { [criterionId]: { status: 'fail', evidence: unknownStatement } },
+      criteria: { [remedyCriterionId]: { status: 'fail', evidence: unknownStatement } },
       remedyFeasibility: [{
-        criterionId,
+        criterionId: remedyCriterionId,
         targetStageId: 'repair',
         targetQuantity: 40,
         unit: 'blocks',
@@ -388,13 +411,82 @@ describe('live guidance and feasibility controls', () => {
         statement: unknownStatement,
       }],
     };
-    writeFileSync(verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', created.runId)?.reason)
+    writeFileSync(fixture.verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
       .toContain('cost cannot be unknown');
-    rmSync(sourcePath);
-    writeFileSync(verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', created.runId)).toMatchObject({
+    rmSync(fixture.sourcePath);
+    writeFileSync(fixture.verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
       pass: false, reason: unknownStatement,
+    });
+  });
+
+  it('[J4 edge] rejects feasibility prose that omits the computed wall-time value', () => {
+    const fixture = makeRemedyFixture();
+    const statement = 'The 40-block target has an implied wall time that is infeasible against the stage budget.';
+    writeFileSync(fixture.verdictPath, JSON.stringify(
+      verdictWithRemedy(fixture, fixture.knownEntry, statement),
+    ), 'utf-8');
+
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
+      .toContain('statement must include the computed implied wall time');
+  });
+
+  it('[J4 edge] rejects a nonexistent target stage instead of assigning it the default budget', () => {
+    const fixture = makeRemedyFixture();
+    const defaultBudget = loadProjectDefaults(projectDir).timeout_ms;
+    const fits = fixture.knownEntry.impliedWallTimeMs <= defaultBudget;
+    const disposition = fits ? 'feasible' : 'infeasible';
+    const statement = `The 40-block target implies 16000 ms and is ${disposition} within the ${defaultBudget} ms stage budget.`;
+    writeFileSync(fixture.verdictPath, JSON.stringify(verdictWithRemedy(fixture, {
+      ...fixture.knownEntry,
+      targetStageId: 'ghost',
+      stageBudgetMs: defaultBudget,
+      fitsStageBudget: fits,
+      disposition,
+    }, statement)), 'utf-8');
+
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
+      .toContain('targetStageId ghost does not name an admitted stage');
+
+    writeFileSync(fixture.verdictPath, JSON.stringify(verdictWithRemedy(fixture, {
+      ...fixture.knownEntry,
+      targetStageId: 'qa',
+      stageBudgetMs: defaultBudget,
+      fitsStageBudget: fits,
+      disposition,
+    }, statement)), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
+      pass: false, reason: statement,
+    });
+  });
+
+  it('[J4 edge] discovers and cites explicit unit costs nested in JSON arrays', () => {
+    const fixture = makeRemedyFixture({ nestedCost: true });
+    const unknownStatement = 'The cost and implied wall time for the 40-block target are unknown.';
+    const unknownEntry = {
+      criterionId: remedyCriterionId,
+      targetStageId: 'repair',
+      targetQuantity: 40,
+      unit: 'blocks',
+      cost: { status: 'unknown', reason: 'No completed attempt recorded a per-block rate.' },
+      impliedWallTimeMs: null,
+      stageBudgetMs: 11_000,
+      fitsStageBudget: null,
+      disposition: 'unknown',
+    };
+    writeFileSync(fixture.verdictPath, JSON.stringify(
+      verdictWithRemedy(fixture, unknownEntry, unknownStatement),
+    ), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
+      .toContain('cost cannot be unknown');
+
+    const knownStatement = 'The 40-block target implies 16000 ms and is infeasible within the 11000 ms stage budget.';
+    writeFileSync(fixture.verdictPath, JSON.stringify(
+      verdictWithRemedy(fixture, fixture.knownEntry, knownStatement),
+    ), 'utf-8');
+    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
+      pass: false, reason: knownStatement,
     });
   });
 

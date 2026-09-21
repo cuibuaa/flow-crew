@@ -163,7 +163,8 @@ export function renderGateControlContract(input: {
     'If a rejecting reason or failed criterion prescribes a sample, block, or iteration quantity, add a matching remedyFeasibility entry.',
     'Known cost shape: {"criterionId":"...","targetStageId":"...","targetQuantity":10000,"unit":"blocks","cost":{"status":"known","unitCostMs":839,"costedQuantity":10000,"unit":"blocks","source":{"stageId":"measure","attemptIndex":1,"path":"docs/measurement.json","elapsedPath":"repair_measurement.measurement_summary.elapsed_seconds","quantityPath":"repair_measurement.measurement_summary.new_records","elapsedUnit":"seconds"}},"impliedWallTimeMs":8390000,"stageBudgetMs":3600000,"fitsStageBudget":false,"disposition":"infeasible","statement":"The 10000-block target implies 8390000ms and is infeasible within the 3600000ms stage budget."}. Put the same feasibility statement in the verdict reason or matching criterion evidence; do not leave an infeasible target as an imperative remedy.',
     'Unknown cost shape: use cost.status="unknown" with a non-empty reason, impliedWallTimeMs=null, fitsStageBudget=null, disposition="unknown", and a statement explicitly saying the cost is unknown. Do not invent unit conversions.',
-    'A known source must be attributed to the named completed attempt. Arithmetic, budget, fit, and disposition are checked by the scheduler.',
+    'A known source must be attributed to the named completed attempt. targetStageId must name an admitted run stage; an admitted stage with no attempt yet uses the project default budget. Arithmetic, budget, fit, and disposition are checked by the scheduler.',
+    'The feasibility statement must include the computed implied wall-time value with a time unit, not only a qualitative feasible/infeasible conclusion.',
     recordedCosts.length > 0
       ? `Recorded attributable unit costs: ${recordedCosts.map((cost) => `${cost.stageId}/${cost.attemptIndex} ${cost.path}#${cost.unitCostPath} = ${cost.unitCostMs} ms/${cost.unit}`).join('; ')}.`
       : 'No explicit structured unit-cost field was discovered in completed-attempt JSON writes; use unknown only after checking the relevant artifacts.',
@@ -260,8 +261,16 @@ function valueAtArtifactPath(root: unknown, rawPath: string): unknown {
     : rawPath.split('.');
   let current = root;
   for (const segment of segments) {
-    if (!segment || !current || typeof current !== 'object' || Array.isArray(current)
-      || !Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
+    if (!segment || !current || typeof current !== 'object') return undefined;
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/.test(segment)) return undefined;
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length
+        || !Object.prototype.hasOwnProperty.call(current, index)) return undefined;
+      current = current[index];
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;
@@ -325,7 +334,12 @@ function explicitUnitCostsInValue(
   value: unknown,
   prefix = '',
 ): Array<Pick<ExplicitUnitCostCandidate, 'unit' | 'unitCostMs' | 'unitCostPath'>> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((nested, index) => (
+      explicitUnitCostsInValue(nested, prefix ? `${prefix}.${index}` : String(index))
+    ));
+  }
   const record = value as Record<string, unknown>;
   const unit = normalizeUnit(String(record.unit ?? record.units ?? ''));
   const milliseconds = Number(record.unitCostMs ?? record.unit_cost_ms);
@@ -343,7 +357,7 @@ function explicitUnitCostsInValue(
     });
   }
   for (const [key, nested] of Object.entries(record)) {
-    if (!nested || typeof nested !== 'object' || Array.isArray(nested)) continue;
+    if (!nested || typeof nested !== 'object') continue;
     own.push(...explicitUnitCostsInValue(nested, prefix ? `${prefix}.${key}` : key));
   }
   return own;
@@ -397,11 +411,45 @@ function verdictNarrative(verdict: Record<string, unknown>, criterionId?: string
   return parts.join('\n');
 }
 
+const STAGE_ID_PATTERN = /^[a-z][a-z0-9_]{0,19}$/;
+
+function runNamesStage(runDir: string, stageId: string): boolean {
+  if (!STAGE_ID_PATTERN.test(stageId)) return false;
+  try {
+    const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')) as { stages?: unknown };
+    const stages = object(state.stages);
+    if (stages && Object.prototype.hasOwnProperty.call(stages, stageId)) return true;
+  } catch { /* a recorded stage status remains valid legacy run evidence */ }
+  return readStatus(runDir, stageId) !== undefined;
+}
+
 function resolveStageBudgetMs(projectDir: string, runDir: string, stageId: string): number | undefined {
   const status = readStatus(runDir, stageId);
   const budget = status?.attempts?.at(-1)?.timeout?.budgetMs ?? status?.timeout?.budgetMs;
   if (typeof budget === 'number' && Number.isFinite(budget) && budget > 0) return budget;
   try { return loadProjectDefaults(projectDir).timeout_ms; } catch { return undefined; }
+}
+
+function statementIncludesDurationMs(statement: string, expectedMs: number): boolean {
+  const durations = statement.matchAll(/\b(\d[\d,]*(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h)\b/gi);
+  for (const match of durations) {
+    const numericText = match[1].replace(/,/g, '');
+    const value = Number(numericText);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const unit = match[2].toLowerCase();
+    const multiplier = unit === 'ms' || unit.startsWith('millisecond') || unit.startsWith('msec')
+      ? 1
+      : unit === 's' || unit.startsWith('second') || unit.startsWith('sec')
+        ? 1_000
+        : unit.startsWith('minute') || unit.startsWith('min')
+          ? 60_000
+          : 3_600_000;
+    const decimalPlaces = numericText.includes('.') ? numericText.split('.')[1].length : 0;
+    const displayedPrecision = multiplier * 0.5 * (10 ** -decimalPlaces);
+    const tolerance = Math.max(1, expectedMs * 1e-6, displayedPrecision);
+    if (Math.abs((value * multiplier) - expectedMs) <= tolerance) return true;
+  }
+  return false;
 }
 
 function normalizedEvidencePath(projectDir: string, runDir: string, path: string): string | undefined {
@@ -436,6 +484,9 @@ function validateRemedyFeasibility(
     }
     if (typeof entry.targetStageId !== 'string' || !entry.targetStageId.trim()) {
       return 'Gate remedy feasibility contract violation: targetStageId is required';
+    }
+    if (!runNamesStage(runDir, entry.targetStageId)) {
+      return `Gate remedy feasibility contract violation: targetStageId ${entry.targetStageId} does not name an admitted stage`;
     }
     const cost = object(entry.cost);
     if (!cost || (cost.status !== 'known' && cost.status !== 'unknown')) {
@@ -512,9 +563,13 @@ function validateRemedyFeasibility(
     }
     const expectedFits = impliedWallTimeMs <= expectedBudget;
     const expectedDisposition = expectedFits ? 'feasible' : 'infeasible';
-    if (entry.fitsStageBudget !== expectedFits || entry.disposition !== expectedDisposition
-      || !/(?:wall\s*time|milliseconds?|\bms\b|seconds?|minutes?|hours?)/i.test(statement)
-      || !new RegExp(expectedDisposition, 'i').test(statement)) {
+    if (entry.fitsStageBudget !== expectedFits || entry.disposition !== expectedDisposition) {
+      return `Gate remedy feasibility contract violation: implied wall time must state ${expectedDisposition} against the stage budget`;
+    }
+    if (!statementIncludesDurationMs(statement, expectedTime)) {
+      return `Gate remedy feasibility contract violation: statement must include the computed implied wall time (${expectedTime} ms)`;
+    }
+    if (!new RegExp(expectedDisposition, 'i').test(statement)) {
       return `Gate remedy feasibility contract violation: implied wall time must state ${expectedDisposition} against the stage budget`;
     }
   }
