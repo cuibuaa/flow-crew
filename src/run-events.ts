@@ -8,7 +8,9 @@ export type RunEventType =
   | 'attempt_started'
   | 'attempt_finished'
   | 'attempt_failed'
+  | 'attempt_suspended'
   | 'guidance_written'
+  | 'guidance_delivery_checked'
   | 'scope_revision_requested'
   | 'scope_revision_decided'
   | 'live_constraint_violation'
@@ -32,12 +34,15 @@ export type RunEventType =
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'
   | 'parallel_write_conflict'
+  | 'writer_lease_wait_started'
+  | 'writer_lease_wait_finished'
   | 'attempt_summary_refresh_requested'
   // Approval inbox: the run suspended on a consequential action, and the
   // resolution that released it. Part of the run's audit narrative — the only
   // place an operator sees WHY a run stopped without a verdict. Deliberately
   // NOT a summary-refresh trigger: an approval is not new measurable work.
   | 'approval_parked'
+  | 'approval_attempt_suspended'
   | 'approval_resolved';
 
 export interface RunEvent {
@@ -57,6 +62,18 @@ export interface RunEvent {
   exitCode?: number;
   adapterFailure?: boolean;
   requestId?: string;
+  ruleId?: string;
+  blockedByStageId?: string;
+  requestingStageId?: string;
+  leasePartition?: string;
+  waitStartedAt?: string;
+  waitedMs?: number;
+  requestedAt?: string;
+  detectedAt?: string;
+  boundary?: 'attempt_start' | 'adapter_invocation';
+  invocationIndex?: number;
+  guidanceIds?: string[];
+  delivered?: boolean;
   decision?: 'accepted' | 'rejected' | 'discarded';
   evidenceGeneration?: string;
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';

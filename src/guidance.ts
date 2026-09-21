@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { appendRunEventAtRunDir } from './run-events.js';
 
@@ -182,6 +182,70 @@ export function readGuidanceForStage(runDir: string, stageId: string): GuidanceE
   }
   const seen = new Set<string>();
   return entries.filter((entry) => !seen.has(entry.id) && Boolean(seen.add(entry.id)));
+}
+
+/**
+ * Route an unaddressed operator message without waiting for a supervisor model
+ * call only when this worker is the sole provably running stage. With multiple
+ * running stages the file remains untouched for supervisor target selection.
+ * Renaming first makes worker/supervisor consumption first-wins and prevents a
+ * second `flowcrew guide` write from being deleted with the claimed message.
+ */
+export function routePendingOperatorGuidanceToStage(
+  runDir: string,
+  stageId: string,
+): GuidanceEnvelope | undefined {
+  const inputPath = join(runDir, 'user_input.md');
+  if (!existsSync(inputPath)) return undefined;
+
+  let knownStageIds: string[];
+  try {
+    const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')) as {
+      stages?: Record<string, { status?: unknown }>;
+    };
+    knownStageIds = Object.keys(state.stages ?? {});
+    if (!knownStageIds.includes(stageId)) knownStageIds.push(stageId);
+    const running = knownStageIds.filter((id) => (
+      id === stageId || state.stages?.[id]?.status === 'running'
+    ));
+    if (running.length !== 1 || running[0] !== stageId) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const claimedPath = join(
+    runDir,
+    `.user_input.${stageId}.${process.pid}.${randomUUID()}.routing`,
+  );
+  try {
+    renameSync(inputPath, claimedPath);
+  } catch {
+    return undefined;
+  }
+
+  try {
+    const body = readFileSync(claimedPath, 'utf-8').trim();
+    if (!body) {
+      unlinkSync(claimedPath);
+      return undefined;
+    }
+    const envelope = appendGuidanceEnvelope({
+      runDir,
+      target: stageId,
+      source: 'operator',
+      body,
+      knownStageIds,
+    });
+    unlinkSync(claimedPath);
+    return envelope;
+  } catch {
+    // Restore the claimed input only when no newer operator message occupies
+    // the live slot. Otherwise retain the claim as evidence for diagnosis.
+    try {
+      if (!existsSync(inputPath) && existsSync(claimedPath)) renameSync(claimedPath, inputPath);
+    } catch { /* leave the claimed artifact intact rather than delete input */ }
+    return undefined;
+  }
 }
 
 export function renderGuidanceDelivery(entries: readonly GuidanceEnvelope[]): string {

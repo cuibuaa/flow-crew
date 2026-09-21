@@ -10,6 +10,7 @@ import { parseStageAbortSignal } from './abort-signal.js';
 import {
   beginStageAttempt,
   completeStageAttempt,
+  suspendStageAttempt,
   writeStageStatus,
   writeStageInput,
   writeStageOutput,
@@ -30,7 +31,12 @@ import {
   AttemptDeadlineController,
   type AttemptDeadlineClock,
 } from './attempt-deadline.js';
-import { guidanceForStageFromText, readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
+import {
+  guidanceForStageFromText,
+  readGuidanceForStage,
+  renderGuidanceDelivery,
+  routePendingOperatorGuidanceToStage,
+} from './guidance.js';
 import { recordRunEvent } from './run-events.js';
 import {
   acquireAttributableWriterLease,
@@ -333,14 +339,43 @@ export async function runStage(
   opts: StageOpts,
 ): Promise<RunResult> {
   // Preserve the synchronous launch edge only when the scheduler supplied no
-  // live policy. An explicitly empty scope still needs an attributable lease:
-  // any project write from that invocation is necessarily a violation.
+  // live policy. An explicitly empty scope is read-only and therefore takes no
+  // writer lease; its live guard still restores and records every project write.
   if (!opts.liveConstraintGuardFactory) {
     return runStageWithWriterLease(adapter, opts);
   }
+  const binding = opts.liveConstraintGuardFactory.writerLease;
+  const writeCapable = opts.projectWriteScope === undefined || opts.projectWriteScope.length > 0;
   const releaseWriterLease = await acquireAttributableWriterLease(
     opts.projectDir,
-    true,
+    writeCapable,
+    {
+      ...(binding ?? {}),
+      ownerStageId: binding?.ownerStageId ?? opts.stageId,
+      onWait: (wait) => {
+        const blockedBy = wait.blockedByOwnerStageId ?? 'another writer';
+        recordRunEvent(opts.projectDir, opts.runId, {
+          type: wait.phase === 'started'
+            ? 'writer_lease_wait_started'
+            : 'writer_lease_wait_finished',
+          runId: opts.runId,
+          timestamp: wait.phase === 'started'
+            ? wait.waitStartedAt
+            : new Date().toISOString(),
+          stageId: opts.stageId,
+          ...(wait.blockedByOwnerStageId
+            ? { blockedByStageId: wait.blockedByOwnerStageId }
+            : {}),
+          leasePartition: wait.partitionId,
+          waitStartedAt: wait.waitStartedAt,
+          ...(wait.waitedMs === undefined ? {} : { waitedMs: wait.waitedMs }),
+          detail: wait.phase === 'started'
+            ? `waiting for writer lease behind ${blockedBy} on partition ${wait.partitionId}`
+            : `writer lease acquired after ${wait.waitedMs ?? 0}ms behind ${blockedBy} on partition ${wait.partitionId}`,
+          source: 'worker',
+        });
+      },
+    },
   );
   try {
     return await runStageWithWriterLease(adapter, opts);
@@ -354,6 +389,7 @@ async function runStageWithWriterLease(
   opts: StageOpts,
 ): Promise<RunResult> {
   const skillNames = opts.stageSkills ?? [];
+  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId);
   let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
     promptTemplate: opts.promptTemplate,
@@ -396,6 +432,69 @@ async function runStageWithWriterLease(
     attemptStartedAt,
     source: 'worker',
   });
+
+  const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
+  const deliveredGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
+  const deliveredGuidance = [...guidanceBeforePrompt];
+  const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
+    const rendered = renderGuidanceDelivery(entries);
+    return rendered
+      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${rendered}\n\n`
+        + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
+      : '';
+  };
+  const persistGuidanceReceipt = (): void => {
+    try {
+      mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
+      const rendered = renderGuidanceDelivery(deliveredGuidance);
+      writeFileSync(
+        guidanceReceiptPath,
+        rendered ? `${rendered}\n` : 'No supervisor guidance was delivered to this execution.\n',
+        'utf-8',
+      );
+    } catch { /* the run event remains the delivery audit */ }
+  };
+  const consumeNewGuidance = (
+    boundary: 'attempt_start' | 'adapter_invocation',
+    boundaryInvocationIndex?: number,
+  ): ReturnType<typeof readGuidanceForStage> => {
+    let entries: ReturnType<typeof readGuidanceForStage> = [];
+    try {
+      routePendingOperatorGuidanceToStage(opts.runDir, opts.stageId);
+      entries = readGuidanceForStage(opts.runDir, opts.stageId)
+        .filter((entry) => !deliveredGuidanceIds.has(entry.id));
+      for (const entry of entries) {
+        deliveredGuidanceIds.add(entry.id);
+        deliveredGuidance.push(entry);
+      }
+      persistGuidanceReceipt();
+    } catch { /* report the failed/empty check below */ }
+    recordRunEvent(opts.projectDir, opts.runId, {
+      type: 'guidance_delivery_checked',
+      runId: opts.runId,
+      timestamp: new Date().toISOString(),
+      stageId: opts.stageId,
+      attemptIndex,
+      attemptStartedAt,
+      boundary,
+      ...(boundaryInvocationIndex === undefined ? {} : { invocationIndex: boundaryInvocationIndex }),
+      guidanceIds: boundary === 'attempt_start'
+        ? [...deliveredGuidanceIds]
+        : entries.map((entry) => entry.id),
+      delivered: boundary === 'attempt_start' ? deliveredGuidanceIds.size > 0 : entries.length > 0,
+      detail: entries.length > 0
+        ? `delivered ${entries.length} new guidance envelope${entries.length === 1 ? '' : 's'} at ${boundary}`
+        : boundary === 'attempt_start' && deliveredGuidanceIds.size > 0
+          ? `confirmed ${deliveredGuidanceIds.size} guidance envelope${deliveredGuidanceIds.size === 1 ? '' : 's'} at attempt start`
+          : `no new guidance available at ${boundary}`,
+      source: 'worker',
+    });
+    return entries;
+  };
+  // buildStagePrompt read the first snapshot. Close the small read/build race by
+  // appending only envelopes that appeared after that snapshot.
+  const arrivedAtAttemptStart = consumeNewGuidance('attempt_start');
+  if (arrivedAtAttemptStart.length > 0) prompt += `\n\n${guidanceBlock(arrivedAtAttemptStart)}`;
 
   // Auto-prepend task brief to the role's system prompt so the brief sits in
   // a stable prefix position across stages. This:
@@ -457,19 +556,6 @@ async function runStageWithWriterLease(
     } catch { /* non-critical */ }
   }
 
-  // Receipt is exactly the filtered delivery for this stage, never a copy of
-  // the global audit ledger.
-  try {
-    const delivered = renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId));
-    const stageDirPath = join(opts.runDir, 'stages', opts.stageId);
-    mkdirSync(stageDirPath, { recursive: true });
-    writeFileSync(
-      join(stageDirPath, 'guidance_consumed.md'),
-      delivered ? `${delivered}\n` : 'No supervisor guidance was delivered to this execution.\n',
-      'utf-8',
-    );
-  } catch { /* non-critical */ }
-
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
@@ -492,6 +578,9 @@ async function runStageWithWriterLease(
   const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
   const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
   let supervisorAborted = false;
+  let approvalSuspended = false;
+  let approvalRequestId: string | undefined;
+  let approvalRequestingStageId: string | undefined;
   let abortReason = '';
   let terminationCause: StageAttemptTimeoutSummary['terminationCause'];
   let rejectedExtensionCount = 0;
@@ -537,15 +626,25 @@ async function runStageWithWriterLease(
       // SIGKILLed, the next same-name attempt cannot replay this cancellation.
       abortReason = parsed.signal.reason.slice(0, 240);
       removeAbortSignal();
-      supervisorAborted = true;
-      terminationCause ??= 'supervisor_abort';
+      const approvalSignal = parsed.signal.source === 'scheduler' && parsed.signal.requestId !== undefined;
+      if (approvalSignal) {
+        approvalSuspended = true;
+        approvalRequestId = parsed.signal.requestId;
+        approvalRequestingStageId = parsed.signal.requestingStageId;
+        terminationCause = 'approval_suspension';
+      } else {
+        supervisorAborted = true;
+        terminationCause ??= 'supervisor_abort';
+      }
       try {
         appendFileSync(
           liveLogPath,
-          `\nSupervisor ABORT signal consumed for attempt ${attemptIndex}; killing stage child process.\n`,
+          approvalSignal
+            ? `\nApproval suspension ${approvalRequestId} consumed for attempt ${attemptIndex}; stopping stage child process.\n`
+            : `\nSupervisor ABORT signal consumed for attempt ${attemptIndex}; killing stage child process.\n`,
         );
       } catch { /* non-critical */ }
-      attemptAbortController.abort('supervisor_abort');
+      attemptAbortController.abort(approvalSignal ? 'approval_suspension' : 'supervisor_abort');
     } catch { /* non-critical */ }
   };
   const cleanupAbortSignalAtExit = (): void => {
@@ -661,7 +760,7 @@ async function runStageWithWriterLease(
 
   pollAbortSignal();
   pollTimeoutExtensionRequests();
-  const abortPollTimer = setInterval(pollAbortSignal, 2000);
+  const abortPollTimer = setInterval(pollAbortSignal, 1000);
   const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 1000);
   const requestWatchers: import('node:fs').FSWatcher[] = [];
   try {
@@ -670,6 +769,7 @@ async function runStageWithWriterLease(
     for (const directory of [join(opts.runDir, 'stages', opts.stageId), signalsDir]) {
       requestWatchers.push(watch(directory, { persistent: false }, (_event, fileName) => {
         const name = fileName?.toString() ?? '';
+        if (!name || name === `abort_${opts.stageId}.json`) pollAbortSignal();
         if (!name || name.includes('timeout_extension')) pollTimeoutExtensionRequests();
       }));
     }
@@ -705,12 +805,18 @@ async function runStageWithWriterLease(
     const tokensOut = typeof telemetry?.tokens_out === 'number' && Number.isFinite(telemetry.tokens_out)
       ? telemetry.tokens_out
       : undefined;
-    const timedOut = terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted;
+    const timedOut = !approvalSuspended && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
     return {
       output: '',
-      exitCode: timedOut ? 124 : 137,
+      exitCode: approvalSuspended ? 0 : timedOut ? 124 : 137,
       duration_ms: Math.round(attemptElapsedMs()),
       timedOut,
+      ...(approvalSuspended ? {
+        suspended: true,
+        suspensionReason: 'approval' as const,
+        ...(approvalRequestId ? { suspensionRequestId: approvalRequestId } : {}),
+        ...(approvalRequestingStageId ? { suspensionRequestingStageId: approvalRequestingStageId } : {}),
+      } : {}),
       ...(tokensIn !== undefined ? { tokens_in: tokensIn } : {}),
       ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
     };
@@ -720,7 +826,7 @@ async function runStageWithWriterLease(
     // current-attempt ABORT first because supervisor authority takes
     // precedence, then observe the monotonic deadline synchronously.
     pollAbortSignal();
-    if (!supervisorAborted) attemptDeadline.observeSettlement();
+    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
   };
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
@@ -743,6 +849,10 @@ async function runStageWithWriterLease(
       effectiveBudgetMs,
     });
     invocationIndex++;
+    const invocationGuidance = consumeNewGuidance('adapter_invocation', invocationIndex);
+    const effectiveInvocationPrompt = invocationGuidance.length > 0
+      ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}`
+      : invocationPrompt;
     const invocationAbortController = new AbortController();
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
     const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
@@ -780,7 +890,7 @@ async function runStageWithWriterLease(
         }
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
-      selectedAdapter.run(invocationPrompt, selectedRole, {
+      selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,
         runDir: opts.runDir,
@@ -891,7 +1001,12 @@ async function runStageWithWriterLease(
     }
   };
   const adapterRetryDelays = opts.technicalRetry?.delaysMs ?? ADAPTER_RETRY_DELAYS;
-  const waitForRetry = (delayMs: number): Promise<boolean> => attemptDeadline.boundedSleep(delayMs, attemptAbortController.signal);
+  const waitForRetry = (delayMs: number): Promise<boolean> => {
+    if (delayMs <= 0) {
+      return Promise.resolve(!aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0);
+    }
+    return attemptDeadline.boundedSleep(delayMs, attemptAbortController.signal);
+  };
 
   let result: RunResult;
   // Abort and legacy-extension polling live through adapter backoff and
@@ -961,20 +1076,28 @@ async function runStageWithWriterLease(
     // The execution attempt ends when adapter/fallback child settlement ends.
     // A blocked event loop can settle after the immutable boundary before its
     // timer callback runs, so observe monotonic expiry before disposal.
-    if (!supervisorAborted) attemptDeadline.observeSettlement();
+    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
     // Dispose here as well on thrown adapter errors so no long deadline timer
     // survives this invocation and keeps the worker process alive.
     attemptDeadline.dispose();
   }
 
-  if (attemptDeadline.signal.aborted && !supervisorAborted) terminationCause = 'attempt_timeout';
-  const timedOut = !supervisorAborted && (
+  if (attemptDeadline.signal.aborted && !supervisorAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
+  const timedOut = !supervisorAborted && !approvalSuspended && (
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
     || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
-  if (timedOut) {
+  if (approvalSuspended) {
+    result.exitCode = 0;
+    result.timedOut = false;
+    result.suspended = true;
+    result.suspensionReason = 'approval';
+    result.suspensionRequestId = approvalRequestId;
+    result.suspensionRequestingStageId = approvalRequestingStageId;
+    terminationCause = 'approval_suspension';
+  } else if (timedOut) {
     result.exitCode = 124;
     result.timedOut = true;
     terminationCause = 'attempt_timeout';
@@ -1026,7 +1149,7 @@ async function runStageWithWriterLease(
     rejectedExtensionCount,
     terminationCause,
   });
-  const final = completeStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, {
+  let final = completeStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, {
     exitCode: result.exitCode,
     duration_ms: result.duration_ms,
     artifacts,
@@ -1050,8 +1173,11 @@ async function runStageWithWriterLease(
     writeAttribution,
     timeout: timeoutSummary,
   });
+  if (approvalSuspended) {
+    final = suspendStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex);
+  }
   recordRunEvent(opts.projectDir, opts.runId, {
-    type: result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
+    type: approvalSuspended ? 'approval_attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
     runId: opts.runId,
     timestamp: final.attempts?.at(-1)?.completedAt ?? new Date().toISOString(),
     stageId: opts.stageId,
@@ -1060,7 +1186,11 @@ async function runStageWithWriterLease(
     status: final.status,
     exitCode: result.exitCode,
     adapterFailure: result.adapterError === true,
-    detail: result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
+    ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
+    ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
+    detail: approvalSuspended
+      ? `attempt suspended for approval ${approvalRequestId ?? 'unknown'}`
+      : result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
     source: 'worker',
   });
 

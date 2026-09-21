@@ -156,9 +156,46 @@ export function compareLiveConstraintContentIdentities(
     : 'different';
 }
 
+export interface WriterLeaseBinding {
+  /** One scheduler-selected batch whose members were checked pairwise. */
+  batchId: string;
+  /** One scope partition within that batch. Equal partitions remain serial. */
+  partitionId: string;
+  ownerStageId: string;
+}
+
+export interface WriterLeaseWaitObservation {
+  phase: 'started' | 'finished';
+  blockedByOwnerStageId?: string;
+  partitionId: string;
+  waitStartedAt: string;
+  waitedMs?: number;
+}
+
+export interface WriterLeaseOptions extends Partial<WriterLeaseBinding> {
+  onWait?: (observation: WriterLeaseWaitObservation) => void;
+  now?: () => number;
+}
+
+interface WriterLeaseRequest {
+  token: symbol;
+  cohortId: string;
+  partitionId: string;
+  ownerStageId?: string;
+  exclusive: boolean;
+}
+
+type WriterLeaseHolder = WriterLeaseRequest;
+
+interface WriterLeaseWaiter {
+  request: WriterLeaseRequest;
+  ready: () => void;
+}
+
 interface WriterLeaseState {
-  held: boolean;
-  waiters: Array<() => void>;
+  cohortId?: string;
+  holders: Map<string, WriterLeaseHolder>;
+  waiters: WriterLeaseWaiter[];
 }
 
 const writerLeases = new Map<string, WriterLeaseState>();
@@ -171,26 +208,90 @@ const writerLeases = new Map<string, WriterLeaseState>();
 export async function acquireAttributableWriterLease(
   projectDir: string,
   writeCapable: boolean,
+  options: WriterLeaseOptions = {},
 ): Promise<() => void> {
   if (!writeCapable) return () => undefined;
   const key = resolve(projectDir);
-  const state = writerLeases.get(key) ?? { held: false, waiters: [] };
+  const batchId = options.batchId?.trim();
+  const requestedPartition = options.partitionId?.trim();
+  const partitioned = Boolean(batchId && requestedPartition);
+  const request: WriterLeaseRequest = {
+    token: Symbol('writer-lease'),
+    cohortId: partitioned ? `batch:${batchId}` : 'project-wide',
+    partitionId: partitioned ? requestedPartition! : 'project-wide',
+    ...(options.ownerStageId ? { ownerStageId: options.ownerStageId } : {}),
+    exclusive: !partitioned,
+  };
+  const state: WriterLeaseState = writerLeases.get(key) ?? {
+    holders: new Map<string, WriterLeaseHolder>(),
+    waiters: [],
+  };
   writerLeases.set(key, state);
-  if (state.held) await new Promise<void>((ready) => state.waiters.push(ready));
-  state.held = true;
+
+  const canGrant = (candidate: WriterLeaseRequest): boolean => {
+    if (state.holders.size === 0) return true;
+    if (state.cohortId !== candidate.cohortId || candidate.exclusive) return false;
+    const active = state.holders.values().next().value as WriterLeaseHolder | undefined;
+    if (active?.exclusive) return false;
+    return !state.holders.has(candidate.partitionId);
+  };
+  const grant = (candidate: WriterLeaseRequest): void => {
+    if (state.holders.size === 0) state.cohortId = candidate.cohortId;
+    state.holders.set(candidate.partitionId, candidate);
+  };
+  const safelyObserve = (observation: WriterLeaseWaitObservation): void => {
+    try { options.onWait?.(observation); } catch { /* lease ownership must not be stranded by telemetry */ }
+  };
+
+  let waitStartedMs: number | undefined;
+  let waitStartedAt: string | undefined;
+  let blockedByOwnerStageId: string | undefined;
+  if (state.waiters.length === 0 && canGrant(request)) {
+    grant(request);
+  } else {
+    const blocker = state.holders.get(request.partitionId)
+      ?? state.holders.values().next().value as WriterLeaseHolder | undefined;
+    blockedByOwnerStageId = blocker?.ownerStageId;
+    const now = options.now ?? Date.now;
+    waitStartedMs = now();
+    waitStartedAt = new Date(waitStartedMs).toISOString();
+    safelyObserve({
+      phase: 'started',
+      ...(blockedByOwnerStageId ? { blockedByOwnerStageId } : {}),
+      partitionId: request.partitionId,
+      waitStartedAt,
+    });
+    await new Promise<void>((ready) => state.waiters.push({ request, ready }));
+    const waitedMs = Math.max(0, now() - waitStartedMs);
+    safelyObserve({
+      phase: 'finished',
+      ...(blockedByOwnerStageId ? { blockedByOwnerStageId } : {}),
+      partitionId: request.partitionId,
+      waitStartedAt,
+      waitedMs,
+    });
+  }
+
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const next = state.waiters.shift();
-    if (next) {
-      // Ownership transfers directly; do not expose an unlocked microtask gap.
-      state.held = true;
-      next();
-      return;
+    const holder = state.holders.get(request.partitionId);
+    if (holder?.token !== request.token) return;
+    state.holders.delete(request.partitionId);
+    if (state.holders.size === 0) state.cohortId = undefined;
+
+    // Preserve FIFO at the batch boundary. Once the oldest waiter establishes
+    // a cohort, immediately admit only subsequent disjoint partitions from
+    // that same scheduler-proven batch.
+    while (state.waiters.length > 0) {
+      const next = state.waiters[0];
+      if (!canGrant(next.request)) break;
+      state.waiters.shift();
+      grant(next.request);
+      next.ready();
     }
-    state.held = false;
-    writerLeases.delete(key);
+    if (state.holders.size === 0 && state.waiters.length === 0) writerLeases.delete(key);
   };
 }
 
@@ -266,9 +367,11 @@ export interface LiveConstraintGuardAttemptContext {
   attemptStartedAt: string;
 }
 
-export type LiveConstraintGuardFactory = (
-  attempt: LiveConstraintGuardAttemptContext,
-) => LiveConstraintGuard;
+export interface LiveConstraintGuardFactory {
+  (attempt: LiveConstraintGuardAttemptContext): LiveConstraintGuard;
+  /** Scheduler proof consumed by runStage before the attempt begins. */
+  writerLease?: WriterLeaseBinding;
+}
 
 export interface LiveConstraintInvocationMonitor {
   finish(): Promise<LiveConstraintInvocationResult>;

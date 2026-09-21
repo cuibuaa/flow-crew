@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import {
   closeSync,
   existsSync,
@@ -73,13 +74,23 @@ function warnAboutDeployedConsumers(): void {
 
 function compileGeneration(): void {
   mkdirSync(stagingDist, { recursive: true });
-  const compiler = join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  const projectRequire = createRequire(join(projectRoot, 'package.json'));
+  let compiler: string;
+  try {
+    compiler = projectRequire.resolve('typescript/bin/tsc');
+  } catch (error) {
+    const lookupPaths = projectRequire.resolve.paths('typescript/bin/tsc') ?? [];
+    throw new Error(
+      `Cannot resolve TypeScript compiler from ${projectRoot}; lookup paths: ${lookupPaths.join(', ') || '(none)'}`,
+      { cause: error },
+    );
+  }
   const result = spawnSync(process.execPath, [
     compiler,
     '-p', join(projectRoot, 'tsconfig.json'),
     '--outDir', stagingDist,
     '--incremental',
-    '--tsBuildInfoFile', join(cacheDir, 'tsc.tsbuildinfo'),
+    '--tsBuildInfoFile', join(stagingDist, '.tsbuildinfo'),
   ], {
     cwd: projectRoot,
     stdio: 'inherit',
@@ -88,7 +99,11 @@ function compileGeneration(): void {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`TypeScript compilation exited ${result.status ?? 'without a status'}`);
   pruneStaleBuildOutputs(projectRoot, stagingDist);
-  chmodSync(join(stagingDist, 'cli.js'), 0o755);
+  const stagedCli = join(stagingDist, 'cli.js');
+  if (!existsSync(stagedCli)) {
+    throw new Error(`TypeScript compilation reported success but did not emit required output ${stagedCli}`);
+  }
+  chmodSync(stagedCli, 0o755);
 }
 
 function main(): void {
@@ -126,4 +141,3 @@ try {
   process.stderr.write(`[flowcrew-build] ERROR: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }
-

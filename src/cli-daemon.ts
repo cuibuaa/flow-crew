@@ -28,6 +28,7 @@ import type { CancellationResult } from './run-control.js';
 import { runsRoot } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { readOperationalProjection, type OperationalRunState } from './cli-events.js';
+import { inspectRunScheduler } from './run-lock.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
 
@@ -200,9 +201,11 @@ export function mergeTaskWithRunState(
     if (typeof state.status !== 'string' || !state.status) return { ...task };
     const verdict = runVerdict(state.verdict, state.realityGate);
     const mismatch = terminalArtifactStatusMismatch(state, { runDir: runPath });
+    const scheduler = inspectRunScheduler(String(state.runId ?? task.run_id), runPath);
     return {
       ...task,
       status: state.status,
+      ...(scheduler.kind === 'live' ? { scheduler_live: { pid: scheduler.pid } } : {}),
       operational: readOperationalProjection(runPath, { state, includeDrift: options.includeDrift }),
       // A terminal registry timestamp may record a later control-plane action
       // (for example an already-terminal cancellation). Preserve it when
@@ -247,7 +250,12 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     appendFileSync(logPath, `${new Date().toISOString()} WARN ${message}\n`, 'utf-8');
   };
   const registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
-  const orchestrator = new Orchestrator({ registry });
+  const orchestrator = new Orchestrator({
+    registry,
+    onMaintenanceEvent: (event) => {
+      appendFileSync(logPath, `${event.timestamp} EVENT ${JSON.stringify(event)}\n`, 'utf-8');
+    },
+  });
   const handler = async (req: RpcRequest): Promise<RpcResponse> => {
     appendFileSync(logPath, `${new Date().toISOString()} ${req.cmd}\n`, 'utf-8');
     if (req.cmd === 'register') {

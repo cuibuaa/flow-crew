@@ -773,7 +773,7 @@ describe('session ledger input and CLI regressions', () => {
     expect(JSON.stringify(result)).not.toContain('outside-controlled');
   });
 
-  it('QA20 bounds reverse registry traversal when a linked task is older than the tail budget', () => {
+  it('[D2] resolves a linked task whose latest row is older than the 16 MiB tail budget', () => {
     const engineRoot = join(root, 'engine-tail-budget');
     const projectDir = join(root, 'project');
     mkdirSync(engineRoot);
@@ -792,8 +792,12 @@ describe('session ledger input and CLI regressions', () => {
       task('linked', { flowcrewTaskId: 1 }),
     );
 
-    expect(result).toMatchObject({ state: 'unavailable', taskId: 1 });
-    expect(result.state === 'unavailable' ? result.detail : '').toMatch(/scan.*limit|tail.*limit/iu);
+    expect(result).toMatchObject({
+      state: 'resolved',
+      taskId: 1,
+      taskStatus: 'pending',
+      projectDir,
+    });
   });
 
   it('QA07 removes Unicode bidi controls from terminal-rendered ledger text', () => {

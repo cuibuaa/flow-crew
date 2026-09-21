@@ -1,6 +1,6 @@
 export const ABORT_SIGNAL_VERSION = 1 as const;
 
-export type AbortSignalSource = 'supervisor' | 'watchdog';
+export type AbortSignalSource = 'supervisor' | 'watchdog' | 'scheduler';
 
 /** One-shot cancellation envelope owned by one concrete stage execution. */
 export interface StageAbortSignal {
@@ -10,6 +10,10 @@ export interface StageAbortSignal {
   reason: string;
   timestamp: string;
   source: AbortSignalSource;
+  /** Present only for scheduler-owned approval suspension. */
+  requestId?: string;
+  /** Stage that created the approval request; peers may be suspended with it. */
+  requestingStageId?: string;
   /** The model's text is retained for audit only; consumers must use `reason`. */
   unverifiedAssessmentReason?: string;
 }
@@ -47,8 +51,20 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
   }
   if (typeof candidate.reason !== 'string') return invalid('missing reason');
   if (typeof candidate.timestamp !== 'string' || !candidate.timestamp) return invalid('missing timestamp');
-  if (candidate.source !== 'supervisor' && candidate.source !== 'watchdog') {
+  if (candidate.source !== 'supervisor' && candidate.source !== 'watchdog' && candidate.source !== 'scheduler') {
     return invalid('invalid source');
+  }
+  if (candidate.requestId !== undefined && (typeof candidate.requestId !== 'string' || !candidate.requestId)) {
+    return invalid('invalid approval request id');
+  }
+  if (
+    candidate.requestingStageId !== undefined
+    && (typeof candidate.requestingStageId !== 'string' || !candidate.requestingStageId)
+  ) {
+    return invalid('invalid requesting stage id');
+  }
+  if (candidate.source === 'scheduler' && typeof candidate.requestId !== 'string') {
+    return invalid('scheduler signal is missing approval request id');
   }
   if (
     candidate.unverifiedAssessmentReason !== undefined
@@ -65,6 +81,10 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
       reason: candidate.reason,
       timestamp: candidate.timestamp,
       source: candidate.source,
+      ...(typeof candidate.requestId === 'string' ? { requestId: candidate.requestId } : {}),
+      ...(typeof candidate.requestingStageId === 'string'
+        ? { requestingStageId: candidate.requestingStageId }
+        : {}),
       unverifiedAssessmentReason: candidate.unverifiedAssessmentReason,
     },
   };

@@ -74,6 +74,7 @@ function setupArgs(briefPath: string, targetDir: string): string[] {
 
 function copyManifest(targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
+  mkdirSync(join(targetDir, 'node_modules'), { recursive: true });
   copyFileSync(join(projectDir, 'package.json'), join(targetDir, 'package.json'));
   copyFileSync(join(projectDir, 'package-lock.json'), join(targetDir, 'package-lock.json'));
 }
@@ -117,6 +118,12 @@ beforeEach(() => {
     // pointing TMPDIR at a symlink.
     root = join(realpathSync.native(tmpdir()), `flowcrew-ship-setup-population-${randomBytes(6).toString('hex')}`);
   projectDir = join(root, 'source');
+  const fixtureVitest = join(root, 'node_modules', 'vitest');
+  mkdirSync(fixtureVitest, { recursive: true });
+  writeFileSync(join(fixtureVitest, 'package.json'), JSON.stringify({
+    name: 'vitest', version: '0.0.0-fixture', exports: { './package.json': './package.json' },
+  }));
+  writeFileSync(join(fixtureVitest, 'vitest.mjs'), 'export {};\n');
   setFcGlobalDir(join(root, 'fc-home'));
 });
 

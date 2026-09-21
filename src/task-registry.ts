@@ -125,8 +125,8 @@ export interface TaskRegistrySnapshot extends TaskRegistryHealth {
 }
 
 // Surface growth well before the observed 341 MiB / 28,551-record incident,
-// while avoiding churn for ordinary E4-era sidecar-backed registries. This is
-// an operator recommendation only: compaction remains explicit and dry-run.
+// while avoiding churn for ordinary E4-era sidecar-backed registries. Doctor
+// exposes the threshold; the daemon consumes it for backup-first compaction.
 export const REGISTRY_COMPACTION_THRESHOLDS = {
   bytes: 64 * 1024 * 1024,
   records: 10_000,

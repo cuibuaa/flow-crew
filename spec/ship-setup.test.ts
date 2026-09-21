@@ -70,6 +70,12 @@ beforeEach(() => {
   }), 'utf-8');
   writeFileSync(join(fixture.project, 'package-lock.json'), '{}', 'utf-8');
   writeFileSync(join(fixture.project, '.gitignore'), 'data/\nnode_modules/\n', 'utf-8');
+  const fixtureVitest = join(fixture.root, 'node_modules', 'vitest');
+  mkdirSync(fixtureVitest, { recursive: true });
+  writeFileSync(join(fixtureVitest, 'package.json'), JSON.stringify({
+    name: 'vitest', version: '0.0.0-fixture', exports: { './package.json': './package.json' },
+  }));
+  writeFileSync(join(fixtureVitest, 'vitest.mjs'), 'export {};\n');
   setFcGlobalDir(fixture.state);
 });
 
@@ -99,6 +105,7 @@ function setupArgs(extra: string[] = []): string[] {
 
 function copyTracked(request: GitWorktreeRequest): void {
   mkdirSync(request.targetDir, { recursive: true });
+  mkdirSync(join(request.targetDir, 'node_modules'), { recursive: true });
   copyFileSync(join(request.projectDir, 'package.json'), join(request.targetDir, 'package.json'));
   copyFileSync(join(request.projectDir, 'package-lock.json'), join(request.targetDir, 'package-lock.json'));
 }

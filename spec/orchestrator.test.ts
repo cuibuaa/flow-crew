@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -11,7 +12,7 @@ import {
   type SupervisorBackend,
   type UnitStatus,
 } from '../src/orchestrator.js';
-import { TaskRegistry } from '../src/task-registry.js';
+import { REGISTRY_COMPACTION_THRESHOLDS, TaskRegistry } from '../src/task-registry.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import {
   activeRunsByProject,
@@ -123,7 +124,123 @@ function addPendingApproval(runId: string, requestId: string): void {
   });
 }
 
+function childOutcome(child: ChildProcessWithoutNullStreams): Promise<{ code: number | null; stderr: string }> {
+  let stderr = '';
+  child.stderr.setEncoding('utf-8');
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, stderr }));
+  });
+}
+
 describe('Orchestrator', () => {
+  it('[D1] auto-compacts a threshold-crossed registry with a backup and maintenance event', async () => {
+    const created = registry.create({ brief_text: 'registry compaction fixture', projectDir: tempDir });
+    const final = registry.update(created.id, { status: 'done', notes: 'latest row survives' });
+    const row = `${JSON.stringify(final)}\n`;
+    for (let index = 2; index < REGISTRY_COMPACTION_THRESHOLDS.records; index += 1) {
+      appendFileSync(registry.registryPath, row, 'utf-8');
+    }
+    expect(registry.metrics()).toMatchObject({
+      records: REGISTRY_COMPACTION_THRESHOLDS.records,
+      compactRecommended: true,
+    });
+    const maintenanceEvents: Array<Record<string, unknown>> = [];
+    const automatic = new Orchestrator({
+      registry,
+      systemd,
+      git,
+      cliPath: '/tmp/flowcrew-cli.js',
+      now: () => new Date(clock),
+      isProjectBusy: () => null,
+      onMaintenanceEvent: (event: Record<string, unknown>) => maintenanceEvents.push(event),
+    } as ConstructorParameters<typeof Orchestrator>[0] & {
+      onMaintenanceEvent: (event: Record<string, unknown>) => void;
+    });
+
+    await automatic.tickOnce();
+
+    expect(registry.metrics()).toMatchObject({ records: 1, tasks: 1, compactRecommended: false });
+    expect(registry.get(created.id)).toMatchObject({ status: 'done', notes: 'latest row survives' });
+    expect(maintenanceEvents).toEqual([
+      expect.objectContaining({
+        type: 'registry_compacted',
+        before: expect.objectContaining({ records: REGISTRY_COMPACTION_THRESHOLDS.records }),
+        after: expect.objectContaining({ records: 1 }),
+        removedRecords: REGISTRY_COMPACTION_THRESHOLDS.records - 1,
+        backupPath: expect.any(String),
+      }),
+    ]);
+    expect(existsSync(String(maintenanceEvents[0]?.backupPath))).toBe(true);
+    expect(registry.update(created.id, { notes: 'append after automatic compaction' }).notes)
+      .toBe('append after automatic compaction');
+  });
+
+  it('[D1] preserves an append that begins while backup-first compaction holds the registry lock', { timeout: 15_000 }, async () => {
+    const created = registry.create({ brief_text: 'concurrent registry fixture', projectDir: tempDir });
+    const latest = registry.update(created.id, { status: 'running', notes: 'before concurrent append' });
+    const row = `${JSON.stringify(latest)}\n`;
+    for (let index = 2; index < REGISTRY_COMPACTION_THRESHOLDS.records; index += 1) {
+      appendFileSync(registry.registryPath, row, 'utf-8');
+    }
+
+    const heldPath = join(tempDir, 'compaction-held');
+    const releasePath = join(tempDir, 'release-compaction');
+    const appendStartedPath = join(tempDir, 'append-started');
+    const appendFinishedPath = join(tempDir, 'append-finished');
+    const compactorScript = `
+      import { existsSync, writeFileSync } from 'node:fs';
+      import { TaskRegistry } from './dist/task-registry.js';
+      const [baseDir, heldPath, releasePath] = process.argv.slice(1);
+      const tasks = new TaskRegistry({ baseDir, lockTimeoutMs: 10000, lockPollMs: 5 });
+      const original = tasks.createVerifiedBackup.bind(tasks);
+      tasks.createVerifiedBackup = (...args) => {
+        original(...args);
+        writeFileSync(heldPath, 'held');
+        const waitCell = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(releasePath)) Atomics.wait(waitCell, 0, 0, 10);
+      };
+      tasks.compact({ apply: true });
+    `;
+    const updaterScript = `
+      import { writeFileSync } from 'node:fs';
+      import { TaskRegistry } from './dist/task-registry.js';
+      const [baseDir, taskId, startedPath, finishedPath] = process.argv.slice(1);
+      writeFileSync(startedPath, 'started');
+      const tasks = new TaskRegistry({ baseDir, lockTimeoutMs: 10000, lockPollMs: 5 });
+      tasks.update(Number(taskId), { notes: 'append launched during compaction' });
+      writeFileSync(finishedPath, 'finished');
+    `;
+    const compactor = spawn(process.execPath, ['--input-type=module', '-e', compactorScript, tempDir, heldPath, releasePath], {
+      cwd: process.cwd(),
+    });
+    const compactorOutcome = childOutcome(compactor);
+    let updater: ChildProcessWithoutNullStreams | undefined;
+    try {
+      await waitForPathEvent(tempDir, () => existsSync(heldPath) ? true : undefined);
+      updater = spawn(process.execPath, [
+        '--input-type=module', '-e', updaterScript,
+        tempDir, String(created.id), appendStartedPath, appendFinishedPath,
+      ], { cwd: process.cwd() });
+      const updaterOutcome = childOutcome(updater);
+      await waitForPathEvent(tempDir, () => existsSync(appendStartedPath) ? true : undefined);
+      expect(existsSync(appendFinishedPath)).toBe(false);
+      writeFileSync(releasePath, 'release');
+
+      const [compacted, appended] = await Promise.all([compactorOutcome, updaterOutcome]);
+      expect(compacted, compacted.stderr).toMatchObject({ code: 0 });
+      expect(appended, appended.stderr).toMatchObject({ code: 0 });
+    } finally {
+      if (!existsSync(releasePath)) writeFileSync(releasePath, 'release');
+      if (compactor.exitCode === null) compactor.kill();
+      if (updater?.exitCode === null) updater.kill();
+    }
+
+    expect(registry.get(created.id)).toMatchObject({ notes: 'append launched during compaction' });
+    expect(readFileSync(registry.registryPath, 'utf-8').trim().split('\n')).toHaveLength(2);
+  });
+
   it('reports registry corruption in daemon status without hiding readable active tasks', () => {
     registry.create({ brief_text: 'visible task', projectDir: tempDir });
     appendFileSync(registry.registryPath, '{broken registry row\n', 'utf-8');

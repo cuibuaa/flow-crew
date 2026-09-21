@@ -1,7 +1,7 @@
 /**
  * `flowcrew inbox` — review and resolve the approval requests that parked runs.
  *
- * Verbs: list | show | approve | deny | rules | revoke
+ * Verbs: list | show | approve | deny | rules [add] | revoke
  *
  * Approving does two things: it appends the (first-wins) resolution to the run's
  * append-only approvals log, and it RESUMES the parked run — same runId, same
@@ -21,7 +21,9 @@ import {
   type BriefAdmissionRecord,
 } from './brief-preflight.js';
 import {
-  foldItems, listAll, listStandingRules, resolveRequest, revokeStandingRule,
+  addProjectActionStandingRule, foldItems, isProjectActionStandingRule,
+  listAll, listApprovalStandingRules, resolveRequest, revokeStandingRule,
+  standingRuleId,
   standingRuleEligible, INBOX_FILTER_STATE, isPendingInboxItemState,
   type InboxFilterState, type InboxItem,
 } from './inbox.js';
@@ -227,13 +229,56 @@ export async function cmdInbox(
     }
 
     if (verb === 'rules') {
-      const rules = listStandingRules();
-      if (rules.length === 0) { out.write('No standing approval rules.\n'); return 0; }
-      out.write(['ACTION'.padEnd(20), 'TARGET'.padEnd(28), 'GRANTED'.padEnd(22), 'PROJECT'].join(' ') + '\n');
-      for (const r of rules) {
-        out.write([r.action.padEnd(20), r.target.padEnd(28), r.grantedAt.padEnd(22), r.projectDir].join(' ') + '\n');
+      if (positional === 'add') {
+        const projectDir = valueAfter(args, '--project');
+        const actionPattern = valueAfter(args, '--action');
+        const positionals: string[] = [];
+        for (let index = 3; index < args.length; index += 1) {
+          const arg = args[index];
+          if (arg === '--project' || arg === '--action') {
+            index += 1;
+            continue;
+          }
+          if (arg.startsWith('--')) {
+            err.write(`Unknown rules add option: ${arg}\n`);
+            return 1;
+          }
+          positionals.push(arg);
+        }
+        if (!projectDir || !actionPattern || positionals.length !== 1) {
+          err.write("Usage: flowcrew inbox rules add --project <dir> --action '<pattern>' approve\n");
+          return 1;
+        }
+        if (positionals[0] !== 'approve') {
+          err.write('Standing action rules support only an explicit approve decision.\n');
+          return 1;
+        }
+        const { rule, created } = addProjectActionStandingRule({
+          projectDir,
+          actionPattern,
+          decision: 'approve',
+          grantedBy: process.env.USER || 'operator',
+        });
+        out.write(`${created ? '✓ added' : '= existing'} standing approval rule ${rule.id}: `
+          + `${rule.actionPattern} → approve (project ${rule.projectDir})\n`);
+        return 0;
       }
-      out.write('\nRevoke with: flowcrew inbox revoke <action> <target> [--project <dir>]\n');
+
+      const rules = listApprovalStandingRules();
+      if (rules.length === 0) { out.write('No standing approval rules.\n'); return 0; }
+      out.write(['RULE'.padEnd(38), 'ACTION'.padEnd(24), 'TARGET'.padEnd(16), 'GRANTED'.padEnd(22), 'PROJECT'].join(' ') + '\n');
+      for (const r of rules) {
+        const action = isProjectActionStandingRule(r) ? r.actionPattern : r.action;
+        const target = isProjectActionStandingRule(r) ? '*' : r.target;
+        out.write([
+          standingRuleId(r).padEnd(38),
+          action.padEnd(24),
+          target.padEnd(16),
+          r.grantedAt.padEnd(22),
+          r.projectDir,
+        ].join(' ') + '\n');
+      }
+      out.write("\nRevoke with: flowcrew inbox revoke <action-or-pattern> <target-or-'*'> [--project <dir>]\n");
       return 0;
     }
 
@@ -247,7 +292,7 @@ export async function cmdInbox(
       return ok ? 0 : 1;
     }
 
-    err.write('Usage: flowcrew inbox list|show|approve|deny|rules|revoke ...\n');
+    err.write('Usage: flowcrew inbox list|show|approve|deny|rules [add]|revoke ...\n');
     return 1;
   } catch (e) {
     err.write(`${e instanceof Error ? e.message : String(e)}\n`);

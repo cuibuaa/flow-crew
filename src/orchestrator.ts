@@ -15,6 +15,7 @@ import {
   TASK_STATUS,
   type TaskCreateInput,
   type TaskEntry,
+  type TaskRegistryMetrics,
 } from './task-registry.js';
 import { parseTaskSummary } from './task-summary-parser.js';
 import {
@@ -104,6 +105,18 @@ export interface OrchestratorOptions {
     RunCancellationOptions,
     'registry' | 'units' | 'now' | 'isLaunchInFlight'
   >>;
+  /** Durable daemon-log sink for automatic registry maintenance. */
+  onMaintenanceEvent?: (event: RegistryMaintenanceEvent) => void;
+}
+
+export interface RegistryMaintenanceEvent {
+  type: 'registry_compacted' | 'registry_compaction_failed';
+  timestamp: string;
+  before: TaskRegistryMetrics;
+  after?: TaskRegistryMetrics;
+  removedRecords?: number;
+  backupPath?: string;
+  detail?: string;
 }
 
 export class Orchestrator {
@@ -115,6 +128,7 @@ export class Orchestrator {
   private readonly now: () => Date;
   private readonly probeBusy: (projectDir: string, selfRunId?: string, nowMs?: number) => string | null;
   private readonly allocateRun: typeof reserveRun;
+  private readonly onMaintenanceEvent: (event: RegistryMaintenanceEvent) => void;
   private readonly cancellations: RunCancellationCoordinator;
   /** Tasks currently awaiting runUnit(). A tick must not interpret their unit
    *  as inactive and launch or reconcile them a second time. */
@@ -122,6 +136,7 @@ export class Orchestrator {
   private timer?: NodeJS.Timeout;
   private ticking = false;
   private startedAt = Date.now();
+  private lastRegistryCompactionAttempt?: string;
 
   constructor(opts: OrchestratorOptions = {}) {
     this.registry = opts.registry ?? new TaskRegistry();
@@ -132,6 +147,7 @@ export class Orchestrator {
     this.now = opts.now ?? (() => new Date());
     this.probeBusy = opts.isProjectBusy ?? isProjectBusy;
     this.allocateRun = opts.reserveRun ?? reserveRun;
+    this.onMaintenanceEvent = opts.onMaintenanceEvent ?? (() => {});
     this.cancellations = new RunCancellationCoordinator({
       ...opts.cancellation,
       registry: this.registry,
@@ -345,6 +361,7 @@ export class Orchestrator {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      this.compactRegistryIfNeeded();
       const tasks = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE });
       // Pass 1 (serial, cheap): drain the launch queue. Serial on purpose —
       // admission control must see each launch before deciding the next, or two
@@ -365,6 +382,41 @@ export class Orchestrator {
       )));
     } finally {
       this.ticking = false;
+    }
+  }
+
+  private compactRegistryIfNeeded(): void {
+    const before = this.registry.metrics();
+    if (!before.compactRecommended) {
+      this.lastRegistryCompactionAttempt = undefined;
+      return;
+    }
+    const signature = `${before.bytes}:${before.records}`;
+    if (this.lastRegistryCompactionAttempt === signature) return;
+    this.lastRegistryCompactionAttempt = signature;
+    try {
+      // TaskRegistry.compact owns the same cross-process lock as append/update,
+      // creates and verifies the evidence backup first, and validates latest-row
+      // semantics before releasing the lock. An append therefore lands wholly
+      // before or wholly after this rewrite and cannot be dropped.
+      const report = this.registry.compact({ apply: true });
+      if (!report.applied) return;
+      this.lastRegistryCompactionAttempt = `${report.after.bytes}:${report.after.records}`;
+      this.onMaintenanceEvent({
+        type: 'registry_compacted',
+        timestamp: this.now().toISOString(),
+        before: report.before,
+        after: report.after,
+        removedRecords: report.removedRecords,
+        backupPath: report.backupPath,
+      });
+    } catch (error) {
+      this.onMaintenanceEvent({
+        type: 'registry_compaction_failed',
+        timestamp: this.now().toISOString(),
+        before,
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

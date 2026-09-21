@@ -734,10 +734,65 @@ function readLatestEngineTasks(
         && tasks.size < requestedIds.size
         && unreadable === 0
         && !snapshotOversized) {
-      return {
-        ok: false,
-        detail: `engine task registry tail scan exceeds the ${MAX_ENGINE_REGISTRY_SCAN_BYTES}-byte limit`,
+      // The tail window is only a fast path. A valid task link must not become
+      // globally unavailable merely because unrelated later task history grew
+      // past that window. Scan the stable descriptor forward, retaining only
+      // the latest row for the still-missing ids. Memory remains bounded by one
+      // registry row plus the requested task snapshot.
+      const missing = new Set([...requestedIds].filter((id) => !tasks.has(id)));
+      const exact = new Map<number, { value: unknown; bytes: number }>();
+      let forwardOffset = 0;
+      let forwardCarry = Buffer.alloc(0);
+      const inspectExact = (bytes: Buffer): void => {
+        const line = bytes.toString('utf-8').trim();
+        if (!line) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line) as unknown;
+        } catch {
+          unreadable += 1;
+          return;
+        }
+        if (!isObject(parsed) || !Number.isSafeInteger(parsed.id)) return;
+        const id = parsed.id as number;
+        if (!missing.has(id)) return;
+        exact.set(id, { value: parsed, bytes: bytes.length });
       };
+      while (forwardOffset < opened.size && unreadable === 0) {
+        const length = Math.min(ENGINE_REGISTRY_READ_CHUNK, opened.size - forwardOffset);
+        const chunk = Buffer.allocUnsafe(length);
+        const bytesRead = readSync(descriptor, chunk, 0, length, forwardOffset);
+        if (bytesRead !== length) {
+          return { ok: false, detail: 'engine task registry changed during exact id fallback' };
+        }
+        forwardOffset += bytesRead;
+        const combined = Buffer.concat([forwardCarry, chunk.subarray(0, bytesRead)]);
+        let lineStart = 0;
+        for (let index = 0; index < combined.length; index += 1) {
+          if (combined[index] !== 0x0a) continue;
+          inspectExact(combined.subarray(lineStart, index));
+          lineStart = index + 1;
+          if (unreadable > 0) break;
+        }
+        forwardCarry = Buffer.from(combined.subarray(lineStart));
+        if (forwardCarry.length > MAX_ENGINE_REGISTRY_ROW_BYTES) {
+          return { ok: false, detail: 'engine task registry contains an oversized record during exact id fallback' };
+        }
+      }
+      if (unreadable === 0 && forwardCarry.length > 0) inspectExact(forwardCarry);
+      for (const [id, row] of exact) {
+        selectedBytes += row.bytes;
+        if (selectedBytes > MAX_ENGINE_TASK_SNAPSHOT_BYTES) {
+          snapshotOversized = true;
+          break;
+        }
+        tasks.set(id, row.value);
+      }
+      // Mark the reverse scan consumed so its partial carry is not interpreted
+      // a second time below. Descriptor/inode validation still happens after
+      // the exact pass.
+      offset = 0;
+      carry = Buffer.alloc(0);
     }
     if (offset === 0
         && tasks.size < requestedIds.size

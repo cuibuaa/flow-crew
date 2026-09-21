@@ -65,7 +65,18 @@ export interface OperationalEventReason {
   type: string;
   at?: string;
   stageId?: string;
+  attemptIndex?: number;
+  /** True when this reason does not describe the currently executing stage attempt. */
+  historical?: boolean;
   detail: string;
+}
+
+export interface OperationalWriterLeaseWait {
+  stageId: string;
+  blockedByStageId?: string;
+  leasePartition?: string;
+  waitStartedAt?: string;
+  waitedMs?: number;
 }
 
 export interface OperationalStageExecution {
@@ -74,6 +85,7 @@ export interface OperationalStageExecution {
   execution: number;
   startedAt?: string;
   elapsedMs?: number;
+  writerLeaseWait?: OperationalWriterLeaseWait;
 }
 
 export interface OperationalPendingScope {
@@ -90,6 +102,7 @@ export interface OperationalProjection {
   runStatus: string;
   runElapsedMs?: number;
   activeStages: OperationalStageExecution[];
+  writerLeaseWaits: OperationalWriterLeaseWait[];
   latestReason?: OperationalEventReason;
   lastRejection?: OperationalEventReason;
   lastGuidance?: OperationalEventReason;
@@ -177,12 +190,50 @@ function reasonFromEvent(event: EventLike): OperationalEventReason | undefined {
   if (!detail) return undefined;
   const at = eventTimestamp(event);
   const stageId = eventStage(event);
+  const attemptIndex = finite(event.attemptIndex);
   return {
     type: eventType(event),
     ...(at ? { at } : {}),
     ...(stageId ? { stageId } : {}),
+    ...(attemptIndex !== undefined ? { attemptIndex: Math.floor(attemptIndex) } : {}),
     detail,
   };
+}
+
+function activeWriterLeaseWaits(events: readonly EventLike[], nowMs: number): OperationalWriterLeaseWait[] {
+  const active = new Map<string, OperationalWriterLeaseWait>();
+  for (const event of events) {
+    const stageId = eventStage(event);
+    if (!stageId) continue;
+    const type = eventType(event);
+    if (type === 'writer_lease_wait_started') {
+      const blockedByStageId = text(event.blockedByStageId);
+      const leasePartition = text(event.leasePartition);
+      const waitStartedAt = text(event.waitStartedAt) ?? eventTimestamp(event);
+      const startedMs = timestampMs(waitStartedAt);
+      active.set(stageId, {
+        stageId,
+        ...(blockedByStageId ? { blockedByStageId } : {}),
+        ...(leasePartition ? { leasePartition } : {}),
+        ...(waitStartedAt ? { waitStartedAt } : {}),
+        ...(startedMs === undefined ? {} : { waitedMs: Math.max(0, nowMs - startedMs) }),
+      });
+    } else if (type === 'writer_lease_wait_finished') {
+      active.delete(stageId);
+    }
+  }
+  return [...active.values()];
+}
+
+/** Render reason provenance so historical failures cannot masquerade as live state. */
+export function formatOperationalReason(reason: OperationalEventReason): string {
+  const provenance = [
+    reason.historical === false ? 'current' : 'historical',
+    `stage ${reason.stageId ?? 'unknown'}`,
+    `attempt ${reason.attemptIndex ?? 'unknown'}`,
+    reason.at ?? 'time unknown',
+  ];
+  return `[${provenance.join(' · ')}]: ${reason.detail}`;
 }
 
 function objectEntries(value: unknown): Array<[string, StageLike]> {
@@ -270,6 +321,8 @@ export function buildOperationalProjection(
 ): OperationalProjection {
   const nowMs = options.nowMs ?? Date.now();
   const stageEntries = objectEntries(state?.stages);
+  const writerLeaseWaits = activeWriterLeaseWaits(events, nowMs);
+  const writerLeaseWaitByStage = new Map(writerLeaseWaits.map((wait) => [wait.stageId, wait]));
   const activeStages = stageEntries
     .filter(([, stage]) => text(stage.status) === 'running')
     .map(([id, stage]): OperationalStageExecution => {
@@ -281,6 +334,7 @@ export function buildOperationalProjection(
         execution: executionNumber(stage),
         ...(startedAt ? { startedAt } : {}),
         ...(elapsedMs === undefined ? {} : { elapsedMs }),
+        ...(writerLeaseWaitByStage.has(id) ? { writerLeaseWait: writerLeaseWaitByStage.get(id) } : {}),
       };
     });
 
@@ -298,6 +352,17 @@ export function buildOperationalProjection(
   const failureReason = text(state?.failureReason);
   if (!latestReason && failureReason) latestReason = { type: 'run_failure', detail: failureReason };
   if (!lastRejection && failureReason) lastRejection = { type: 'run_failure', detail: failureReason };
+
+  const markHistorical = (reason: OperationalEventReason | undefined): OperationalEventReason | undefined => {
+    if (!reason) return undefined;
+    const current = reason.stageId !== undefined
+      && reason.attemptIndex !== undefined
+      && activeStages.some((stage) => stage.id === reason.stageId && stage.execution === reason.attemptIndex);
+    return { ...reason, historical: !current };
+  };
+  latestReason = markHistorical(latestReason);
+  lastRejection = markHistorical(lastRejection);
+  lastGuidance = markHistorical(lastGuidance);
 
   const runId = text(state?.runId);
   const projectDir = text(state?.projectDir);
@@ -318,6 +383,7 @@ export function buildOperationalProjection(
     runStatus,
     ...(runElapsedMs === undefined ? {} : { runElapsedMs }),
     activeStages,
+    writerLeaseWaits,
     ...(latestReason ? { latestReason } : {}),
     ...(lastRejection ? { lastRejection } : {}),
     ...(lastGuidance ? { lastGuidance } : {}),

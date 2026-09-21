@@ -32,7 +32,7 @@ import {
 import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import { runsRoot } from './store.js';
 import { findExecutableOnPath } from './adapters/availability.js';
-import { formatHumanDuration } from './cli-events.js';
+import { formatHumanDuration, formatOperationalReason } from './cli-events.js';
 import { formatRunDriftProjection } from './run-drift.js';
 
 export interface TaskFollowControls {
@@ -177,12 +177,15 @@ function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withS
       ? `${lifecycle} [terminal artifact says ${task.terminal_status_mismatch.terminal_status}]`
       : lifecycle;
     const active = task.operational?.activeStages[0];
-    const currentStage = active ? `${active.id} (execution ${active.execution})` : '—';
+    const waiting = task.operational?.writerLeaseWaits.length ?? 0;
+    const currentStage = active
+      ? `${active.id} (execution ${active.execution})${waiting > 0 ? `; ${waiting} waiting for writer lease` : ''}`
+      : '—';
     const elapsed = formatHumanDuration(active?.elapsedMs ?? task.operational?.runElapsedMs);
-    const reason = task.operational?.lastRejection?.detail
-      ?? task.operational?.latestReason?.detail
-      ?? task.failure_reason
-      ?? '—';
+    const operationalReason = task.operational?.lastRejection ?? task.operational?.latestReason;
+    const reason = operationalReason
+      ? formatOperationalReason(operationalReason)
+      : task.failure_reason ?? '—';
     const fields = [
       String(task.id),
       truncate(status, 44),
@@ -211,9 +214,9 @@ function printTask(
   const verdict = task.summary_verdict ?? task.run_verdict;
   if (verdict) stdout.write(`Verdict: ${verdict}\n`);
   if (task.summary_one_liner) stdout.write(`Summary: ${task.summary_one_liner}\n`);
-  const projectedStatus = isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal'
+  const projectedStatus = isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal' && !task.scheduler_live
     ? 'terminal'
-    : isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal-unknown'
+    : isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal-unknown' && !task.scheduler_live
       ? 'terminal-unknown'
       : task.status;
   stdout.write(`Status: ${projectedStatus}\n`);
@@ -231,11 +234,18 @@ function printTask(
     stdout.write(`Run elapsed: ${formatHumanDuration(operational.runElapsedMs)}\n`);
     if (operational.activeStages.length === 0) stdout.write('Current stage: none executing\n');
     else for (const stage of operational.activeStages) {
-      stdout.write(`Current stage: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}\n`);
+      const waiting = operational.writerLeaseWaits.length;
+      const waitSummary = waiting > 0
+        ? ` · ${waiting} ${waiting === 1 ? 'stage' : 'stages'} waiting for writer lease`
+        : '';
+      const blocker = stage.writerLeaseWait?.blockedByStageId
+        ? ` behind ${stage.writerLeaseWait.blockedByStageId}`
+        : '';
+      stdout.write(`Current stage: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}${waitSummary}${blocker}\n`);
     }
-    if (operational.latestReason) stdout.write(`Latest reason: ${operational.latestReason.detail}\n`);
-    if (operational.lastRejection) stdout.write(`Latest rejection: ${operational.lastRejection.detail}\n`);
-    if (operational.lastGuidance) stdout.write(`Latest guidance: ${operational.lastGuidance.detail}\n`);
+    if (operational.latestReason) stdout.write(`Latest reason ${formatOperationalReason(operational.latestReason)}\n`);
+    if (operational.lastRejection) stdout.write(`Latest rejection ${formatOperationalReason(operational.lastRejection)}\n`);
+    if (operational.lastGuidance) stdout.write(`Latest guidance ${formatOperationalReason(operational.lastGuidance)}\n`);
     for (const pending of operational.pendingScope) {
       stdout.write(`Pending scope request: ${pending.requestId}${pending.stageId ? ` · ${pending.stageId}` : ''}${pending.detail ? ` · ${pending.detail}` : ''}\n`);
     }

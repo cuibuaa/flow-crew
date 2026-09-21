@@ -107,6 +107,102 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('Exit code: 3\n');
   });
 
+  it('[C4] keeps the run lifecycle status when a replacement scheduler is live after the old unit exits', async () => {
+    server = await startRpcServer(socketPath, () => ({
+      task: {
+        ...task({ id: 3, status: 'running' }),
+        scheduler_live: { pid: process.pid },
+      },
+      recent_ticks: [],
+      unit_status: { kind: 'terminal', exitCode: 0 },
+      exit_code: 0,
+    }));
+    const out = new Capture();
+
+    const code = await cmdTask(
+      ['task', 'show', '3', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    );
+
+    expect(code).toBe(0);
+    expect(out.text()).toContain('Status: running\n');
+    expect(out.text()).not.toContain('Status: terminal\n');
+  });
+
+  it('[A3] shows the live writer-lease wait count and blocker on Current stage lines', async () => {
+    const operational = buildOperationalProjection({
+      runId: 'run-3',
+      status: 'running',
+      stages: {
+        owner: {
+          status: 'running',
+          attempts: [{ index: 1, status: 'running', startedAt: '2026-09-14T10:00:00.000Z' }],
+        },
+        waiter: {
+          status: 'running',
+          attempts: [{ index: 1, status: 'running', startedAt: '2026-09-14T10:00:00.000Z' }],
+        },
+      },
+    }, [{
+      type: 'writer_lease_wait_started',
+      stageId: 'waiter',
+      blockedByStageId: 'owner',
+      waitStartedAt: '2026-09-14T10:00:01.000Z',
+      timestamp: '2026-09-14T10:00:01.000Z',
+      detail: 'waiting for writer lease behind owner',
+    }], { nowMs: Date.parse('2026-09-14T10:00:03.000Z') });
+    server = await startRpcServer(socketPath, () => ({
+      task: { ...task({ id: 3, status: 'running' }), operational },
+      recent_ticks: [],
+    }));
+    const out = new Capture();
+
+    expect(await cmdTask(
+      ['task', 'show', '3', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    )).toBe(0);
+    const currentLines = out.text().split(/\r?\n/u).filter((line) => line.startsWith('Current stage:'));
+    expect(currentLines).toHaveLength(2);
+    expect(currentLines.every((line) => line.includes('1 stage waiting for writer lease'))).toBe(true);
+    expect(currentLines.find((line) => line.includes('waiter'))).toContain('behind owner');
+  });
+
+  it('[D3] labels Latest reason with its stage, attempt, time, and historical status', async () => {
+    const operational = buildOperationalProjection({
+      runId: 'run-3',
+      status: 'running',
+      stages: {
+        prepare: {
+          status: 'complete',
+          attempts: [{ index: 1, status: 'complete', startedAt: '2026-09-14T09:59:00.000Z' }],
+        },
+        implement: {
+          status: 'running',
+          attempts: [{ index: 2, status: 'running', startedAt: '2026-09-14T10:01:00.000Z' }],
+        },
+      },
+    }, [{
+      type: 'stage_failed',
+      stageId: 'prepare',
+      attemptIndex: 1,
+      timestamp: '2026-09-14T10:00:00.000Z',
+      detail: 'historical preparation failure',
+    }]);
+    server = await startRpcServer(socketPath, () => ({
+      task: { ...task({ id: 3, status: 'running' }), operational },
+      recent_ticks: [],
+    }));
+    const out = new Capture();
+
+    expect(await cmdTask(
+      ['task', 'show', '3', '--port', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any },
+    )).toBe(0);
+    expect(out.text()).toContain(
+      'Latest reason [historical · stage prepare · attempt 1 · 2026-09-14T10:00:00.000Z]: historical preparation failure',
+    );
+  });
+
   it('renders daemon-merged run status, verdict, completion, and failure detail', async () => {
     server = await startRpcServer(socketPath, () => ({
       task: {

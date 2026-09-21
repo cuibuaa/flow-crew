@@ -23,6 +23,11 @@ export interface RunResult {
   effectiveTimeoutMs?: number;
   /** Worker-owned authoritative termination attribution. */
   timeoutTerminationCause?: string;
+  /** Scheduler/worker control boundary: the stage must be re-dispatched, not completed. */
+  suspended?: boolean;
+  suspensionReason?: 'scope_revision' | 'approval';
+  suspensionRequestId?: string;
+  suspensionRequestingStageId?: string;
 }
 
 export interface RunOpts {

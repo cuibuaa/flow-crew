@@ -55,6 +55,7 @@ const [
   runLockModule,
   terminalArtifactStatusModule,
   cliEventsModule,
+  guidanceModule,
 ] = await Promise.all([
   import('node:fs'),
   import('node:path'),
@@ -72,6 +73,7 @@ const [
   import('./run-lock.js'),
   import('./terminal-artifact-status.js'),
   import('./cli-events.js'),
+  import('./guidance.js'),
 ]);
 
 const {
@@ -120,7 +122,13 @@ const {
 const { detectSupervisorBackend } = cliDoctorModule;
 const { isLiveFlowcrewSchedulerForRun, parseSchedulerPidMarker } = runLockModule;
 const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
-const { formatHumanDuration, formatRunDriftProjection, readOperationalProjection } = cliEventsModule;
+const {
+  formatHumanDuration,
+  formatOperationalReason,
+  formatRunDriftProjection,
+  readOperationalProjection,
+} = cliEventsModule;
+const { appendGuidanceEnvelope } = guidanceModule;
 
 const args = bootstrapArgs;
 const command = args[0];
@@ -1433,9 +1441,9 @@ function cmdStatus() {
   else for (const stage of operational.activeStages) {
     console.log(`Now: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}`);
   }
-  if (operational.latestReason) console.log(`Latest reason: ${operational.latestReason.detail}`);
-  if (operational.lastRejection) console.log(`Latest rejection: ${operational.lastRejection.detail}`);
-  if (operational.lastGuidance) console.log(`Latest guidance: ${operational.lastGuidance.detail}`);
+  if (operational.latestReason) console.log(`Latest reason ${formatOperationalReason(operational.latestReason)}`);
+  if (operational.lastRejection) console.log(`Latest rejection ${formatOperationalReason(operational.lastRejection)}`);
+  if (operational.lastGuidance) console.log(`Latest guidance ${formatOperationalReason(operational.lastGuidance)}`);
   for (const pending of operational.pendingScope) console.log(`Pending scope: ${pending.requestId}${pending.stageId ? ` · ${pending.stageId}` : ''}`);
   if (operational.pendingApproval) console.log(`Pending approval: ${operational.pendingApproval.detail}`);
   for (const line of formatRunDriftProjection(operational.drift)) console.log(line);
@@ -1491,23 +1499,25 @@ interface GuideRunCandidate {
   id: string;
   title: string;
   status: string;
+  stageIds: string[];
 }
 
 function printGuideUsage(): void {
-  console.log('Usage: flowcrew guide [--run <run-id>] "your guidance message"');
+  console.log('Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "your guidance message"');
   console.log('');
   console.log('Omit --run only when exactly one run is currently executing.');
 }
 
 function guideArgumentError(message: string): never {
   console.error(message);
-  console.error('Usage: flowcrew guide [--run <run-id>] "your guidance message"');
+  console.error('Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "your guidance message"');
   process.exit(1);
 }
 
-function parseGuideArguments(): { message: string; targetRunId?: string } {
+function parseGuideArguments(): { message: string; targetRunId?: string; targetStageId?: string } {
   const messageParts: string[] = [];
   let targetRunId: string | undefined;
+  let targetStageId: string | undefined;
   for (let index = 1; index < args.length; index++) {
     const value = args[index];
     if (value === '--run') {
@@ -1525,11 +1535,26 @@ function parseGuideArguments(): { message: string; targetRunId?: string } {
       targetRunId = selected;
       continue;
     }
+    if (value === '--stage') {
+      const selected = args[index + 1];
+      if (!selected || selected.startsWith('--')) guideArgumentError('--stage requires a stage id.');
+      if (targetStageId !== undefined) guideArgumentError('--stage may be specified only once.');
+      targetStageId = selected;
+      index++;
+      continue;
+    }
+    if (value.startsWith('--stage=')) {
+      const selected = value.slice('--stage='.length);
+      if (!selected) guideArgumentError('--stage requires a stage id.');
+      if (targetStageId !== undefined) guideArgumentError('--stage may be specified only once.');
+      targetStageId = selected;
+      continue;
+    }
     messageParts.push(value);
   }
   const message = messageParts.join(' ').trim();
   if (!message) guideArgumentError('Guidance message must not be empty.');
-  return { message, targetRunId };
+  return { message, targetRunId, targetStageId };
 }
 
 function safeGuideRunId(runId: string): boolean {
@@ -1553,12 +1578,16 @@ function readGuideCandidate(root: string, runId: string): GuideRunCandidate | un
       status?: string;
       taskDescription?: string;
       workflowName?: string;
+      stages?: unknown;
     };
     if (state.runId !== undefined && state.runId !== runId) return undefined;
     return {
       id: runId,
       status: typeof state.status === 'string' ? state.status : '',
       title: extractTaskTitle(state.taskDescription) || state.workflowName || '(untitled task)',
+      stageIds: state.stages && typeof state.stages === 'object' && !Array.isArray(state.stages)
+        ? Object.keys(state.stages as Record<string, unknown>)
+        : [],
     };
   } catch {
     return undefined;
@@ -1570,7 +1599,7 @@ function cmdGuide() {
     printGuideUsage();
     return;
   }
-  const { message, targetRunId } = parseGuideArguments();
+  const { message, targetRunId, targetStageId } = parseGuideArguments();
   const root = runsRoot();
   if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
   const runs = runIdsByRecency(root);
@@ -1615,6 +1644,24 @@ function cmdGuide() {
       process.exit(1);
     }
     selected = running[0];
+  }
+
+  if (targetStageId !== undefined) {
+    if (!selected.stageIds.includes(targetStageId)) {
+      console.error(`Stage "${targetStageId}" is not part of run "${selected.id}"; guidance was not sent.`);
+      process.exit(1);
+    }
+    appendGuidanceEnvelope({
+      runDir: join(root, selected.id),
+      target: targetStageId,
+      source: 'operator',
+      body: message,
+      knownStageIds: selected.stageIds,
+    });
+    console.log(`Guidance sent directly to stage ${targetStageId} in run ${selected.id}:`);
+    console.log(`  "${message}"`);
+    console.log('\nThe running stage will consume it before its next adapter invocation.');
+    return;
   }
 
   writeFileSync(join(root, selected.id, 'user_input.md'), message, 'utf-8');

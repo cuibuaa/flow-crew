@@ -15,6 +15,7 @@ import {
 import { sendRpc, startRpcServer, type DaemonStatusRpcResponse, type RpcResponse } from '../src/orchestrator-rpc.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
+import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
 
 interface TrackedServer {
   server: Server;
@@ -291,6 +292,35 @@ describe('daemon status local diagnosis', () => {
     });
     expect(merged.completed_at).toBeUndefined();
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
+  });
+
+  it('[C4] reports the live replacement scheduler bound to a running run', () => {
+    const registry = new TaskRegistry({ baseDir: tempDir });
+    const runRoot = join(tempDir, 'runs');
+    const runId = 'resumed-live-run';
+    const runPath = join(runRoot, runId);
+    mkdirSync(runPath, { recursive: true });
+    const task = registry.create({
+      projectDir: tempDir,
+      name: 'resumed scheduler fixture',
+      run_id: runId,
+      status: 'running',
+    });
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+      runId,
+      projectDir: tempDir,
+      status: 'running',
+      stages: { work: { status: 'running', retries: 0 } },
+    }), 'utf-8');
+    writeSchedulerProcessIdentity(runPath, runId, process.pid);
+    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+
+    const merged = mergeTaskWithRunState(task, runRoot);
+
+    expect(merged).toMatchObject({
+      status: 'running',
+      scheduler_live: { pid: process.pid },
+    });
   });
 
   async function listenSilently(socketPath: string): Promise<void> {

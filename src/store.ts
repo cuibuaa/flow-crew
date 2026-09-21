@@ -71,7 +71,7 @@ export const STAGE_STATUS = {
 } as const;
 export type StageState = typeof STAGE_STATUS[keyof typeof STAGE_STATUS];
 
-export type StageAttemptState = 'running' | 'complete' | 'failed';
+export type StageAttemptState = 'running' | 'complete' | 'failed' | 'suspended';
 export type AttemptTokenUsage = 'known' | 'unknown';
 export type WriteAttribution = 'structured' | 'snapshot' | 'unknown';
 
@@ -85,7 +85,7 @@ export interface StageAttemptTimeoutSummary {
   rejectedExtensionCount: number;
   decisionPaths: string[];
   mismatchPaths: string[];
-  terminationCause?: 'complete' | 'supervisor_abort' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  terminationCause?: 'complete' | 'supervisor_abort' | 'approval_suspension' | 'attempt_timeout' | 'adapter_error' | 'failed';
   deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
@@ -1941,6 +1941,38 @@ export function rependStageStatus(
     retries,
     error,
   };
+}
+
+/**
+ * Convert one settled execution into a durable control-boundary suspension.
+ * The attempt remains in history, while the stage becomes runnable again and
+ * cannot release downstream dependencies.
+ */
+export function suspendStageAttempt(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  attemptIndex: number,
+): StageStatus {
+  const previous = readStageStatus(projectDir, runId, stageId);
+  const attempts = [...(previous.attempts ?? [])];
+  const index = attempts.findIndex((attempt) => attempt.index === attemptIndex);
+  if (index < 0) throw new Error(`Cannot suspend stage ${stageId} attempt ${attemptIndex}: attempt not found`);
+  attempts[index] = {
+    ...attempts[index],
+    status: 'suspended',
+    completedAt: attempts[index].completedAt ?? new Date().toISOString(),
+  };
+  const suspended: StageStatus = {
+    ...previous,
+    status: STAGE_STATUS.PENDING,
+    exitCode: undefined,
+    completedAt: undefined,
+    error: undefined,
+    attempts,
+  };
+  writeStageStatus(projectDir, runId, stageId, suspended);
+  return suspended;
 }
 
 export function writeStageInput(

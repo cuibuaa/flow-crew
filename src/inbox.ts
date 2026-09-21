@@ -20,19 +20,29 @@
  *     read-modify-write, because append order IS the arbiter.
  * There is no second source of truth to rebuild or keep in sync.
  *
- * Standing rules ("allow this every time") are restricted the same way
- * openworker restricts them: only for an EXTERNAL-risk action bound to an exact
- * target. A shell/write/unbounded action asks forever — an "always" grant is
- * only safe when the thing it authorizes is pinned to a specific target.
+ * A request-time `--always` grant remains restricted to an EXTERNAL-risk action
+ * bound to an exact target. Separately, an operator may explicitly create a
+ * project-bound action-pattern rule. That broader grant is never inferred from
+ * a request; it exists only after an operator names both the project and action
+ * pattern through the rules CLI.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
 import { isValidApprovalRequestId } from './approval-artifacts.js';
 import { readJsonlFile } from './jsonl.js';
 import { fcGlobalDir, runDir, runsRoot } from './store.js';
 
-/** Risk classes a brief may declare on a request. Only `external` is eligible for a standing rule. */
+/** Risk classes a brief may declare on a request. Only `external` is eligible for request-time `--always`. */
 export type ApprovalRisk = 'external' | 'exec' | 'write' | 'unknown';
 
 export interface ApprovalRequest {
@@ -43,7 +53,7 @@ export interface ApprovalRequest {
   requestId: string;
   /** What the agent wants to do, e.g. "deploy" / "spend" / "send_order". */
   action: string;
-  /** The exact object of the action, e.g. "binance-mainnet" — required for a standing rule. */
+  /** The exact object of the action, e.g. "binance-mainnet" — required for request-time `--always`. */
   target?: string;
   risk: ApprovalRisk;
   title: string;
@@ -102,8 +112,38 @@ export interface StandingRule {
   fromRequestId?: string;
 }
 
+/**
+ * A broader grant that can only be authored by an explicit operator command.
+ * `actionPattern` is an anchored glob where `*` is the sole metacharacter.
+ */
+export interface ProjectActionStandingRule {
+  version: 1;
+  kind: 'standing_rule';
+  id: string;
+  projectDir: string;
+  actionPattern: string;
+  decision: 'approve';
+  grantedBy: string;
+  grantedAt: string;
+}
+
+export type ApprovalStandingRule = StandingRule | ProjectActionStandingRule;
+
+/** Compatibility shape for existing consumers, plus a stable audit identity. */
+export interface StandingRuleMatch extends StandingRule {
+  id: string;
+  actionPattern: string;
+  decision: 'approve';
+  source: 'legacy_exact' | 'project_action';
+}
+
 const approvalsPath = (projectDir: string, runId: string) => join(runDir(projectDir, runId), 'approvals.jsonl');
 const rulesPath = () => join(fcGlobalDir(), 'approval-rules.jsonl');
+
+function canonicalProjectDir(projectDir: string): string {
+  const absolute = resolve(projectDir);
+  try { return realpathSync.native(absolute); } catch { return absolute; }
+}
 
 function appendJsonl(path: string, rec: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -238,32 +278,167 @@ function safeReaddir(dir: string): string[] {
  */
 export function standingRuleEligible(item: ApprovalRequest): { ok: boolean; reason?: string } {
   if (item.risk !== 'external') {
-    return { ok: false, reason: `standing rules are only allowed for risk=external (this request is risk=${item.risk}); approve it once instead` };
+    return {
+      ok: false,
+      reason: `request-time --always rules are only allowed for risk=external (this request is risk=${item.risk}); approve it once, or explicitly add a project action rule with flowcrew inbox rules add`,
+    };
   }
   if (!item.target) {
-    return { ok: false, reason: 'standing rules require an exact target on the request; approve it once instead' };
+    return {
+      ok: false,
+      reason: 'request-time --always rules require an exact target; approve it once, or explicitly add a project action rule with flowcrew inbox rules add',
+    };
   }
   return { ok: true };
 }
 
 export function addStandingRule(rule: StandingRule): void {
-  appendJsonl(rulesPath(), rule);
+  appendJsonl(rulesPath(), { ...rule, projectDir: canonicalProjectDir(rule.projectDir) });
 }
 
+/** Legacy exact action→target rules minted by `approve --always`. */
 export function listStandingRules(): StandingRule[] {
-  return readJsonl<StandingRule>(rulesPath());
+  return listApprovalStandingRules().filter(isLegacyStandingRule);
+}
+
+/** Every supported on-disk rule, preserving JSONL order for first-match semantics. */
+export function listApprovalStandingRules(): ApprovalStandingRule[] {
+  return readJsonl<unknown>(rulesPath()).filter(isApprovalStandingRule);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isLegacyStandingRule(value: ApprovalStandingRule | unknown): value is StandingRule {
+  return isRecord(value)
+    && typeof value.projectDir === 'string'
+    && typeof value.action === 'string'
+    && typeof value.target === 'string'
+    && typeof value.grantedBy === 'string'
+    && typeof value.grantedAt === 'string';
+}
+
+export function isProjectActionStandingRule(
+  value: ApprovalStandingRule | unknown,
+): value is ProjectActionStandingRule {
+  return isRecord(value)
+    && value.version === 1
+    && value.kind === 'standing_rule'
+    && typeof value.id === 'string'
+    && value.id.length > 0
+    && typeof value.projectDir === 'string'
+    && typeof value.actionPattern === 'string'
+    && value.actionPattern.length > 0
+    && value.decision === 'approve'
+    && typeof value.grantedBy === 'string'
+    && typeof value.grantedAt === 'string';
+}
+
+function isApprovalStandingRule(value: unknown): value is ApprovalStandingRule {
+  return isLegacyStandingRule(value) || isProjectActionStandingRule(value);
+}
+
+function normalizeActionPattern(actionPattern: string): string {
+  const normalized = actionPattern.trim();
+  if (!normalized) throw new Error('standing rule action pattern must not be empty');
+  if (normalized.length > 256) throw new Error('standing rule action pattern must be at most 256 characters');
+  if (/\r|\n|\0/u.test(normalized)) throw new Error('standing rule action pattern must be one line');
+  return normalized;
+}
+
+function actionMatchesPattern(action: string, actionPattern: string): boolean {
+  const escapedParts = actionPattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
+  return new RegExp(`^${escapedParts.join('.*')}$`, 'u').test(action);
+}
+
+/** Stable identity for both versioned and pre-versioned rules. */
+export function standingRuleId(rule: ApprovalStandingRule): string {
+  if (isProjectActionStandingRule(rule)) return rule.id;
+  return `legacy-${createHash('sha256')
+    .update(JSON.stringify([
+      canonicalProjectDir(rule.projectDir), rule.action, rule.target,
+      rule.grantedBy, rule.grantedAt, rule.fromRequestId ?? '',
+    ]))
+    .digest('hex')
+    .slice(0, 16)}`;
+}
+
+export function addProjectActionStandingRule(input: {
+  projectDir: string;
+  actionPattern: string;
+  decision: 'approve';
+  grantedBy: string;
+  grantedAt?: string;
+}): { rule: ProjectActionStandingRule; created: boolean } {
+  const projectDir = canonicalProjectDir(input.projectDir);
+  const actionPattern = normalizeActionPattern(input.actionPattern);
+  const existing = listApprovalStandingRules().find((rule): rule is ProjectActionStandingRule =>
+    isProjectActionStandingRule(rule)
+      && canonicalProjectDir(rule.projectDir) === projectDir
+      && rule.actionPattern === actionPattern
+      && rule.decision === input.decision);
+  if (existing) return { rule: existing, created: false };
+
+  const rule: ProjectActionStandingRule = {
+    version: 1,
+    kind: 'standing_rule',
+    id: randomUUID(),
+    projectDir,
+    actionPattern,
+    decision: input.decision,
+    grantedBy: input.grantedBy,
+    grantedAt: input.grantedAt ?? new Date().toISOString(),
+  };
+  appendJsonl(rulesPath(), rule);
+  return { rule, created: true };
 }
 
 /** The rule that pre-authorizes this request, if any. */
-export function matchStandingRule(req: Omit<ApprovalRequest, 'kind'>): StandingRule | undefined {
-  if (req.risk !== 'external' || !req.target) return undefined;
-  return listStandingRules().find((r) =>
-    r.projectDir === req.projectDir && r.action === req.action && r.target === req.target);
+export function matchStandingRule(req: Omit<ApprovalRequest, 'kind'>): StandingRuleMatch | undefined {
+  const projectDir = canonicalProjectDir(req.projectDir);
+  for (const rule of listApprovalStandingRules()) {
+    if (canonicalProjectDir(rule.projectDir) !== projectDir) continue;
+    if (isProjectActionStandingRule(rule)) {
+      if (!actionMatchesPattern(req.action, rule.actionPattern)) continue;
+      return {
+        projectDir,
+        action: rule.actionPattern,
+        target: '*',
+        grantedBy: rule.grantedBy,
+        grantedAt: rule.grantedAt,
+        id: rule.id,
+        actionPattern: rule.actionPattern,
+        decision: rule.decision,
+        source: 'project_action',
+      };
+    }
+    if (req.risk !== 'external' || !req.target) continue;
+    if (rule.action !== req.action || rule.target !== req.target) continue;
+    return {
+      ...rule,
+      projectDir,
+      id: standingRuleId(rule),
+      actionPattern: rule.action,
+      decision: 'approve',
+      source: 'legacy_exact',
+    };
+  }
+  return undefined;
 }
 
 export function revokeStandingRule(projectDir: string, action: string, target: string): boolean {
-  const rules = listStandingRules();
-  const keep = rules.filter((r) => !(r.projectDir === projectDir && r.action === action && r.target === target));
+  const canonicalProject = canonicalProjectDir(projectDir);
+  const rules = listApprovalStandingRules();
+  const keep = rules.filter((rule) => {
+    if (canonicalProjectDir(rule.projectDir) !== canonicalProject) return true;
+    if (isProjectActionStandingRule(rule)) {
+      return !(rule.actionPattern === action && target === '*');
+    }
+    return !(rule.action === action && rule.target === target);
+  });
   if (keep.length === rules.length) return false;
   // Rewrite is safe here: rules are operator-scale (tens), and a revoke MUST
   // remove history rather than append a tombstone the matcher could miss.

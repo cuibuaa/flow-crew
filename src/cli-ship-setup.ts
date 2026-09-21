@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import {
   accessSync,
   copyFileSync,
@@ -136,6 +137,25 @@ export type GitCommandRunner = (
   request: GitCommandRequest,
 ) => Promise<GitWorktreeResponse> | GitWorktreeResponse;
 
+export interface DependencyInstallRequest {
+  command: 'npm';
+  args: ['ci'];
+  display: 'npm ci';
+  cwd: string;
+}
+
+export interface DependencyInstallResponse {
+  exitCode: number | null;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  durationMs?: number;
+}
+
+export type DependencyInstallRunner = (
+  request: DependencyInstallRequest,
+) => Promise<DependencyInstallResponse> | DependencyInstallResponse;
+
 function bounded(value: string, maximum = 24 * 1024): string {
   const bytes = Buffer.from(value, 'utf-8');
   if (bytes.length <= maximum) return value;
@@ -180,6 +200,42 @@ const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
   });
 });
 
+const runDependencyInstallCommand: DependencyInstallRunner = (request) => new Promise((settle) => {
+  const started = Date.now();
+  const child = spawn(request.command, request.args, {
+    cwd: request.cwd,
+    env: process.env,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 15 * 60 * 1_000,
+  });
+  let stdout = '';
+  let stderr = '';
+  let launchError: string | undefined;
+  let settled = false;
+  child.stdout?.on('data', (chunk: Buffer | string) => {
+    stdout = bounded(stdout + chunk.toString());
+  });
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    stderr = bounded(stderr + chunk.toString());
+  });
+  child.once('error', (error) => {
+    launchError = error.message;
+  });
+  child.once('close', (code, signal) => {
+    if (settled) return;
+    settled = true;
+    settle({
+      exitCode: code,
+      stdout,
+      stderr,
+      durationMs: Math.max(0, Date.now() - started),
+      ...(launchError ? { error: launchError } : {}),
+      ...(!launchError && signal ? { error: `npm ci ended by signal ${signal}` } : {}),
+    });
+  });
+});
+
 /** Map the declared setup identity to one argv-safe Git operation. */
 export function createGitWorktree(
   request: GitWorktreeRequest,
@@ -197,6 +253,7 @@ export interface ShipSetupDependencies {
   fs?: ShipSetupFileSystem;
   createWorktree?: GitWorktreeCreator;
   runGitCommand?: GitCommandRunner;
+  runDependencyInstallCommand?: DependencyInstallRunner;
   runValidationCommand?: ValidationCommandRunner;
   runTestCollectionCommand?: ValidationCommandRunner;
   globalDir?: () => string;
@@ -209,6 +266,8 @@ interface ResolvedShipSetupDependencies {
   cwd: string;
   fs: ShipSetupFileSystem;
   createWorktree: GitWorktreeCreator;
+  runGitCommand: GitCommandRunner;
+  runDependencyInstallCommand: DependencyInstallRunner;
   runValidationCommand?: ValidationCommandRunner;
   runTestCollectionCommand: ValidationCommandRunner;
   globalDir: () => string;
@@ -280,8 +339,19 @@ export interface TestPopulationParity {
   reason?: string;
 }
 
+export interface DependencyInstallObservation {
+  state: 'installed' | 'failed' | 'manual_required';
+  command: 'npm';
+  args: ['ci'];
+  display: 'npm ci';
+  cwd: string;
+  exitCode: number | null;
+  durationMs: number;
+  reason?: string;
+}
+
 export interface ShipSetupBlocker {
-  phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
+  phase: 'source' | 'worktree' | 'target' | 'dependency' | 'validation' | 'record';
   reason: string;
   repair: string;
   input?: string;
@@ -300,6 +370,7 @@ interface ShipSetupFacts {
   base: string;
   branch: string;
   worktreeCreated: boolean;
+  worktreeReused: boolean;
   links: ShipSetupLink[];
   copies: ShipSetupCopy[];
   sourceVerification: BriefInputVerification;
@@ -307,6 +378,7 @@ interface ShipSetupFacts {
   targetVerification?: BriefInputVerification;
   targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
+  dependencyInstall?: DependencyInstallObservation;
   validationBaseline?: ProjectValidationBaseline;
   blockers: ShipSetupBlocker[];
 }
@@ -331,11 +403,14 @@ function errorMessage(error: unknown): string {
 }
 
 function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetupDependencies {
+  const git = overrides.runGitCommand ?? runGitCommand;
   return {
     cwd: resolve(overrides.cwd ?? process.cwd()),
     fs: overrides.fs ?? nodeShipSetupFileSystem,
     createWorktree: overrides.createWorktree
-      ?? ((request) => createGitWorktree(request, overrides.runGitCommand ?? runGitCommand)),
+      ?? ((request) => createGitWorktree(request, git)),
+    runGitCommand: git,
+    runDependencyInstallCommand: overrides.runDependencyInstallCommand ?? runDependencyInstallCommand,
     ...(overrides.runValidationCommand ? { runValidationCommand: overrides.runValidationCommand } : {}),
     runTestCollectionCommand: overrides.runTestCollectionCommand
       ?? overrides.runValidationCommand
@@ -460,6 +535,9 @@ function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
   }
   if (blocker.phase === 'target') {
     return `Reconcile the named target input${subject} without overwriting unique data, ensure it stays inside the worktree and is readable, then rerun ship-setup.`;
+  }
+  if (blocker.phase === 'dependency') {
+    return 'The target lacks node_modules; run npm ci successfully in that target, then rerun ship-setup with the same arguments.';
   }
   if (blocker.phase === 'validation') {
     return 'Correct the named validation declaration, command/environment, or test-population mismatch; run that command successfully from the target, then rerun ship-setup.';
@@ -623,6 +701,7 @@ function setupFacts(
     base: parsed.base as string,
     branch: parsed.branch as string,
     worktreeCreated: false,
+    worktreeReused: false,
     links: [],
     copies: [],
     sourceVerification,
@@ -634,6 +713,171 @@ function worktreeFailureReason(response: GitWorktreeResponse): string {
   const detail = response.error || response.stderr?.trim() || response.stdout?.trim();
   const exit = response.exitCode === null ? 'without an exit code' : `with exit ${response.exitCode}`;
   return `Git worktree creation failed ${exit}${detail ? `: ${detail}` : ''}`;
+}
+
+interface WorktreeIdentity {
+  path: string;
+  head?: string;
+  branch?: string;
+}
+
+function parseWorktreeIdentities(raw: string): WorktreeIdentity[] {
+  const fields = raw.includes('\0') ? raw.split('\0') : raw.split(/\r?\n/);
+  const records: WorktreeIdentity[] = [];
+  let current: WorktreeIdentity | undefined;
+  const finish = (): void => {
+    if (current) records.push(current);
+    current = undefined;
+  };
+  for (const field of fields) {
+    if (!field) {
+      finish();
+      continue;
+    }
+    if (field.startsWith('worktree ')) {
+      finish();
+      current = { path: field.slice('worktree '.length) };
+      continue;
+    }
+    if (!current) continue;
+    if (field.startsWith('HEAD ')) current.head = field.slice('HEAD '.length);
+    else if (field.startsWith('branch refs/heads/')) current.branch = field.slice('branch refs/heads/'.length);
+  }
+  finish();
+  return records;
+}
+
+async function verifyReusableWorktree(
+  request: GitWorktreeRequest,
+  runner: GitCommandRunner,
+  fs: ShipSetupFileSystem,
+): Promise<{ reusable: true } | { reusable: false; reason: string }> {
+  let inventory: GitWorktreeResponse;
+  try {
+    inventory = await runner({
+      command: 'git',
+      args: ['worktree', 'list', '--porcelain', '-z'],
+      cwd: request.projectDir,
+    });
+  } catch (error) {
+    return { reusable: false, reason: `cannot inspect Git worktree inventory: ${errorMessage(error)}` };
+  }
+  if (inventory.exitCode !== 0 || inventory.error) {
+    return { reusable: false, reason: worktreeFailureReason(inventory) };
+  }
+  let targetCanonical: string;
+  try {
+    targetCanonical = fs.realpath(request.targetDir);
+  } catch (error) {
+    return { reusable: false, reason: `cannot canonicalize the existing target: ${errorMessage(error)}` };
+  }
+  const selected = parseWorktreeIdentities(inventory.stdout ?? '').find((record) => {
+    try {
+      return fs.realpath(record.path) === targetCanonical;
+    } catch {
+      return false;
+    }
+  });
+  if (!selected) return { reusable: false, reason: 'the target is not registered in `git worktree list`' };
+  const expectedBranch = request.branch.replace(/^refs\/heads\//, '');
+  if (selected.branch !== expectedBranch) {
+    return {
+      reusable: false,
+      reason: `registered branch ${selected.branch ?? '(detached)'} does not match requested branch ${expectedBranch}`,
+    };
+  }
+
+  let base: GitWorktreeResponse;
+  try {
+    base = await runner({
+      command: 'git',
+      args: ['rev-parse', '--verify', '--end-of-options', `${request.base}^{commit}`],
+      cwd: request.projectDir,
+    });
+  } catch (error) {
+    return { reusable: false, reason: `cannot resolve the requested base: ${errorMessage(error)}` };
+  }
+  if (base.exitCode !== 0 || base.error) {
+    return { reusable: false, reason: `cannot resolve requested base ${request.base}: ${worktreeFailureReason(base)}` };
+  }
+  const baseCommit = (base.stdout ?? '').trim().split(/\r?\n/, 1)[0];
+  if (!baseCommit || selected.head !== baseCommit) {
+    return {
+      reusable: false,
+      reason: `registered HEAD ${selected.head ?? '(unknown)'} does not match requested base ${request.base} (${baseCommit || 'unknown'})`,
+    };
+  }
+  return { reusable: true };
+}
+
+async function prepareNodeDependencies(
+  targetDir: string,
+  fs: ShipSetupFileSystem,
+  runner: DependencyInstallRunner,
+): Promise<{
+  observation?: DependencyInstallObservation;
+  blocker?: ShipSetupBlockerInput;
+}> {
+  const packagePath = join(targetDir, 'package.json');
+  if (!fs.exists(packagePath) || fs.entryExists(join(targetDir, 'node_modules'))) return {};
+  const request: DependencyInstallRequest = {
+    command: 'npm',
+    args: ['ci'],
+    display: 'npm ci',
+    cwd: targetDir,
+  };
+  const hasNpmLock = fs.exists(join(targetDir, 'package-lock.json'))
+    || fs.exists(join(targetDir, 'npm-shrinkwrap.json'));
+  if (!hasNpmLock) {
+    const reason = 'Target has package.json but no node_modules or npm lockfile, so ship-setup cannot safely run npm ci.';
+    return {
+      observation: {
+        state: 'manual_required',
+        ...request,
+        exitCode: null,
+        durationMs: 0,
+        reason,
+      },
+      blocker: {
+        phase: 'dependency',
+        reason,
+        repair: 'Restore the project npm lockfile and run npm ci, or install dependencies with the project\'s declared package manager, then rerun ship-setup with the same arguments.',
+      },
+    };
+  }
+
+  const started = Date.now();
+  let response: DependencyInstallResponse;
+  try {
+    response = await runner(request);
+  } catch (error) {
+    response = { exitCode: null, error: errorMessage(error) };
+  }
+  const durationMs = response.durationMs ?? Math.max(0, Date.now() - started);
+  if (!response.error && response.exitCode === 0) {
+    return {
+      observation: {
+        state: 'installed',
+        ...request,
+        exitCode: 0,
+        durationMs,
+      },
+    };
+  }
+  const diagnostic = bounded(response.stderr?.trim() || response.stdout?.trim() || 'no diagnostic output');
+  const reason = response.error
+    ? `Dependency installation failed: npm ci could not launch: ${response.error}`
+    : `Dependency installation failed: npm ci exited ${response.exitCode ?? 'without a status'}: ${diagnostic}`;
+  return {
+    observation: {
+      state: 'failed',
+      ...request,
+      exitCode: response.exitCode,
+      durationMs,
+      reason,
+    },
+    blocker: { phase: 'dependency', reason },
+  };
 }
 
 function reconcileInputs(
@@ -871,6 +1115,29 @@ function isPythonExecutable(command: string): boolean {
   return /^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$/i.test(basename(command));
 }
 
+function resolveVitestExecutable(projectDir: string, fs: ShipSetupFileSystem): string {
+  const projectRequire = createRequire(join(projectDir, 'package.json'));
+  const specifier = 'vitest/package.json';
+  const lookupPaths = projectRequire.resolve.paths(specifier) ?? [];
+  let packagePath: string;
+  try {
+    packagePath = projectRequire.resolve(specifier);
+  } catch (error) {
+    throw new Error(
+      `Cannot resolve vitest from ${projectDir}; lookup paths: ${lookupPaths.join(', ') || '(none)'}`,
+      { cause: error },
+    );
+  }
+  const executable = join(dirname(packagePath), 'vitest.mjs');
+  if (!fs.exists(executable) || !fs.readable(executable)) {
+    throw new Error(
+      `Cannot resolve vitest executable from package ${packagePath}; expected ${executable}; `
+      + `lookup paths: ${lookupPaths.join(', ') || '(none)'}`,
+    );
+  }
+  return executable;
+}
+
 function discoverTestPopulationMethod(
   projectDir: string,
   fs: ShipSetupFileSystem,
@@ -941,7 +1208,7 @@ function discoverTestPopulationMethod(
         };
       }
       if (/(?:^|[\s;&|()])vitest(?:[\s;&|()]|$)/.test(testScript)) {
-        const executable = join(projectDir, 'node_modules', 'vitest', 'vitest.mjs');
+        const executable = resolveVitestExecutable(projectDir, fs);
         return {
           hasConfiguredTests: true,
           validationUnknown: false,
@@ -1323,28 +1590,33 @@ export async function runShipSetup(
       repair: `Choose a fresh output path, or declare an explicit on_existing disposition when the existing ${entry.entryType} is intentionally consumed.`,
     })));
   }
+  const worktreeRequest: GitWorktreeRequest = {
+    projectDir,
+    targetDir,
+    base: parsed.base as string,
+    branch: parsed.branch as string,
+  };
   if (deps.fs.entryExists(targetDir)) {
-    return refused(facts, [{
-      phase: 'worktree',
-      reason: `Target already exists and will not be overwritten: ${targetDir}`,
-    }]);
+    const existing = await verifyReusableWorktree(worktreeRequest, deps.runGitCommand, deps.fs);
+    if (!existing.reusable) {
+      return refused(facts, [{
+        phase: 'worktree',
+        reason: `Target already exists but cannot be safely reused: ${targetDir}; ${existing.reason}`,
+      }]);
+    }
+    facts = { ...facts, worktreeReused: true };
+  } else {
+    let git: GitWorktreeResponse;
+    try {
+      git = await deps.createWorktree(worktreeRequest);
+    } catch (error) {
+      git = { exitCode: null, error: errorMessage(error) };
+    }
+    if (git.exitCode !== 0 || git.error) {
+      return refused(facts, [{ phase: 'worktree', reason: worktreeFailureReason(git) }]);
+    }
+    facts = { ...facts, worktreeCreated: true };
   }
-
-  let git: GitWorktreeResponse;
-  try {
-    git = await deps.createWorktree({
-      projectDir,
-      targetDir,
-      base: parsed.base as string,
-      branch: parsed.branch as string,
-    });
-  } catch (error) {
-    git = { exitCode: null, error: errorMessage(error) };
-  }
-  if (git.exitCode !== 0 || git.error) {
-    return refused(facts, [{ phase: 'worktree', reason: worktreeFailureReason(git) }]);
-  }
-  facts = { ...facts, worktreeCreated: true };
   const targetIsDirectory = (() => {
     try {
       return deps.fs.exists(targetDir) && deps.fs.stat(targetDir).isDirectory();
@@ -1368,6 +1640,16 @@ export async function runShipSetup(
       reason: `Cannot canonicalize target worktree: ${errorMessage(error)}`,
     }]);
   }
+
+  const dependencyPreparation = await prepareNodeDependencies(
+    targetDir,
+    deps.fs,
+    deps.runDependencyInstallCommand,
+  );
+  if (dependencyPreparation.observation) {
+    facts = { ...facts, dependencyInstall: dependencyPreparation.observation };
+  }
+  if (dependencyPreparation.blocker) return refused(facts, [dependencyPreparation.blocker]);
 
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
@@ -1546,6 +1828,13 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   writer.write(`Project: ${report.projectDir}\nTarget: ${report.targetDir}\n`);
   writer.write(`Brief digest: ${report.briefDigest}\n`);
   writer.write(`Git: branch ${report.branch} at base ${report.base}\n`);
+  if (report.dependencyInstall) {
+    writer.write(
+      `Dependencies: ${report.dependencyInstall.state.toUpperCase()} ${report.dependencyInstall.display} `
+      + `exit=${report.dependencyInstall.exitCode ?? 'none'} duration=${report.dependencyInstall.durationMs}ms\n`,
+    );
+    if (report.dependencyInstall.reason) writer.write(`  reason: ${report.dependencyInstall.reason}\n`);
+  }
   renderVerification(report, writer);
   if (report.testPopulation) {
     writer.write(

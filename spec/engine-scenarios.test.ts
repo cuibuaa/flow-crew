@@ -95,6 +95,8 @@ interface ScriptedDispatchStage {
   condition?: string;
   scope?: string[];
   maxRetries?: number;
+  isGate?: boolean;
+  retryTo?: string[];
 }
 
 const DEFAULT_RESEARCH_SCOPE = [
@@ -118,6 +120,8 @@ function strictResearchDispatch(
       dependency_reasons: Object.fromEntries(dependencies.map((dependency) => [dependency, `scripted dependency on ${dependency}`])),
       ...(stage.condition ? { condition: stage.condition } : {}),
       ...(stage.maxRetries !== undefined ? { max_retries: stage.maxRetries } : {}),
+      ...(stage.isGate ? { is_gate: true } : {}),
+      ...(stage.retryTo ? { retry_to: stage.retryTo } : {}),
       prompt_template: 'scripted stage',
     };
   });
@@ -396,7 +400,8 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     // The requesting stage must not be frozen 'running' — findAllReady only ever
     // picks 'pending', so a frozen stage makes the resumed iteration re-plan and
     // delete the dispatched DAG.
-    expect(state.stages['act']?.status).toBe('complete');
+    expect(state.stages['act']?.status).toBe('pending');
+    expect(state.stages['act']?.attempts?.at(-1)?.status).toBe('suspended');
 
     // Durable + idempotent inbox record.
     const items = inbox.foldItems(state.runId!);
@@ -415,6 +420,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
 
     const resumed = await runScenario(BRIEF_D, {
       plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'finish' }]) } }],
+      act: { output: 'approved deploy completed' },
       finish: { projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'after_approval', result: 9.5 }) } },
       research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\napproved result' } },
     }, 8, { projectDir, runId: state.runId! });
@@ -442,18 +448,21 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     expect(inbox.foldItems(state.runId!).get('race-1')?.resolution?.by).toBe('alice');
   }, 60000);
 
-  it('a standing rule auto-approves without parking; ineligible risks cannot mint one', async () => {
+  it('[C3] a project action rule auto-approves unknown risk and records its stable rule id', async () => {
     const inbox = await import('../src/inbox.js');
     const projectDir = makeProject();
-    inbox.addStandingRule({
-      projectDir, action: 'deploy', target: 'mainnet',
-      grantedBy: 'tester', grantedAt: new Date().toISOString(),
+    const { rule } = inbox.addProjectActionStandingRule({
+      projectDir,
+      actionPattern: 'launch_*training*',
+      decision: 'approve',
+      grantedBy: 'tester',
+      grantedAt: new Date().toISOString(),
     });
 
-    const { state } = await runScenario(BRIEF_D, {
+    const { state, runDirPath } = await runScenario(BRIEF_D, {
       plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
       act: {
-        ...REQUEST('auto-1'),
+        ...REQUEST('auto-1', { action: 'launch_long_training_job', risk: 'unknown' }),
         projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'auto', result: 9.9 }) },
       },
       research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\nauto-approved result' } },
@@ -461,7 +470,18 @@ describe('Scenario D: approval park / resume (inbox)', () => {
 
     expect(state.status).not.toBe('parked');
     expect(inbox.foldItems(state.runId!).get('auto-1')?.state).toBe('approved');
-    expect(inbox.foldItems(state.runId!).get('auto-1')?.resolution?.by).toBe('standing-rule');
+    expect(inbox.foldItems(state.runId!).get('auto-1')?.resolution).toMatchObject({
+      by: 'standing-rule',
+      viaRule: rule.id,
+    });
+    const events = readFileSync(join(runDirPath, 'events.jsonl'), 'utf-8')
+      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'approval_resolved',
+      requestId: 'auto-1',
+      ruleId: rule.id,
+      decision: 'accepted',
+    }));
 
     // "always" is only offered where it is bounded: external risk + exact target.
     expect(inbox.standingRuleEligible({
@@ -547,7 +567,8 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
     expect(parked.state.status).toBe('parked');
     expect(parked.state.parked?.atIteration).toBe(2);
     expect(parked.state.stages.safe_before?.status).toBe('complete');
-    expect(parked.state.stages.approved_action?.status).toBe('complete');
+    expect(parked.state.stages.approved_action?.status).toBe('pending');
+    expect(parked.state.stages.approved_action?.attempts?.at(-1)?.status).toBe('suspended');
     expect(parked.state.stages.finish_after?.status).toBe('pending');
 
     const dispatchBefore = readFileSync(join(parked.runDirPath, 'dispatch.yaml'), 'utf-8');
@@ -578,8 +599,77 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
     expect(resumed.state.stages.approved_action?.status).toBe('complete');
     expect(resumed.state.stages.finish_after?.status).toBe('complete');
     expect(readFileSync(guidanceArchive, 'utf-8')).toBe(guidanceBefore);
-    expect(adapter.calls.filter((call) => call.stageId === 'approved_action')).toHaveLength(1);
+    expect(adapter.calls.filter((call) => call.stageId === 'approved_action')).toHaveLength(2);
     expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(2);
+  }, 60000);
+});
+
+describe('Scenario E2: repair-stage approval suspension (C2)', () => {
+  it('[C2] parks a repair attempt and re-runs that repair before its gate re-evaluation', async () => {
+    const inbox = await import('../src/inbox.js');
+    const dispatch = strictResearchDispatch([
+      { id: 'review_gate', dependsOn: ['plan'], scope: [], isGate: true },
+      { id: 'repair_round', dependsOn: ['review_gate'], scope: [], retryTo: ['review_gate'] },
+      { id: 'measure_after', dependsOn: ['review_gate'] },
+    ]);
+    const script: ConstructorParameters<typeof ScriptedAdapter>[0] = {
+      plan: [{ runFiles: { 'dispatch.yaml': dispatch } }],
+      review_gate: [
+        { runFiles: { 'verdict_review_gate.json': JSON.stringify({ pass: false, reason: 'repair required' }) } },
+        { runFiles: { 'verdict_review_gate.json': JSON.stringify({ pass: true, reason: 'repair accepted' }) } },
+      ],
+      repair_round: [
+        {
+          runFiles: {
+            'stages/repair_round/approval_request.json': JSON.stringify({
+              id: 'repair-action',
+              action: 'launch_repair_training',
+              risk: 'unknown',
+              title: 'launch repair training',
+            }),
+          },
+        },
+        { output: 'approved repair completed' },
+      ],
+      measure_after: {
+        projectFiles: {
+          'research/val/round_result.json': JSON.stringify({ label: 'after-repair', result: 9.5 }),
+        },
+      },
+      research_finalize: {
+        projectFiles: { 'research/val/ship_report.md': '# Ship\nrepair approval respected' },
+      },
+    };
+    const adapter = new ScriptedAdapter(script);
+
+    const parked = await runScenario(BRIEF_D, script, 4, undefined, adapter);
+
+    expect(parked.state.status).toBe('parked');
+    expect(parked.state.parked).toMatchObject({ requestId: 'repair-action', stageId: 'repair_round' });
+    expect(parked.state.stages.repair_round?.status).toBe('pending');
+    expect(parked.state.stages.repair_round?.attempts?.at(-1)?.status).toBe('suspended');
+    expect(adapter.calls.filter((call) => call.stageId === 'review_gate')).toHaveLength(1);
+    expect(inbox.resolveRequest(
+      parked.projectDir,
+      parked.state.runId!,
+      'repair-action',
+      'approve',
+      { by: 'scenario-e2' },
+    ).won).toBe(true);
+
+    const resumed = await runScenario(
+      BRIEF_D,
+      script,
+      4,
+      { projectDir: parked.projectDir, runId: parked.state.runId! },
+      adapter,
+    );
+
+    expect(resumed.state.status).toBe('shipped');
+    expect(adapter.calls.filter((call) => call.stageId === 'repair_round')).toHaveLength(2);
+    expect(adapter.calls.filter((call) => call.stageId === 'review_gate')).toHaveLength(2);
+    expect(adapter.calls.findIndex((call) => call.stageId === 'repair_round' && call.nthCall === 2))
+      .toBeLessThan(adapter.calls.findIndex((call) => call.stageId === 'review_gate' && call.nthCall === 2));
   }, 60000);
 });
 
@@ -701,9 +791,9 @@ describe('Approval request ingestion: isolated slots and failed batches (M3/L2)'
   it('records every valid parallel request even when a peer fails and rejects unsafe ids', async () => {
     const inbox = await import('../src/inbox.js');
     const dispatch = strictResearchDispatch([
-      { id: 'req_a', maxRetries: 0 },
-      { id: 'req_b' },
-      { id: 'req_bad' },
+      { id: 'req_a', maxRetries: 0, scope: ['research/val/request-a.json'] },
+      { id: 'req_b', scope: ['research/val/request-b.json'] },
+      { id: 'req_bad', scope: ['research/val/request-bad.json'] },
     ]);
     const result = await runScenario(BRIEF_D, {
       plan: [{ runFiles: { 'dispatch.yaml': dispatch } }],

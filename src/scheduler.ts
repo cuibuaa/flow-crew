@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'n
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
+import { ABORT_SIGNAL_VERSION, type StageAbortSignal } from './abort-signal.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import {
   APPROVAL_REQUEST_FILE,
@@ -15,6 +16,7 @@ import {
 import { evaluateCondition, parseCondition } from './condition.js';
 import {
   enforceRealityGateBeforeTerminal,
+  atomicWrite,
   initializeReservedRun,
   readRunReservation,
   readRunState,
@@ -28,6 +30,7 @@ import {
   captureStageEvidence,
   resetStageLiveAttemptAliases,
   rependStageStatus,
+  suspendStageAttempt,
   runDir,
   stageDir,
   isAwaitingApprovalRunStatus,
@@ -726,6 +729,45 @@ function archiveApprovalRequest(runDirPath: string, sourcePath: string, requestI
   renameSync(sourcePath, target);
 }
 
+function writeApprovalSuspensionSignal(input: {
+  runDirPath: string;
+  stageId: string;
+  attemptIndex: number;
+  requestId: string;
+  requestingStageId?: string;
+}): void {
+  const signalsDir = join(input.runDirPath, 'signals');
+  mkdirSync(signalsDir, { recursive: true });
+  const target = join(signalsDir, `abort_${input.stageId}.json`);
+  // A supervisor ABORT remains authoritative if it won the slot first.
+  if (existsSync(target)) return;
+  const signal: StageAbortSignal = {
+    version: ABORT_SIGNAL_VERSION,
+    stageId: input.stageId,
+    attemptIndex: input.attemptIndex,
+    reason: `run parked for approval ${input.requestId}`,
+    timestamp: new Date().toISOString(),
+    source: 'scheduler',
+    requestId: input.requestId,
+    ...(input.requestingStageId ? { requestingStageId: input.requestingStageId } : {}),
+  };
+  atomicWrite(target, `${JSON.stringify(signal, null, 2)}\n`);
+}
+
+function inferredApprovalStageId(
+  state: StoreState,
+  explicitStageId: string | undefined,
+  candidateStageIds: readonly string[] | undefined,
+): string | undefined {
+  if (explicitStageId) return explicitStageId;
+  const candidates = [...new Set(candidateStageIds ?? [])];
+  if (candidates.length === 1) return candidates[0];
+  const running = Object.entries(state.stages)
+    .filter(([, status]) => isRunningStageStatus(status.status))
+    .map(([stageId]) => stageId);
+  return running.length === 1 ? running[0] : undefined;
+}
+
 /**
  * Approval park gate — the engine-side half of the approval inbox.
  *
@@ -734,9 +776,8 @@ function archiveApprovalRequest(runDirPath: string, sourcePath: string, requestI
  * isolated `<run_dir>/stages/<stageId>/approval_request.json` slot containing
  * {id, action, target?, risk?, title, body?}. The legacy root slot remains
  * readable. This function ingests every slot and then either
- *   (a) auto-approves it, when a standing rule already authorizes exactly this
- *       action→target for this project (rules are only mintable for
- *       external-risk targeted actions), or
+ *   (a) auto-approves it when either a legacy exact action→target rule or an
+ *       operator-authored project action-pattern rule matches, or
  *   (b) PARKS the run: status='parked', request recorded durably in the inbox,
  *       and the caller returns so the process exits — freeing the project lock
  *       and the daemon queue slot while a human decides.
@@ -750,7 +791,13 @@ function archiveApprovalRequest(runDirPath: string, sourcePath: string, requestI
  */
 async function tryParkOnApprovalRequest(
   state: StoreState,
-  ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
+  ctx: {
+    projectDir: string;
+    runId: string;
+    runDirPath: string;
+    iteration: number;
+    candidateStageIds?: readonly string[];
+  },
 ): Promise<StoreState | null> {
   // Ingestion is deliberately separate from choosing which request parks the
   // run: parallel stages may produce several slots in one batch, and all must
@@ -774,6 +821,7 @@ async function tryParkOnApprovalRequest(
       title?: unknown;
       body?: unknown;
       stageId?: unknown;
+      requestedAt?: unknown;
     };
     const requestIdRaw = typeof raw.requestId === 'string' ? raw.requestId : typeof raw.id === 'string' ? raw.id : '';
     const requestId = requestIdRaw.trim();
@@ -788,7 +836,11 @@ async function tryParkOnApprovalRequest(
     }
     const target = typeof raw.target === 'string' && raw.target.trim() ? raw.target.trim() : undefined;
     const risk: ApprovalRisk = raw.risk === 'external' || raw.risk === 'exec' || raw.risk === 'write' ? raw.risk : 'unknown';
-    const stageId = typeof raw.stageId === 'string' && raw.stageId.trim() ? raw.stageId.trim() : source.stageId;
+    const explicitStageId = typeof raw.stageId === 'string' && raw.stageId.trim() ? raw.stageId.trim() : source.stageId;
+    const stageId = inferredApprovalStageId(state, explicitStageId, ctx.candidateStageIds);
+    const requestedAt = typeof raw.requestedAt === 'string' && Number.isFinite(Date.parse(raw.requestedAt))
+      ? raw.requestedAt
+      : new Date().toISOString();
     const req = {
       runId: ctx.runId,
       projectDir: ctx.projectDir,
@@ -800,7 +852,7 @@ async function tryParkOnApprovalRequest(
         ? raw.title.trim()
         : `${action}${target ? ` → ${target}` : ''}`,
       ...(typeof raw.body === 'string' && raw.body ? { body: raw.body } : {}),
-      createdAt: new Date().toISOString(),
+      createdAt: requestedAt,
       atIteration: ctx.iteration,
       ...(stageId ? { stageId } : {}),
     };
@@ -825,7 +877,7 @@ async function tryParkOnApprovalRequest(
       if (rule) {
         const resolution = resolveRequest(ctx.projectDir, ctx.runId, item.requestId, 'approve', {
           by: 'standing-rule',
-          viaRule: `${rule.action}→${rule.target}`,
+          viaRule: rule.id,
         });
         if (resolution.won) {
           recordRunEvent(ctx.projectDir, ctx.runId, {
@@ -833,9 +885,14 @@ async function tryParkOnApprovalRequest(
             runId: ctx.runId,
             timestamp: new Date().toISOString(),
             iteration: ctx.iteration,
+            stageId: item.stageId,
+            requestId: item.requestId,
+            ruleId: rule.id,
+            decision: 'accepted',
             detail: `auto-approved ${item.action}${item.target ? ` → ${item.target}` : ''} via standing rule (${item.requestId})`,
+            source: 'scheduler',
           });
-          log.info({ runId: ctx.runId, requestId: item.requestId, rule: `${rule.action}→${rule.target}` }, 'Approval auto-granted by standing rule');
+          log.info({ runId: ctx.runId, requestId: item.requestId, ruleId: rule.id }, 'Approval auto-granted by standing rule');
         }
       }
     }
@@ -862,40 +919,144 @@ async function tryParkOnApprovalRequest(
   const { requestId, action } = item;
 
   // ---- park ----
-  // The requesting stage must NOT be left 'running': findAllReady only picks
-  // 'pending', so a stage frozen mid-flight can never be re-dispatched and the
-  // resumed iteration would fall through to the re-plan boundary that deletes
-  // dispatch.yaml — losing the DAG this park exists to preserve.
-  for (const [stageId, st] of Object.entries(state.stages)) {
-    if (isRunningStageStatus(st.status)) {
-      st.status = STAGE_STATUS.COMPLETE;
-      st.completedAt = new Date().toISOString();
-      log.info({ runId: ctx.runId, stageId }, 'Normalizing in-flight stage to complete for park');
-    }
-  }
-  const pausedAt = new Date().toISOString();
+  // Persist the park before signalling children. Every running stage receives
+  // an attempt-bound suspension signal; an already-settled requester is
+  // converted directly so a fast exit can never release downstream work.
+  const detectedAt = new Date().toISOString();
+  const requestingStageId = item.stageId;
+  const pausedAt = detectedAt;
   state.status = RUN_STATUS.PARKED;
   state.parked = {
     requestId, action,
     ...(item.target ? { target: item.target } : {}),
     reason: item.title,
     atIteration: ctx.iteration,
-    ...(item.stageId ? { stageId: item.stageId } : {}),
+    ...(requestingStageId ? { stageId: requestingStageId } : {}),
     requestedAt: item.createdAt,
     pausedAt,
   };
   // Deliberately NO completedAt: that field is what every reader treats as
-  // "this run finished".
+  // "this run finished". Publish this before asking any child to stop.
+  writeRunState(ctx.projectDir, ctx.runId, state);
+  let requestingAttemptIndex: number | undefined;
+  if (requestingStageId) {
+    try {
+      const status = readStageStatus(ctx.projectDir, ctx.runId, requestingStageId);
+      const attempt = status.attempts?.at(-1);
+      requestingAttemptIndex = attempt?.index;
+      if (attempt && !isRunningStageStatus(attempt.status)) {
+        const suspended = suspendStageAttempt(
+          ctx.projectDir,
+          ctx.runId,
+          requestingStageId,
+          attempt.index,
+        );
+        state.stages[requestingStageId] = suspended;
+        recordRunEvent(ctx.projectDir, ctx.runId, {
+          type: 'approval_attempt_suspended',
+          runId: ctx.runId,
+          timestamp: detectedAt,
+          iteration: ctx.iteration,
+          stageId: requestingStageId,
+          attemptIndex: attempt.index,
+          requestId,
+          requestingStageId,
+          detail: `settled attempt suspended for approval ${requestId}`,
+          source: 'scheduler',
+        });
+      }
+    } catch { /* the running worker will publish the authoritative settlement */ }
+  }
+  for (const [stageId, projected] of Object.entries(state.stages)) {
+    if (!isRunningStageStatus(projected.status)) continue;
+    try {
+      const status = readStageStatus(ctx.projectDir, ctx.runId, stageId);
+      const attempt = status.attempts?.at(-1);
+      if (!attempt || !isRunningStageStatus(attempt.status)) continue;
+      writeApprovalSuspensionSignal({
+        runDirPath: ctx.runDirPath,
+        stageId,
+        attemptIndex: attempt.index,
+        requestId,
+        requestingStageId,
+      });
+    } catch { /* final batch reconciliation catches a synchronously settled requester */ }
+  }
+  // Capture any synchronous requester suspension in the parked projection.
   writeRunState(ctx.projectDir, ctx.runId, state);
   writeCampaignEntryUnlessPaused(ctx.projectDir, state);
   recordRunEvent(ctx.projectDir, ctx.runId, {
     type: 'approval_parked', runId: ctx.runId, timestamp: pausedAt, iteration: ctx.iteration,
+    ...(requestingStageId ? { stageId: requestingStageId } : {}),
+    ...(requestingAttemptIndex === undefined ? {} : { attemptIndex: requestingAttemptIndex }),
+    requestId,
+    requestedAt: item.createdAt,
+    detectedAt,
     detail: `${action}${item.target ? ` → ${item.target}` : ''} awaiting approval (${requestId})`,
+    source: 'scheduler',
   });
   appendApprovalGuidance(ctx.runDirPath, requestId, item.title);
   log.warn({ runId: ctx.runId, requestId, action, target: item.target },
     'PARKED awaiting human approval — resolve with `flowcrew inbox approve <requestId>`');
   return state;
+}
+
+/** Watch every active stage slot and park within one heartbeat of a request. */
+async function monitorApprovalRequests(input: {
+  selected: readonly StageConfig[];
+  projectDir: string;
+  runId: string;
+  runDirPath: string;
+  iteration: number;
+  isComplete: () => boolean;
+}): Promise<StoreState | null> {
+  let parked: StoreState | null = null;
+  let wake: (() => void) | undefined;
+  const inspect = async (): Promise<void> => {
+    if (parked) return;
+    const state = readRunState(input.projectDir, input.runId);
+    parked = await tryParkOnApprovalRequest(state, {
+      projectDir: input.projectDir,
+      runId: input.runId,
+      runDirPath: input.runDirPath,
+      iteration: input.iteration,
+      candidateStageIds: input.selected.map((stage) => stage.id),
+    });
+  };
+  const watchers: import('node:fs').FSWatcher[] = [];
+  try {
+    for (const directory of [
+      input.runDirPath,
+      ...input.selected.map((stage) => join(input.runDirPath, 'stages', stage.id)),
+    ]) {
+      mkdirSync(directory, { recursive: true });
+      watchers.push(watch(directory, { persistent: false }, () => wake?.()));
+    }
+  } catch { /* one-second heartbeat remains the portable fallback */ }
+  try {
+    await inspect();
+    while (!parked && !input.isComplete()) {
+      await new Promise<void>((resolvePromise) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          wake = undefined;
+          resolvePromise();
+        };
+        wake = finish;
+        timer = setTimeout(finish, 1000);
+        if (input.isComplete()) finish();
+      });
+      await inspect();
+    }
+    if (!parked) await inspect();
+    return parked;
+  } finally {
+    for (const watcher of watchers) watcher.close();
+  }
 }
 
 /** The agent-readable decision record, written beside the consumed request. */
@@ -3417,6 +3578,56 @@ export function selectRunnableBatch(ready: StageConfig[]): {
   return { selected, deferred };
 }
 
+function parallelScopeAdmissionWarnings(stages: StageConfig[]): string[] {
+  const remaining = new Map(stages.map((stage) => [stage.id, stage]));
+  const warnings: string[] = [];
+  while (remaining.size > 0) {
+    // Dependencies outside the proposal (normally the already-complete
+    // dispatch stage) do not block this static frontier simulation.
+    const frontier = [...remaining.values()].filter((stage) => (
+      stage.depends_on.every((dependency) => !remaining.has(dependency))
+    ));
+    if (frontier.length === 0) break; // the normal admission cycle error owns this case
+
+    const conflicts: ScopeConflict[] = [];
+    const adjacency = new Map(frontier.map((stage) => [stage.id, new Set<string>()]));
+    for (let left = 0; left < frontier.length; left++) {
+      for (let right = left + 1; right < frontier.length; right++) {
+        const conflict = findScopeConflict(frontier[left], frontier[right]);
+        if (!conflict) continue;
+        conflicts.push(conflict);
+        adjacency.get(frontier[left].id)!.add(frontier[right].id);
+        adjacency.get(frontier[right].id)!.add(frontier[left].id);
+      }
+    }
+
+    const visited = new Set<string>();
+    for (const stage of frontier) {
+      if (visited.has(stage.id) || adjacency.get(stage.id)!.size === 0) continue;
+      const component = new Set<string>();
+      const queue = [stage.id];
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        if (component.has(current)) continue;
+        component.add(current);
+        visited.add(current);
+        queue.push(...(adjacency.get(current) ?? []));
+      }
+      const details = conflicts
+        .filter((conflict) => component.has(conflict.leftStageId) && component.has(conflict.rightStageId))
+        .map((conflict) => `${conflict.leftStageId} ↔ ${conflict.rightStageId}: ${conflict.reason}`);
+      warnings.push(
+        `Parallel scope warning: stages [${[...component].join(', ')}] can be runnable in the same scheduling frontier, `
+        + `but their project-write scopes are not provably disjoint (${details.join('; ')}). `
+        + 'They are admitted but will be serialized at runtime; give stages intended to run in parallel separate project paths.',
+      );
+    }
+
+    for (const stage of frontier) remaining.delete(stage.id);
+  }
+  return warnings;
+}
+
 export interface ParallelWriteConflict {
   stageIds: [string, string];
   files: string[];
@@ -4364,6 +4575,7 @@ function decideScopeRevision(input: {
   activePeers: StageConfig[];
   projectDir: string;
   runId: string;
+  attemptIndex?: number;
   snapshot?: RepairRoundSnapshot;
 }): Record<string, unknown> & { accepted: boolean; decision: 'accepted' | 'rejected' } {
   const { request, stage, priorScope, activePeers, projectDir, runId, snapshot } = input;
@@ -4373,7 +4585,7 @@ function decideScopeRevision(input: {
   if (request.stageId !== stage.id) {
     return scopeRevisionRejection(request, priorScope, `request stageId ${request.stageId} does not match ${stage.id}`);
   }
-  const attemptIndex = currentStageAttemptIndex(projectDir, runId, stage.id);
+  const attemptIndex = input.attemptIndex ?? currentStageAttemptIndex(projectDir, runId, stage.id);
   if (!Number.isInteger(request.attemptIndex) || request.attemptIndex < 1 || request.attemptIndex !== attemptIndex) {
     return scopeRevisionRejection(request, priorScope, `request attempt ${String(request.attemptIndex)} does not match running attempt ${String(attemptIndex)}`);
   }
@@ -4890,6 +5102,7 @@ interface DispatchAdmissionReport {
   pass: boolean;
   checkedAt: string;
   errors: string[];
+  warnings: string[];
   proposalDigest?: string;
   terminalOwners: Record<string, string>;
   /** Declared finalizer capability that may be touched for validation but may not leave a durable delta. */
@@ -5024,6 +5237,7 @@ export function inspectDispatchAdmission(input: {
   criterionDischarges?: CriterionDischargeRecord[];
 }): DispatchAdmissionReport {
   const errors: string[] = [];
+  const warnings = parallelScopeAdmissionWarnings(input.dispatched);
   const all = [...input.baseStages, ...input.dispatched];
   const byId = new Map(all.map((stage) => [stage.id, stage]));
   const knownIds = new Set(byId.keys());
@@ -5211,6 +5425,7 @@ export function inspectDispatchAdmission(input: {
     pass: errors.length === 0,
     checkedAt: new Date().toISOString(),
     errors,
+    warnings,
     terminalOwners,
     terminalValidationScopes: Object.fromEntries(
       [...terminalValidationScopeSets].map(([ownerId, scopes]) => [ownerId, [...scopes]]),
@@ -5722,6 +5937,7 @@ function injectDispatchedStages(
       pass: false,
       checkedAt: new Date().toISOString(),
       errors: [`dispatch.yaml could not be parsed as YAML (${error instanceof Error ? error.message : String(error)})`],
+      warnings: [],
       proposalDigest,
       terminalOwners: {},
     };
@@ -5779,6 +5995,7 @@ function injectDispatchedStages(
       pass: false,
       checkedAt: new Date().toISOString(),
       errors: skippedReasons.length > 0 ? skippedReasons : ['dispatch contains no stages'],
+      warnings: [],
       proposalDigest,
       terminalOwners: {},
     };
@@ -5798,6 +6015,7 @@ function injectDispatchedStages(
       pass: false,
       checkedAt: new Date().toISOString(),
       errors: [error instanceof Error ? error.message : String(error)],
+      warnings: [],
       proposalDigest,
       terminalOwners: {},
     };
@@ -8276,17 +8494,12 @@ export async function runWorkflow(
             );
             const repairSnapshot = captureRepairRoundSnapshot(projectDir, activeRetryStages, { runDirPath });
 
-            // Clear verdict and metric files for all gates referenced by active retry stages
-            for (const gid of activeGateIds) {
-              const perGate = join(runDirPath, `verdict_${gid}.json`);
-              if (existsSync(perGate)) unlinkSync(perGate);
-              const gateMetric = join(runDirPath, 'stages', gid, 'metric.json');
-              if (existsSync(gateMetric)) unlinkSync(gateMetric);
-              const staleCorrection = gateVerdictCorrectionPath(runDirPath, gid);
-              if (existsSync(staleCorrection)) unlinkSync(staleCorrection);
-            }
+            // Keep the rejected gate evidence live until repair succeeds. A
+            // repair attempt may suspend for approval, and that durable verdict
+            // is what lets a replacement scheduler resume the same retry loop.
+            // The re-evaluation block below clears each gate immediately before
+            // it is dispatched again.
             const sharedVerdict = join(runDirPath, 'verdict.json');
-            if (existsSync(sharedVerdict)) unlinkSync(sharedVerdict);
 
             // Reset and run all active retry stages (possibly in parallel)
             for (const retryStage of activeRetryStages) {
@@ -8309,6 +8522,7 @@ export async function runWorkflow(
             innerRetriesUsed = inner + 1;
             syncStageStatuses(projectDir, runId, activeRetryStages.map(s => s.id));
             state = readRunState(projectDir, runId);
+            if (isPausedRunStatus(state.status)) return state;
             const roundDiffPath = writeRepairRoundDiffArtifact({
               snapshot: repairSnapshot,
               projectDir,
@@ -8349,6 +8563,10 @@ export async function runWorkflow(
             for (const gate of gatesToRerun) {
               const perGate = join(runDirPath, `verdict_${gate.id}.json`);
               if (existsSync(perGate)) unlinkSync(perGate);
+              const gateMetric = join(runDirPath, 'stages', gate.id, 'metric.json');
+              if (existsSync(gateMetric)) unlinkSync(gateMetric);
+              const staleCorrection = gateVerdictCorrectionPath(runDirPath, gate.id);
+              if (existsSync(staleCorrection)) unlinkSync(staleCorrection);
               state.stages[gate.id] = rependStageStatus(state.stages[gate.id], 0);
               mkdirSync(join(runDirPath, 'stages', gate.id), { recursive: true });
               // Clear live.log so the SSE feed shows only the current re-evaluation's output
@@ -8370,6 +8588,7 @@ export async function runWorkflow(
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
             state = readRunState(projectDir, runId);
+            if (isPausedRunStatus(state.status)) return state;
 
             // Check gates again
             const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
@@ -8905,15 +9124,30 @@ export async function runWorkflow(
 
 interface ScopeBatchContext {
   snapshot: RepairRoundSnapshot;
+  leaseBatchId: string;
+  leasePartitions: Map<string, string>;
   declaredScopes: Map<string, string[] | null>;
   inheritedScopes: Map<string, string[]>;
   inheritedDecisionPaths: Map<string, Set<string>>;
+  liveViolationSequence: number;
+  liveViolations: Array<{
+    sequence: number;
+    path: string;
+    reason: string;
+    restored: boolean;
+    rollbackFailure?: string;
+    targetStageIds: Set<string>;
+    deliveredAttemptKeys: Set<string>;
+  }>;
   attempts: Map<string, {
     effectiveScope: string[];
     decisionPaths: Set<string>;
     mismatchPaths: Set<string>;
+    acceptedDuringAttempt: boolean;
   }>;
 }
+
+let scopeBatchSequence = 0;
 
 function createScopeBatchContext(
   projectDir: string,
@@ -8937,11 +9171,25 @@ function createScopeBatchContext(
     inheritedScopes.set(stage.id, inherited?.scope ?? (copy ?? []));
     inheritedDecisionPaths.set(stage.id, new Set(inherited?.decisionPaths ?? []));
   }
+  scopeBatchSequence++;
+  const leaseBatchId = `${runId ?? 'standalone'}:${scopeBatchSequence}`;
+  const leasePartitions = new Map(stages.map((stage) => {
+    const scope = [...(inheritedScopes.get(stage.id) ?? [])].sort();
+    const digest = createHash('sha256')
+      .update(`${stage.id}\0${scope.join('\0')}`)
+      .digest('hex')
+      .slice(0, 16);
+    return [stage.id, `scope:${stage.id}:${digest}`];
+  }));
   return {
     snapshot: resolvedSnapshot,
+    leaseBatchId,
+    leasePartitions,
     declaredScopes,
     inheritedScopes,
     inheritedDecisionPaths,
+    liveViolationSequence: 0,
+    liveViolations: [],
     attempts: new Map(),
   };
 }
@@ -8954,7 +9202,7 @@ function getScopeAttemptContext(
   context: ScopeBatchContext,
   stageId: string,
   attemptIndex: number,
-): { effectiveScope: string[]; decisionPaths: Set<string>; mismatchPaths: Set<string> } {
+): { effectiveScope: string[]; decisionPaths: Set<string>; mismatchPaths: Set<string>; acceptedDuringAttempt: boolean } {
   const key = scopeAttemptKey(stageId, attemptIndex);
   const existing = context.attempts.get(key);
   if (existing) return existing;
@@ -8964,6 +9212,7 @@ function getScopeAttemptContext(
     effectiveScope: [...(context.inheritedScopes.get(stageId) ?? (declared ?? []))],
     decisionPaths: new Set(context.inheritedDecisionPaths.get(stageId) ?? []),
     mismatchPaths: new Set<string>(),
+    acceptedDuringAttempt: false,
   };
   context.attempts.set(key, created);
   return created;
@@ -8985,11 +9234,22 @@ async function monitorScopeRevisionRequests(input: {
   const runDirPath = runDir(input.projectDir, input.runId);
   const inspect = (): void => {
     for (const stage of input.selected) {
-      if (!input.activeStageIds.has(stage.id)) continue;
       const stagePath = join(runDirPath, 'stages', stage.id);
-      const attemptIndex = currentStageAttemptIndex(input.projectDir, input.runId, stage.id);
       const request = readScopeRevisionRequest(stagePath, input.runId);
       if (!request) continue;
+      const activeAttemptIndex = currentStageAttemptIndex(input.projectDir, input.runId, stage.id);
+      const recordedRequestedAttempt = (() => {
+        try {
+          return readStageStatus(input.projectDir, input.runId, stage.id).attempts
+            ?.some((attempt) => attempt.index === request.attemptIndex)
+            ? request.attemptIndex
+            : undefined;
+        } catch { return undefined; }
+      })();
+      // A synchronous adapter can write its request and settle before the fs
+      // notification runs. The final inspection must still adjudicate that
+      // exact recorded attempt; otherwise exit 0 silently loses the request.
+      const attemptIndex = activeAttemptIndex ?? (input.isComplete() ? recordedRequestedAttempt : undefined);
       const key = negotiationRequestDigest(request);
       if (attemptIndex === undefined) continue;
       if (processed.has(key)) continue;
@@ -9028,6 +9288,7 @@ async function monitorScopeRevisionRequests(input: {
         activePeers,
         projectDir: input.projectDir,
         runId: input.runId,
+        attemptIndex,
         snapshot: input.context.snapshot,
       });
       const publication = publishConstraintDecision({
@@ -9051,12 +9312,13 @@ async function monitorScopeRevisionRequests(input: {
         addScopeArtifactPath(inheritedPaths, publication.path, runDirPath);
         input.context.inheritedDecisionPaths.set(stage.id, inheritedPaths);
         stage.scope = [...attemptContext.effectiveScope];
+        attemptContext.acceptedDuringAttempt = true;
         appendGuidanceEnvelope({
           runDir: runDirPath,
           target: stage.id,
           source: 'scheduler',
           knownStageIds: input.selected.map((candidate) => candidate.id),
-          body: `Scope revision ${request.requestId} was accepted. Effective scope ${JSON.stringify(attemptContext.effectiveScope)} is durable and will be revalidated/inherited by the next attempt of this stage.`,
+          body: `Scope revision ${request.requestId} was accepted. This attempt stops at the control boundary and the same stage will be re-dispatched with effective scope ${JSON.stringify(attemptContext.effectiveScope)}.`,
         });
       }
       recordRunEvent(input.projectDir, input.runId, {
@@ -9249,12 +9511,14 @@ function createSchedulerLiveConstraintGuardFactory(input: {
   context: ScopeBatchContext;
 }): LiveConstraintGuardFactory | undefined {
   // Every declared scope is enforceable, including an explicitly empty one.
-  // The worker's attributable writer lease serializes these invocations across
-  // every adapter so an unexpected write by a read-only stage remains attributable.
+  // Non-empty, scheduler-proven disjoint scopes receive separate writer
+  // partitions. Empty scopes take no writer lease, while the shared batch
+  // violation ledger lets every concurrent guard retain the same rollback fact.
   if (!input.stage.scope) return undefined;
   const runDirPath = runDir(input.projectDir, input.runId);
-  return ({ attemptIndex }) => {
+  const factory: LiveConstraintGuardFactory = ({ attemptIndex }) => {
     const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attemptIndex);
+    const currentAttemptKey = scopeAttemptKey(input.stage.id, attemptIndex);
     const options: LiveConstraintGuardOptions = {
       projectDir: input.projectDir,
       runDir: runDirPath,
@@ -9295,25 +9559,54 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             candidates.add(path);
           }
         }
-        const violations = [...candidates].sort().flatMap((path) => {
+        for (const path of [...candidates].sort()) {
           const before = baselineImage(baseline, path);
           const current = readRepairFileImage(input.projectDir, path);
-          if (compareRepairFileContents(before, current) !== 'different') return [];
+          if (compareRepairFileContents(before, current) !== 'different') continue;
           if (scopeContainsPath(attemptContext.effectiveScope, path)) {
-            // Commit an authorized write into the shared run baseline before
-            // the next lease owner starts. The round snapshot still preserves
-            // the original preimage for the post-attempt audit/repair diff.
+            // Commit an authorized write into the shared run baseline. The
+            // round snapshot still preserves its preimage for post-attempt
+            // per-stage audit and write-conflict checks.
             settleRollbackBaselinePath(baseline, input.projectDir, path);
-            return [];
+            continue;
           }
+          // A disjoint peer owns this path. Its guard is solely responsible for
+          // settling the shared live baseline; an observer must never roll the
+          // peer's authorized write back.
+          if (peerScopeContainsPath(input.context, input.stage.id, path)) continue;
+          // A failed restoration remains dirty. Reuse its batch fact instead of
+          // generating an unbounded incident on every watcher/fallback scan.
+          if (input.context.liveViolations.some((entry) => entry.path === path && !entry.restored)) continue;
           const restoration = restoreProjectPath(input.projectDir, path, before);
-          return [{
+          input.context.liveViolationSequence++;
+          input.context.liveViolations.push({
+            sequence: input.context.liveViolationSequence,
             path,
             reason: restoration.restored
-              ? 'adapter attributed an unauthorized project write; live enforcement restored its preimage before the invocation ended'
-              : 'adapter attributed an unauthorized project write; live enforcement could not restore its preimage',
+              ? 'the concurrent batch observed a write outside every admitted scope partition; live enforcement restored its preimage before the invocation ended'
+              : 'the concurrent batch observed a write outside every admitted scope partition; live enforcement could not restore its preimage',
             restored: restoration.restored,
             ...(restoration.restored ? {} : { rollbackFailure: restoration.failure ?? `could not restore ${path}` }),
+            // The complete scheduler-selected batch is the attribution cohort.
+            // A peer can reach its first guard scan just after this restoration,
+            // so keying only the attempts registered at observation time would
+            // make attribution depend on microtask order. The path is outside
+            // every admitted partition; coarse attribution is therefore safe,
+            // and is required for concurrent read-only peers because filesystem
+            // notifications cannot identify their writer.
+            targetStageIds: new Set(input.context.declaredScopes.keys()),
+            deliveredAttemptKeys: new Set(),
+          });
+        }
+        const violations = input.context.liveViolations.flatMap((violation) => {
+          if (!violation.targetStageIds.has(input.stage.id)
+              || violation.deliveredAttemptKeys.has(currentAttemptKey)) return [];
+          violation.deliveredAttemptKeys.add(currentAttemptKey);
+          return [{
+            path: violation.path,
+            reason: violation.reason,
+            restored: violation.restored,
+            ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
           }];
         });
         for (const violation of violations) {
@@ -9334,6 +9627,12 @@ function createSchedulerLiveConstraintGuardFactory(input: {
     };
     return new LiveConstraintGuard(options);
   };
+  factory.writerLease = {
+    batchId: input.context.leaseBatchId,
+    partitionId: input.context.leasePartitions.get(input.stage.id) ?? `scope:${input.stage.id}`,
+    ownerStageId: input.stage.id,
+  };
+  return factory;
 }
 
 function readLiveConstraintIncidents(
@@ -9515,10 +9814,10 @@ function reconcileStageScope(input: {
   context: ScopeBatchContext;
   attemptIndex: number;
   terminalDurableScope?: string[];
-}): { status: StageStatus; violation: boolean } {
+}): { status: StageStatus; violation: boolean; acceptedRevisionDuringAttempt: boolean } {
   const status = readStageStatus(input.projectDir, input.runId, input.stage.id);
   const attempt = status.attempts?.find((candidate) => candidate.index === input.attemptIndex);
-  if (!attempt) return { status, violation: false };
+  if (!attempt) return { status, violation: false, acceptedRevisionDuringAttempt: false };
   const declaredScope = input.context.declaredScopes.get(input.stage.id) ?? null;
   const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attempt.index);
   const effectiveScope = attemptContext.effectiveScope;
@@ -9587,8 +9886,9 @@ function reconcileStageScope(input: {
   for (const rawPath of enforcement.rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
     // A live incident is attributable even when an adapter has no structured
-    // write report: the project writer lease excludes every peer writer for
-    // the lifetime of this attempt.
+    // write report. For partitioned batches the shared incident ledger records
+    // a path only after proving that it lies outside every admitted partition,
+    // then conservatively assigns that fact to the batch cohort.
     const definitelyAttributed = definiteWrites.has(normalized ?? rawPath)
       || restoredLivePaths.has(normalized ?? rawPath);
     if (!definitelyAttributed && !normalized) continue;
@@ -9757,6 +10057,7 @@ function reconcileStageScope(input: {
   return {
     status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, summary, error),
     violation: unresolvedDefinite.length > 0,
+    acceptedRevisionDuringAttempt: attemptContext.acceptedDuringAttempt,
   };
 }
 
@@ -9766,16 +10067,22 @@ function reconcileCompletedStageAttempts(input: {
   runId: string;
   context: ScopeBatchContext;
   terminalDurableScope?: string[];
-}): { status: StageStatus; violation: boolean } {
+}): { status: StageStatus; violation: boolean; acceptedRevisionDuringAttempt: boolean; attemptIndex?: number } {
   let status = readStageStatus(input.projectDir, input.runId, input.stage.id);
   let violation = false;
+  let acceptedRevisionDuringAttempt = false;
+  let acceptedAttemptIndex: number | undefined;
   for (const attempt of status.attempts ?? []) {
     if (isRunningStageStatus(attempt.status) || attempt.constraintAudit) continue;
     const reconciled = reconcileStageScope({ ...input, attemptIndex: attempt.index });
     status = reconciled.status;
     violation ||= reconciled.violation;
+    if (reconciled.acceptedRevisionDuringAttempt) {
+      acceptedRevisionDuringAttempt = true;
+      acceptedAttemptIndex = attempt.index;
+    }
   }
-  return { status, violation };
+  return { status, violation, acceptedRevisionDuringAttempt, attemptIndex: acceptedAttemptIndex };
 }
 
 function enforceTemporalResearchTestContract(
@@ -9905,7 +10212,16 @@ async function runScopeSafeStageGroup(
       context,
       isComplete: () => complete,
     });
+    const approvalMonitor = monitorApprovalRequests({
+      selected,
+      projectDir,
+      runId,
+      runDirPath,
+      iteration,
+      isComplete: () => complete,
+    });
     let executionError: unknown;
+    let parkedDuringExecution: StoreState | null = null;
     try {
       await executions;
     } catch (error) {
@@ -9913,14 +10229,44 @@ async function runScopeSafeStageGroup(
     } finally {
       complete = true;
       await monitor;
+      parkedDuringExecution = await approvalMonitor;
     }
     if (executionError) throw executionError;
     // Let recursive filesystem notifications queued by a synchronous adapter
     // reach the run-scoped journal before reconciliation reads its cursor.
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    const redispatch: StageConfig[] = [];
     for (const stage of selected) {
-      reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
-      enforceTemporalResearchTestContract(projectDir, runId, stage.id);
+      const reconciled = reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
+      const temporal = enforceTemporalResearchTestContract(projectDir, runId, stage.id);
+      const acceptedAttempt = reconciled.attemptIndex === undefined
+        ? undefined
+        : reconciled.status.attempts?.find((attempt) => attempt.index === reconciled.attemptIndex);
+      if (
+        !reconciled.violation
+        && !temporal.violation
+        && reconciled.acceptedRevisionDuringAttempt
+        && reconciled.attemptIndex !== undefined
+        && acceptedAttempt?.exitCode === 0
+        && readStageStatus(projectDir, runId, stage.id).status === STAGE_STATUS.COMPLETE
+      ) {
+        suspendStageAttempt(projectDir, runId, stage.id, reconciled.attemptIndex);
+        redispatch.push(stageWithInheritedScope(runDirPath, stage));
+        recordRunEvent(projectDir, runId, {
+          type: 'attempt_suspended', runId, timestamp: new Date().toISOString(), iteration,
+          stageId: stage.id, attemptIndex: reconciled.attemptIndex,
+          detail: 'accepted scope revision requires re-dispatch of the same stage', source: 'scheduler',
+        });
+      } else {
+        const finalStatus = readStageStatus(projectDir, runId, stage.id);
+        if (finalStatus.status === STAGE_STATUS.COMPLETE || finalStatus.status === STAGE_STATUS.FAILED) {
+          recordStageOutcome(projectDir, runId, stage.id, iteration, finalStatus);
+        }
+      }
+    }
+    if (parkedDuringExecution || isPausedRunStatus(readRunState(projectDir, runId).status)) {
+      syncStageStatuses(projectDir, runId, selected.map((stage) => stage.id));
+      return;
     }
     const statuses: Record<string, StageStatus> = {};
     for (const stage of selected) {
@@ -9934,7 +10280,7 @@ async function runScopeSafeStageGroup(
         stageIds: conflict.stageIds, files: conflict.files, level: 'warning', detail,
       });
     }
-    pending = deferred.map(({ stage }) => stage);
+    pending = [...redispatch, ...deferred.map(({ stage }) => stage)];
   }
 }
 
@@ -10440,8 +10786,10 @@ async function executeSingleStage(
   // Record the outcome event using the authoritative per-stage file.
   try {
     const stageStatus = readStageStatus(projectDir, runId, stage.id);
-    recordStageOutcome(projectDir, runId, stage.id, state.currentIteration, stageStatus);
-    // Record trace event for stage completion
+    // Batch reconciliation owns stage_complete/stage_failed emission because a
+    // just-accepted scope request or approval may convert this settlement into
+    // a suspension before downstream dependencies are released.
+    // Record trace evidence for the adapter settlement itself.
     try {
       appendTraceEvent(projectDir, runId, stage.id, {
         timestamp: new Date().toISOString(),
@@ -10946,6 +11294,14 @@ async function executeIteration(
       context: ordinaryScopeContext,
       isComplete: () => ordinaryBatchComplete,
     });
+    const ordinaryApprovalMonitor = monitorApprovalRequests({
+      selected: toRun,
+      projectDir,
+      runId,
+      runDirPath,
+      iteration: state.currentIteration ?? 1,
+      isComplete: () => ordinaryBatchComplete,
+    });
     const results = await Promise.all(toRun.map(async (stage) => {
      try {
       if (!agents.has(stage.role)) {
@@ -11138,6 +11494,7 @@ async function executeIteration(
     }));
     ordinaryBatchComplete = true;
     await ordinaryScopeMonitor;
+    const parkedDuringExecution = await ordinaryApprovalMonitor;
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
     for (const item of results) {
       const reconciled = reconcileCompletedStageAttempts({
@@ -11152,6 +11509,37 @@ async function executeIteration(
         item.result.timedOut = false;
         item.result.timeoutTerminationCause = 'failed';
       }
+      if (
+        item.result.exitCode === 0
+        && !reconciled.violation
+        && reconciled.acceptedRevisionDuringAttempt
+        && reconciled.attemptIndex !== undefined
+        && reconciled.status.attempts?.find(
+          (attempt) => attempt.index === reconciled.attemptIndex,
+        )?.exitCode === 0
+      ) {
+        suspendStageAttempt(projectDir, runId, item.stage.id, reconciled.attemptIndex);
+        item.result.suspended = true;
+        item.result.suspensionReason = 'scope_revision';
+        recordRunEvent(projectDir, runId, {
+          type: 'attempt_suspended',
+          runId,
+          timestamp: new Date().toISOString(),
+          iteration: state.currentIteration ?? 1,
+          stageId: item.stage.id,
+          attemptIndex: reconciled.attemptIndex,
+          detail: 'accepted scope revision requires re-dispatch of the same stage',
+          source: 'scheduler',
+        });
+      }
+      const postControlStatus = readStageStatus(projectDir, runId, item.stage.id);
+      if (
+        postControlStatus.status === STAGE_STATUS.PENDING
+        && postControlStatus.attempts?.at(-1)?.status === 'suspended'
+      ) {
+        item.result.suspended = true;
+        item.result.suspensionReason ??= 'approval';
+      }
       if (item.result.exitCode === 0 && enforceTemporalResearchTestContract(projectDir, runId, item.stage.id).violation) {
         item.result.exitCode = 1;
         item.result.timedOut = false;
@@ -11163,6 +11551,12 @@ async function executeIteration(
     let failed = false;
 
     for (const { stage, result, currentRetries } of results) {
+      if (result.suspended) {
+        technicalRetries.delete(stage.id);
+        state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+        log.info({ stage: stage.id, reason: result.suspensionReason }, 'Stage suspended at control boundary; re-dispatching');
+        continue;
+      }
       const maxFailureRetries = Math.max(0, Math.floor(Number(
         stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit(projectDir),
       )));
@@ -11231,6 +11625,7 @@ async function executeIteration(
     for (const event of stageEvents) {
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
     }
+    if (parkedDuringExecution || isPausedRunStatus(state.status)) return state;
 
     // Scope admission may split one logical ready set into several physical
     // waves. Do not park, terminate, or return a failure between those waves:
@@ -11253,7 +11648,13 @@ async function executeIteration(
     // [Approval park gate, call site 2 of 2] Ingest every request the batch
     // wrote even when a peer stage failed; a failure must not erase another
     // stage's consequential-action request.
-    const parkedEager = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1 });
+    const parkedEager = await tryParkOnApprovalRequest(state, {
+      projectDir,
+      runId,
+      runDirPath,
+      iteration: state.currentIteration ?? 1,
+      candidateStageIds: toRun.map((stage) => stage.id),
+    });
     if (parkedEager) return parkedEager;
 
     const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });

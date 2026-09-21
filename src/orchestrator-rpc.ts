@@ -62,6 +62,8 @@ export interface TaskListRpcResponse {
 /** Registry fields plus authoritative run.json fields merged by the daemon read path. */
 export interface TaskShowEntry extends Omit<TaskEntry, 'status'> {
   status: string;
+  /** A scheduler identity verified against the bound run, independent of the launch unit. */
+  scheduler_live?: { pid: number };
   operational?: OperationalProjection;
   run_verdict?: string;
   failure_reason?: string;

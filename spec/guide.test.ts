@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parseGuidanceLedger } from '../src/guidance.js';
 
 let fixtureRoot: string;
 let isolatedHome: string;
@@ -33,11 +34,22 @@ afterEach(() => {
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-function writeRun(runId: string, status: string, title: string, mtimeOffsetSeconds: number): void {
+function writeRun(
+  runId: string,
+  status: string,
+  title: string,
+  mtimeOffsetSeconds: number,
+  stageIds: string[] = [],
+): void {
   const directory = join(runsDir, runId);
   mkdirSync(directory, { recursive: true });
   const runJson = join(directory, 'run.json');
-  writeFileSync(runJson, JSON.stringify({ runId, status, taskDescription: `# ${title}` }), 'utf-8');
+  writeFileSync(runJson, JSON.stringify({
+    runId,
+    status,
+    taskDescription: `# ${title}`,
+    stages: Object.fromEntries(stageIds.map((stageId) => [stageId, { status: 'running', retries: 0 }])),
+  }), 'utf-8');
   const timestamp = new Date(Date.UTC(2026, 7, 2, 12, 0, mtimeOffsetSeconds));
   utimesSync(runJson, timestamp, timestamp);
 }
@@ -112,5 +124,33 @@ describe('safe guide targeting', () => {
     expect([traversal.status, unknown.status, finished.status].every((status) => status !== 0)).toBe(true);
     expect(existsSync(guidancePath('run-live'))).toBe(false);
     expect(existsSync(guidancePath('run-finished'))).toBe(false);
+  });
+
+  it('[E2] sends --stage guidance directly to that running stage with a durable event', () => {
+    writeRun('run-alpha', 'running', 'Alpha task', 1, ['plan', 'implement']);
+
+    const result = runGuide(
+      '--run', 'run-alpha',
+      '--stage', 'implement',
+      'use the already-isolated reproduction',
+    );
+
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    expect(existsSync(guidancePath('run-alpha'))).toBe(false);
+    const ledger = parseGuidanceLedger(readFileSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'), 'utf-8'));
+    expect(ledger).toEqual([
+      expect.objectContaining({
+        target: 'implement',
+        source: 'operator',
+        body: 'use the already-isolated reproduction',
+      }),
+    ]);
+    const events = readFileSync(join(runsDir, 'run-alpha', 'events.jsonl'), 'utf-8')
+      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'guidance_written',
+      stageId: 'implement',
+      source: 'operator',
+    }));
   });
 });

@@ -41,6 +41,7 @@ import {
   parseScopeRevisionRequest,
   publishConstraintDecision,
 } from '../src/runtime-negotiation.js';
+import { resolveRequest } from '../src/inbox.js';
 
 let projectDir: string;
 let isolatedStateDir: string;
@@ -251,7 +252,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     };
   }
 
-  it('accepts a reasoned ordinary-stage addition before write and exposes its audit to a gate', { timeout: 10_000 }, async () => {
+  it('[B1] suspends an exit-0 attempt with a just-accepted scope revision and re-dispatches the same stage', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
     const yaml = [
@@ -268,20 +269,26 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     };
     const created = prepareRun(config, yaml);
     let gateSawAudit = false;
+    let ordinaryCalls = 0;
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'ordinary') {
+        ordinaryCalls++;
         expect(prompt).toContain('immutable');
         expect(prompt).toContain('config/defaults.yaml::default_timeout_ms');
         expect(prompt).not.toContain('timeout_extension_request.json');
-        const directory = join(opts.runDir, 'stages', opts.stageId);
-        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-          version: 1, kind: 'scope_revision', requestId: 'ordinary-shared', stageId: opts.stageId,
-          attemptIndex: 1, requestedPaths: ['src/shared.ts'], reason: 'the implementation needs the authoritative shared type',
-        }));
-        const decision = await waitForDecision(directory, 'scope_revision_decision_');
-        expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'scheduler-policy' });
+        if (ordinaryCalls === 1) {
+          const directory = join(opts.runDir, 'stages', opts.stageId);
+          writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
+            version: 1, kind: 'scope_revision', requestId: 'ordinary-shared', stageId: opts.stageId,
+            attemptIndex: 1, requestedPaths: ['src/shared.ts'], reason: 'the implementation needs the authoritative shared type',
+          }));
+          const decision = await waitForDecision(directory, 'scope_revision_decision_');
+          expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'scheduler-policy' });
+          return { output: 'scope accepted; stop at the control boundary', exitCode: 0, duration_ms: 20, writes: [], writeAttribution: 'structured' };
+        }
+        expect(prompt).toContain('Scope revision ordinary-shared was accepted');
         writeFileSync(join(projectDir, 'src', 'shared.ts'), 'shared\n');
         return { output: 'done', exitCode: 0, duration_ms: 20, writes: ['src/shared.ts'], writeAttribution: 'structured' };
       }
@@ -291,8 +298,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder', 'qa'), created.runId, 'scope gate', true);
     expect(final.status).toBe('complete');
+    expect(ordinaryCalls).toBe(2);
     expect(gateSawAudit).toBe(true);
     const status = readStageStatus(projectDir, created.runId, 'ordinary');
+    expect(status.attempts?.map((attempt) => attempt.status)).toEqual(['suspended', 'complete']);
     expect(status.attempts?.[0].constraintAudit).toMatchObject({ acceptedRevisionCount: 1, violationCount: 0, effectiveScope: ['src/declared.ts', 'src/shared.ts'] });
   });
 
@@ -456,6 +465,102 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
   });
 });
 
+describe('approval attempt suspension', () => {
+  it('[C1] parks within one poll, suspends the requester, and resumes by re-running that same stage', { timeout: 15_000 }, async () => {
+    const yaml = [
+      'name: approval-suspension', 'defaults:', '  max_iterations: 1', '  max_retries: 0', 'stages:',
+      '  - id: action', '    role: coder', '    scope: []', '    prompt_template: request approval',
+      '  - id: downstream', '    role: coder', '    scope: []', '    depends_on: [action]',
+      '    dependency_reasons: {action: "consume the approved action"}', '    prompt_template: finish',
+    ].join('\n');
+    const config: WorkflowConfig = {
+      name: 'approval-suspension',
+      defaults: { max_iterations: 1, max_retries: 0 },
+      stages: [
+        { id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
+        { id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
+      ],
+    };
+    const created = prepareRun(config, yaml);
+    let actionCalls = 0;
+    let downstreamCalls = 0;
+    let approvalAbortElapsedMs = Number.POSITIVE_INFINITY;
+    const adapter: Adapter = { async run(_prompt, _agent, opts) {
+      const summary = summaryResult(opts);
+      if (summary) return summary;
+      if (opts.stageId === 'downstream') {
+        downstreamCalls++;
+        return { output: 'downstream complete', exitCode: 0, duration_ms: 1 };
+      }
+      actionCalls++;
+      if (actionCalls > 1) {
+        expect(existsSync(join(opts.runDir, 'approvals', 'launch-training.decision.json'))).toBe(true);
+        return { output: 'approved action complete', exitCode: 0, duration_ms: 1 };
+      }
+      const requestedAt = new Date().toISOString();
+      const started = Date.now();
+      writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'approval_request.json'), JSON.stringify({
+        id: 'launch-training',
+        action: 'launch_model_training',
+        risk: 'unknown',
+        title: 'launch model training',
+        requestedAt,
+      }));
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 2_000);
+        const finish = () => {
+          clearTimeout(timer);
+          approvalAbortElapsedMs = Date.now() - started;
+          resolveWait();
+        };
+        if (opts.abortSignal?.aborted) finish();
+        else opts.abortSignal?.addEventListener('abort', finish, { once: true });
+      });
+      return { output: 'stopped at approval boundary', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: Date.now() - started };
+    } };
+
+    const parked = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      writeRoles('coder'), created.runId, 'approval suspension', true,
+    );
+
+    expect(parked.status).toBe('parked');
+    expect(approvalAbortElapsedMs).toBeLessThanOrEqual(1_100);
+    expect(parked.stages.action.status).toBe('pending');
+    expect(readStageStatus(projectDir, created.runId, 'action').attempts?.[0]?.status).toBe('suspended');
+    expect(downstreamCalls).toBe(0);
+    const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf-8')
+      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    const parkedEvent = events.find((event) => event.type === 'approval_parked');
+    expect(parkedEvent).toMatchObject({
+      stageId: 'action',
+      attemptIndex: 1,
+      requestId: 'launch-training',
+      requestedAt: expect.any(String),
+      detectedAt: expect.any(String),
+    });
+    expect(Date.parse(String(parkedEvent?.detectedAt)) - Date.parse(String(parkedEvent?.requestedAt)))
+      .toBeLessThanOrEqual(1_000);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'approval_attempt_suspended',
+      stageId: 'action',
+      attemptIndex: 1,
+      requestId: 'launch-training',
+    }));
+
+    expect(resolveRequest(projectDir, created.runId, 'launch-training', 'approve', { by: 'operator' }).won).toBe(true);
+    const resumed = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      writeRoles('coder'), created.runId, 'approval suspension', true,
+    );
+    expect(resumed.status).toBe('complete');
+    expect(actionCalls).toBe(2);
+    expect(downstreamCalls).toBe(1);
+    expect(readStageStatus(projectDir, created.runId, 'action').attempts?.map((attempt) => attempt.status))
+      .toEqual(['suspended', 'complete']);
+  });
+});
+
 describe('gate verdict facts and repair eligibility', () => {
   it('normalizes retry targets and blocks ordinary dependents on an explicit negative verdict', () => {
     const gate = StageConfigSchema.parse({ id: 'legacy_gate', role: 'qa', prompt_template: 'gate' });
@@ -565,6 +670,65 @@ describe('bounded timeout negotiation', () => {
     mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
     return { runId: created.runId, runDirPath: created.runDirPath };
   }
+
+  it('[E1] delivers new targeted guidance at attempt start and before every adapter invocation', { timeout: 15_000 }, async () => {
+    const stageId = 'guided_retry';
+    const { runId, runDirPath } = directRunDir(stageId);
+    const beforeAttempt = 'read this before the attempt starts';
+    writeFileSync(join(runDirPath, 'user_input.md'), beforeAttempt, 'utf-8');
+    const prompts: string[] = [];
+    let calls = 0;
+    const adapter: Adapter = { async run(prompt, _agent, opts) {
+      calls++;
+      prompts.push(prompt);
+      if (calls === 1) {
+        expect(prompt).toContain(beforeAttempt);
+        writeFileSync(
+          join(opts.runDir, 'user_input.md'),
+          'switch to the isolated retry reproduction',
+          'utf-8',
+        );
+        return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
+      }
+      return { output: 'recovered', exitCode: 0, duration_ms: 1 };
+    } };
+
+    const result = await runStage(adapter, {
+      stageId,
+      role,
+      dependsOn: [],
+      promptTemplate: 'guided retry',
+      timeout_ms: 10_000,
+      technicalRetry: {
+        delaysMs: [0],
+        loadFallbackAdapter: async () => adapter,
+      },
+      projectDir,
+      runId,
+      runDir: runDirPath,
+      retries: 0,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('switch to the isolated retry reproduction');
+    const receipt = readFileSync(join(runDirPath, 'stages', stageId, 'guidance_consumed.md'), 'utf-8');
+    expect(receipt).toContain(beforeAttempt);
+    expect(receipt).toContain('switch to the isolated retry reproduction');
+    expect(existsSync(join(runDirPath, 'user_input.md'))).toBe(false);
+    const events = readFileSync(join(runDirPath, 'events.jsonl'), 'utf-8')
+      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'guidance_delivery_checked', stageId, attemptIndex: 1,
+        boundary: 'attempt_start', delivered: true,
+      }),
+      expect.objectContaining({
+        type: 'guidance_delivery_checked', stageId, attemptIndex: 1,
+        boundary: 'adapter_invocation', invocationIndex: 2, delivered: true,
+      }),
+    ]));
+  });
 
   it('does not advertise or accept supervisor extension verdicts', () => {
     expect(parseSupervisorVerdict(
