@@ -7,6 +7,7 @@ import {
   resolveRunStatus,
   type StoreState,
 } from './store.js';
+import { isPathSafelyArchived } from './declared-output-archive.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -752,6 +753,7 @@ function gradeInventoryPaths(
 async function inspectInventory(
   state: StoreState,
   projectDir: string,
+  runDirectory: string,
   git: LandGitRunner,
   fs: LandFileSystem,
 ): Promise<{ inventory: LandInventory; issues: LandInspectionIssue[]; branch?: string }> {
@@ -769,8 +771,8 @@ async function inspectInventory(
   if (status.ok) {
     try {
       const parsed = parseGitStatusPorcelain(status.stdout);
-      inventory.tracked = parsed.tracked;
-      untrackedPaths = parsed.untracked;
+      inventory.tracked = parsed.tracked.filter((entry) => !isPathSafelyArchived(projectDir, runDirectory, entry.path, fs));
+      untrackedPaths = parsed.untracked.filter((path) => !isPathSafelyArchived(projectDir, runDirectory, path, fs));
     } catch (error) {
       issues.push({ operation: 'status', reason: errorMessage(error) });
     }
@@ -783,7 +785,8 @@ async function inspectInventory(
     operation: 'ignored',
   };
   const ignored = await checkedGit(ignoredRequest, git);
-  if (ignored.ok) ignoredPaths = nulPaths(ignored.stdout);
+  if (ignored.ok) ignoredPaths = nulPaths(ignored.stdout)
+    .filter((path) => !isPathSafelyArchived(projectDir, runDirectory, path, fs));
   else issues.push(ignored.issue);
 
   const branchRequest: LandGitRequest = {
@@ -1088,7 +1091,7 @@ export async function runLand(
   const artifactIssues: LandInspectionIssue[] = artifacts
     .filter((artifact) => artifact.reason)
     .map((artifact) => ({ operation: 'artifact', reason: `${artifact.path}: ${artifact.reason}` }));
-  const inspected = await inspectInventory(state, projectDir, deps.git, deps.fs);
+  const inspected = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs);
   const inspectionIssues = [...artifactIssues, ...inspected.issues];
   const statusResolution = resolveRunStatus(state.status);
   const terminal = statusResolution.kind === 'known' && isTerminalRunStatus(statusResolution.status);

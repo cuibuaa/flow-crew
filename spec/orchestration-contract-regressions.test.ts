@@ -346,6 +346,11 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(recorded.pass).toBe(false);
 
     const report = inspectDispatchAdmission(fixture.admission);
+    if (name === 'diagram_extra_directory') {
+      expect(report.pass).toBe(false);
+      expect(report.errors).toContain('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
+      return;
+    }
     expect(report.pass, report.errors.join('\n')).toBe(true);
     expect(report.terminalValidationScopes?.[owner]).toEqual(scopes);
   });

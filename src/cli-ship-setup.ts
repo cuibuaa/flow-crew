@@ -433,6 +433,9 @@ export interface ShipSetupReadyReport extends ShipSetupFacts {
 
 export interface ShipSetupRefusedReport extends ShipSetupFacts {
   state: 'refused';
+  ready: false;
+  createdAt: string;
+  readyRecordPath?: string;
 }
 
 export type ShipSetupReport = ShipSetupReadyReport | ShipSetupRefusedReport;
@@ -606,11 +609,36 @@ function refused(
   return {
     ...facts,
     state: 'refused',
+    ready: false,
+    createdAt: new Date().toISOString(),
     blockers: blockers.map((blocker) => ({
       ...blocker,
       repair: blocker.repair ?? shipSetupBlockerRepair(blocker),
     })),
   };
+}
+
+function persistRefused(
+  facts: Omit<ShipSetupFacts, 'blockers'>,
+  blockers: ShipSetupBlockerInput[],
+  targetDir: string,
+  deps: ResolvedShipSetupDependencies,
+): ShipSetupRefusedReport {
+  let report = { ...refused(facts, blockers), createdAt: deps.timestamp() };
+  try {
+    if (!deps.fs.entryExists(targetDir) || !deps.fs.stat(targetDir).isDirectory()) return report;
+    const targetCanonicalDir = deps.fs.realpath(targetDir);
+    const readyRecordPath = shipSetupReadyRecordPath(targetCanonicalDir, facts.briefDigest, deps.globalDir());
+    report = { ...report, targetCanonicalDir, readyRecordPath };
+    deps.fs.writeAtomic(readyRecordPath, `${JSON.stringify(report, null, 2)}\n`);
+  } catch (error) {
+    report.blockers.push({
+      phase: 'record',
+      reason: `Cannot atomically persist the refused setup record: ${errorMessage(error)}`,
+      repair: 'Repair the FC-global setup record directory, then rerun ship-setup.',
+    });
+  }
+  return report;
 }
 
 function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
@@ -1388,11 +1416,109 @@ function resolveVitestExecutable(projectDir: string, fs: ShipSetupFileSystem): s
   return executable;
 }
 
-function discoverTestPopulationMethod(
+function directCommandWords(line: string): string[] | undefined {
+  if (!line.trim() || /[;&|<>`$\n\r]/.test(line)) return undefined;
+  const words = [...line.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|(\S+)/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3]);
+  return words.length > 0 && words.join(' ').length > 0 ? words : undefined;
+}
+
+function explicitNodeTestMethod(
+  projectDir: string,
+  fs: ShipSetupFileSystem,
+  words: readonly string[],
+  evidencePath: string,
+): TestPopulationMethod | undefined {
+  const executable = basename(words[0] ?? '');
+  const testIndex = words.indexOf('--test');
+  if (!/^node(?:\.exe)?$/i.test(executable) || testIndex < 0) return undefined;
+  const candidates = words.slice(testIndex + 1).filter((word) => !word.startsWith('-'));
+  if (candidates.length === 0 || candidates.some((word) => /[*?{}[\]]/.test(word))) return undefined;
+  const identities = [...new Set(candidates.map((candidate) => normalizedPopulationIdentity(projectDir, candidate)))].sort();
+  if (identities.some((identity) => !fs.exists(join(projectDir, identity))
+      || !fs.readable(join(projectDir, identity)) || fs.stat(join(projectDir, identity)).isDirectory())) return undefined;
+  return {
+    tool: 'declared-files',
+    display: words.join(' '),
+    evidencePath,
+    declaredIdentities: identities,
+  };
+}
+
+function exactMethodForExpandedCommand(
+  projectDir: string,
+  fs: ShipSetupFileSystem,
+  words: readonly string[],
+  evidencePath: string,
+  depth = 0,
+): TestPopulationMethod | undefined {
+  if (depth > 1) return undefined;
+  const nodeMethod = explicitNodeTestMethod(projectDir, fs, words, evidencePath);
+  if (nodeMethod) return nodeMethod;
+
+  const executable = basename(words[0] ?? '').toLowerCase();
+  const vitestWord = executable === 'vitest' || executable === 'vitest.mjs'
+    || ((executable === 'npx' || executable === 'pnpx') && basename(words[1] ?? '').toLowerCase() === 'vitest')
+    || (executable === 'pnpm' && words[1] === 'exec' && basename(words[2] ?? '').toLowerCase() === 'vitest')
+    || (executable === 'yarn' && basename(words[1] ?? '').toLowerCase() === 'vitest');
+  if (vitestWord) {
+    const vitest = resolveVitestExecutable(projectDir, fs);
+    return {
+      tool: 'vitest',
+      display: 'vitest list --filesOnly --json --passWithNoTests',
+      evidencePath,
+      request: {
+        role: 'test',
+        command: process.execPath,
+        args: [vitest, 'list', '--filesOnly', '--json', '--passWithNoTests'],
+        display: 'vitest list --filesOnly --json --passWithNoTests',
+        evidencePath,
+        cwd: projectDir,
+      },
+    };
+  }
+
+  const pythonPytest = isPythonExecutable(words[0] ?? '') && words[1] === '-m' && words[2] === 'pytest';
+  if (executable === 'pytest' || pythonPytest) {
+    const args = [...words.slice(1), '--collect-only', '-q'];
+    return {
+      tool: 'pytest',
+      display: [words[0], ...args].join(' '),
+      evidencePath,
+      request: {
+        role: 'test',
+        command: words[0],
+        args,
+        display: [words[0], ...args].join(' '),
+        evidencePath,
+        cwd: projectDir,
+      },
+    };
+  }
+
+  const packageRunner = executable === 'npm' || executable === 'pnpm'
+    || executable === 'yarn' || executable === 'bun';
+  const invokesTestScript = words[1] === 'test' || (words[1] === 'run' && words[2] === 'test');
+  if (packageRunner && invokesTestScript) {
+    try {
+      const packagePath = join(projectDir, 'package.json');
+      const manifest = JSON.parse(fs.readText(packagePath)) as { scripts?: Record<string, unknown> };
+      const script = manifest.scripts?.test;
+      const scriptWords = typeof script === 'string' ? directCommandWords(script) : undefined;
+      return scriptWords
+        ? exactMethodForExpandedCommand(projectDir, fs, scriptWords, `${packagePath}#scripts.test`, depth + 1)
+        : undefined;
+    } catch { return undefined; }
+  }
+  return undefined;
+}
+
+async function discoverTestPopulationMethod(
   projectDir: string,
   fs: ShipSetupFileSystem,
   declaredCommands: readonly BriefValidationCommand[],
-): TestPopulationDiscovery {
+  runCollector: ValidationCommandRunner,
+): Promise<TestPopulationDiscovery> {
   const validation = declaredCommands.length === 0
     ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
     : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
@@ -1513,6 +1639,48 @@ function discoverTestPopulationMethod(
     };
   }
 
+  if (/^(?:g?make)(?:\.exe)?$/i.test(basename(testCommand.command)) && testCommand.args.length > 0) {
+    const dryRunDisplay = [testCommand.command, '-n', ...testCommand.args].join(' ');
+    let dryRun: ValidationRunResponse;
+    try {
+      dryRun = await runCollector({
+        ...testCommand,
+        args: ['-n', ...testCommand.args],
+        display: dryRunDisplay,
+        cwd: projectDir,
+      });
+    } catch (error) {
+      dryRun = { exitCode: null, error: errorMessage(error) };
+    }
+    const lines = (dryRun.stdout ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const words = dryRun.exitCode === 0 && !dryRun.error && lines.length === 1
+      ? directCommandWords(lines[0])
+      : undefined;
+    const method = words
+      ? exactMethodForExpandedCommand(projectDir, fs, words, testCommand.evidencePath ?? join(projectDir, 'Makefile'))
+      : undefined;
+    if (method) {
+      return {
+        hasConfiguredTests: true,
+        validationUnknown: false,
+        testCommand,
+        runner,
+        method,
+      };
+    }
+    const diagnostic = dryRun.error
+      ?? (dryRun.exitCode !== 0 ? `${dryRunDisplay} exited ${dryRun.exitCode}`
+        : lines.length !== 1 ? `${dryRunDisplay} expanded to ${lines.length} command lines`
+          : 'expanded command is not a safe supported exact collector');
+    return {
+      hasConfiguredTests: true,
+      validationUnknown: false,
+      testCommand,
+      runner,
+      reason: `Configured test runner "${runner.display}" could not be unwrapped safely from Make: ${diagnostic}`,
+    };
+  }
+
   return {
     hasConfiguredTests: true,
     validationUnknown: false,
@@ -1529,6 +1697,9 @@ function parseCollectedTestIdentities(
 ): string[] {
   if (method.declaredIdentities) return method.declaredIdentities;
   const stdout = response.stdout ?? '';
+  const combinedOutput = [response.stdout, response.stderr]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join('\n');
   const identities: string[] = [];
   if (method.tool === 'vitest') {
     const parsed = JSON.parse(stdout) as unknown;
@@ -1543,7 +1714,9 @@ function parseCollectedTestIdentities(
       identities.push(normalizedPopulationIdentity(projectDir, file));
     }
   } else if (method.tool === 'pytest') {
-    for (const rawLine of stdout.split(/\r?\n/)) {
+    // Pytest and its plugins may route collection identities to stderr even
+    // on a successful exit. Both channels are collector evidence.
+    for (const rawLine of combinedOutput.split(/\r?\n/)) {
       const line = rawLine.trim();
       const nodeId = line.includes('::') ? line.slice(0, line.indexOf('::')) : '';
       if (!nodeId || !/\.py$/i.test(nodeId)) continue;
@@ -1579,6 +1752,15 @@ async function collectTestPopulation(
     );
   }
   const identities = parseCollectedTestIdentities(projectDir, method, response);
+  if (method.tool === 'pytest' && identities.length === 0 && !pytestEmpty) {
+    const output = `${response.stdout ?? ''}\n${response.stderr ?? ''}`;
+    const positivelyEmpty = /(?:no tests (?:collected|ran)|0 tests? collected|collected 0 items)/i.test(output);
+    if (!positivelyEmpty) {
+      throw new Error(
+        `${method.display} exited successfully but produced no parseable test identities and did not positively report an empty collection`,
+      );
+    }
+  }
   return {
     projectDir,
     count: identities.length,
@@ -1595,8 +1777,8 @@ async function compareTestPopulations(
   runner: ValidationCommandRunner,
   declaredCommands: readonly BriefValidationCommand[],
 ): Promise<TestPopulationComparison> {
-  const sourceDiscovery = discoverTestPopulationMethod(sourceDir, fs, declaredCommands);
-  const targetDiscovery = discoverTestPopulationMethod(targetDir, fs, declaredCommands);
+  const sourceDiscovery = await discoverTestPopulationMethod(sourceDir, fs, declaredCommands, runner);
+  const targetDiscovery = await discoverTestPopulationMethod(targetDir, fs, declaredCommands, runner);
   const discoveries = { sourceDiscovery, targetDiscovery };
   if (!sourceDiscovery.hasConfiguredTests && !targetDiscovery.hasConfiguredTests) return discoveries;
   if (targetDiscovery.validationUnknown) return discoveries;
@@ -1837,13 +2019,16 @@ export async function runShipSetup(
     sourceOutputInventory,
     proseInputWarnings,
   );
+  const refuse = (blockers: ShipSetupBlockerInput[]): ShipSetupRefusedReport => (
+    persistRefused(facts, blockers, targetDir, deps)
+  );
   if (declaredValidation.error) {
-    return refused(facts, [{ phase: 'validation', reason: declaredValidation.error }]);
+    return refuse([{ phase: 'validation', reason: declaredValidation.error }]);
   }
   const sourceBlockers = verificationBlockers('source', sourceVerification);
-  if (sourceBlockers.length > 0) return refused(facts, sourceBlockers);
+  if (sourceBlockers.length > 0) return refuse(sourceBlockers);
   if (sourceOutputInventory.blocking.length > 0) {
-    return refused(facts, sourceOutputInventory.blocking.map((entry) => ({
+    return refuse(sourceOutputInventory.blocking.map((entry) => ({
       phase: 'source' as const,
       input: entry.path,
       reason: entry.reason ?? 'Declared output path is already occupied',
@@ -1859,7 +2044,7 @@ export async function runShipSetup(
   if (deps.fs.entryExists(targetDir)) {
     const existing = await verifyReusableWorktree(worktreeRequest, deps.runGitCommand, deps.fs);
     if (!existing.reusable) {
-      return refused(facts, [{
+      return refuse([{
         phase: 'worktree',
         reason: `Target already exists but cannot be safely reused: ${targetDir}; ${existing.reason}`,
       }]);
@@ -1872,7 +2057,7 @@ export async function runShipSetup(
     if (deps.managedWorktreeCreation) {
       const prepared = await prepareManagedWorktree(worktreeRequest, deps.runGitCommand, deps.fs);
       if (!prepared.request || !prepared.ownership || prepared.failureReason) {
-        return refused(facts, [{
+        return refuse([{
           phase: 'worktree',
           reason: `${prepared.failureReason ?? 'Git worktree preparation failed'}`
             + (prepared.cleanup.length ? `; cleanup: ${prepared.cleanup.join('; ')}` : ''),
@@ -1905,7 +2090,7 @@ export async function runShipSetup(
             deps.fs,
           )
         : [];
-      return refused(facts, [{
+      return refuse([{
         phase: 'worktree',
         reason: `${worktreeFailureReason(git)}${cleanup.length ? `; cleanup: ${cleanup.join('; ')}` : ''}`,
       }]);
@@ -1920,7 +2105,7 @@ export async function runShipSetup(
     }
   })();
   if (!targetIsDirectory) {
-    return refused(facts, [{
+    return refuse([{
       phase: 'worktree',
       reason: 'Git reported success but the target worktree directory is not reachable',
     }]);
@@ -1930,7 +2115,7 @@ export async function runShipSetup(
     targetCanonicalDir = deps.fs.realpath(targetDir);
     facts = { ...facts, targetCanonicalDir };
   } catch (error) {
-    return refused(facts, [{
+    return refuse([{
       phase: 'target',
       reason: `Cannot canonicalize target worktree: ${errorMessage(error)}`,
     }]);
@@ -1944,24 +2129,24 @@ export async function runShipSetup(
   if (dependencyPreparation.observation) {
     facts = { ...facts, dependencyInstall: dependencyPreparation.observation };
   }
-  if (dependencyPreparation.blocker) return refused(facts, [dependencyPreparation.blocker]);
+  if (dependencyPreparation.blocker) return refuse([dependencyPreparation.blocker]);
 
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
     reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
   } catch (error) {
-    return refused(facts, [{ phase: 'target', reason: `Cannot inspect target worktree: ${errorMessage(error)}` }]);
+    return refuse([{ phase: 'target', reason: `Cannot inspect target worktree: ${errorMessage(error)}` }]);
   }
   facts = { ...facts, links: reconciled.links, copies: reconciled.copies };
-  if (reconciled.blockers.length > 0) return refused(facts, reconciled.blockers);
+  if (reconciled.blockers.length > 0) return refuse(reconciled.blockers);
 
   const targetVerification = verifyDeclaredBriefInputs(brief, targetDir, deps.fs);
   const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs);
   facts = { ...facts, targetVerification, targetOutputInventory };
   const targetBlockers = verificationBlockers('target', targetVerification);
-  if (targetBlockers.length > 0) return refused(facts, targetBlockers);
+  if (targetBlockers.length > 0) return refuse(targetBlockers);
   if (targetOutputInventory.blocking.length > 0) {
-    return refused(facts, targetOutputInventory.blocking.map((entry) => ({
+    return refuse(targetOutputInventory.blocking.map((entry) => ({
       phase: 'target' as const,
       input: entry.path,
       reason: entry.reason ?? 'Declared output path is already occupied in the target worktree',
@@ -1986,7 +2171,7 @@ export async function runShipSetup(
       ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
       : '';
     const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
-    return refused(facts, [{
+    return refuse([{
       phase: 'validation',
       reason: `Test population mismatch before baseline: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
     }]);
@@ -2045,7 +2230,7 @@ export async function runShipSetup(
         reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${declaration}: ${result.reason ?? 'command ended without an exit code'}`,
       };
     }));
-  if (validationBlockers.length > 0) return refused(facts, validationBlockers);
+  if (validationBlockers.length > 0) return refuse(validationBlockers);
   if (testPopulation?.state === 'mismatched') {
     const missing = testPopulation.missingFromTarget.length > 0
       ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
@@ -2054,7 +2239,7 @@ export async function runShipSetup(
       ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
       : '';
     const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
-    return refused(facts, [{
+    return refuse([{
       phase: 'validation',
       reason: `Test population mismatch from baseline output: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
     }]);
@@ -2077,7 +2262,7 @@ export async function runShipSetup(
   try {
     deps.fs.writeAtomic(readyRecordPath, `${JSON.stringify(report, null, 2)}\n`);
   } catch (error) {
-    return refused(facts, [{
+    return refuse([{
       phase: 'record',
       reason: `Cannot atomically persist the FC-global ready record: ${errorMessage(error)}`,
     }]);

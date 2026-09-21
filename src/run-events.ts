@@ -1,8 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJsonlFile } from './jsonl.js';
 import type { StageStatus, StoreState } from './store.js';
-import { atomicWrite, isSettledStageStatus, runDir, STAGE_STATUS } from './store.js';
+import { atomicWrite, isSettledStageStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
   | 'attempt_started'
@@ -23,6 +23,7 @@ export type RunEventType =
   | 'live_constraint_violation'
   | 'live_constraint_exemptions'
   | 'live_constraint_monitor_failure'
+  | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'supervisor_reject_requested'
@@ -41,6 +42,8 @@ export type RunEventType =
   | 'plan_dispatch_retry'
   | 'research_mode_degraded'
   | 'research_gate_exhausted'
+  | 'research_round_contract_repaired'
+  | 'stage_artifact_contract_violation'
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'
   | 'parallel_write_conflict'
@@ -167,8 +170,7 @@ function readRefreshState(projectDir: string, runId: string): AttemptSummaryRefr
 }
 
 function writeRefreshState(projectDir: string, runId: string, state: AttemptSummaryRefreshState): void {
-  const dir = runDir(projectDir, runId);
-  mkdirSync(dir, { recursive: true });
+  requireRunArtifactDirectory(projectDir, runId);
   atomicWrite(refreshStatePath(projectDir, runId), JSON.stringify(state, null, 2));
 }
 
@@ -181,8 +183,7 @@ export function readAttemptSummaryRefreshState(
 }
 
 export function appendRunEvent(projectDir: string, runId: string, event: RunEvent): void {
-  const dir = runDir(projectDir, runId);
-  mkdirSync(dir, { recursive: true });
+  requireRunArtifactDirectory(projectDir, runId);
   appendFileSync(eventsPath(projectDir, runId), JSON.stringify(event) + '\n', 'utf-8');
 }
 
@@ -190,7 +191,7 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
  * guidance and negotiation events canonical without reverse-engineering the
  * project root from an arbitrary run path. */
 export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): void {
-  mkdirSync(runDirectory, { recursive: true });
+  requireExistingRunArtifactDirectory(runDirectory);
   appendFileSync(join(runDirectory, 'events.jsonl'), JSON.stringify(event) + '\n', 'utf-8');
 }
 
@@ -237,21 +238,26 @@ export function requestAttemptSummaryRefresh(
 
   const timer = setTimeout(() => {
     debounceTimers.delete(key);
-    const latest = readRefreshState(projectDir, runId);
-    const scheduledAt = new Date().toISOString();
-    const nextState: AttemptSummaryRefreshState = {
-      ...latest,
-      refreshVersion: latest.refreshVersion + 1,
-      pending: false,
-      scheduledAt,
-    };
-    writeRefreshState(projectDir, runId, nextState);
-    appendRunEvent(projectDir, runId, {
-      type: 'attempt_summary_refresh_requested',
-      runId,
-      timestamp: scheduledAt,
-      detail: nextState.reasons.join(', '),
-    });
+    try {
+      const latest = readRefreshState(projectDir, runId);
+      const scheduledAt = new Date().toISOString();
+      const nextState: AttemptSummaryRefreshState = {
+        ...latest,
+        refreshVersion: latest.refreshVersion + 1,
+        pending: false,
+        scheduledAt,
+      };
+      writeRefreshState(projectDir, runId, nextState);
+      appendRunEvent(projectDir, runId, {
+        type: 'attempt_summary_refresh_requested',
+        runId,
+        timestamp: scheduledAt,
+        detail: nextState.reasons.join(', '),
+      });
+    } catch {
+      // A run may be cleaned after the refresh was scheduled. Never recreate
+      // the directory or turn that expected race into an uncaught exception.
+    }
   }, debounceMs);
 
   debounceTimers.set(key, timer);

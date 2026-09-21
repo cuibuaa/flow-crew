@@ -185,6 +185,12 @@ function eventDetail(event: EventLike): string | undefined {
     ?? (text(event.status) ? `status ${text(event.status)}` : undefined);
 }
 
+function eventFiles(event: EventLike): string[] {
+  return Array.isArray(event.files)
+    ? event.files.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+}
+
 function reasonFromEvent(event: EventLike): OperationalEventReason | undefined {
   const detail = eventDetail(event);
   if (!detail) return undefined;
@@ -612,7 +618,9 @@ function formatHumanEvent(runId: string, event: EventLike): string {
   const attempt = finite(event.attemptIndex);
   const context = [stage ? `stage=${stage}` : '', attempt === undefined ? '' : `execution=${attempt}`].filter(Boolean).join(' ');
   const detail = eventDetail(event);
-  return `${timestamp} ${runId} ${eventType(event)}${context ? ` ${context}` : ''}${detail ? ` — ${detail}` : ''}`;
+  const files = eventFiles(event);
+  return `${timestamp} ${runId} ${eventType(event)}${context ? ` ${context}` : ''}`
+    + `${files.length > 0 ? ` paths=${files.join(',')}` : ''}${detail ? ` — ${detail}` : ''}`;
 }
 
 function emitEvents(
@@ -683,20 +691,23 @@ export async function cmdEventsWithDeps(args: string[], overrides: CliEventsDepe
 
   const cursors = new Map<string, string | undefined>();
   let runIds = selectedRunIds(parsed, deps);
-  const emitted = emitEvents(runRoot, runIds, parsed, stdout, cursors, true);
-  if (!parsed.follow) {
-    if (emitted === 0 && !parsed.json) stdout.write('No matching run events.\n');
-    return 0;
-  }
-
   let stopped = false;
   const stop = () => { stopped = true; };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  const sleep = overrides.sleep ?? wait;
-  const pollMs = overrides.followPollMs ?? 1_000;
-  let polls = 0;
+  // Follow mode owns signals before emitting even the first row: a writer can
+  // synchronously receive an interrupt while that row is being rendered.
+  if (parsed.follow) {
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  }
   try {
+    const emitted = emitEvents(runRoot, runIds, parsed, stdout, cursors, true);
+    if (!parsed.follow) {
+      if (emitted === 0 && !parsed.json) stdout.write('No matching run events.\n');
+      return 0;
+    }
+    const sleep = overrides.sleep ?? wait;
+    const pollMs = overrides.followPollMs ?? 1_000;
+    let polls = 0;
     while (!stopped && (overrides.maxFollowPolls === undefined || polls < overrides.maxFollowPolls)) {
       await sleep(pollMs);
       polls += 1;
@@ -704,8 +715,10 @@ export async function cmdEventsWithDeps(args: string[], overrides: CliEventsDepe
       emitEvents(runRoot, runIds, parsed, stdout, cursors, false);
     }
   } finally {
-    process.off('SIGINT', stop);
-    process.off('SIGTERM', stop);
+    if (parsed.follow) {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+    }
   }
   return 0;
 }

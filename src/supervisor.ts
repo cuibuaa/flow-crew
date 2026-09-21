@@ -2037,6 +2037,16 @@ export class Supervisor {
           const basis: AbortBasis = idleMs >= this.config.stuckThresholdMs
             ? { kind: 'idle', stalledMs: idleMs }
             : { kind: 'repeated_guidance', guideCount };
+          if (
+            source === 'operator'
+            && basis.kind === 'repeated_guidance'
+            && guideCount >= 2
+          ) {
+            return {
+              verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
+              reason: `Direction ABORT deferred for ${assessment.targetStage}: this assessment was triggered by newly supplied operator guidance; ${guideCount} prior supervisor GUIDE decision(s) remain available to a later supervisor-triggered assessment after the stage can act on that guidance.`,
+            };
+          }
           const abort = this.writeVerifiedAbort(
             assessment.targetStage,
             'supervisor',

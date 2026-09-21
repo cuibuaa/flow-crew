@@ -46,3 +46,4 @@ spec/delivery-truth-table.test.ts
 
 # Operator-local vitest config: names the machine-private verification tree, never published.
 vitest.local.config.ts
+.cache/

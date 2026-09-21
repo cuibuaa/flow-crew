@@ -50,7 +50,12 @@ afterEach(() => {
 describe('rehearsal language and diagnostic integrity', () => {
   it('prints the complete hello-research report in English and retains pino diagnostics outside stdout', { timeout: 70_000 }, () => {
     const isolated = fixture();
-    const result = rehearse(['examples/hello-research.brief.md'], isolated);
+    const brief = join(isolated.root, 'hello-with-criterion.brief.md');
+    writeFileSync(brief, readFileSync(join(repositoryRoot, 'examples', 'hello-research.brief.md'), 'utf-8').replace(
+      '## Round contract',
+      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+    ));
+    const result = rehearse([brief], isolated);
 
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -79,8 +84,8 @@ describe('rehearsal language and diagnostic integrity', () => {
       '  complete:',
       '    paths: [docs/result.md]',
       '---',
-      '# 验收判据',
-      criterion,
+      '# Acceptance criteria',
+      `1. ${criterion}`,
       '',
     ].join('\n'), 'utf-8');
 
@@ -88,13 +93,13 @@ describe('rehearsal language and diagnostic integrity', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr || result.stdout).toBe(0);
-    expect(result.stdout).toContain(`Criteria lint at line 7: “${criterion}”`);
+    expect(result.stdout).toContain(`Criteria lint at line 7: “1. ${criterion}”`);
     expect(result.stdout).toContain('\n  Risk: This wording makes a specific implementation instrument mandatory');
     expect(result.stdout).toContain('This wording makes a specific implementation instrument mandatory');
     expect(result.stdout).toContain('\n  Suggestion: State the observable property to prove.');
     const generatedText = result.stdout
       .replace(criterion, '')
-      .replace('# 验收判据', '');
+      .replace('# Acceptance criteria', '');
     expect(generatedText).not.toMatch(/[\u3400-\u9fff]/u);
   });
 });

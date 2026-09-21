@@ -295,6 +295,10 @@ export class Orchestrator {
     return this.cancellations.cancelRun(runId, unit);
   }
 
+  async cancellationStatus(runId: string, unit?: string): Promise<CancellationResult> {
+    return this.cancellations.statusRun(runId, unit);
+  }
+
   async retry(id: number): Promise<TaskEntry> {
     const task = this.mustGet(id);
     return this.relaunch(task, 'manual retry');

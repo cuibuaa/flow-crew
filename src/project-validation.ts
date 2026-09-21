@@ -106,6 +106,8 @@ export interface ProjectValidationDependencies {
   fs?: ValidationFileSystem;
   runCommand?: ValidationCommandRunner;
   declaredCommands?: readonly BriefValidationCommand[];
+  /** Exact commands copied from an admitted setup baseline. */
+  commands?: readonly ValidationCommand[];
   now?: () => number;
   maxOutputBytes?: number;
   observer?: ValidationProgressObserver;
@@ -748,9 +750,16 @@ export async function runProjectValidationBaseline(
   const now = dependencies.now ?? Date.now;
   const maxOutputBytes = dependencies.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const declaredCommands = dependencies.declaredCommands;
-  const discovery = declaredCommands === undefined
-    ? discoverProjectValidation(root, fs)
-    : reconcileProjectValidation(root, declaredCommands, fs);
+  const discovery = dependencies.commands
+    ? {
+        state: 'configured' as const,
+        configPath: 'run-local validation_baseline.json',
+        commands: dependencies.commands.map((command) => ({ ...command, args: [...command.args] })),
+        missingRoles: ROLES.filter((role) => !dependencies.commands!.some((command) => command.role === role)),
+      }
+    : declaredCommands === undefined
+      ? discoverProjectValidation(root, fs)
+      : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
 
   for (const role of ROLES) {

@@ -19,6 +19,14 @@ export interface GuidanceEnvelope {
   quarantineReason?: string;
 }
 
+export interface GuidanceDeliveryStatus {
+  id: string;
+  state: 'quarantined' | 'queued' | 'delivered' | 'unknown';
+  reason?: string;
+  stageId?: string;
+  attemptIndex?: number;
+}
+
 const ENVELOPE_PREFIX = '<!-- flowcrew-guidance ';
 const ENVELOPE_SUFFIX = ' -->';
 const STAGE_ID = /^[a-z][a-z0-9_]{0,19}$/;
@@ -190,6 +198,36 @@ export function readGuidanceForStage(runDir: string, stageId: string): GuidanceE
   }
   const seen = new Set<string>();
   return entries.filter((entry) => !seen.has(entry.id) && Boolean(seen.add(entry.id)));
+}
+
+/** Resolve an operator-visible receipt from the immutable envelope and worker
+ * delivery events. Queued is deliberately not described as delivered. */
+export function readGuidanceDeliveryStatus(runDir: string, guidanceId: string): GuidanceDeliveryStatus {
+  let envelope: GuidanceEnvelope | undefined;
+  try {
+    envelope = parseGuidanceLedger(readFileSync(join(runDir, 'supervisor_guidance.md'), 'utf-8'))
+      .find((entry) => entry.id === guidanceId);
+  } catch { /* absence is reported below */ }
+  if (envelope?.quarantined) {
+    return { id: guidanceId, state: 'quarantined', reason: envelope.quarantineReason };
+  }
+  try {
+    const events = readFileSync(join(runDir, 'events.jsonl'), 'utf-8').split(/\r?\n/).filter(Boolean);
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = JSON.parse(events[index]) as Record<string, unknown>;
+      if (event.type !== 'guidance_delivery_checked' || !Array.isArray(event.guidanceIds)
+          || !event.guidanceIds.includes(guidanceId)) continue;
+      return {
+        id: guidanceId,
+        state: 'delivered',
+        ...(typeof event.stageId === 'string' ? { stageId: event.stageId } : {}),
+        ...(typeof event.attemptIndex === 'number' ? { attemptIndex: event.attemptIndex } : {}),
+      };
+    }
+  } catch { /* no delivery event yet */ }
+  return envelope
+    ? { id: guidanceId, state: 'queued' }
+    : { id: guidanceId, state: 'unknown', reason: 'no matching guidance envelope exists' };
 }
 
 function knownCriterionIds(runDir: string): string[] {

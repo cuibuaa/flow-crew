@@ -581,6 +581,14 @@ export interface StoreState {
   program?: ProgramConfig;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
+  /** Structurally declared brief outputs archived before terminal commit. */
+  declaredOutputs?: Array<{
+    path: string;
+    line: number;
+    source: string;
+    disposition: 'create' | 'update' | 'append' | 'replace' | 'input';
+    expectedType: 'file' | 'directory';
+  }>;
   stages: Record<string, StageStatus>;
   /** Append-only cost ledger for dynamic stages replaced by later outer plans. */
   retiredStageUsage?: RetiredStageUsage[];
@@ -1030,6 +1038,45 @@ export interface RunReservation {
   reservedAt: string;
 }
 
+/** Give pre-initialization artifact writers a classified, expiring identity. */
+export function requireRunArtifactDirectory(projectDir: string, runId: string): string {
+  if (!runId || basename(runId) !== runId || runId === '.' || runId === '..') {
+    throw new Error(`Run identifier is not a safe directory name: ${runId}`);
+  }
+  // Validate before deriving or probing a path.  Otherwise a pre-existing
+  // ../escape/run.json turns the state check itself into traversal authority.
+  const dir = runDir(projectDir, runId);
+  if (existsSync(join(dir, 'run.json'))) return dir;
+  if (readRunReservation(projectDir, runId)) return dir;
+  // Artifact APIs can precede scheduler initialization. Classify that window
+  // with the same expiring reservation marker as reserveRun instead of
+  // creating an unidentifiable directory or inventing run state.
+  ensureGlobalRunsDir();
+  mkdirSync(dir, { recursive: true });
+  if (!existsSync(join(dir, 'run.json')) && !readRunReservation(projectDir, runId)) {
+    const reservation: RunReservation = {
+      version: 1,
+      runId,
+      projectDir: resolve(projectDir),
+      reservedAt: new Date().toISOString(),
+    };
+    atomicWrite(join(dir, RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
+  }
+  return dir;
+}
+
+/** Variant for consumers which already received the exact run directory. */
+export function requireExistingRunArtifactDirectory(runDirectory: string): string {
+  if (existsSync(join(runDirectory, 'run.json'))) return runDirectory;
+  try {
+    const marker = JSON.parse(readFileSync(join(runDirectory, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
+    const reservedAt = Date.parse(String(marker.reservedAt ?? ''));
+    if (marker.version === 1 && marker.runId === basename(runDirectory)
+      && Number.isFinite(reservedAt) && Date.now() - reservedAt <= RUN_RESERVATION_TTL_MS) return runDirectory;
+  } catch { /* classified below */ }
+  throw new Error(`Run directory ${runDirectory} is neither initialized nor actively reserved`);
+}
+
 /**
  * Allocate the run identity before a daemon launches the CLI. The directory and
  * marker are the durable task→run association; run.json is deliberately absent
@@ -1101,10 +1148,6 @@ export function initializeReservedRun(
   if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
   const dir = runDir(normalizedProjectDir, runId);
   if (existsSync(join(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
-  mkdirSync(join(dir, 'stages'), { recursive: true });
-  for (const sid of stageIds) {
-    mkdirSync(stageDir(normalizedProjectDir, runId, sid), { recursive: true });
-  }
   const stages: Record<string, StageStatus> = {};
   for (const sid of stageIds) stages[sid] = { status: 'pending', retries: 0 };
   const state: StoreState = {
@@ -1117,7 +1160,13 @@ export function initializeReservedRun(
   };
   const baseCommit = captureGitHead(normalizedProjectDir);
   if (baseCommit) state.baseCommit = baseCommit;
+  // State is the directory's identity. Publish it before any optional child
+  // directories so every observable initialization point is classifiable.
   writeRunState(normalizedProjectDir, runId, state);
+  mkdirSync(join(dir, 'stages'), { recursive: true });
+  for (const sid of stageIds) {
+    mkdirSync(stageDir(normalizedProjectDir, runId, sid), { recursive: true });
+  }
   atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
   try { unlinkSync(join(dir, RUN_RESERVATION_FILE)); } catch { /* initialized state is authoritative */ }
   return { runId, runDirPath: dir };

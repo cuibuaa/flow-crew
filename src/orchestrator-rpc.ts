@@ -9,6 +9,9 @@ import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import type { OperationalProjection } from './cli-events.js';
 
 export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
+/** Cancellation convergence itself may consume 1.5s; leave transport room for
+ * request parsing, observation, and the final response. */
+export const CANCELLATION_RPC_TIMEOUT_MS = 5_000;
 
 export class DaemonUnavailableError extends Error {
   readonly exitCode = 1;
@@ -42,6 +45,7 @@ export type RpcRequest =
   | { cmd: 'show'; id: number; raw?: boolean }
   | { cmd: 'cancel'; id: number }
   | { cmd: 'cancel-run'; runId: string; unit?: string }
+  | { cmd: 'cancel-status'; runId: string; unit?: string }
   | { cmd: 'retry'; id: number }
   | { cmd: 'tail'; id: number; lines?: number; follow?: boolean }
   | { cmd: 'status' }

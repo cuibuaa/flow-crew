@@ -26,6 +26,7 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { TaskRegistry, type TaskCreateInput } from '../src/task-registry.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const WORKFLOW = [
@@ -104,15 +105,15 @@ describe('Dashboard admission handshake', () => {
       },
       isProjectBusy: () => null,
     });
-    const brief = 'Fix the login race';
+    const brief = '# What the report must show\n\n1. The source must contain `new JSDOM(...)` while fixing the login race.';
     const checked = await preflight(app, brief);
     expect(checked.report).toMatchObject({
-      inputKind: 'plain_text',
+      inputKind: 'brief',
       contractReady: true,
       frontmatter: { status: 'absent' },
       requiresAcknowledgement: true,
     });
-    expect(checked.report.findings.map((finding) => finding.code)).toContain('plain_text_input');
+    expect(checked.report.findings.map((finding) => finding.code)).toContain('criterion_instrument_wording');
 
     const unchecked = await app.inject({ method: 'POST', url: '/api/tasks', payload: { brief, workflow: 'default' } });
     expect(unchecked.statusCode).toBe(409);
@@ -638,11 +639,13 @@ describe('quick and operator entry behavior', () => {
     expect(plain.status).toBe(2);
     expect(`${plain.stdout}${plain.stderr}`).toContain('Brief preflight');
     expect(`${plain.stdout}${plain.stderr}`).toContain('[plain_text_input]');
-    expect(`${plain.stdout}${plain.stderr}`).toContain('--acknowledge-brief-warnings=');
+    expect(`${plain.stdout}${plain.stderr}`).toContain('no structurally extractable criterion');
+    expect(`${plain.stdout}${plain.stderr}`).not.toContain('--acknowledge-brief-warnings=');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
 
+    const digestGuardedBrief = '# Goal\nFix the race.\n\n## What the report must show\n1. Preserve exact brief admission.\n';
     const wrong = runQuickSync(isolated, [
-      'quick', 'Fix the race', '--project', isolated.project,
+      'quick', digestGuardedBrief, '--project', isolated.project,
       '--acknowledge-brief-warnings=wrong-digest',
     ]);
     expect(wrong.status).toBe(2);
@@ -659,13 +662,21 @@ describe('quick and operator entry behavior', () => {
       return { id: 7, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
     });
     try {
-      const exact = 'Automated one-line input with trailing newline\n';
+      const exact = [
+        '# Goal',
+        'Automate the guarded submit.',
+        '',
+        '## What the report must show',
+        '1. Preserve these exact stdin bytes through registration.',
+        '',
+      ].join('\n');
+      writeReadySetupRecord(isolated.project, exact, isolated.fcHome);
       const result = await runQuick(isolated, [
         'quick', '--background', '--acknowledge-brief-warnings', '--project', isolated.project, '-',
       ], exact, socketPath);
       expect(result.code).toBe(0);
       expect(result.stdout).toContain('Brief preflight');
-      expect(result.stdout).toContain('[plain_text_input]');
+      expect(result.stdout).toContain('[terminal_states_missing]');
       expect(request).toMatchObject({
         cmd: 'register',
         task: {
@@ -686,7 +697,7 @@ describe('quick and operator entry behavior', () => {
     const runId = 'existing-fixture';
     const runPath = join(isolated.fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    const brief = '# Goal\nContinue exactly.\n';
+    const brief = '# Goal\nContinue exactly.\n\n## What the report must show\n1. Continue the admitted run snapshot.\n';
     writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
     writeFileSync(join(runPath, 'run.json'), JSON.stringify({
       runId,
@@ -720,7 +731,7 @@ describe('quick and operator entry behavior', () => {
     const runId = 'transported-existing-fixture';
     const runPath = join(isolated.fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    const brief = '# Goal\nConsume the captured continuation.\n';
+    const brief = '# Goal\nConsume the captured continuation.\n\n## What the report must show\n1. Use the transported admitted snapshot.\n';
     const admission = explicitAdmission(brief);
     writeFileSync(join(runPath, 'task_brief.md'), `${brief}\n`, 'utf-8');
     writeFileSync(join(runPath, 'run.json'), JSON.stringify({

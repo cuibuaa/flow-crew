@@ -826,7 +826,10 @@ export function recordPlanRetryRefusal(input: {
   } else if (attempts.length >= maxAttempts) {
     terminal = {
       disposition: 'attempts_exhausted',
-      reason: `Plan retry exhausted ${maxAttempts} bounded attempts. Unsatisfied requirement(s): ${unresolvedSummary(nextUnsatisfied)}`,
+      // The retained incumbent ledger is useful history, but it is not the
+      // cause of the final refusal. Report the requirements observed on the
+      // attempt which actually exhausted the budget.
+      reason: `Plan retry exhausted ${maxAttempts} bounded attempts. Unsatisfied requirement(s): ${unresolvedSummary(unsatisfied)}`,
     };
   }
   const state: MonotonePlanRetryState = {

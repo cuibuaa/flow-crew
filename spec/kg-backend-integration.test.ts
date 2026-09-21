@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -9,6 +9,9 @@ import {
 
 vi.mock('../src/store.js', () => ({
   runDir: (projectDir: string, runId: string) => join(projectDir, '.fc', 'runs', runId),
+  requireRunArtifactDirectory: (projectDir: string, runId: string) => {
+    mkdirSync(join(projectDir, '.fc', 'runs', runId), { recursive: true });
+  },
   stageDir: (projectDir: string, runId: string, stageId: string) => join(projectDir, '.fc', 'runs', runId, 'stages', stageId),
   readStageStatus: vi.fn(() => ({ status: 'complete', retries: 0, artifacts: ['file.ts'] })),
   readStageOutput: vi.fn(() => 'stage output text'),

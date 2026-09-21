@@ -363,7 +363,12 @@ describe('ship-setup test population integrity', () => {
     expect(stderr.value).toContain(`missing from target: ${missing}`);
     if (extra) expect(stderr.value).toContain(`extra in target: ${extra}`);
     else expect(stderr.value).not.toContain('extra in target:');
-    expect(existsSync(join(root, 'state', 'ship-setups'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(
+      root,
+      'state',
+      'ship-setups',
+      readdirSync(join(root, 'state', 'ship-setups'))[0],
+    ), 'utf-8')).state).toBe('refused');
   });
 
   it('uses name-local occurrences to preserve duplicate TAP multiplicity', async () => {
@@ -567,7 +572,12 @@ describe('ship-setup test population integrity', () => {
       [targetDir, 'test'],
       [targetDir, 'lint'],
     ]);
-    expect(existsSync(join(root, 'state', 'ship-setups'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(
+      root,
+      'state',
+      'ship-setups',
+      readdirSync(join(root, 'state', 'ship-setups'))[0],
+    ), 'utf-8')).state).toBe('refused');
   });
 
   it('keeps a failed TAP target as the governing red baseline with its no-regression gate', async () => {
@@ -713,7 +723,12 @@ describe('ship-setup test population integrity', () => {
         reason: expect.stringContaining('mismatch from baseline output'),
       })],
     });
-    expect(existsSync(join(root, 'state', 'ship-setups'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(
+      root,
+      'state',
+      'ship-setups',
+      readdirSync(join(root, 'state', 'ship-setups'))[0],
+    ), 'utf-8')).state).toBe('refused');
   });
 
   it('records identical target baseline results and gate criteria for TAP-matched and unverified populations', async () => {

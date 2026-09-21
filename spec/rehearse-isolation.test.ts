@@ -69,6 +69,16 @@ function runRehearsal(
   );
 }
 
+function writeCriterionBrief(fixture: RehearsalFixture, name = 'brief.md'): { path: string; source: string } {
+  const source = readFileSync(helloBrief, 'utf-8').replace(
+    '## Round contract',
+    '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+  );
+  const path = join(fixture.project, name);
+  writeFileSync(path, source, 'utf-8');
+  return { path, source };
+}
+
 afterEach(() => {
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -76,6 +86,7 @@ afterEach(() => {
 describe('rehearsal Git isolation', () => {
   it('ignores signing, hook, template, config and repository controls inherited from the caller', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
+    const brief = writeCriterionBrief(fixture, 'git-isolation.md');
     const missing = join(fixture.root, 'does-not-exist');
     writeFileSync(join(fixture.home, '.gitconfig'), [
       '[commit]',
@@ -89,7 +100,7 @@ describe('rehearsal Git isolation', () => {
       '',
     ].join('\n'), 'utf-8');
 
-    const result = runRehearsal(fixture, helloBrief, {
+    const result = runRehearsal(fixture, brief.path, {
       GIT_CONFIG_COUNT: '2',
       GIT_CONFIG_KEY_0: 'commit.gpgSign',
       GIT_CONFIG_VALUE_0: 'true',
@@ -119,7 +130,10 @@ describe('rehearsal Git isolation', () => {
     const fixture = rehearsalFixture();
     const brief = join(fixture.project, 'brief.md');
     const sentinel = join(fixture.project, 'sentinel.txt');
-    const briefSource = readFileSync(helloBrief, 'utf-8');
+    const briefSource = readFileSync(helloBrief, 'utf-8').replace(
+      '## Round contract',
+      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+    );
     writeFileSync(brief, briefSource, 'utf-8');
     writeFileSync(sentinel, 'unchanged\n', 'utf-8');
 
@@ -142,20 +156,21 @@ describe('rehearsal Git isolation', () => {
 
   it('turns a real Git setup failure into a concise report with executable next steps', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
+    const validBrief = writeCriterionBrief(fixture, 'git-failure.md');
     const bin = join(fixture.root, 'broken-git-bin');
     mkdirSync(bin, { recursive: true });
     const git = join(bin, 'git');
     writeFileSync(git, `#!${process.execPath}\nprocess.exit(73);\n`, 'utf-8');
     chmodSync(git, 0o755);
 
-    const result = runRehearsal(fixture, helloBrief, { PATH: bin });
+    const result = runRehearsal(fixture, validBrief.path, { PATH: bin });
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(1);
     expect(output).toContain('Git could not create the isolated temporary repository (git exit 73).');
     expect(output).toContain('Next: git --version');
-    expect(output).toContain(`Static fallback: flowcrew rehearse '${helloBrief}' --static-only`);
+    expect(output).toContain(`Static fallback: flowcrew rehearse '${validBrief.path}' --static-only`);
     expect(output).toContain('❌ 1 contract problem');
     expect(output).not.toContain('Buffer <');
     expect(output).not.toContain('at cmdRehearse');

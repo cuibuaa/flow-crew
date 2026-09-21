@@ -135,9 +135,11 @@ function successfulGit(
 function validationRunner(testExit = 0): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
   return vi.fn<ValidationCommandRunner>((request) => ({
     exitCode: request.role === 'test' ? testExit : 0,
-    stdout: request.role === 'test' && testExit !== 0
-      ? 'FAIL spec/existing.test.ts\nTests 1 failed'
-      : `${request.role} passed`,
+    stdout: request.args.includes('--collect-only')
+      ? 'checks/test_example.py::test_example\n'
+      : request.role === 'test' && testExit !== 0
+        ? 'FAIL spec/existing.test.ts\nTests 1 failed'
+        : `${request.role} passed`,
     durationMs: 4,
   }));
 }
@@ -186,7 +188,14 @@ function copyPopulationTrackedFiles(request: GitWorktreeRequest): void {
 
 function noReadyRecord(): boolean {
   const directory = join(fixture.state, 'ship-setups');
-  return !existsSync(directory) || readdirSync(directory).length === 0;
+  if (!existsSync(directory)) return true;
+  return readdirSync(directory).every((name) => {
+    try {
+      return JSON.parse(readFileSync(join(directory, name), 'utf-8')).state !== 'ready';
+    } catch {
+      return true;
+    }
+  });
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
@@ -1156,11 +1165,16 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
 
     expect(runner).toHaveBeenCalledTimes(3);
-    expect(writeAtomic).toHaveBeenCalledTimes(1);
+    // The ready write fails, then the fail-closed path makes one best-effort
+    // attempt to persist the distinct refused outcome for launch diagnostics.
+    expect(writeAtomic).toHaveBeenCalledTimes(2);
     expect(report).toMatchObject({
       state: 'refused',
       validationBaseline: { version: 1 },
-      blockers: [expect.objectContaining({ phase: 'record', reason: expect.stringContaining('state volume unavailable') })],
+      blockers: expect.arrayContaining([
+        expect.objectContaining({ phase: 'record', reason: expect.stringContaining('ready record') }),
+        expect.objectContaining({ phase: 'record', reason: expect.stringContaining('refused setup record') }),
+      ]),
     });
     expect(noReadyRecord()).toBe(true);
     expect(report.blockers[0].repair).toMatch(/restore|choose|retry|writable/i);

@@ -65,12 +65,17 @@ describe('independent dispatch-admission QA probes', () => {
     for (const name of [
       'research_multi_writer',
       'diagram_extra_dist',
-      'diagram_extra_directory',
       'admitted_single_owner',
     ]) {
       const report = inspectDispatchAdmission(fixture(name).input);
       expect(report.pass, `${name}: ${report.errors.join('\n')}`).toBe(true);
     }
+  });
+
+  it('rejects the recorded empty-criteria fixture instead of vacuously admitting it', () => {
+    const report = inspectDispatchAdmission(fixture('diagram_extra_directory').input);
+    expect(report.pass).toBe(false);
+    expect(report.errors).toContain('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
   });
 
   it('rejects terminal ownership of research output through exact, tree, and glob scopes', () => {

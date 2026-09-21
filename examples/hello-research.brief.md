@@ -50,3 +50,12 @@ one tracked TypeScript file.
 
 The framework owns the ship or ceiling report. Do not create either terminal
 artifact yourself.
+
+## What each round's report must show
+
+1. The counting method this round used, named in `label`, and why it is
+   read-only.
+2. The number of tracked TypeScript files it found, recorded in `result`, with
+   the exact command that produced it and that command's direct exit code.
+3. Whether this round's method disagrees with any earlier round's, and by how
+   many files.

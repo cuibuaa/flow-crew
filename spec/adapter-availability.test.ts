@@ -23,6 +23,7 @@ import {
   type AdapterName,
 } from '../src/adapters/availability.js';
 import { normalizeAdapterName } from '../src/adapters/loader.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const fixtureRoots: string[] = [];
@@ -99,15 +100,20 @@ function structuredBrief(): string {
     '# Goal',
     'Exercise adapter resolution.',
     '',
+    '## What the report must show',
+    '1. Report which adapter resolution branch was reached.',
+    '',
   ].join('\n');
 }
 
 function quickUntilWorkflowLookup(fixture: CliFixture) {
+  const brief = structuredBrief();
+  writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
   return runCli(fixture, [
     'quick',
     '--project', fixture.project,
     '--workflow', 'intentionally-missing',
-    '--task', structuredBrief(),
+    '--task', brief,
   ]);
 }
 
@@ -376,9 +382,11 @@ describe('CLI adapter behavior', () => {
       exit_code: 1,
     }), 'utf-8');
 
+    const brief = structuredBrief();
+    writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
     const result = runCli(fixture, [
       'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'failure',
-      '--no-supervise', '--no-campaign', '--task', structuredBrief(),
+      '--no-supervise', '--no-campaign', '--task', brief,
     ], { MOCK_FIXTURE_DIR: mockDir });
     const output = `${result.stdout}${result.stderr}`;
 

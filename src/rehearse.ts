@@ -17,7 +17,7 @@
  * committed honestly.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
@@ -60,6 +60,12 @@ export interface IsolatedRehearsalResult {
     projectDir: string;
     runDir: string;
   };
+  /** Separate isolated runs are required when declared outcomes are mutually
+   * exclusive under the brief's own stopping rule. */
+  retainedOutcomeArtifacts?: Record<string, {
+    projectDir: string;
+    runDir: string;
+  }>;
 }
 
 interface RunRehearsalOptions extends IsolatedRehearsalOptions {
@@ -126,6 +132,30 @@ export function projectBriefPreflightContext(
 }
 
 const mark = { ok: '✓', warn: '⚠', fail: '✗' } as const;
+
+const NO_CANDIDATE_OUTCOME = /(?:\boutcome\s*:\s*no_candidate\b|\bno[-_ ]candidate\b)/i;
+
+/**
+ * A rehearsal should follow an outcome the brief permits, not every outcome it
+ * happens to discuss. Keep this deliberately lexical and conservative: a
+ * positive literal declaration is enough, while common prohibition and
+ * explicit-absence forms suppress only the clause that contains them.
+ */
+export function briefDeclaresNoCandidateOutcome(brief: string): boolean {
+  const clauses = brief.split(/\r?\n|[!?;](?:\s+|$)|\.(?:\s+|$)/);
+  return clauses.some((clause) => {
+    if (!NO_CANDIDATE_OUTCOME.test(clause)) return false;
+    const token = '(?:outcome\\s*:\\s*no_candidate|no[-_ ]candidate)';
+    const negations = [
+      new RegExp(`\\bno\\s+(?:${token})\\b`, 'i'),
+      new RegExp(`\\b(?:do|does|did|must|should|shall|may|can)\\s+not\\b[^.!?;]{0,120}\\b${token}\\b`, 'i'),
+      new RegExp(`\\b(?:never|without)\\b[^.!?;]{0,120}\\b${token}\\b`, 'i'),
+      new RegExp(`\\b${token}\\b[^.!?;]{0,80}\\b(?:is|are)\\s+not\\b`, 'i'),
+      new RegExp(`\\b${token}\\b[^.!?;]{0,80}\\b(?:undeclared|forbidden|unsupported|disallowed)\\b`, 'i'),
+    ];
+    return !negations.some((pattern) => pattern.test(clause));
+  });
+}
 
 export function rehearsalExitCode(findings: ReadonlyArray<Finding>): 0 | 1 {
   return findings.some((finding) => finding.level === 'fail') ? 1 : 0;
@@ -253,7 +283,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   const preflightContext = projectBriefPreflightContext(projectDir, brief);
   const preflight = inspectBrief(brief, preflightContext);
   for (const finding of preflight.findings) {
-    add(finding.level, finding.message
+    add(finding.code === 'brief_criteria_missing' ? 'fail' : finding.level, finding.message
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')
       + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : ''));
   }
@@ -276,8 +306,11 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   let simulated = false;
   let tempFcHome = '';
   let tempProject = '';
+  let noCandidateProject = '';
   let rehearsalRunDir = '';
+  let noCandidateRunDir = '';
   let retainedArtifacts: IsolatedRehearsalResult['retainedArtifacts'];
+  let retainedOutcomeArtifacts: IsolatedRehearsalResult['retainedOutcomeArtifacts'];
   if (!staticOnly && rc && !hasFail()) {
     simulated = true;
     tempFcHome = mkdtempSync(join(tmpdir(), 'fc-rehearse-home-'));
@@ -297,6 +330,81 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const sign = hib ? 1 : -1;
       const base = rc.baseline;
       const beat = rc.stop?.beat;
+      const schemaProperties = rc.resultSchema && typeof rc.resultSchema === 'object'
+        && rc.resultSchema.properties && typeof rc.resultSchema.properties === 'object'
+        ? rc.resultSchema.properties as Record<string, unknown>
+        : {};
+      const resultProperty = schemaProperties.result;
+      const numericResultSchema = resultProperty && typeof resultProperty === 'object'
+        ? resultProperty as Record<string, unknown>
+        : {};
+      const requiredFields = rc.resultSchema && typeof rc.resultSchema === 'object'
+        && Array.isArray(rc.resultSchema.required)
+        ? rc.resultSchema.required.filter((field): field is string => typeof field === 'string')
+        : [];
+      const resultStdRequired = requiredFields.includes('result_std');
+      const resultStdProperty = schemaProperties.result_std;
+      const resultStdSchema = resultStdProperty && typeof resultStdProperty === 'object'
+        ? resultStdProperty as Record<string, unknown>
+        : {};
+      const resultStdType = resultStdSchema.type;
+      const resultStdAllowsNumber = resultStdType === undefined
+        || resultStdType === 'number'
+        || resultStdType === 'integer'
+        || (Array.isArray(resultStdType) && (
+          resultStdType.includes('number') || resultStdType.includes('integer')
+        ));
+      const fieldFloors = rc.integrity?.fieldFloors ?? {};
+      const stdFloor = Math.max(
+        0,
+        typeof resultStdSchema.minimum === 'number' ? resultStdSchema.minimum : 0,
+        fieldFloors.result_std ?? 0,
+      );
+      const stdCeiling = typeof resultStdSchema.maximum === 'number'
+        ? resultStdSchema.maximum
+        : Infinity;
+      const integerStd = resultStdType === 'integer'
+        || (Array.isArray(resultStdType) && resultStdType.includes('integer') && !resultStdType.includes('number'));
+      const enumStdCandidates = Array.isArray(resultStdSchema.enum)
+        ? resultStdSchema.enum.filter((value): value is number => (
+          typeof value === 'number' && Number.isFinite(value) && value >= stdFloor && value <= stdCeiling
+        )).sort((left, right) => left - right)
+        : undefined;
+      const minimumStdCandidate = integerStd ? Math.ceil(stdFloor) : stdFloor;
+      const resultStd = !resultStdRequired
+        ? undefined
+        : !resultStdAllowsNumber
+          ? undefined
+          : enumStdCandidates
+            ? enumStdCandidates[0]
+            : minimumStdCandidate <= stdCeiling
+              ? minimumStdCandidate
+              : undefined;
+      const seMultiple = rc.stop?.improvementSEMultiple ?? 1;
+      const margin = Math.max(
+        rc.stop?.minImprovement ?? 0,
+        resultStd === undefined ? 0 : Math.abs(resultStd) * seMultiple,
+      );
+      const epsilon = Number.EPSILON * Math.max(1, Math.abs(base), Math.abs(beat ?? base)) * 8;
+      const crossing = beat === undefined
+        ? undefined
+        : hib
+          ? Math.max(beat, base + margin + epsilon)
+          : Math.min(beat, base - margin - epsilon);
+      const minimum = typeof numericResultSchema.minimum === 'number' ? numericResultSchema.minimum : -Infinity;
+      const maximum = typeof numericResultSchema.maximum === 'number' ? numericResultSchema.maximum : Infinity;
+      const outlierFactor = rc.integrity?.outlierFactor ?? 5;
+      const outlierSafe = crossing === undefined || Math.abs(base) <= 1e-9
+        || (hib ? crossing <= Math.abs(base) * outlierFactor : crossing >= -(Math.abs(base) * outlierFactor));
+      const maxStdRatio = rc.integrity?.maxStdRatio ?? 0.30;
+      const varianceSafe = crossing === undefined || resultStd === undefined || Math.abs(crossing) <= 1e-6
+        || Math.abs(resultStd) / Math.abs(crossing) <= maxStdRatio;
+      const rejectStd = (rc.integrity?.rejectIfPositive ?? []).includes('result_std')
+        && (resultStd ?? 0) > 0;
+      const uncertaintySafe = !resultStdRequired || (resultStd !== undefined && varianceSafe && !rejectStd);
+      const shipProbe = crossing !== undefined && crossing >= minimum && crossing <= maximum && outlierSafe && uncertaintySafe
+        ? crossing
+        : undefined;
       // Trajectory sized FROM the brief's own stop rules and ceiling floor so a
       // policy-owned ceiling is actually reachable: one mild keeper strictly
       // below the ship target, one decoy AT the target (forcing ship→confirm),
@@ -305,13 +413,15 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const halt = rc.stop?.haltAfterNoImprovement;
       const maxR = rc.stop?.maxRounds;
       const floorN = ts?.['ceiling_hit']?.floor?.minAttemptedStages ?? 0;
-      const head = 1 + (beat !== undefined ? 1 : 0);
+      const head = 1 + (shipProbe !== undefined ? 1 : 0);
       let totalRounds = Math.max(floorN, head + (halt ?? 3), head + 1);
       if (maxR !== undefined) totalRounds = Math.min(totalRounds, Math.max(maxR, head + 1));
       const r1 = beat !== undefined ? base + (beat - base) * 0.5 : base + sign * (Math.abs(base) * 0.1 + 1);
       const seq: Array<{ label: string; result: number }> = [
         { label: 'rehearse_r1_mild', result: r1 },
-        ...(beat !== undefined ? [{ label: 'rehearse_r2_decoy', result: beat + sign }] : []),
+        // Use the closest policy- and schema-valid crossing. A fixed unit jump
+        // made bounded metrics invalid before ship/confirm could run.
+        ...(shipProbe !== undefined ? [{ label: 'rehearse_r2_decoy', result: shipProbe }] : []),
       ];
       for (let i = seq.length; i < totalRounds; i++) {
         seq.push({ label: `rehearse_r${i + 1}_flat`, result: base + (r1 - base) * Math.max(0.1, 0.8 - 0.1 * i) });
@@ -322,13 +432,14 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const roundPayload = (label: string, result: number): string => {
         const payload: Record<string, unknown> = { label, result };
         const schema = rc.resultSchema as { required?: string[]; properties?: Record<string, { type?: string }> } | undefined;
-        const fieldFloors = (rc.integrity as { fieldFloors?: Record<string, number> } | undefined)?.fieldFloors ?? {};
         for (const field of schema?.required ?? []) {
           if (field in payload) continue;
           const t = schema?.properties?.[field]?.type;
           // Numeric placeholders must clear any brief-declared field floor
           // (gate #3) — the rehearsal probes the gates, it shouldn't trip them.
-          payload[field] = t === 'number' ? (fieldFloors[field] ?? result)
+          payload[field] = field === 'result_std' && resultStd !== undefined
+            ? resultStd
+            : t === 'number' ? (fieldFloors[field] ?? result)
             : t === 'boolean' ? true : `rehearsal_${field}`;
         }
         for (const [field, min] of Object.entries(fieldFloors)) {
@@ -405,10 +516,12 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const declaredTerminalPaths = new Set(
         Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []),
       );
-      const adapter: import('./adapters/base.js').Adapter = {
+      const terminalizingAdapter = (
+        scripted: InstanceType<typeof ScriptedAdapter>,
+      ): import('./adapters/base.js').Adapter => ({
         async run(prompt, role, opts) {
           if (opts.stageId !== 'research_finalize') {
-            return scriptedAdapter.run(prompt, role, opts);
+            return scripted.run(prompt, role, opts);
           }
           let terminalPath = '';
           let terminalStatus = '';
@@ -437,7 +550,8 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
             writeAttribution: 'structured',
           };
         },
-      };
+      });
+      const adapter = terminalizingAdapter(scriptedAdapter);
       const t0 = Date.now();
       const state = await scheduler.runWorkflow(
         config, raw, tempProject, adapter, new Map(), undefined, agentsDir,
@@ -470,7 +584,9 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         const decoy = journal.rounds.find((r) => r.label.includes('decoy'));
         const summary = journal.rounds.map((r) => `${r.label}=${r.result}${r.confirmFailed ? '(confirm rejected; excluded)' : ''}`).join(' · ');
         add('ok', `Round journal: ${summary}`);
-        if (beat !== undefined) {
+        if (beat !== undefined && shipProbe === undefined) {
+          add('warn', `No schema- and integrity-valid value can cross the declared ship target ${beat}; the ship outcome is not exercisable by this brief`);
+        } else if (beat !== undefined) {
           if (!decoy) add('warn', 'The decoy round is missing from the journal — the ship path was not exercised');
           else if (decoy.confirmFailed) add('ok', 'The decoy proposed ship, confirm rejected it, the candidate was excluded, and the loop continued');
           else if (state.status !== store.RUN_STATUS.SHIPPED) add('warn', 'The decoy passed confirm but the terminal status is not shipped — inspect the confirm semantics');
@@ -491,15 +607,126 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         else add('fail', `Declared path ${declared} is missing after the terminal state — the terminal contract failed`);
       }
 
-      if (rc.confirm && beat !== undefined) {
+      if (rc.confirm && beat !== undefined && shipProbe !== undefined) {
         if (existsSync(join(runDirPath, 'research_confirm.json'))) add('ok', 'The confirm command was executed and recorded in `research_confirm.json`');
         else add('warn', 'Confirm was never executed — a ship decision may never have been proposed');
       }
 
       const pendingStages = Object.entries(state.stages ?? {}).filter(([, s]) => store.isPendingStageStatus(s.status));
       if (pendingStages.length > 0) add('fail', `run.json still contains pending stages: ${pendingStages.map(([k]) => k).join(', ')}`);
+
+      // A no-candidate round can itself trigger a stopping rule, so it cannot
+      // always coexist with the ship/confirm probe in one run. Exercise it in
+      // a second isolated run using the same parsed brief and normal scheduler
+      // ingestion path.
+      const declaresNoCandidate = briefDeclaresNoCandidateOutcome(brief);
+      if (declaresNoCandidate) {
+        noCandidateProject = mkdtempSync(join(tmpdir(), 'fc-rehearse-no-candidate-'));
+        initializeTemporaryGitRepository(noCandidateProject, tempFcHome);
+        mkdirSync(join(noCandidateProject, dirname(resultRel)), { recursive: true });
+        const noCandidateTurns = [
+          { label: 'rehearse_no_candidate', noCandidate: true as const },
+          ...seq.map((round) => ({ ...round, noCandidate: false as const })),
+        ];
+        const noCandidateScript: Record<string, import('./adapters/scripted.js').StageScript> = {
+          plan: noCandidateTurns.map((round, index) => {
+            const measureId = `probe_${index + 1}`;
+            const finalDependency = criterionIds.length > 0 ? 'rehearsal_gate' : measureId;
+            const stages: Array<Record<string, unknown>> = [{
+              id: measureId,
+              role: 'researcher',
+              depends_on: [],
+              dependency_reasons: {},
+              scope: [resultRel, `${resultRel}.no_candidate.json`],
+              criterion_refs: criterionIds,
+              prompt_template: round.noCandidate
+                ? 'write the declared no-candidate sidecar with outcome, label, and reason'
+                : `rehearsal round ${round.label}`,
+            }];
+            if (criterionIds.length > 0) {
+              stages.push({
+                id: 'rehearsal_gate',
+                role: 'qa',
+                depends_on: [measureId],
+                dependency_reasons: { [measureId]: 'verify the synthetic round against every canonical criterion' },
+                scope: [],
+                is_gate: true,
+                criterion_refs: criterionIds,
+                prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
+              });
+            }
+            stages.push({
+              id: 'research_finalize',
+              role: 'researcher',
+              depends_on: [finalDependency],
+              dependency_reasons: { [finalDependency]: 'commit only the settled policy outcome' },
+              scope: [...declaredTerminalPaths],
+              condition: 'research.decision != continue',
+              prompt_template: 'write only the terminal path selected by research_decision.json',
+            });
+            return { runFiles: { 'dispatch.yaml': JSON.stringify(stages, null, 2) } };
+          }),
+        };
+        if (criterionIds.length > 0 && script.rehearsal_gate) {
+          noCandidateScript.rehearsal_gate = script.rehearsal_gate;
+        }
+        noCandidateTurns.forEach((round, index) => {
+          noCandidateScript[`probe_${index + 1}`] = round.noCandidate
+            ? {
+                projectFiles: {
+                  [`${resultRel}.no_candidate.json`]: JSON.stringify({
+                    label: round.label,
+                    outcome: 'no_candidate',
+                    reason: 'the isolated rehearsal intentionally found no safe acting candidate',
+                  }),
+                },
+                output: 'rehearsal wrote the canonical no-candidate sidecar',
+              }
+            : {
+                projectFiles: { [resultRel]: roundPayload(round.label, round.result) },
+                output: `rehearsal measured ${round.label} = ${round.result}`,
+              };
+        });
+        const noCandidateWorkflow = scheduler.loadWorkflow(
+          join(import.meta.dirname ?? '.', '..', 'config', 'workflows', 'research.yaml'),
+        );
+        noCandidateWorkflow.config.defaults.max_iterations = noCandidateTurns.length + 3;
+        const noCandidateState = await scheduler.runWorkflow(
+          noCandidateWorkflow.config,
+          noCandidateWorkflow.raw,
+          noCandidateProject,
+          terminalizingAdapter(new ScriptedAdapter(noCandidateScript)),
+          new Map(),
+          undefined,
+          agentsDir,
+          undefined,
+          brief,
+          true,
+          false,
+          undefined,
+          false,
+        );
+        noCandidateRunDir = join(tempFcHome, 'runs', noCandidateState.runId!);
+        const noCandidateJournal = JSON.parse(
+          readFileSync(join(noCandidateRunDir, 'research_journal.json'), 'utf-8'),
+        ) as { rounds?: Array<{ label?: string; outcome?: string }> };
+        const noCandidateRound = noCandidateJournal.rounds?.find((round) => round.outcome === 'no_candidate');
+        const noCandidateMarker = readdirSync(noCandidateRunDir)
+          .find((name) => /research_round_\d+_no_candidate_consumed\.json$/.test(name));
+        if (noCandidateRound && noCandidateMarker) {
+          add('ok', `Declared outcome no_candidate exercised: journal label=${noCandidateRound.label}; terminal status=${noCandidateState.status}; consumed artifact=${noCandidateMarker}`);
+        } else {
+          add('fail', 'Declared outcome no_candidate was not journaled and consumed by the isolated scheduler rehearsal');
+        }
+      }
       if (keep) {
         retainedArtifacts = { projectDir: tempProject, runDir: runDirPath };
+        retainedOutcomeArtifacts = {
+          ship_confirm_and_ceiling: { projectDir: tempProject, runDir: runDirPath },
+          ...(noCandidateRunDir
+            ? { no_candidate: { projectDir: noCandidateProject, runDir: noCandidateRunDir } }
+            : {}),
+        };
         add('ok', `Artifacts retained: project=${tempProject} run=${runDirPath}`);
       }
     } catch (error) {
@@ -510,12 +737,12 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         add('fail', `The isolated scheduler rehearsal could not complete: ${conciseError(error)}\n  Next: ${retry}`);
       }
     } finally {
-      if (rehearsalRunDir) {
+      for (const deferredRunDir of [rehearsalRunDir, noCandidateRunDir].filter(Boolean)) {
         // Keep the rehearsal home active until framework-owned debounced writes
         // settle. Restoring the caller's FC home first redirects their mutable
         // global path lookup into the caller after rehearsal returns.
         try {
-          await settleDeferredRunWrites(rehearsalRunDir);
+          await settleDeferredRunWrites(deferredRunDir);
         } catch (error) {
           add('fail', `The isolated scheduler rehearsal left deferred writes pending: ${conciseError(error)}`);
         }
@@ -524,6 +751,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       if (!keep) {
         rmSync(tempFcHome, { recursive: true, force: true });
         rmSync(tempProject, { recursive: true, force: true });
+        if (noCandidateProject) rmSync(noCandidateProject, { recursive: true, force: true });
       }
     }
   }
@@ -557,6 +785,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
     },
     diagnosticsLogPath: diagnosticLogPath,
     ...(retainedArtifacts ? { retainedArtifacts } : {}),
+    ...(retainedOutcomeArtifacts ? { retainedOutcomeArtifacts } : {}),
   };
 }
 

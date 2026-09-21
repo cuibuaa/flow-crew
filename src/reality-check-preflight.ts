@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
+import { inspectVersionedJsonShapeCheck } from './reality-gate/versioned-json-admission.js';
 import { resolveResearchPaths } from './research-paths.js';
 import type {
   ProjectValidationBaseline,
@@ -16,6 +17,7 @@ export type RealityCheckPreflightCode =
   | 'copy_byte_equivalence'
   | 'hard_check_cannot_fail'
   | 'hard_check_cannot_pass'
+  | 'versioned_json_shape_mismatch'
   | 'invalid_reality_check_declaration';
 
 export type RealityCheckPreflightTier = 'blocking' | 'advisory' | 'structural';
@@ -50,6 +52,8 @@ export interface RealityCheckPreflightReport {
 export interface RealityCheckPreflightContext {
   /** Exact identity-bound ship-setup baseline supplied by orchestration. */
   validationBaseline?: ProjectValidationBaseline;
+  /** Canonical project root used only for contained, already-present artifact evidence. */
+  projectDir?: string;
 }
 
 export interface RealityCheckAdvisoryRewrite {
@@ -1185,7 +1189,9 @@ export function demoteRealityCheckAdvisories(
 
 /**
  * Inspect exact planner-authored check markdown against the exact task brief.
- * This function is deterministic and performs no filesystem or process work.
+ * This function is deterministic and performs no process work. When a canonical
+ * project root is supplied, it may read one statically named, project-contained
+ * JSON artifact using the same narrow analyzer as terminal admission.
  * It refuses only mechanically decisive relations; intent-dependent relations
  * remain visible advisory findings. Arbitrary shell semantics remain out of
  * scope.
@@ -1261,6 +1267,28 @@ export function inspectRealityChecks(
           'hard_check_cannot_pass',
           `The hard check makes its verdict the raw exit status of recorded ${cannotPass.command.role} command ${JSON.stringify(cannotPass.command.display.slice(0, 240))}, but that command has a failing recorded baseline with ${evidence} failure evidence${countSummary} under no_regression_from_baseline.${identitySummary}${partial ? ' The recorded failure evidence is partial, so a red-to-red comparison must remain unresolved.' : ''} Compare current failure identities with the recorded baseline, or omit the redundant validation check.`,
           rawValidationEvidence(cannotPass),
+        ));
+      }
+
+      const versionedShapeArgs = params.args === undefined
+        ? []
+        : Array.isArray(params.args) && params.args.every((arg) => typeof arg === 'string')
+          ? params.args as string[]
+          : undefined;
+      const versionedShape = context.projectDir && versionedShapeArgs
+        ? inspectVersionedJsonShapeCheck({
+            script: params.script,
+            args: versionedShapeArgs,
+            projectDir: context.projectDir,
+          })
+        : undefined;
+      if (versionedShape) {
+        findings.push(finding(
+          declaration,
+          checkIndex,
+          'versioned_json_shape_mismatch',
+          `The already-present versioned JSON artifact ${JSON.stringify(versionedShape.evidence.artifactPath)} contradicts ${versionedShape.evidence.independentFailureGuards} independent shape guards, while the check never binds its ${versionedShape.evidence.discriminator.field} discriminator. The current bytes are advisory planning evidence because a later admitted producer may replace them; bind the expected discriminator for a format-specific hard check.`,
+          JSON.stringify(versionedShape.evidence),
         ));
       }
     }

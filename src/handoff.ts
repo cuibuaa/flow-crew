@@ -6,6 +6,7 @@ import { readStageStatus } from './store.js';
 import { getDefaultTimeout } from './config.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { renderCriterionRulings, renderGateControlContract } from './verdict-controls.js';
+import { captureResearchGateCandidate } from './research-candidate.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
@@ -30,6 +31,9 @@ interface HandoffOpts {
   availableSkills?: string;
   taskDescription?: string;
   isGate?: boolean;
+  /** True only for a gate whose dependency closure owns the current research
+   * outcome slot. Other gates must not be made responsible for producing it. */
+  researchOutcomeGate?: boolean;
   stageId?: string;
   criterionRefs?: string[];
 }
@@ -271,6 +275,37 @@ export function buildStagePrompt(opts: HandoffOpts): string {
         criterionRefs: opts.criterionRefs,
       })
     : '';
+  const validationBaselineBlock = (() => {
+    if (!opts.isGate) return '';
+    const artifactPath = join(opts.runDir, 'validation_baseline.json');
+    if (!existsSync(artifactPath)) return '';
+    try {
+      const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8')) as {
+        baseline?: { gateCriteria?: Array<{ role?: unknown; rule?: unknown; baselineFailureIdentifiers?: unknown }> };
+      };
+      const criteria = artifact.baseline?.gateCriteria ?? [];
+      const rows = criteria.map((criterion) => {
+        const identifiers = Array.isArray(criterion.baselineFailureIdentifiers)
+          ? criterion.baselineFailureIdentifiers.filter((value) => typeof value === 'string')
+          : [];
+        return `- ${String(criterion.role)}: ${String(criterion.rule)}; baseline failures=${identifiers.length}${identifiers.length ? ` (${identifiers.join(', ')})` : ''}`;
+      });
+      return `## Engine-enforced validation baseline\nExact run-local evidence: ${artifactPath}\n${rows.join('\n')}\nAfter this gate settles, the engine replays these commands and rejects a pass whose delta regresses or is unresolved.`;
+    } catch {
+      return `## Engine-enforced validation baseline\n${artifactPath} is unreadable; do not claim the validation delta passed.`;
+    }
+  })();
+  const researchCandidateBlock = (() => {
+    if (!opts.isGate || !opts.researchOutcomeGate || !opts.stageId) return '';
+    const candidate = captureResearchGateCandidate(opts.projectDir, opts.runDir, opts.stageId);
+    if (candidate.kind === 'absent' && candidate.reason === 'run is not in research mode') return '';
+    const detail = candidate.kind === 'no_candidate'
+      ? `label=${JSON.stringify(candidate.label)}; reason=${JSON.stringify(candidate.reason)}`
+      : candidate.kind === 'measured'
+        ? `label=${JSON.stringify(candidate.label)}; result=${candidate.result}`
+        : candidate.reason ?? 'no outcome detail';
+    return `## Framework-captured research round outcome\nKind: ${candidate.kind}\nSource: ${candidate.source}\n${detail}\nJudge the assigned criteria against this declared outcome. A no_candidate round is not a measured candidate and must not be rejected merely for lacking a numeric candidate measurement.`;
+  })();
 
   const parts = [
     guidanceBlock,
@@ -279,6 +314,8 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     criterionBlock,
     criterionRulingBlock,
     gateControlBlock,
+    validationBaselineBlock,
+    researchCandidateBlock,
     anchor,
     skillsContent,
   ].filter(Boolean);

@@ -4,6 +4,7 @@ import type { AdapterName, AdapterResolution } from './adapters/availability.js'
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
+import { createCampaignProposerScratch } from './campaign-scratch.js';
 
 function earlyCommandHelp(input: string[]): string | undefined {
   if (!input.includes('--help') && !input.includes('-h')) return undefined;
@@ -106,6 +107,8 @@ const {
   resolveRunStatus,
   readRunState,
   RUN_STATUS,
+  RUN_RESERVATION_FILE,
+  RUN_RESERVATION_TTL_MS,
   runsRoot,
   STAGE_STATUS,
 } = storeModule;
@@ -131,7 +134,7 @@ const {
   formatRunDriftProjection,
   readOperationalProjection,
 } = cliEventsModule;
-const { appendGuidanceEnvelope } = guidanceModule;
+const { appendGuidanceEnvelope, readGuidanceDeliveryStatus } = guidanceModule;
 const { requestStageCommandInterrupt } = commandInterruptModule;
 
 const args = bootstrapArgs;
@@ -1010,6 +1013,28 @@ async function cmdQuick() {
   const preflight = inspectBrief(task, preflightContext);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
 
+  // Nothing about the brief matters if nothing can execute it. A newcomer whose
+  // adapter CLI is not installed must be told the install command, not sent to
+  // fix a brief they cannot run either way, so environment refusals precede
+  // content refusals. The authoritative resolution still happens below.
+  if (background) {
+    const earlyResolution = resolveRuntimeAdapter({
+      explicit: adapter?.trim() || undefined,
+      configured: loadProjectDefaults(projectDir).adapter,
+    });
+    if (!earlyResolution.ok) {
+      console.error(`❌ ${earlyResolution.hint}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  if (preflight.findings.some((finding) => finding.code === 'brief_criteria_missing')) {
+    console.error('Launch refused: the exact brief has no structurally extractable criterion. This is not an acknowledgeable warning.');
+    process.exitCode = 2;
+    return;
+  }
+
   if (acknowledgementDigest !== undefined && acknowledgementDigest !== preflight.digest) {
     console.error(`Brief acknowledgement digest mismatch: received ${acknowledgementDigest || '(empty)'}, current digest is ${preflight.digest}.`);
     console.error(`Review the report and rerun with --acknowledge-brief-warnings=${preflight.digest}`);
@@ -1073,10 +1098,27 @@ async function cmdQuick() {
   // Auto-select the research workflow only after the shared report is visible.
   // The canonical frontmatter parser owns this decision; quick has no YAML regex.
   const { parseBriefFrontmatter } = await import('./scheduler.js');
-  if (!workflowExplicit && workflow === 'default' && parseBriefFrontmatter(task).research) {
+  const parsedBrief = parseBriefFrontmatter(task);
+  if (!workflowExplicit && workflow === 'default' && parsedBrief.research) {
     workflow = 'research';
     launchArgs.push('--workflow', 'research');
     console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
+  }
+
+  const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
+  if (!initializedContinuation) {
+    const { inspectShipSetupRecord } = await import('./ship-setup-record.js');
+    const setup = inspectShipSetupRecord(projectDir, task);
+    if (setup.state !== 'ready') {
+      const detail = setup.state === 'missing'
+        ? `no exact setup record exists at ${setup.recordPath}`
+        : setup.state === 'refused'
+          ? `ship-setup refused this exact target and brief: ${setup.reason}`
+          : `the exact setup record is invalid: ${setup.reason}`;
+      console.error(`Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`);
+      process.exitCode = 2;
+      return;
+    }
   }
 
   if (background) {
@@ -1145,9 +1187,18 @@ async function cmdQuick() {
     process.exit(1);
   }
 
-  const { loadWorkflow, runWorkflow } = await import('./scheduler.js');
+  const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
   const { config, raw } = loadWorkflow(workflowPath);
   if (maxIterations) config.defaults.max_iterations = maxIterations;
+  const budgetAssessment = assessResearchIterationBudget(
+    parsedBrief.research,
+    config.defaults.max_iterations ?? loadProjectDefaults(projectDir).max_iterations,
+  );
+  if (!budgetAssessment.pass) {
+    console.error(`Launch refused: ${budgetAssessment.reason}. Raise default_max_iterations or lower max_rounds.`);
+    process.exitCode = 2;
+    return;
+  }
 
   const agentsDir = join(projectDir, 'config', 'agents');
   const fallbackAgentsDir = join(import.meta.dirname ?? '.', '..', 'config', 'agents');
@@ -1655,16 +1706,22 @@ function cmdGuide() {
       console.error(`Stage "${targetStageId}" is not part of run "${selected.id}"; guidance was not sent.`);
       process.exit(1);
     }
-    appendGuidanceEnvelope({
+    const envelope = appendGuidanceEnvelope({
       runDir: join(root, selected.id),
       target: targetStageId,
       source: 'operator',
       body: message,
       knownStageIds: selected.stageIds,
     });
-    console.log(`Guidance sent directly to stage ${targetStageId} in run ${selected.id}:`);
+    const receipt = readGuidanceDeliveryStatus(join(root, selected.id), envelope.id);
+    if (receipt.state === 'quarantined') {
+      console.error(`Guidance ${envelope.id} was quarantined and was not queued for delivery: ${receipt.reason ?? 'invalid envelope'}`);
+      process.exitCode = 2;
+      return;
+    }
+    console.log(`Guidance ${envelope.id} queued for stage ${targetStageId} in run ${selected.id}:`);
     console.log(`  "${message}"`);
-    console.log('\nThe running stage will consume it before its next adapter invocation.');
+    console.log('\nDelivery is not yet confirmed; a guidance_delivery_checked receipt will identify the consuming execution.');
     return;
   }
 
@@ -1727,9 +1784,26 @@ function cmdClean() {
   if (!existsSync(root)) { console.log('Nothing to clean.'); return; }
   const keepArg = args.find((a, i) => args[i - 1] === '--keep');
   const keep = keepArg ? parseInt(keepArg, 10) : 5;
-  const runs = readdirSync(root).sort().reverse();
-  const toDelete = runs.slice(keep);
-  if (toDelete.length === 0) { console.log(`Nothing to clean (${runs.length} runs, keeping ${keep}).`); return; }
+  const entries = readdirSync(root).sort().reverse();
+  const readableRuns = entries.filter((runId) => {
+    try {
+      const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8')) as { runId?: unknown };
+      return state.runId === runId;
+    } catch { return false; }
+  });
+  const expiredReservations = entries.filter((runId) => {
+    if (readableRuns.includes(runId)) return false;
+    try {
+      const marker = JSON.parse(readFileSync(join(root, runId, RUN_RESERVATION_FILE), 'utf-8')) as {
+        version?: unknown; runId?: unknown; reservedAt?: unknown;
+      };
+      const reservedAt = typeof marker.reservedAt === 'string' ? Date.parse(marker.reservedAt) : Number.NaN;
+      return marker.version === 1 && marker.runId === runId && Number.isFinite(reservedAt)
+        && Date.now() - reservedAt > RUN_RESERVATION_TTL_MS;
+    } catch { return false; }
+  });
+  const toDelete = [...readableRuns.slice(Math.max(0, keep)), ...expiredReservations];
+  if (toDelete.length === 0) { console.log(`Nothing to clean (${readableRuns.length} readable runs, keeping ${keep}; ${entries.length - readableRuns.length} unclassified entries preserved).`); return; }
   let skippedLive = 0;
   let cleaned = 0;
   for (const runId of toDelete) {
@@ -1746,7 +1820,8 @@ function cmdClean() {
       cleaned += 1;
     } catch { /* non-critical */ }
   }
-  console.log(`Cleaned ${cleaned} old runs (kept ${keep} most recent).`);
+  const preservedUnclassified = entries.length - readableRuns.length - expiredReservations.length;
+  console.log(`Cleaned ${cleaned} old readable/expired-reservation entries (kept ${Math.min(keep, readableRuns.length)} most recent readable runs; ${preservedUnclassified} unclassified or active-reservation entries preserved).`);
   if (skippedLive > 0) console.log(`Skipped ${skippedLive} live run(s); stop them before cleaning their history.`);
 }
 
@@ -2169,8 +2244,7 @@ async function cmdCampaignLoop(): Promise<void> {
   const adapterInstance = await loadAdapterByName(adapterName);
 
   const cliPath = process.argv[1];
-  const proposeDir = join(runsRoot(), `campaign-loop-propose-${process.pid}`);
-  mkdirSync(proposeDir, { recursive: true });
+  const proposeDir = createCampaignProposerScratch();
 
   const { runLiveCampaign, scoutDirections } = await import('./campaign-loop-live.js');
 

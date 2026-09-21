@@ -20,6 +20,7 @@ import {
   initializeReservedRun,
   readRunReservation,
   readRunState,
+  requireRunArtifactDirectory,
   requireKnownRunStatus,
   reserveRun,
   writeRunState,
@@ -131,6 +132,17 @@ import {
   type RealityCheckPreflightReport,
 } from './reality-check-preflight.js';
 import { readShipSetupReadyValidationBaseline } from './ship-setup-record.js';
+import {
+  evaluateValidationDelta,
+  runProjectValidationBaseline,
+  type ProjectValidationBaseline,
+  type ProjectValidationDependencies,
+  type ValidationDeltaResult,
+} from './project-validation.js';
+import { ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES } from './generated-path-policy.js';
+import { extractBriefOutputDeclarations, type BriefOutputDeclaration } from './ship-inputs.js';
+import { archiveDeclaredOutputs } from './declared-output-archive.js';
+import { readResearchGateCandidate } from './research-candidate.js';
 import { writeBriefCriteriaArtifact, type BriefCriteriaArtifact } from './brief-criteria.js';
 import {
   appendGuidanceEnvelope,
@@ -145,6 +157,7 @@ import {
   planRetryPreflightRequirement,
   planRetryRequirement,
   preparePlanRetryCandidate,
+  readMonotonePlanRetryState,
   recordPlanRetryAdmission,
   recordPlanRetryRefusal,
   type PlanRetryRequirement,
@@ -214,8 +227,33 @@ export interface ParsedBriefFrontmatter {
   /** Strict-parser error retained even when no metric-loop config is created. */
   researchFeasibilityError?: string;
   researchPolicyError?: string;
+  outputs?: BriefOutputDeclaration[];
   stripped: string;
   frontmatterError?: string;
+}
+
+export interface ResearchIterationBudgetAssessment {
+  pass: boolean;
+  maxRounds?: number;
+  maxIterations: number;
+  reason?: string;
+}
+
+/** A terminal owner can run in the settling iteration, so only the authored
+ * round budget itself must fit inside the engine iteration budget. */
+export function assessResearchIterationBudget(
+  research: ResearchConfig | undefined,
+  maxIterations: number,
+): ResearchIterationBudgetAssessment {
+  const maxRounds = research?.stop?.maxRounds;
+  if (typeof maxRounds !== 'number') return { pass: true, maxIterations };
+  if (maxRounds <= maxIterations) return { pass: true, maxRounds, maxIterations };
+  return {
+    pass: false,
+    maxRounds,
+    maxIterations,
+    reason: `research.stop.max_rounds (${maxRounds}) exceeds the engine iteration limit (${maxIterations})`,
+  };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
@@ -236,6 +274,15 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   try { parsed = parseYaml(fm); } catch (err) { return { stripped: brief, frontmatterError: `frontmatter YAML parse error: ${err instanceof Error ? err.message : String(err)}` }; }
   if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
   const out: ParsedBriefFrontmatter = { stripped };
+  // Terminal-state, research-result, and report-directory paths have their own
+  // lifecycle contracts. Only the brief's explicit output collection belongs
+  // to the terminal archive added for `outputs:`; otherwise a consumed mutable
+  // research slot would make an unrelated terminal artifact impossible to
+  // commit merely because it is absent at closeout.
+  const outputs = extractBriefOutputDeclarations(brief).filter((entry) => (
+    /^(?:outputs?|deliverables?|artifacts?)(?:\.|$)/.test(entry.source)
+  ));
+  if (outputs.length > 0) out.outputs = outputs;
 
   // `research:` and `objective:` are exact aliases. Static feasibility is parsed
   // independently; only a numeric baseline creates the native metric-loop config.
@@ -1237,7 +1284,25 @@ export function appendResearchTemporalPathContract(
     + `- mutable no-candidate alternative: ${paths.resultFile}.no_candidate.json\n`
     + `- always-emitted framework manifest: ${paths.manifestFile}\n`
     + `- terminal outputs: ${terminalPaths.length > 0 ? terminalPaths.join(', ') : 'none declared'}\n`
-    + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. Use ${paths.manifestFile} or scheduler-consumed immutable round evidence. This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path.`;
+    + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. `
+    + `When no safe acting candidate exists, write exactly {"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"} to ${paths.resultFile}.no_candidate.json; the discriminator field is outcome, not status. `
+    + `Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. Use ${paths.manifestFile} or scheduler-consumed immutable round evidence. This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path.`;
+}
+
+function appendPlannerAdmissionContract(
+  prompt: string,
+  terminalStates: TerminalStatesConfig | undefined,
+): string {
+  const terminalPaths = Object.entries(terminalStates ?? {}).flatMap(([status, entry]) => (
+    entry.paths.map((path) => ({ status, path }))
+  ));
+  const rows = terminalPaths.length > 0
+    ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — exactly one scoped non-gate, non-repair DAG sink owner`).join('\n')
+    : '- none declared';
+  return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
+    + `Before finishing dispatch.yaml, tally the owners for every row above; zero and multiple owners are both refused. `
+    + `Also remove or demote every hard reality check whose absent path has neither an admitted producer nor a framework emitter. `
+    + `Paths under an external run store (for example .fc/runs/) are not project outputs and cannot be made reachable by declaring project scope.`;
 }
 
 function appendAttemptDeadlineContract(
@@ -1342,19 +1407,31 @@ function admittedTerminalDurableScope(
 
 function stageAttemptWroteProjectPath(
   projectDir: string,
-  status: StageStatus | undefined,
+  state: StoreState,
+  stageId: string,
   terminalPath: string,
 ): boolean {
-  if (status?.status !== STAGE_STATUS.COMPLETE) return false;
-  const attempt = status.attempts?.at(-1);
-  const writes = attempt?.writes ?? status.writes ?? status.artifacts ?? [];
   const wanted = posix.normalize(terminalPath.replace(/\\/g, '/'));
-  return writes.some((raw) => {
+  const matches = (raw: string): boolean => {
     const normalized = raw.replace(/\\/g, '/');
     const projectRelative = isAbsolute(normalized)
       ? relative(projectDir, normalized).replace(/\\/g, '/')
       : normalized.replace(/^\.\//, '');
     return posix.normalize(projectRelative) === wanted;
+  };
+  const statuses = [
+    state.stages[stageId],
+    ...(state.stageEvidence ?? [])
+      .filter((entry) => entry.stageId === stageId)
+      .map((entry) => entry.status),
+  ].filter((status): status is StageStatus => Boolean(status));
+  return statuses.some((status) => {
+    const completedAttempts = [...(status.attempts ?? [])]
+      .reverse()
+      .filter((attempt) => attempt.status === STAGE_STATUS.COMPLETE);
+    if (completedAttempts.some((attempt) => (attempt.writes ?? []).some(matches))) return true;
+    return status.status === STAGE_STATUS.COMPLETE
+      && (status.writes ?? status.artifacts ?? []).some(matches);
   });
 }
 
@@ -1411,7 +1488,7 @@ export async function tryTerminateOnTerminalState(
         const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
         const attributedToCurrentRun = Boolean(
           admittedOwner
-          && stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path),
+          && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path),
         );
         const sources = [projectPath, snapshotPath].filter((candidate) => {
           try {
@@ -1491,7 +1568,7 @@ export async function tryTerminateOnTerminalState(
       const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
       const attributedToCurrentRun = Boolean(
         admittedOwner
-        && stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path),
+        && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path),
       );
       const source = Number.isFinite(startedAtMs)
         ? candidates.find((candidate) => candidate.mtimeMs >= startedAtMs)
@@ -1516,7 +1593,7 @@ export async function tryTerminateOnTerminalState(
         continue;
       }
       const sourcePath = source.path;
-      if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state.stages[admittedOwner], path)) {
+      if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path)) {
         const marker = `[scheduler-hint:${terminalStatus}:${path}:owner]`;
         const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no completed-attempt write attribution for the path`;
         appendSchedulerGuidanceOnce(
@@ -1526,7 +1603,18 @@ export async function tryTerminateOnTerminalState(
           `Terminal artifact rejected: ${reason}. The owner must run after its declared ancestors and write the terminal path itself.`,
           Object.keys(state.stages),
         );
-        log.warn({ runId: ctx.runId, terminalStatus, path, admittedOwner }, 'Terminal-state file rejected because its admitted owner did not produce it');
+        const quarantined = sourcePath === projPath
+          ? quarantineTerminalCandidate(ctx.runDirPath, sourcePath, `non_owner_terminal_${terminalStatus}_${path.split('/').pop() ?? 'artifact'}`)
+          : undefined;
+        if (quarantined) {
+          recordRunEvent(ctx.projectDir, ctx.runId, {
+            type: 'terminal_candidate_quarantined', runId: ctx.runId, timestamp: new Date().toISOString(),
+            stageId: admittedOwner,
+            detail: `${path} moved to ${quarantined} because no write was attributed to its admitted owner`,
+            artifacts: [quarantined], level: 'warning', source: 'scheduler',
+          });
+        }
+        log.warn({ runId: ctx.runId, terminalStatus, path, admittedOwner, quarantined }, 'Terminal-state file rejected because its admitted owner did not produce it');
         deferredReasons.push(`${terminalStatus}: ${reason}`);
         continue;
       }
@@ -1631,6 +1719,21 @@ export async function tryTerminateOnTerminalState(
           continue;
         }
         log.info({ runId: ctx.runId, path }, 'Shipped terminal file passed confirm gate');
+      }
+      if (state.declaredOutputs?.length) {
+        try {
+          archiveDeclaredOutputs(ctx.projectDir, ctx.runDirPath, state.declaredOutputs);
+        } catch (error) {
+          const reason = `declared output archival failed: ${error instanceof Error ? error.message : String(error)}`;
+          appendSchedulerGuidanceOnce(
+            ctx.runDirPath,
+            RUN_WIDE_GUIDANCE_TARGET,
+            `[scheduler-hint:${terminalStatus}:${path}:declared-outputs]`,
+            `${path} reached a terminal outcome, but ${reason}. Produce every declared output with its declared type before terminalization.`,
+          );
+          deferredReasons.push(`${terminalStatus}: ${reason}`);
+          continue;
+        }
       }
       state.status = terminalStatus as StoreState['status'];
       state.terminalArtifact = path.split('/').pop();
@@ -1866,7 +1969,7 @@ export async function tryAdvanceResearch(
     );
   }
   const sourceAbs = freshNoCandidate ? noCandidateAbs : resultAbs;
-  let round: { label?: string; result?: number; outcome?: string; reason?: string; evidence?: unknown };
+  let round: { label?: string; result?: number; outcome?: string; status?: string; reason?: string; evidence?: unknown };
   try {
     round = JSON.parse(readFileSync(sourceAbs, 'utf-8'));
   } catch {
@@ -1877,6 +1980,36 @@ export async function tryAdvanceResearch(
     return rejectRoundInput('missing_label', 'Research round artifacts require a non-empty string label.', [sourceAbs]);
   }
   if (noCandidate) {
+    // Recover only the exact, unambiguous `status`/`outcome` transposition.
+    // The expensive producer has already completed; all other malformed
+    // shapes still take the normal refusal path below.
+    if (round.outcome === undefined
+        && round.status === 'no_candidate'
+        && typeof round.reason === 'string'
+        && round.reason.trim()) {
+      round.outcome = 'no_candidate';
+      const repairedAt = new Date().toISOString();
+      try {
+        writeFileSync(join(ctx.runDirPath, 'research_round_contract_repair.json'), `${JSON.stringify({
+          version: 1,
+          repairedAt,
+          kind: 'no_candidate_status_alias',
+          source: `${resultRel}.no_candidate.json`,
+          fromField: 'status',
+          toField: 'outcome',
+          value: 'no_candidate',
+        }, null, 2)}\n`, 'utf-8');
+      } catch { /* the journal and event still carry the recovery */ }
+      recordRunEvent(ctx.projectDir, ctx.runId, {
+        type: 'research_round_contract_repaired',
+        runId: ctx.runId,
+        timestamp: repairedAt,
+        iteration: ctx.iteration,
+        files: [`${resultRel}.no_candidate.json`],
+        detail: 'normalized the unambiguous no-candidate discriminator from status to outcome before ingestion',
+        source: 'scheduler',
+      });
+    }
     if (round.outcome !== 'no_candidate' || typeof round.reason !== 'string' || !round.reason.trim()) {
       return rejectRoundInput(
         'invalid_no_candidate_shape',
@@ -2749,8 +2882,18 @@ function concludePlanRetryFailure(input: {
   stageId: string;
   reason: string;
 }): StoreState {
+  const retryState = readMonotonePlanRetryState(
+    runDir(input.projectDir, input.runId),
+    input.stageId,
+    input.state.currentIteration ?? 1,
+  );
+  const causalRequirements = retryState?.attempts.at(-1)?.unsatisfied ?? [];
+  const reason = causalRequirements.length > 0 && input.reason.includes('Unsatisfied requirement(s):')
+    ? `${input.reason.slice(0, input.reason.indexOf('Unsatisfied requirement(s):'))}`
+      + `Unsatisfied requirement(s): ${causalRequirements.map((requirement) => `${requirement.id} — ${requirement.detail}`).join('; ')}`
+    : input.reason;
   input.state.status = RUN_STATUS.FAILED;
-  input.state.failureReason = input.reason;
+  input.state.failureReason = reason;
   input.state.completedAt = new Date().toISOString();
   writeRunState(input.projectDir, input.runId, input.state);
   recordRunEvent(input.projectDir, input.runId, {
@@ -2759,7 +2902,7 @@ function concludePlanRetryFailure(input: {
     timestamp: input.state.completedAt,
     iteration: input.state.currentIteration ?? 1,
     stageId: input.stageId,
-    detail: `failed: ${input.reason}`,
+    detail: `failed: ${reason}`,
   });
   return input.state;
 }
@@ -3870,12 +4013,12 @@ function shouldPreserveSession(stage: StageConfig, allStages: StageConfig[], ena
   return stage.dynamic_dispatch || reusableDirectSuccessors(stage, allStages).length === 1;
 }
 
-const REPAIR_DIFF_SKIP_DIRS = new Set([
-  '.git', '.fc', 'node_modules', '.cache', '__pycache__', '.venv', 'venv', '.tox', '.gradle',
-]);
+const REPAIR_DIFF_SKIP_DIRS = ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES;
 
 interface RepairFileImage {
   exists: boolean;
+  /** Whether absence was observed or merely inferred from an uncaptured path. */
+  provenance?: 'observed' | 'unknown';
   sha256?: string;
   byteLength?: number;
   binary?: boolean;
@@ -4085,7 +4228,7 @@ function describeRepairError(error: unknown): string {
 
 function readRepairFileImage(projectDir: string, relativePath: string): RepairFileImage {
   const normalized = normalizedProjectPath(relativePath);
-  if (!normalized) return { exists: false };
+  if (!normalized) return { exists: false, provenance: 'unknown' };
   const absolute = join(projectDir, normalized);
   let stat: ReturnType<typeof lstatSync>;
   try {
@@ -4093,8 +4236,8 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
     return code === 'ENOENT' || code === 'ENOTDIR'
-      ? { exists: false }
-      : { exists: false, inspectionFailure: `could not inspect ${normalized}: ${describeRepairError(error)}` };
+      ? { exists: false, provenance: 'observed' }
+      : { exists: false, provenance: 'unknown', inspectionFailure: `could not inspect ${normalized}: ${describeRepairError(error)}` };
   }
   if (stat.isSymbolicLink()) {
     try {
@@ -4121,7 +4264,7 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
       };
     }
   }
-  if (!stat.isFile()) return { exists: false };
+  if (!stat.isFile()) return { exists: false, provenance: 'unknown' };
   try {
     const bytes = readFileSync(absolute);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -4304,7 +4447,7 @@ function ensureRollbackBaseline(projectDir: string, runDirPath?: string): { base
 }
 
 function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): RepairFileImage {
-  if (!baseline.gitRoot || !baseline.cleanTracked.has(path)) return { exists: false };
+  if (!baseline.gitRoot || !baseline.cleanTracked.has(path)) return { exists: false, provenance: 'unknown' };
   const entry = baseline.gitIndexEntries.get(path);
   if (!entry) {
     const image: RepairFileImage = {
@@ -4354,7 +4497,17 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
 }
 
 function baselineImage(baseline: RunRollbackBaseline, path: string): RepairFileImage {
-  return baseline.images.get(path) ?? imageFromGitBaseline(baseline, path);
+  const captured = baseline.images.get(path);
+  if (captured) return captured;
+  if (baseline.cleanTracked.has(path)) return imageFromGitBaseline(baseline, path);
+  // The run-start inventory deliberately omits dependency/cache trees. A miss
+  // there is lack of evidence, not evidence of absence. Everywhere else both
+  // baseline strategies enumerate the complete project tree, so a missing
+  // entry positively proves that the path did not exist when the run began.
+  if (path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) {
+    return { exists: false, provenance: 'unknown' };
+  }
+  return { exists: false, provenance: 'observed' };
 }
 
 function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
@@ -4550,7 +4703,7 @@ interface ProjectPathRestoreResult {
 
 let rollbackReplacementSequence = 0;
 
-function restoreProjectPath(
+export function restoreProjectPath(
   projectDir: string,
   rawPath: string,
   before: RepairFileImage,
@@ -4570,6 +4723,12 @@ function restoreProjectPath(
       return { restored: false, failure: `refused to replace unexpected directory at ${normalized}` };
     }
     if (!before.exists) {
+      if (before.provenance !== 'observed') {
+        return {
+          restored: false,
+          failure: `preimage absence was not observed for ${normalized}; refusing destructive rollback`,
+        };
+      }
       rmSync(absolute, { force: true });
       const after = readRepairFileImage(projectDir, normalized);
       return !after.exists && !after.inspectionFailure
@@ -4702,6 +4861,23 @@ function decideScopeRevision(input: {
   }
   const requestedPaths = [...new Set(normalizedPaths)];
   const requestedScopes = requestedPaths.map(parseDeclaredScope);
+  try {
+    const admission = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'dispatch_admission.json'), 'utf-8')) as {
+      terminalOwners?: Record<string, string>;
+    };
+    for (const [terminalPath, ownerId] of Object.entries(admission.terminalOwners ?? {})) {
+      if (ownerId === stage.id) continue;
+      const normalizedTerminal = normalizedProjectPath(terminalPath);
+      if (normalizedTerminal && requestedScopes.some((scope) => scopeMatchesProjectPath(scope, normalizedTerminal))) {
+        return scopeRevisionRejection(
+          { ...request, requestedPaths },
+          priorScope,
+          `requested capability contains terminal path ${terminalPath}, whose admitted owner is ${ownerId}; scope revision cannot transfer terminal ownership`,
+          ownerId,
+        );
+      }
+    }
+  } catch { /* static workflows may have no dispatch admission artifact */ }
   const priorScopes = (priorScope ?? []).map(parseDeclaredScope);
   const alreadyAuthorizedPaths = requestedPaths.filter((_path, index) => (
     scopeRequestAlreadyAuthorized(requestedScopes[index], priorScopes)
@@ -5071,6 +5247,12 @@ export function loadWorkflow(yamlPath: string): { config: WorkflowConfig; raw: s
   const raw = readFileSync(yamlPath, 'utf-8');
   const parsed = parseYaml(raw);
   const config = WorkflowConfigSchema.parse(parsed);
+  for (const stage of config.stages) {
+    if (!stage.condition?.trim()) continue;
+    const condition = parseCondition(stage.condition);
+    const domainError = finiteStatusConditionDomainError(stage.id, condition);
+    if (domainError) throw new Error(domainError);
+  }
   normalizeRetryGateRelationships(config.stages);
   return { config, raw };
 }
@@ -5331,6 +5513,16 @@ function researchTerminalConditionExcludesContinue(
   }
 }
 
+function finiteStatusConditionDomainError(
+  stageId: string,
+  parsed: ReturnType<typeof parseCondition>,
+): string | undefined {
+  if (parsed.field !== 'status') return undefined;
+  const allowed = new Set<string>(Object.values(STAGE_STATUS));
+  if (typeof parsed.value === 'string' && allowed.has(parsed.value)) return undefined;
+  return `${stageId}.condition: status literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...allowed].join(', ')}`;
+}
+
 export function inspectDispatchAdmission(input: {
   dispatched: StageConfig[];
   baseStages: StageConfig[];
@@ -5350,13 +5542,34 @@ export function inspectDispatchAdmission(input: {
     if (input.research && stage.id === 'research') {
       errors.push(`${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`);
     }
-    if (!input.research && stage.condition?.trim()) {
+    if (stage.condition?.trim()) {
       try {
         const parsed = parseCondition(stage.condition);
-        if (parsed.stageId === 'research') {
+        if (!input.research && parsed.stageId === 'research') {
           errors.push(`${stage.id}.condition: references framework research facts in a non-research run; remove the condition or declare research mode`);
         }
-      } catch { /* the normal condition validator reports malformed syntax */ }
+        const finiteDomainError = finiteStatusConditionDomainError(stage.id, parsed);
+        if (finiteDomainError) errors.push(finiteDomainError);
+        if (parsed.stageId === 'research' && parsed.op === '==') {
+          if (parsed.field === 'decision') {
+            if (typeof parsed.value !== 'string' || !EMITTED_RESEARCH_DECISIONS.has(parsed.value)) {
+              errors.push(`${stage.id}.condition: research.decision literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...EMITTED_RESEARCH_DECISIONS].join(', ')}`);
+            }
+          } else if (parsed.field === 'terminalStatus') {
+            const statuses = new Set(Object.keys(input.terminalStates ?? {}));
+            if (typeof parsed.value !== 'string' || !statuses.has(parsed.value)) {
+              errors.push(`${stage.id}.condition: research.terminalStatus literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`);
+            }
+          } else if (parsed.field === 'terminalPath') {
+            const paths = new Set(Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths));
+            if (typeof parsed.value !== 'string' || !paths.has(parsed.value)) {
+              errors.push(`${stage.id}.condition: research.terminalPath literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`);
+            }
+          }
+        }
+      } catch (error) {
+        errors.push(`${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     for (const [index, scope] of (stage.scope ?? []).entries()) {
       const parsed = parseDeclaredScope(scope);
@@ -5485,6 +5698,9 @@ export function inspectDispatchAdmission(input: {
   }
 
   const criteria = input.criteria?.criteria ?? [];
+  if (input.criteria && criteria.length === 0) {
+    errors.push('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
+  }
   const discharged = new Map(
     (input.criterionDischarges ?? [])
       .filter((record) => record.briefDigest === input.criteria?.briefDigest)
@@ -6127,14 +6343,20 @@ function injectDispatchedStages(
     emitAdmissionRejection(report);
     return [];
   }
+  // A process-bound brief admission makes zero criteria a launch contract.
+  // Direct library fixtures from before that contract may still exercise DAG
+  // mechanics without manufacturing criterion coverage.
+  const effectiveCriteria = criteria?.criteria.length === 0 && !state.briefAdmission
+    ? undefined
+    : criteria;
   const admission = inspectDispatchAdmission({
     dispatched,
     baseStages: sorted,
     dispatchStageId,
     terminalStates: state.terminalStates,
     research: state.research,
-    criteria,
-    criterionDischarges: validatedCriterionDischarges(runDirPath, state, criteria?.briefDigest),
+    criteria: effectiveCriteria,
+    criterionDischarges: validatedCriterionDischarges(runDirPath, state, effectiveCriteria?.briefDigest),
   });
   admission.proposalDigest = proposalDigest;
   if (admission.pass) {
@@ -6243,9 +6465,8 @@ export function appendIterationLog(
   innerRetriesUsed?: number,
   maxInnerRetries?: number,
 ): void {
-  const runDirPath = runDir(projectDir, runId);
+  const runDirPath = requireRunArtifactDirectory(projectDir, runId);
   const logPath = join(runDirPath, 'iteration_log.md');
-  mkdirSync(runDirPath, { recursive: true });
   const lines: string[] = [`# Iteration ${iteration}`];
   if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
     lines.push(`Gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}`);
@@ -6350,6 +6571,7 @@ export function writeCampaignEntry(projectDir: string, state: StoreState): void 
     entry.score = metric.score;
     entry.metric = metric.metric;
     entry.threshold = metric.threshold;
+    entry.higherIsBetter = state.research?.higherIsBetter !== false;
   }
   if (phase?.phase) entry.phase = phase.phase;
   if (typeof phase?.phaseComplete === 'boolean') entry.phaseComplete = phase.phaseComplete;
@@ -6519,6 +6741,7 @@ export interface CampaignEntry {
   iteration?: number;
   score?: number;
   metric?: string;
+  higherIsBetter?: boolean;
   gate?: string;
   pass: boolean;
   timestamp: string;
@@ -6547,10 +6770,14 @@ export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabl
   const latestMetric = scoped.at(-1)?.metric;
   const comparable = latestMetric ? scoped.filter((entry) => entry.metric === latestMetric) : scoped;
 
-  // Consecutive declines
+  // Consecutive regressions in the declared optimization direction. Historical
+  // entries without the field retain the prior higher-is-better interpretation.
   let declines = 0;
   for (let i = comparable.length - 1; i > 0; i--) {
-    if (comparable[i].score < comparable[i - 1].score) declines++;
+    const direction = comparable[i].higherIsBetter !== false;
+    const priorDirection = comparable[i - 1].higherIsBetter !== false;
+    if (direction !== priorDirection) break;
+    if (direction ? comparable[i].score < comparable[i - 1].score : comparable[i].score > comparable[i - 1].score) declines++;
     else break;
   }
   if (declines >= regAfter) return { type: 'regression', action: 'inject_researcher', message: `${declines} consecutive score declines` };
@@ -6878,6 +7105,80 @@ function validateGateCriterionEvidence(
   return undefined;
 }
 
+export const RUN_VALIDATION_BASELINE_FILE = 'validation_baseline.json';
+
+interface RunValidationBaselineArtifact {
+  version: 1;
+  capturedAt: string;
+  source: 'ship-setup-ready-record';
+  baseline: ProjectValidationBaseline;
+}
+
+interface GateValidationDeltaArtifact {
+  version: 1;
+  stageId: string;
+  checkedAt: string;
+  pass: boolean;
+  baselineSha256: string;
+  current: ProjectValidationBaseline['results'];
+  delta: ValidationDeltaResult[];
+}
+
+function readRunValidationBaseline(runDirPath: string): RunValidationBaselineArtifact | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE), 'utf-8')) as RunValidationBaselineArtifact;
+    if (parsed.version !== 1 || parsed.source !== 'ship-setup-ready-record'
+        || !parsed.baseline || parsed.baseline.version !== 1) return undefined;
+    return parsed;
+  } catch { return undefined; }
+}
+
+export function snapshotShipSetupValidationBaseline(
+  projectDir: string,
+  exactBrief: string,
+  runDirPath: string,
+): RunValidationBaselineArtifact | undefined {
+  const baseline = readShipSetupReadyValidationBaseline(projectDir, exactBrief);
+  if (!baseline) return undefined;
+  const artifact: RunValidationBaselineArtifact = {
+    version: 1,
+    capturedAt: new Date().toISOString(),
+    source: 'ship-setup-ready-record',
+    baseline,
+  };
+  writeFileSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+  return artifact;
+}
+
+/** Execute and persist the baseline comparison at the gate consumer boundary. */
+export async function recordGateValidationDelta(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  dependencies: ProjectValidationDependencies = {},
+): Promise<GateValidationDeltaArtifact | undefined> {
+  const base = runDir(projectDir, runId);
+  const snapshot = readRunValidationBaseline(base);
+  if (!snapshot) return undefined;
+  const current = await runProjectValidationBaseline(projectDir, {
+    ...dependencies,
+    commands: snapshot.baseline.discovery.commands,
+  });
+  const delta = evaluateValidationDelta(snapshot.baseline, current.results);
+  const baselineBytes = readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE));
+  const artifact: GateValidationDeltaArtifact = {
+    version: 1,
+    stageId,
+    checkedAt: new Date().toISOString(),
+    pass: delta.every((entry) => entry.state === 'pass'),
+    baselineSha256: createHash('sha256').update(baselineBytes).digest('hex'),
+    current: current.results,
+    delta,
+  };
+  writeFileSync(join(base, `validation_delta_${stageId}.json`), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+  return artifact;
+}
+
 export function readGateVerdict(
   projectDir: string,
   stageId: string,
@@ -6907,6 +7208,25 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
+  if (runId && v.pass === true) {
+    const candidate = readResearchGateCandidate(base, stageId);
+    if (candidate && (candidate.kind === 'invalid' || candidate.kind === 'absent')) {
+      return { pass: false, reason: `Research round outcome is ${candidate.kind}: ${candidate.reason ?? 'no usable evidence'}` };
+    }
+  }
+  if (runId && v.pass === true) {
+    const baselinePath = join(base, RUN_VALIDATION_BASELINE_FILE);
+    if (existsSync(baselinePath)) {
+      let delta: GateValidationDeltaArtifact | undefined;
+      try {
+        delta = JSON.parse(readFileSync(join(base, `validation_delta_${stageId}.json`), 'utf-8')) as GateValidationDeltaArtifact;
+      } catch { /* rejected below */ }
+      const expectedDigest = createHash('sha256').update(readFileSync(baselinePath)).digest('hex');
+      if (!delta || delta.version !== 1 || delta.stageId !== stageId || delta.baselineSha256 !== expectedDigest || delta.pass !== true) {
+        return { pass: false, reason: `Validation baseline delta for gate ${stageId} is missing, stale, or regressed` };
+      }
+    }
+  }
   const contradiction = explicitPassContradiction(v, 'verdict');
   if (contradiction) {
     log.warn({ stageId, runId, contradiction }, 'Gate verdict rejected because its structured fields contradict pass=true');
@@ -7406,6 +7726,61 @@ export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: st
   return allStages.filter(s => s.retry_to && s.retry_to.some(id => failedSet.has(id)));
 }
 
+const OMITTED_OUTCOME_REJECTION = /(?:\b(?:no|missing|absent|unavailable)\b.{0,80}\b(?:measurement|measured result|result|outcome|evidence)\b|\b(?:measurement|measured result|outcome)\b.{0,80}\b(?:missing|absent|unavailable)\b)/i;
+const NEGATED_OUTCOME_OMISSION = /(?:\b(?:no|not|without)\s+(?:longer\s+)?(?:missing|absent|unavailable)\b.{0,80}\b(?:measurement|measured result|result|outcome|evidence)\b|\bno\s+(?:measurement|measured result|result|outcome|evidence)\b.{0,40}\b(?:is|are|was|were|remains?)\s+(?:missing|absent|unavailable)\b|\b(?:measurement|measured result|result|outcome|evidence)\b.{0,40}\b(?:is|are|was|were|remains?)\s+(?:not|no longer)\s+(?:missing|absent|unavailable)\b)/i;
+
+function rejectionReportsOmittedOutcome(reason: string | undefined): boolean {
+  if (!reason || NEGATED_OUTCOME_OMISSION.test(reason)) return false;
+  return OMITTED_OUTCOME_REJECTION.test(reason);
+}
+
+/** Add a completed research outcome producer only when the gate's effective
+ * reason says the outcome itself is absent. Ordinary report-quality rejection
+ * continues to select only retry_to repair stages. */
+export function findGateRecoveryStages(
+  allStages: StageConfig[],
+  rejectedGateIds: string[],
+  rejectionReasons: Readonly<Record<string, string | undefined>>,
+  research?: ResearchConfig,
+): StageConfig[] {
+  const repairs = findAllRetryToStages(allStages, rejectedGateIds);
+  if (!research) return repairs;
+  const paths = resolveResearchPaths(research);
+  const outcomePaths = [paths.resultFile, `${paths.resultFile}.no_candidate.json`];
+  const byId = new Map(allStages.map((stage) => [stage.id, stage]));
+  const selected = new Map(repairs.map((stage) => [stage.id, stage]));
+  for (const gateId of rejectedGateIds) {
+    if (!rejectionReportsOmittedOutcome(rejectionReasons[gateId])) continue;
+    for (const candidate of allStages) {
+      if (candidate.is_gate || candidate.retry_to?.length || candidate.dynamic_dispatch) continue;
+      if (!transitivelyDependsOn(gateId, candidate.id, byId)) continue;
+      if (!outcomePaths.some((path) => stageScopeOwnsPath(candidate, path))) continue;
+      selected.set(candidate.id, candidate);
+    }
+  }
+  return [...selected.values()];
+}
+
+/** Bind research outcome semantics only to a gate whose dependency closure
+ * contains an ordinary stage that owns the mutable result/sidecar slot. */
+export function isResearchOutcomeGate(
+  stage: StageConfig,
+  allStages: StageConfig[],
+  research?: ResearchConfig,
+): boolean {
+  if (!research || !stage.is_gate) return false;
+  const paths = resolveResearchPaths(research);
+  const outcomePaths = [paths.resultFile, `${paths.resultFile}.no_candidate.json`];
+  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
+  return allStages.some((candidate) => (
+    !candidate.is_gate
+    && !candidate.retry_to?.length
+    && !candidate.dynamic_dispatch
+    && transitivelyDependsOn(stage.id, candidate.id, byId)
+    && outcomePaths.some((path) => stageScopeOwnsPath(candidate, path))
+  ));
+}
+
 export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], allStages: StageConfig[], projectDir?: string, runId?: string): boolean {
   // If there are is_gate stages, use verdict-based checking
   const gateStages = allStages.filter(s => s.is_gate && dispatchedStageIds.includes(s.id));
@@ -7542,6 +7917,40 @@ function guardPlainCompletionWithStageObligations(
     }, 'Plain completion blocked by unresolved stage obligations');
   }
   return reconciled.stageIds;
+}
+
+/** A successful run is the last reliable point at which ignored declared
+ * outputs still exist in the worktree.  Archive them before committing every
+ * non-terminal-state completion, and fail visibly if the declared artifact is
+ * absent, ambiguous, or otherwise unsafe to preserve. */
+function archiveDeclaredOutputsBeforePlainCompletion(
+  state: StoreState,
+  context: { projectDir: string; runId: string; runDirPath: string; iteration: number },
+  completionPath: string,
+): boolean {
+  if (!state.declaredOutputs?.length) return true;
+  try {
+    archiveDeclaredOutputs(context.projectDir, context.runDirPath, state.declaredOutputs);
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    state.status = RUN_STATUS.FAILED;
+    state.failureReason = `Declared output archival refused plain completion (${completionPath}): ${detail}`;
+    state.completedAt = new Date().toISOString();
+    writeRunState(context.projectDir, context.runId, state);
+    writeCampaignEntry(context.projectDir, state);
+    recordRunEvent(context.projectDir, context.runId, {
+      type: 'run_completed',
+      runId: context.runId,
+      timestamp: state.completedAt,
+      iteration: context.iteration,
+      detail: state.failureReason,
+      level: 'warning',
+      source: 'scheduler',
+    });
+    log.error({ runId: context.runId, completionPath, detail }, 'Plain completion refused because declared outputs could not be archived');
+    return false;
+  }
 }
 
 function appendUnresolvedStageObligationContext(prompt: string, state: StoreState): string {
@@ -7766,7 +8175,12 @@ export async function runWorkflow(
     const exactBrief = existsSync(briefPath)
       ? readFileSync(briefPath, 'utf-8')
       : (taskDescription ?? '');
-    if (exactBrief) writeBriefCriteriaArtifact(runDirPath, exactBrief);
+    if (exactBrief) {
+      writeBriefCriteriaArtifact(runDirPath, exactBrief);
+      if (!existsSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
+        snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
+      }
+    }
   } catch (error) {
     throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
@@ -7883,13 +8297,14 @@ export async function runWorkflow(
       ? taskDescription
       : readFileSync(briefPath, 'utf-8')).trim();
     if (briefContent) {
-      const { terminalStates, program, research, stripped, frontmatterError } = parseBriefFrontmatter(briefContent);
+      const { terminalStates, program, research, outputs, stripped, frontmatterError } = parseBriefFrontmatter(briefContent);
       taskDescription = stripped || briefContent;
-      if (terminalStates || program || research) {
+      if (terminalStates || program || research || outputs) {
         const s = readRunState(projectDir, runId);
         if (terminalStates) s.terminalStates = terminalStates;
         if (program) s.program = program;
         if (research) s.research = research;
+        if (outputs) s.declaredOutputs = outputs;
         writeRunState(projectDir, runId, s);
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
         if (program) log.info({ runId, program: program.name, phase: program.phase }, 'Program config loaded from brief frontmatter');
@@ -7929,6 +8344,19 @@ export async function runWorkflow(
         // Frontmatter was malformed but the run isn't a research loop — still
         // surface it (it may have intended terminal_states / program config).
         log.warn({ runId, frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/program/research config in it was ignored');
+      }
+      const budgetAssessment = assessResearchIterationBudget(research, maxIterations);
+      if (briefAdmission && !budgetAssessment.pass) {
+        const s = readRunState(projectDir, runId);
+        s.status = 'failed';
+        s.failureReason = `Research budget admission refused: ${budgetAssessment.reason}. Raise default_max_iterations or lower max_rounds before launch.`;
+        s.completedAt = new Date().toISOString();
+        writeRunState(projectDir, runId, s);
+        recordRunEvent(projectDir, runId, {
+          type: 'admission_rejected', runId, timestamp: s.completedAt,
+          detail: s.failureReason,
+        });
+        return s;
       }
       // Program safeguard pre-check at run start. If violated, refuse to start
       // and write a program-level abort artifact for the orchestrator's next
@@ -8247,6 +8675,11 @@ export async function runWorkflow(
             'supervisor_goal_met',
           );
           if (terminalConclusion) return terminalConclusion;
+          if (!archiveDeclaredOutputsBeforePlainCompletion(
+            state,
+            { projectDir, runId, runDirPath, iteration },
+            'supervisor_goal_met',
+          )) return state;
           state.status = 'complete';
           state.completedAt = new Date().toISOString();
           const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -8509,6 +8942,11 @@ export async function runWorkflow(
     const recoveredTerminal = recoverTerminalStudyCompletion(projectDir, runId, state);
     if (recoveredTerminal) {
       clearGateContinuationsForStages(runDirPath, sorted);
+      if (!archiveDeclaredOutputsBeforePlainCompletion(
+        recoveredTerminal,
+        { projectDir, runId, runDirPath, iteration },
+        'terminal_study_recovery',
+      )) return recoveredTerminal;
       writeRunState(projectDir, runId, recoveredTerminal);
       writeCampaignEntry(projectDir, recoveredTerminal);
       return recoveredTerminal;
@@ -8572,7 +9010,12 @@ export async function runWorkflow(
       if (!allPass) {
         // Terminal incompleteness is not a repair verdict. Only a completed,
         // validated pass:false fact can make its retry_to stage eligible.
-        const retryStages = findAllRetryToStages(sorted, rejectedGateIds);
+        const retryStages = findGateRecoveryStages(
+          sorted,
+          rejectedGateIds,
+          Object.fromEntries(outerCheck.evaluations.map((entry) => [entry.id, entry.effectiveVerdict?.reason])),
+          state.research,
+        );
         if (retryStages.length > 0) {
           for (let inner = innerRetriesUsed; inner < maxInnerRetries; inner++) {
 
@@ -8615,7 +9058,12 @@ export async function runWorkflow(
             }, 'Gate retry entry check');
             if (shouldBreakForPassingGates) break;
 
-            const activeRetryStages = findAllRetryToStages(sorted, currentRejectedGateIds);
+            const activeRetryStages = findGateRecoveryStages(
+              sorted,
+              currentRejectedGateIds,
+              Object.fromEntries(currentCheck.evaluations.map((entry) => [entry.id, entry.effectiveVerdict?.reason])),
+              state.research,
+            );
             if (activeRetryStages.length === 0) {
               log.info({ event: 'gate_retry_entry_break', runId, iteration, inner, reason: 'no-active-retry-stages' }, 'Gate retry entry break');
               break;
@@ -9178,6 +9626,11 @@ export async function runWorkflow(
           'gate_pass',
         );
         if (terminalConclusion) return terminalConclusion;
+        if (!archiveDeclaredOutputsBeforePlainCompletion(
+          state,
+          { projectDir, runId, runDirPath, iteration },
+          'gate_pass',
+        )) return state;
         state.status = 'complete';
         state.completedAt = new Date().toISOString();
         const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -9260,6 +9713,11 @@ export async function runWorkflow(
           'base_all_done',
         );
         if (terminalConclusion) return terminalConclusion;
+        if (!archiveDeclaredOutputsBeforePlainCompletion(
+          state,
+          { projectDir, runId, runDirPath, iteration },
+          'base_all_done',
+        )) return state;
         state.status = RUN_STATUS.COMPLETE;
         state.completedAt = new Date().toISOString();
         const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
@@ -11153,6 +11611,7 @@ async function executeSingleStage(
   resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
   resolvedPrompt = appendResearchTemporalPathContract(resolvedPrompt, state.research, state.terminalStates);
   if (stage.dynamic_dispatch) {
+    resolvedPrompt = appendPlannerAdmissionContract(resolvedPrompt, state.terminalStates);
     resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
   }
@@ -11204,6 +11663,7 @@ async function executeSingleStage(
       promptTemplate: appendAttemptDeadlineContract(retries > 0
         ? `${buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`
         : resolvedPrompt, prepared.budgetMs),
+      artifactObligationTemplate: stage.prompt_template,
       timeout_ms: prepared.budgetMs,
       ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
       projectDir,
@@ -11216,6 +11676,7 @@ async function executeSingleStage(
       availableSkills,
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
+      researchOutcomeGate: isResearchOutcomeGate(stage, allStages, state.research),
       criterionRefs: stage.criterion_refs,
       resumeSessionId: resumeSession?.sessionId,
       sessionOwnerStageId: resumeSession?.ownerStageId,
@@ -11246,6 +11707,9 @@ async function executeSingleStage(
   // Record the outcome event using the authoritative per-stage file.
   try {
     const stageStatus = readStageStatus(projectDir, runId, stage.id);
+    if (stage.is_gate && stageStatus.status === STAGE_STATUS.COMPLETE) {
+      await recordGateValidationDelta(projectDir, runId, stage.id);
+    }
     // Batch reconciliation owns stage_complete/stage_failed emission because a
     // just-accepted scope request or approval may convert this settlement into
     // a suspension before downstream dependencies are released.
@@ -11346,8 +11810,12 @@ async function executeIteration(
           const plannerChecks = existsSync(plannerChecksPath)
             ? readFileSync(plannerChecksPath, 'utf-8')
             : '';
-          const validationBaseline = readShipSetupReadyValidationBaseline(projectDir, exactTaskBrief);
-          const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, { validationBaseline });
+          const validationBaseline = readRunValidationBaseline(runDirPath)?.baseline
+            ?? readShipSetupReadyValidationBaseline(projectDir, exactTaskBrief);
+          const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, {
+            validationBaseline,
+            projectDir,
+          });
           if (preflight.refusingFindings.length > 0) {
             writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
             injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId, true);
@@ -11696,7 +12164,15 @@ async function executeIteration(
       if (stage.condition) {
         const met = evaluateCondition(stage.condition, projectDir, runId);
         if (!met) {
-          const skipped: StageStatus = { status: 'skipped', retries: 0 };
+          // A later conditional skip is a scheduling decision, not evidence
+          // that an earlier completed execution never happened. Preserve its
+          // immutable attempts so terminal ownership and audit attribution
+          // remain provable across research iterations.
+          const previous = (() => {
+            try { return readStageStatus(projectDir, runId, stage.id); }
+            catch { return state.stages[stage.id]; }
+          })();
+          const skipped: StageStatus = { ...previous, status: STAGE_STATUS.SKIPPED, retries: previous?.retries ?? 0 };
           writeStageStatus(projectDir, runId, stage.id, skipped);
           state.stages[stage.id] = skipped;
           writeRunState(projectDir, runId, state);
@@ -11708,7 +12184,11 @@ async function executeIteration(
       // Skip retry_to stages during initial execution; the inner loop handles them
       // But don't skip is_gate stages — they need to run to evaluate the gate
       if (stage.retry_to && stage.retry_to.length > 0 && !stage.is_gate) {
-        const skipped: StageStatus = { status: 'skipped', retries: 0 };
+        const previous = (() => {
+          try { return readStageStatus(projectDir, runId, stage.id); }
+          catch { return state.stages[stage.id]; }
+        })();
+        const skipped: StageStatus = { ...previous, status: STAGE_STATUS.SKIPPED, retries: previous?.retries ?? 0 };
         writeStageStatus(projectDir, runId, stage.id, skipped);
         state.stages[stage.id] = skipped;
         writeRunState(projectDir, runId, state);
@@ -11874,6 +12354,7 @@ async function executeIteration(
       resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
       resolvedPrompt = appendResearchTemporalPathContract(resolvedPrompt, state.research, state.terminalStates);
       if (stage.dynamic_dispatch) {
+        resolvedPrompt = appendPlannerAdmissionContract(resolvedPrompt, state.terminalStates);
         resolvedPrompt = appendScopePlanningInput(resolvedPrompt, runDirPath);
         resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
       }
@@ -11913,6 +12394,7 @@ async function executeIteration(
         role: agent,
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
+        artifactObligationTemplate: stage.prompt_template,
         timeout_ms: prepared.budgetMs,
         ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
         projectDir,
@@ -11929,6 +12411,7 @@ async function executeIteration(
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
+        researchOutcomeGate: isResearchOutcomeGate(stage, sorted, state.research),
         criterionRefs: stage.criterion_refs,
         resumeSessionId: resumeSession?.sessionId,
         sessionOwnerStageId: resumeSession?.ownerStageId,
@@ -12077,6 +12560,20 @@ async function executeIteration(
       }
 
       state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+      if (stage.is_gate && state.stages[stage.id].status === STAGE_STATUS.COMPLETE) {
+        try {
+          await recordGateValidationDelta(projectDir, runId, stage.id);
+        } catch (error) {
+          // readGateVerdict fails closed when a run-local baseline exists but
+          // its bound delta is missing.  Keep the stage settlement observable
+          // and let gate adjudication report that failure instead of orphaning
+          // the scheduler on a validation-launch exception.
+          log.error({
+            stage: stage.id,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'Could not record gate validation delta');
+        }
+      }
       technicalRetries.delete(stage.id);
       stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');

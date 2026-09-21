@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type {
   ProjectValidationBaseline,
@@ -168,4 +168,47 @@ export function readShipSetupReadyValidationBaseline(
   } catch {
     return undefined;
   }
+}
+
+export type ShipSetupRecordInspection =
+  | { state: 'missing'; recordPath: string }
+  | { state: 'invalid'; recordPath?: string; reason: string }
+  | { state: 'refused'; recordPath: string; reason: string }
+  | { state: 'ready'; recordPath: string; validationBaseline: ProjectValidationBaseline; record: Record<string, unknown> };
+
+/** Preserve absence, refusal, corruption, and readiness as distinct launch facts. */
+export function inspectShipSetupRecord(
+  targetDir: string,
+  exactBrief: string,
+  globalRoot = fcGlobalDir(),
+): ShipSetupRecordInspection {
+  let canonicalTarget: string;
+  try { canonicalTarget = realpathSync.native(resolve(targetDir)); }
+  catch (error) {
+    return { state: 'invalid', reason: `target cannot be canonicalized: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const briefDigest = shipSetupBriefDigest(exactBrief);
+  const expectedPath = shipSetupReadyRecordPath(canonicalTarget, briefDigest, globalRoot);
+  if (!existsSync(expectedPath)) return { state: 'missing', recordPath: expectedPath };
+  let parsed: Record<string, unknown> | undefined;
+  try { parsed = record(JSON.parse(readFileSync(expectedPath, 'utf-8')) as unknown); }
+  catch (error) {
+    return { state: 'invalid', recordPath: expectedPath, reason: `record is unreadable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!parsed
+      || parsed.version !== 1
+      || parsed.briefDigest !== briefDigest
+      || !sameResolvedPath(parsed.targetCanonicalDir, canonicalTarget)
+      || !sameResolvedPath(parsed.readyRecordPath, expectedPath)) {
+    return { state: 'invalid', recordPath: expectedPath, reason: 'record identity does not match the exact canonical target and brief' };
+  }
+  if (parsed.state === 'refused' && parsed.ready === false) {
+    const blockers = Array.isArray(parsed.blockers) ? parsed.blockers : [];
+    const reason = blockers.map((item) => record(item)?.reason).filter((item): item is string => typeof item === 'string').join('; ');
+    return { state: 'refused', recordPath: expectedPath, reason: reason || 'ship-setup refused this target and brief' };
+  }
+  if (parsed.state !== 'ready' || parsed.ready !== true || !validBaseline(parsed.validationBaseline, canonicalTarget)) {
+    return { state: 'invalid', recordPath: expectedPath, reason: 'record is neither a valid ready record nor a valid refused record' };
+  }
+  return { state: 'ready', recordPath: expectedPath, validationBaseline: parsed.validationBaseline, record: parsed };
 }

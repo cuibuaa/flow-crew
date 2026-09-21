@@ -34,12 +34,35 @@ repair action. A silent script failure also tells the author to rerun from the
 project root and make each condition emit a named diagnostic, so a multi-part
 check does not require manual reconstruction to discover which condition failed.
 
-There is one narrow runtime exception for `exec-script-exit-zero`: exit 127 is
+There are two narrow runtime exceptions for `exec-script-exit-zero`. Exit 127 is
 treated as an advisory environment defect only when stderr also contains a
 shell `command not found` diagnostic. The report, persisted JSON, and advisory
-event name the unavailable command. Exit 1 and exit 127 without that diagnostic
-remain hard failures, so a script cannot bypass an evidence check merely by
-choosing exit code 127.
+event name the unavailable command.
+
+The other exception is an inline Node check that exits 1 after parsing exactly
+one project-contained JSON artifact. Its failed execution becomes advisory only
+when the artifact declares a version in its top-level `artifact` field, the
+script never reads that discriminator, and at least two independent failure
+guards require statically resolvable property paths that are absent or have an
+incompatible container type. The original command, complete streams, direct
+exit tuple, discriminator, and incompatible paths remain in
+`.reality-gate.json`; the check itself remains `pass: false`. Binding the
+expected `artifact` discriminator keeps a format-specific defect hard.
+
+This is deliberately not a general satisfiability test. A single incompatible
+guard, unversioned JSON, computed or helper-derived access, multiple JSON
+inputs, value-only failures on present fields, malformed or escaping paths,
+timeouts, signals, other exit codes, and unrecognized script shapes remain hard
+failures. Exit 127 without a command-not-found diagnostic also remains hard, so
+a script cannot bypass an evidence check merely by choosing its exit code.
+
+Planner preflight applies that same narrow analyzer when the statically named,
+project-contained artifact already exists. It records a
+`versioned_json_shape_mismatch` advisory and demotes the check before dispatch;
+the finding does not reject the plan because an admitted producer may still
+replace the current bytes. Checks that bind the discriminator, artifacts that
+are absent or malformed, and every unsupported script shape retain their prior
+hard behavior at the terminal boundary.
 
 ## Check Types
 

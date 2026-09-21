@@ -20,6 +20,7 @@ live_constraint_exempt_patterns:
   - "**/.pytest_cache/**"
   - "**/.mypy_cache/**"
   - "**/.ruff_cache/**"
+  - "node_modules/.vite/vitest/**"
   - "**/*.tsbuildinfo"
 # Recursive watching is only an accelerator; these bounds govern the portable
 # reconciliation scan and how long an attempt may go without a completed scan.

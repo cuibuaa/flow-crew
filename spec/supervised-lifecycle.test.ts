@@ -17,6 +17,7 @@ import { sendRpc, type RpcResponse } from '../src/orchestrator-rpc.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { TERMINAL_STATUSES } from '../src/store.js';
 import { TASK_STATUS, TaskRegistry, type TaskEntry } from '../src/task-registry.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const distCli = join(repositoryRoot, 'dist', 'cli.js');
@@ -341,7 +342,11 @@ function registerBackgroundTask(harness: Harness, project: string, marker: strin
     '# Goal',
     `Exercise portable supervision: ${marker}`,
     '',
+    '## What the report must show',
+    '1. Record the supervised lifecycle outcome for this fixture.',
+    '',
   ].join('\n');
+  writeReadySetupRecord(project, brief, harness.fcHome);
   const result = runCliSync(harness, project, [
     'quick',
     '--background',

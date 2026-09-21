@@ -13,11 +13,15 @@ export interface BriefCriteriaArtifact {
   version: 1;
   briefDigest: string;
   criteria: BriefCriterion[];
+  excluded?: Array<{ line: number; text: string; reason: 'explicitly_illustrative' }>;
 }
 
 const CRITERIA_HEADING = /^(?:requirements?|criteria)\s*:?$|\b(?:acceptance|success|completion|verification|report)\b.{0,40}\b(?:criteria|requirements?|contract|must show|must contain)\b|\bwhat\b.{0,40}\bmust show\b|\bnon-negotiables?\b/i;
 const ILLUSTRATIVE_HEADING = /\b(?:for example|e\.g\.|illustrative|example only|not (?:a )?criteri(?:on|a))\b/i;
-const ILLUSTRATIVE_ONLY = /^(?:for example|e\.g\.|example(?: only)?|illustration)\b|\b(?:examples? (?:are|is) illustrative|not (?:a )?criteri(?:on|a))\b/i;
+// Exclude only an explicit example label/directive.  A substantive adjective
+// such as "Example-driven" is part of the criterion, not a label for prose
+// that follows it.
+const ILLUSTRATIVE_ONLY = /^(?:(?:for example|e\.g\.|example only|illustration)\b|(?:illustrative|example)\s*:|\[(?:illustrative|example)\]\s*:?[ \t]*|\((?:illustrative|example)\)[ \t]*)/i;
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -44,6 +48,7 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
   const lines = brief.split(/\r?\n/);
   const firstBodyLine = bodyStartLine(brief);
   const criteria: BriefCriterion[] = [];
+  const excluded: NonNullable<BriefCriteriaArtifact['excluded']> = [];
   let section: { title: string; level: number } | undefined;
   let current: { ordinal: string; line: number; text: string; section: string } | undefined;
   let inFence = false;
@@ -58,7 +63,7 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
         line: current.line,
         section: current.section,
       });
-    }
+    } else if (text) excluded.push({ line: current.line, text, reason: 'explicitly_illustrative' });
     current = undefined;
   };
 
@@ -103,7 +108,7 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
     }
   }
   flush();
-  return { version: 1, briefDigest: digest(brief), criteria };
+  return { version: 1, briefDigest: digest(brief), criteria, ...(excluded.length ? { excluded } : {}) };
 }
 
 export function writeBriefCriteriaArtifact(runDir: string, brief: string): BriefCriteriaArtifact {

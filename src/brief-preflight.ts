@@ -8,6 +8,7 @@ import {
   normalizeBriefInputPath,
 } from './ship-inputs.js';
 import { isNegatedRequirementLine } from './brief-negation.js';
+import { extractBriefCriteria } from './brief-criteria.js';
 import {
   evaluateResearchFeasibility,
   type ResearchFeasibilityEvaluation,
@@ -691,6 +692,27 @@ export function inspectBrief(
       code: 'structured_input',
       level: 'ok',
       message: 'Structured brief shape detected',
+      acknowledgementRequired: false,
+    });
+  }
+
+  const extractedCriteria = extractBriefCriteria(brief);
+  if (extractedCriteria.criteria.length === 0) {
+    add({
+      code: 'brief_criteria_missing',
+      // The shared inspector is also used for partial drafting diagnostics.
+      // Launch/certification consumers promote this explicit code to refusal.
+      level: 'ok',
+      message: 'No structurally extractable criterion was found under an explicit criteria/requirements/report contract heading.',
+      acknowledgementRequired: false,
+      risk: 'Planning and dispatch would otherwise iterate over an empty proof obligation and report readiness.',
+      suggestion: 'Add at least one numbered criterion under an explicit contract heading.',
+    });
+  } else {
+    add({
+      code: 'brief_criteria_extracted',
+      level: 'ok',
+      message: `${extractedCriteria.criteria.length} structurally extractable criterion/criteria found`,
       acknowledgementRequired: false,
     });
   }

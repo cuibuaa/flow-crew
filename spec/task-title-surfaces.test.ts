@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { startRpcServer, type RpcRequest } from '../src/orchestrator-rpc.js';
 import { extractTaskTitle } from '../src/store.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 /**
  * Task registration is a user-facing projection of the brief, so both the
@@ -36,6 +37,8 @@ const titleCases = [
 ] as const;
 
 async function runBackgroundSubmit(brief: string): Promise<{ code: number | null; output: string }> {
+  const admittedBrief = `${brief}\n## What the report must show\n1. Preserve the extracted task title at registration.\n`;
+  writeReadySetupRecord(projectDir, admittedBrief, fcHome);
   const child = spawn(
     process.execPath,
     [
@@ -62,7 +65,7 @@ async function runBackgroundSubmit(brief: string): Promise<{ code: number | null
   child.stderr.setEncoding('utf-8');
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.stdin.end(brief);
+  child.stdin.end(admittedBrief);
   const code = await new Promise<number | null>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', resolve);

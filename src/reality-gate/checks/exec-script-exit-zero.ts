@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, join, posix } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { CheckContext, CheckResult, RealityCheck, RealityGateExit } from '../types.js';
+import { classifyVersionedJsonShapeFailure } from '../versioned-json-admission.js';
 import { result } from './_utils.js';
 
 interface Params {
@@ -33,7 +34,7 @@ function commandNotFound(stderr: string): string | undefined {
 }
 
 export default class ExecScriptExitZeroCheck implements RealityCheck {
-  static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Scripts that use `git archive` must declare every repository input in `archive_paths`; each path is verified in `archive_ref` (default `HEAD`) before the script runs. Exit 127 is advisory only when stderr contains a command-not-found diagnostic.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number, archive_paths?: string[] (required with git archive), archive_ref?: string (default HEAD)' };
+  static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Scripts that use `git archive` must declare every repository input in `archive_paths`; each path is verified in `archive_ref` (default `HEAD`) before the script runs. Exit 127 with a command-not-found diagnostic and narrowly recognized unbound multi-shape checks against versioned JSON are advisory with their failed execution preserved.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number, archive_paths?: string[] (required with git archive), archive_ref?: string (default HEAD)' };
   async run(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.script !== 'string') return result(false, '`params.script` must be provided; add a failure-capable script and rerun the check.');
@@ -67,6 +68,22 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
           false,
           `Environment could not run check: command not found: ${missingCommand} (exit 127). Install or replace the named command, then rerun the check.`,
           { ...execution, environmentDefect: 'command_not_found', missingCommand },
+        ),
+        advisory: true,
+      };
+    }
+    const versionedJsonAdmission = classifyVersionedJsonShapeFailure({
+      script: params.script,
+      args,
+      projectDir: context.projectDir,
+      execution,
+    });
+    if (versionedJsonAdmission) {
+      return {
+        ...result(
+          false,
+          versionedJsonAdmission.detail,
+          { ...execution, terminalAdmission: versionedJsonAdmission.evidence },
         ),
         advisory: true,
       };

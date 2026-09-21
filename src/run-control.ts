@@ -253,6 +253,35 @@ export class RunCancellationCoordinator {
     return this.coordinate({ task, run, runBinding: run.binding, unit });
   }
 
+  /** Read-only convergence check used after a client loses the mutating RPC
+   * response. It never sends another stop signal. */
+  async statusRun(runId: string, unit?: string): Promise<CancellationResult> {
+    if (!safeRunId(runId)) throw new Error(`Invalid run id: ${runId}`);
+    const run = this.readRunTarget(runId);
+    if (!run) throw new Error(`Run not found: ${runId}`);
+    const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
+      .filter((entry) => this.taskRunId(entry) === run.runId)
+      .sort((left, right) => right.id - left.id)[0];
+    const target: CancellationTarget = { task, run, runBinding: run.binding, unit };
+    const observation = await this.observe(target);
+    const current = this.readRunTarget(run.binding) ?? run;
+    if (observation.unitState.kind === 'terminal-unknown') {
+      return { ok: false, status: 'outcome-unknown', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation outcome remains unknown', observation) };
+    }
+    if (this.isStopped(observation) && isTerminalRunStatus(current.state.status)) {
+      return {
+        ok: true,
+        status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
+        runId,
+        ...(task ? { taskId: task.id } : {}),
+        observation,
+        preservedRunStatus: current.state.status,
+        message: this.observationMessage('cancellation convergence confirmed', observation),
+      };
+    }
+    return { ok: false, status: 'cancelling', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation has not converged', observation) };
+  }
+
   private coordinate(target: CancellationTarget): Promise<CancellationResult> {
     const boundRunId = target.run?.runId
       ?? (target.runBinding

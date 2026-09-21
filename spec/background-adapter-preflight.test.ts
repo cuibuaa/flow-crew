@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 /**
  * `flowcrew quick --background` is the line the ship skill runs. It hands the
@@ -55,6 +56,15 @@ afterEach(() => {
 });
 
 function runBackgroundSubmit(extraArgs: readonly string[]): { code: number | null; out: string } {
+  const brief = [
+    '# Goal',
+    'Probe the background adapter preflight.',
+    '',
+    '## What the report must show',
+    '1. Report whether adapter availability was checked before registration.',
+    '',
+  ].join('\n');
+  writeReadySetupRecord(join(root, 'project'), brief, join(root, 'fc'));
   const result = spawnSync(
     process.execPath,
     [
@@ -73,7 +83,7 @@ function runBackgroundSubmit(extraArgs: readonly string[]): { code: number | nul
         NO_COLOR: '1',
       },
       encoding: 'utf-8',
-      input: '# Goal\nProbe the background adapter preflight.\n',
+      input: brief,
       timeout: 60_000,
     },
   );

@@ -2,6 +2,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { Orchestrator } from './orchestrator.js';
 import {
   DaemonUnavailableError,
+  CANCELLATION_RPC_TIMEOUT_MS,
   defaultSocketPath,
   RpcOutcomeUnknownError,
   sendRpc,
@@ -97,7 +98,11 @@ function clientRuntime(options: CancellationClientOptions): {
 } {
   const socketPath = options.socketPath ?? defaultSocketPath();
   const request = options.sendRequest ?? ((rpcRequest: RpcRequest) => (
-    sendRpc<RpcResponse>(socketPath, rpcRequest, options.rpcTimeoutMs)
+    sendRpc<RpcResponse>(
+      socketPath,
+      rpcRequest,
+      options.rpcTimeoutMs ?? (/^cancel(?:-|$)/.test(rpcRequest.cmd) ? CANCELLATION_RPC_TIMEOUT_MS : undefined),
+    )
   ));
   let localControl = options.localControl;
   return {
@@ -139,6 +144,13 @@ async function requestRunCancellation(
   try {
     response = await request({ cmd: 'cancel-run', runId, ...(unit ? { unit } : {}) });
   } catch (error) {
+    if (error instanceof RpcOutcomeUnknownError) {
+      try {
+        const observed = await request({ cmd: 'cancel-status', runId, ...(unit ? { unit } : {}) });
+        if (isCancellationResult(observed, { runId })) return observed;
+      } catch { /* preserve the original ambiguous delivery error below */ }
+      throw error;
+    }
     if (!mayFallbackAfter(error)) throw error;
     return fallback();
   }

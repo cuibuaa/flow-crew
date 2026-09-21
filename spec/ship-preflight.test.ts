@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
 import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
@@ -65,6 +66,14 @@ beforeEach(() => {
   mkdirSync(join(fixture.packageRoot, 'dist'), { recursive: true });
   writeFileSync(join(fixture.packageRoot, 'src', 'probe.ts'), 'export const probe = true;\n', 'utf-8');
   writeFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'export const probe = true;\n', 'utf-8');
+  writeFileSync(join(fixture.packageRoot, 'dist', 'probe.d.ts'), 'export declare const probe = true;\n', 'utf-8');
+  writeFileSync(join(fixture.packageRoot, 'tsconfig.json'), '{}\n', 'utf-8');
+  const manifest = createBuildManifest(fixture.packageRoot, join(fixture.packageRoot, 'dist'));
+  writeFileSync(
+    join(fixture.packageRoot, 'dist', BUILD_MANIFEST_FILENAME),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    'utf-8',
+  );
   const older = new Date(1_000);
   const newer = new Date(2_000);
   utimesSync(join(fixture.packageRoot, 'src', 'probe.ts'), older, older);
@@ -322,8 +331,7 @@ describe('ship-preflight daemon and build freshness fact', () => {
 
   it('does not call stale source current merely because daemon matches dist', async () => {
     const source = join(fixture.packageRoot, 'src', 'probe.ts');
-    const future = new Date(5_000);
-    utimesSync(source, future, future);
+    writeFileSync(source, 'export const probe = false;\n', 'utf-8');
     writeFileSync(join(fixture.packageRoot, 'src', 'missing.ts'), 'export const missing = true;\n', 'utf-8');
     const output = new Capture();
     const code = await cmdShipPreflightWithDeps(['ship-preflight'], commonDeps({ stdout: output.writer }));
@@ -331,8 +339,7 @@ describe('ship-preflight daemon and build freshness fact', () => {
     expect(code).toBe(0);
     expect(output.value).toContain('Daemon → dist: FRESH');
     expect(output.value).toContain('Source → dist: STALE');
-    expect(output.value).toContain('probe.js');
-    expect(output.value).toContain('missing.js');
+    expect(output.value).toContain('source/config digest');
     expect(output.value).toContain('A dist build that is behind src can still report FRESH');
   });
 
@@ -440,6 +447,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       '---',
       '# Background',
       'The ordinary words scheduler and generator are descriptive prose.',
+      '## What the report must show',
+      '1. Report every invalid leading input declaration.',
     ].join('\n');
 
     expect(extractDeclaredBriefInputPaths(brief)).toEqual(['dependency_cache']);

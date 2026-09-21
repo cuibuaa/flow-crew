@@ -11,7 +11,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   canonicalCampaignStorageKey,
@@ -56,6 +56,8 @@ import {
   type StoreState,
   isRunningRunStatus,
 } from './store.js';
+import { assertDistFresh } from './build-manifest.js';
+import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
 
 export { extractBriefInputPaths } from './ship-inputs.js';
 
@@ -195,6 +197,11 @@ export interface ShipPreflightReport {
     state: 'checked' | 'not_requested';
     briefPath?: string;
     inventory: BriefOutputInventory;
+  };
+  briefCriteria: {
+    state: 'checked' | 'missing' | 'not_requested';
+    briefPath?: string;
+    artifact?: BriefCriteriaArtifact;
   };
   validationBaseline: ProjectValidationBaseline;
 }
@@ -702,31 +709,25 @@ function sourceDistFreshness(packageRoot: string, deps: ResolvedDependencies): S
     return { state: 'unknown', sourceFiles: 0, pairedOutputs: 0, stalePaths: [], reason: 'No TypeScript source files were found' };
   }
 
-  const stalePaths: string[] = [];
-  let pairedOutputs = 0;
-  for (const source of sources) {
-    const sourceRelative = relative(sourceRoot, source);
-    const outputRelative = sourceRelative.replace(/\.ts$/, '.js');
-    const output = join(distRoot, outputRelative);
-    if (!deps.exists(output)) {
-      stalePaths.push(outputRelative.split(sep).join('/'));
-      continue;
-    }
-    try {
-      pairedOutputs += 1;
-      if (deps.stat(source).mtimeMs > deps.stat(output).mtimeMs) {
-        stalePaths.push(outputRelative.split(sep).join('/'));
-      }
-    } catch (error) {
-      stalePaths.push(`${outputRelative.split(sep).join('/')} (${errorMessage(error)})`);
-    }
+  try {
+    const manifest = assertDistFresh(packageRoot, distRoot);
+    return {
+      state: 'current',
+      sourceFiles: sources.length,
+      pairedOutputs: manifest.outputs.filter((output) => output.path.endsWith('.js')).length,
+      stalePaths: [],
+    };
+  } catch (error) {
+    const reason = errorMessage(error);
+    const unknown = /cannot be proven|manifest is (?:missing|unreadable|invalid)/i.test(reason);
+    return {
+      state: unknown ? 'unknown' : 'stale',
+      sourceFiles: sources.length,
+      pairedOutputs: 0,
+      stalePaths: unknown ? [] : [reason],
+      reason,
+    };
   }
-  return {
-    state: stalePaths.length > 0 ? 'stale' : 'current',
-    sourceFiles: sources.length,
-    pairedOutputs,
-    stalePaths,
-  };
 }
 
 function inspectBriefInputs(
@@ -825,6 +826,17 @@ export async function collectShipPreflight(
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
   const briefInputs = inspectBriefInputs(canonicalProject.path, parsed.brief, deps);
   const outputInventory = inspectOutputInventory(canonicalProject.path, parsed.brief, deps);
+  const briefCriteria: ShipPreflightReport['briefCriteria'] = parsed.brief
+    ? (() => {
+        const briefPath = resolve(isAbsolute(parsed.brief!) ? parsed.brief! : join(canonicalProject.path, parsed.brief!));
+        const artifact = extractBriefCriteria(deps.readText(briefPath));
+        return {
+          state: artifact.criteria.length === 0 ? 'missing' as const : 'checked' as const,
+          briefPath,
+          artifact,
+        };
+      })()
+    : { state: 'not_requested' as const };
   if ((previousRun.liveMatchingRunIds?.length ?? 0) > 0) {
     deps.stderr.write(
       `WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. `
@@ -857,6 +869,7 @@ export async function collectShipPreflight(
       daemonFreshness: { daemonToDist, sourceToDist, caveat: DAEMON_CAVEAT },
       briefInputs,
       outputInventory,
+      briefCriteria,
       validationBaseline,
     },
   };
@@ -869,6 +882,11 @@ function renderEvidence(writer: Writer, label: string, evidence: unknown): void 
 
 function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   writer.write(`Ship preflight: ${report.project.canonicalPath}\n`);
+  if (report.briefCriteria.state === 'checked') {
+    writer.write(`Brief criteria: ${report.briefCriteria.artifact?.criteria.length ?? 0} extracted from ${report.briefCriteria.briefPath}\n`);
+  } else if (report.briefCriteria.state === 'missing') {
+    writer.write(`Brief criteria: MISSING — zero structurally extractable criteria in ${report.briefCriteria.briefPath}\n`);
+  }
   if (report.project.usedCanonicalFallback) {
     writer.write(`  Path warning: realpath failed; comparison used resolved path ${report.project.requestedPath}\n`);
   }
@@ -978,7 +996,7 @@ export async function cmdShipPreflightWithDeps(
     const { report, json } = await collectShipPreflight(args, overrides);
     if (json) deps.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     else renderHuman(report, deps.stdout);
-    return 0;
+    return report.briefCriteria.state === 'missing' ? 2 : 0;
   } catch (error) {
     deps.stderr.write(`ship-preflight: ${errorMessage(error)}\n`);
     return 1;

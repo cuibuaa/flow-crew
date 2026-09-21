@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { scopePathDigest } from './runtime-negotiation.js';
+import { stableGeneratedScope } from './generated-path-policy.js';
 
 export const LIVE_CONSTRAINT_FALLBACK_SCAN_MS = 30_000;
 export const LIVE_CONSTRAINT_MONITOR_DEADLINE_MS = 600_000;
@@ -27,6 +28,18 @@ export interface ScopeRevisionContractInput {
   scope: readonly string[];
   scopePresence: 'present' | 'missing';
   gate: boolean;
+}
+
+/**
+ * Convert only observed, generator-owned content-addressed members to their
+ * stable tree capability. Other paths remain exact, including hexadecimal
+ * source directories and short hash-like names.
+ */
+export function scopeRevisionPathsForViolations(paths: readonly string[]): string[] {
+  return [...new Set(paths.map((path) => {
+    const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/');
+    return stableGeneratedScope(normalized) ?? normalized;
+  }))].sort();
 }
 
 /** One byte-stable source for the ordinary prompt and live/post-audit guidance. */
@@ -51,13 +64,18 @@ export function scopeRevisionInstruction(input: ScopeRevisionContractInput & {
   violatingPaths: readonly string[];
 }): string {
   const paths = [...new Set(input.violatingPaths.map((path) => path.replace(/\\/g, '/')))].sort();
-  const digest = scopePathDigest(paths);
+  const requestedPaths = scopeRevisionPathsForViolations(paths);
+  const digest = scopePathDigest(requestedPaths);
+  const stableScopeDetail = requestedPaths.some((path, index) => path !== paths[index])
+    ? ` The refused member belongs to a recognized content-addressed generated tree, so the complete stable parent scope is ${JSON.stringify(requestedPaths)}.`
+    : '';
   return `The live constraint guard detected project content change${paths.length === 1 ? '' : 's'} outside the effective scope: ${JSON.stringify(paths)}. `
     + `Each incident records whether exact preimage restoration succeeded; an unrestored path is never described as reverted. `
-    + `Do not rewrite ${paths.length === 1 ? 'that path' : 'those paths'} unless a scope revision is accepted. `
+    + `Do not rewrite ${paths.length === 1 ? 'that path' : 'those paths'} unless a scope revision is accepted.`
+    + stableScopeDetail + ' '
     + `If the declared work requires ${paths.length === 1 ? 'it' : 'them'}, write exactly one request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`
-    + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(paths)},"pathDigest":"${digest}",`
+    + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(requestedPaths)},"pathDigest":"${digest}",`
     + `"reason":"<why the declared work requires it>"}. Wait without hot-polling for scope_revision_decision_<requestId>.json and write only after acceptance. `
     + `This is the same instruction recorded by the post-attempt constraint audit, which remains the backstop.`;
 }

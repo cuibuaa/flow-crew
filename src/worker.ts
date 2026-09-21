@@ -54,6 +54,11 @@ import {
   type LiveConstraintGuardFactory,
   type LiveConstraintInvocationResult,
 } from './live-constraint-guard.js';
+import {
+  captureStageArtifactContractPreimages,
+  inspectStageArtifactContract,
+  writeStageArtifactContractAudit,
+} from './stage-artifact-contract.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -64,6 +69,8 @@ export interface StageOpts {
   role: AgentConfig;
   dependsOn: string[];
   promptTemplate: string;
+  /** Planner-authored stage text before scheduler contracts are appended. */
+  artifactObligationTemplate?: string;
   timeout_ms: number;
   /** Internal dependency injection for deterministic attempt-deadline tests. */
   deadlineClock?: AttemptDeadlineClock;
@@ -86,6 +93,7 @@ export interface StageOpts {
   ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
+  researchOutcomeGate?: boolean;
   criterionRefs?: string[];
   resumeSessionId?: string;
   sessionOwnerStageId?: string;
@@ -409,6 +417,7 @@ async function runStageWithWriterLease(
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
     isGate: opts.isGate,
+    researchOutcomeGate: opts.researchOutcomeGate,
     criterionRefs: opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
@@ -571,6 +580,24 @@ async function runStageWithWriterLease(
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
   const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope, [kgPath]);
+  const artifactContractPath = join(opts.runDir, 'stages', opts.stageId, 'artifact_contract.json');
+  const artifactContractPreimages = opts.artifactObligationTemplate?.trim()
+    ? captureStageArtifactContractPreimages({
+        template: opts.artifactObligationTemplate,
+        projectDir: opts.projectDir,
+        runDir: opts.runDir,
+      })
+    : [];
+  let priorProducedPromptArtifacts: string[] = [];
+  try {
+    const prior = JSON.parse(readFileSync(artifactContractPath, 'utf-8')) as {
+      producedPromptArtifacts?: unknown;
+    };
+    if (Array.isArray(prior.producedPromptArtifacts)) {
+      priorProducedPromptArtifacts = prior.producedPromptArtifacts
+        .filter((path): path is string => typeof path === 'string');
+    }
+  } catch { /* first attempt, or no prior artifact contract */ }
 
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
@@ -1362,6 +1389,46 @@ async function runStageWithWriterLease(
     // Dispose here as well on thrown adapter errors so no long deadline timer
     // survives this invocation and keeps the worker process alive.
     attemptDeadline.dispose();
+  }
+
+  if (result.exitCode === 0 && opts.artifactObligationTemplate?.trim()) {
+    try {
+      const audit = inspectStageArtifactContract({
+        stageId: opts.stageId,
+        template: opts.artifactObligationTemplate,
+        projectDir: opts.projectDir,
+        runDir: opts.runDir,
+        writes: result.writes,
+        preimages: artifactContractPreimages,
+        priorProducedPromptArtifacts,
+      });
+      if (audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
+      if (audit.violations.length > 0) {
+        const detail = audit.violations.map((violation) => violation.reason).join('; ');
+        result.exitCode = 1;
+        result.timedOut = false;
+        result.adapterError = false;
+        result.friendlyError = `artifact contract violation: ${detail}`;
+        result.output = `${result.output}${result.output ? '\n\n' : ''}Artifact contract refused completion: ${detail}`;
+        recordRunEvent(opts.projectDir, opts.runId, {
+          type: 'stage_artifact_contract_violation',
+          runId: opts.runId,
+          timestamp: audit.checkedAt,
+          stageId: opts.stageId,
+          attemptIndex,
+          attemptStartedAt,
+          files: audit.violations.map((violation) => violation.mention),
+          detail,
+          level: 'warning',
+          source: 'worker',
+        });
+      }
+    } catch (error) {
+      result.exitCode = 1;
+      result.timedOut = false;
+      result.adapterError = false;
+      result.friendlyError = `artifact contract could not be checked: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   if (attemptDeadline.signal.aborted && !supervisorAborted && !approvalSuspended) terminationCause = 'attempt_timeout';

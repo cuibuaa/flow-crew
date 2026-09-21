@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { runDir } from './store.js';
+import { requireRunArtifactDirectory, runDir } from './store.js';
 
 export type KGNodeType = 'goal' | 'approach' | 'finding' | 'result' | 'insight' | 'dead_end' | 'user_hint' | 'source';
 export type KGEdgeType = 'explored_by' | 'found_that' | 'measured_as' | 'sourced_from' | 'supports' | 'contradicts' | 'combines_with' | 'depends_on';
@@ -75,7 +75,7 @@ export function readKGSafe(projectDir: string, runId: string): KnowledgeGraph {
 
 export function writeKG(projectDir: string, runId: string, kg: KnowledgeGraph): void {
   const p = kgPath(projectDir, runId);
-  mkdirSync(runDir(projectDir, runId), { recursive: true });
+  requireRunArtifactDirectory(projectDir, runId);
   kg.metadata.updatedAt = new Date().toISOString();
   atomicWrite(p, JSON.stringify(kg, null, 2));
 }

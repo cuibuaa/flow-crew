@@ -88,7 +88,15 @@ function fixture(name: 'research' | 'diagram') {
     writeFileSync(absolutePath, 'recorded admission context\n', 'utf8');
   }
 
-  const dispatched = (rawStages as unknown[]).map((stage) => parseDispatchedStageConfig(stage));
+  const dispatched = (rawStages as unknown[]).map((stage) => {
+    const parsedStage = parseDispatchedStageConfig(stage);
+    // This fixture predates the closed stage-status domain. Keep the path
+    // extraction subject reachable with the real completion literal.
+    if (parsedStage.condition === 'verify_diagram.status == passed') {
+      parsedStage.condition = 'verify_diagram.status == complete';
+    }
+    return parsedStage;
+  });
   const baseStages = context.baseStages.map((stage) => parseDispatchedStageConfig(stage));
   return {
     context,

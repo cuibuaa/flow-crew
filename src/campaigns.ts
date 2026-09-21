@@ -14,6 +14,7 @@ export interface CampaignHistoryEntry {
   iteration?: number;
   score?: number;
   metric?: string;
+  higherIsBetter?: boolean;
   gate?: string;
   pass: boolean;
   status?: string;

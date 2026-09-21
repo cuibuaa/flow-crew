@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { isRecognizedLiveConstraintExemptPattern } from './generated-path-policy.js';
 
 // --- Types ---
 
@@ -206,17 +208,12 @@ function liveConstraintExemptPatternsValue(
   const patterns = [...new Set(value.map((entry) => String(entry).trim().replace(/\\/g, '/')))];
   for (const pattern of patterns) {
     const segments = pattern.split('/');
-    const safeCacheAnchor = segments.some((segment) => (
-      segment === '__pycache__'
-      || (/^\.[A-Za-z0-9_.-]*cache[A-Za-z0-9_.-]*$/i.test(segment) && !/[?*[{]/.test(segment))
-    ));
-    const safeGeneratedSuffix = /\.\*?(?:py[co]|tsbuildinfo)$/i.test(pattern)
-      || /\*\.(?:py[co]|tsbuildinfo)$/i.test(pattern);
+    const recognizedGeneratedPattern = isRecognizedLiveConstraintExemptPattern(pattern);
     if (
       pattern.startsWith('/')
       || /^[A-Za-z]:\//.test(pattern)
       || segments.includes('..')
-      || (!safeCacheAnchor && !safeGeneratedSuffix)
+      || !recognizedGeneratedPattern
     ) {
       throw new Error(
         `config/defaults.yaml ${key} contains unsafe non-cache pattern ${JSON.stringify(pattern)}`,
@@ -279,7 +276,9 @@ export function campaignBaseDirectory(
   }
 }
 
-export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
+/** Validate with this module's schema/template without delegating to a
+ * candidate worktree. Exported for the isolated candidate-validator process. */
+export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults {
   const p = ensureProjectDefaultsFile(projectDir);
   const mtime = statSync(p).mtimeMs;
   if (_cache && mtime === _cacheMtime && p === _cachePath) return _cache;
@@ -314,6 +313,70 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
   _cacheMtime = mtime;
   _cachePath = p;
   return parsed;
+}
+
+function compatibleCandidateDefaults(value: unknown): value is ProjectDefaults {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<ProjectDefaults>;
+  const positiveNumbers = [
+    item.timeout_ms, item.validation_timeout_ms, item.live_constraint_fallback_scan_ms,
+    item.live_constraint_monitor_deadline_ms, item.git_worktree_add_timeout_ms,
+  ];
+  const nonnegativeNumbers = [
+    item.max_iterations, item.gate_retry_loops, item.stage_technical_retries,
+    item.plan_stage_retries, item.supervisor_max_rejects,
+  ];
+  return positiveNumbers.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry > 0)
+    && nonnegativeNumbers.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 0)
+    && typeof item.model === 'string' && item.model.length > 0
+    && typeof item.reasoning_effort === 'string' && item.reasoning_effort.length > 0
+    && typeof item.adapter === 'string' && item.adapter.length > 0
+    && typeof item.sessionReuse === 'boolean'
+    && Array.isArray(item.live_constraint_exempt_patterns)
+    && item.live_constraint_exempt_patterns.every((entry) => typeof entry === 'string')
+    && Boolean(item.paths && Object.values(item.paths).every((entry) => typeof entry === 'string' && entry.length > 0));
+}
+
+function candidateDefaults(projectDir: string): ProjectDefaults | undefined {
+  if (process.env.FC_CONFIG_VALIDATOR_HANDSHAKE === '1') return undefined;
+  const root = resolve(projectDir);
+  const candidateConfig = join(root, 'src', 'config.ts');
+  const validator = join(root, 'scripts', 'validate-project-defaults.ts');
+  if (!existsSync(candidateConfig) || !existsSync(validator)) return undefined;
+  if (resolve(fileURLToPath(import.meta.url)) === resolve(candidateConfig)) return undefined;
+  let response: unknown;
+  try {
+    const tsxLoader = createRequire(import.meta.url).resolve('tsx');
+    const stdout = execFileSync(process.execPath, ['--import', tsxLoader, validator, root], {
+      cwd: root,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 15_000,
+      env: { ...process.env, FC_CONFIG_VALIDATOR_HANDSHAKE: '1' },
+    });
+    response = JSON.parse(stdout) as unknown;
+  } catch (error) {
+    throw new Error(`Candidate configuration validator failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  const envelope = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : undefined;
+  if (!envelope || envelope.version !== 1 || envelope.ok !== true || !compatibleCandidateDefaults(envelope.defaults)) {
+    const reason = typeof envelope?.error === 'string' ? envelope.error : 'candidate returned an incompatible defaults payload';
+    throw new Error(`Candidate configuration validator refused config/defaults.yaml: ${reason}`);
+  }
+  return envelope.defaults;
+}
+
+/** Engine worktrees validate their coupled defaults with their own candidate
+ * module in a bounded child process; ordinary projects retain deployed-schema
+ * validation. */
+export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
+  if (projectDir) {
+    const fromCandidate = candidateDefaults(projectDir);
+    if (fromCandidate) return fromCandidate;
+  }
+  return loadProjectDefaultsLocally(projectDir);
 }
 
 /** Per-process measurement override; only literal 0/1 are accepted. */

@@ -160,7 +160,7 @@ export function createDaemonRpcErrorLogger(
 }
 
 export async function handleDaemonCancellationRequest(
-  orchestrator: Pick<Orchestrator, 'cancel' | 'cancelRun'>,
+  orchestrator: Pick<Orchestrator, 'cancel' | 'cancelRun' | 'cancellationStatus'>,
   request: RpcRequest,
 ): Promise<CancellationResult | undefined> {
   if (request.cmd === 'cancel') {
@@ -174,6 +174,7 @@ export async function handleDaemonCancellationRequest(
     return result;
   }
   if (request.cmd === 'cancel-run') return orchestrator.cancelRun(request.runId, request.unit);
+  if (request.cmd === 'cancel-status') return orchestrator.cancellationStatus(request.runId, request.unit);
   return undefined;
 }
 
