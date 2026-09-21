@@ -1,6 +1,51 @@
 # Changelog
 
-## Unreleased — engine state truthfulness
+## [0.9.0] - 2026-09-20
+
+### Fixed — twenty-seven controls that judged from evidence they did not have
+
+A control deciding something about a run from evidence that does not support that
+decision, or enforcing a contract it never told the part that had to satisfy it.
+Twenty-five changed behaviour; two were measured and found not to be defects.
+
+`ship-setup` recorded each validation command's failure identity and labelled it
+`must_remain_green` or `no_regression_from_baseline`; `evaluateValidationDelta`
+implemented the comparison; three specs covered it; nothing in `src` called it. A
+QA stage, told nothing, invented "the suite must be green" on a project whose own
+recorded baseline is red with thirteen known failures. The baseline now reaches
+the gate, and a new failing identifier overturns an otherwise accepting verdict.
+
+Rollback no longer reads an unrecorded preimage as proof of absence. Provenance is
+`observed` or `unknown`, and `unknown` is not deletion authority — it produces a
+visible rollback failure. A path proven absent before the run is still removed.
+
+Research rounds are told the artifact contract before they work, including that
+the no-candidate discriminator is `outcome` and not `status`; a round already
+written the other way is normalised on ingestion with a durable repair record
+rather than refused after its work stage completed. Planners receive the declared
+terminal paths and the exact-one-owner rule. The rehearsal ship probe is the
+nearest crossing satisfying both the stop policy and the declared schema, so a
+brief declaring numeric bounds can be rehearsed at all.
+
+Also in this release: launch distinguishes missing, refused, invalid and ready
+setup state; declared outputs are archived at terminal commit; guidance reports
+envelope disposition instead of predicting consumption; an ambiguous cancellation
+is followed by one bounded observation; zero extracted criteria is an explicit
+refusal, ordered after the adapter check so a newcomer still sees the install
+command; impossible finite-domain condition literals are rejected at admission;
+engine-created run-root entries are classified before cleanup; one generated-path
+catalog supplies three policy projections; build freshness is content-addressed;
+research rounds are compared with the engine iteration limit; campaign health
+respects optimization direction; terminal failure summaries name the refusal that
+ended the run rather than a union across attempts; violation paths appear in the
+published event row; a stage's named output is checked rather than assumed; and an
+empty test population is no longer reported as a matched one.
+
+Each item carries a before/after replay and a case that must still be judged the
+old way. The independent verification gate rejected this work three times across
+two rounds before accepting it.
+
+### Engine state truthfulness
 
 ### Fixed — generated caches and honest plans no longer stop guarded work
 
