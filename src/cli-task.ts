@@ -195,7 +195,7 @@ function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withS
       elapsed,
       task.systemd_unit,
       task.name,
-      truncate(reason, 80),
+      truncate(reason, 160),
     ];
     if (withSummary) fields.push(truncate(task.summary_one_liner ?? '', 80));
     stdout.write(`${fields.join('  ')}\n`);

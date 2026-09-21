@@ -500,6 +500,81 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(status.error).toContain('Temporal test contract rejected');
   }, 15_000);
 
+  it('H6 fails only the stage that wrote a temporally invalid test', { timeout: 20_000 }, async () => {
+    const projectDir = temporaryRoot('flowcrew-temporal-attribution-project-');
+    const stateRoot = temporaryRoot('flowcrew-temporal-attribution-state-');
+    priorStateRoot = fcGlobalDir();
+    setFcGlobalDir(stateRoot);
+    const agentsDir = join(projectDir, 'config', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'qa.yaml'), [
+      'name: qa', 'description: attribution replay', 'model: default', 'reasoning_effort: default',
+      'tools: []', 'prompt: replay',
+    ].join('\n'));
+    const testPath = 'tests/test_round_attribution.py';
+    const stageIds = ['writer', 'peer_a', 'peer_b'];
+    const config: WorkflowConfig = {
+      name: 'temporal-attribution-replay', defaults: { max_iterations: 1, max_retries: 0 },
+      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/happymj/round_result.json' },
+      stages: [
+        {
+          id: 'writer', role: 'qa', depends_on: [], scope: [testPath],
+          prompt_template: 'write the verifier', skills: [], dynamic_dispatch: false,
+          is_gate: false, criterion_refs: [],
+        },
+        ...['peer_a', 'peer_b'].map((id) => ({
+          id, role: 'qa', depends_on: [], scope: [`src/${id}.ts`],
+          prompt_template: 'perform unrelated work', skills: [], dynamic_dispatch: false,
+          is_gate: false, criterion_refs: [],
+        })),
+      ],
+    };
+    const created = createRun(projectDir, config.name, 'fixture', stageIds);
+    const initial = readRunState(projectDir, created.runId);
+    initial.autoApprove = true;
+    initial.research = config.research;
+    writeRunState(projectDir, created.runId, initial);
+    let arrivals = 0;
+    let releaseArrivals!: () => void;
+    const allArrived = new Promise<void>((resolvePromise) => { releaseArrivals = resolvePromise; });
+    let markWritten!: () => void;
+    const written = new Promise<void>((resolvePromise) => { markWritten = resolvePromise; });
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      arrivals++;
+      if (arrivals === stageIds.length) releaseArrivals();
+      await allArrived;
+      if (opts.stageId === 'writer') {
+        mkdirSync(join(projectDir, 'tests'), { recursive: true });
+        writeFileSync(join(projectDir, testPath), [
+          'from pathlib import Path',
+          'RESULT = Path("docs/happymj/round_result.json")',
+          'assert RESULT.exists()',
+        ].join('\n'));
+        markWritten();
+        return {
+          output: 'invalid temporal verifier written', exitCode: 0, duration_ms: 1,
+          writes: [testPath], writeAttribution: 'structured',
+        };
+      }
+      await written;
+      return {
+        output: 'unrelated peer observed the batch snapshot', exitCode: 0, duration_ms: 1,
+        writes: [testPath], writeAttribution: 'snapshot',
+      };
+    } };
+
+    await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
+    const statuses = Object.fromEntries(stageIds.map((id) => [
+      id,
+      JSON.parse(readFileSync(join(created.runDirPath, 'stages', id, 'status.json'), 'utf-8')) as StageStatus,
+    ]));
+    expect(statuses.writer.status).toBe('failed');
+    expect(statuses.writer.error).toContain('Temporal test contract rejected');
+    expect(statuses.peer_a.status).toBe('complete');
+    expect(statuses.peer_b.status).toBe('complete');
+  });
+
   it('item 4: the first proposal remains fail-closed after exact path guidance is supplied', () => {
     const markdown = recordedEvidence('item4_first_plan_proposal').toString('utf-8');
     const guided = appendResearchTemporalPathContract('plan now', {

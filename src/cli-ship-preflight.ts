@@ -37,13 +37,16 @@ import {
 } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import {
-  verifyBriefInputs,
+  extractBriefPathMentions,
+  extractDeclaredBriefInputPaths,
+  verifyDeclaredBriefInputs,
   inspectBriefOutputs,
   type BriefOutputInventory,
   type BriefInputAssertionResult,
   type ShipInputStat,
   type UnresolvedBriefInputDeclaration,
   type VerifiedBriefInput,
+  type BriefPathMention,
 } from './ship-inputs.js';
 import {
   resolveRunStatus,
@@ -186,6 +189,7 @@ export interface ShipPreflightReport {
     inputs: BriefInputReport[];
     unresolvedInputs: UnresolvedBriefInputDeclaration[];
     unboundAssertions: BriefInputAssertionResult[];
+    proseWarnings: BriefPathMention[];
   };
   outputInventory: {
     state: 'checked' | 'not_requested';
@@ -731,7 +735,7 @@ function inspectBriefInputs(
   deps: ResolvedDependencies,
 ): ShipPreflightReport['briefInputs'] {
   if (!briefArgument) return {
-    state: 'not_requested', inputs: [], unresolvedInputs: [], unboundAssertions: [],
+    state: 'not_requested', inputs: [], unresolvedInputs: [], unboundAssertions: [], proseWarnings: [],
   };
   const requested = isAbsolute(briefArgument) ? briefArgument : join(project, briefArgument);
   const briefPath = resolve(requested);
@@ -741,7 +745,7 @@ function inspectBriefInputs(
   } catch (error) {
     throw new Error(`Cannot read requested brief ${briefPath}: ${errorMessage(error)}`, { cause: error });
   }
-  const verification = verifyBriefInputs(brief, project, {
+  const verification = verifyDeclaredBriefInputs(brief, project, {
     exists: deps.exists,
     readable: deps.readable,
     readText: deps.readText,
@@ -752,7 +756,10 @@ function inspectBriefInputs(
     readlink: deps.readlink,
     realpath: deps.realpath,
   });
-  return { state: 'checked', briefPath, ...verification };
+  const declared = new Set(extractDeclaredBriefInputPaths(brief));
+  const proseWarnings = extractBriefPathMentions(brief)
+    .filter((mention) => !declared.has(mention.path));
+  return { state: 'checked', briefPath, ...verification, proseWarnings };
 }
 
 function inspectOutputInventory(
@@ -922,6 +929,9 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   }
   for (const assertion of report.briefInputs.unboundAssertions) {
     writer.write(`  NOT_CHECKABLE ${assertion.kind} at line ${assertion.line} — ${assertion.reason}\n`);
+  }
+  for (const warning of report.briefInputs.proseWarnings) {
+    writer.write(`  WARNING prose path ${warning.path} at line ${warning.line} is not a declared input\n`);
   }
 
   if (report.outputInventory.state === 'not_requested') {

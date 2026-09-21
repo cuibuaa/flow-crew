@@ -101,7 +101,7 @@ import {
   resolveCampaignStorageKey,
 } from './campaigns.js';
 import { formatCampaignContextBlock, selectRelevantCampaignContext } from './campaign-context.js';
-import { recordRunEvent, recordStageOutcome } from './run-events.js';
+import { readRunEvents, recordRunEvent, recordStageOutcome } from './run-events.js';
 import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
 import { appendTraceEvent } from './trace.js';
 import { generateRunSummary } from './run-summary.js';
@@ -109,6 +109,8 @@ import { Supervisor, computeSupervisorEvidenceBinding, type SupervisorEvidenceBi
 import {
   LiveConstraintGuard,
   SCOPE_REVISION_REQUEST_FILE,
+  isLiveConstraintExemptDirectory,
+  isLiveConstraintExemptPath,
   scopeRevisionContract,
   scopeRevisionInstruction,
   type LiveConstraintGuardOptions,
@@ -136,6 +138,7 @@ import {
 } from './guidance.js';
 import { recordBlockageOccurrence } from './blockage-ledger.js';
 import { inspectTemporalResearchTests } from './temporal-test-guard.js';
+import { validateGateControls } from './verdict-controls.js';
 import {
   buildMonotonePlanRetryContext,
   planRetryPairDigest,
@@ -3471,8 +3474,21 @@ export function findAllReady(stages: StageConfig[], state: StoreState): StageCon
 type ParsedScope =
   | { kind: 'exact'; raw: string; value: string }
   | { kind: 'tree'; raw: string; value: string }
-  | { kind: 'glob'; raw: string; directoryPrefix: string }
+  | { kind: 'glob'; raw: string; directoryPrefix: string; segments: ParsedScopeSegment[] }
   | { kind: 'unknown'; raw: string; reason: string };
+
+type ParsedScopeSegment =
+  | { kind: 'literal'; value: string }
+  | { kind: 'wildcard'; value: string }
+  | { kind: 'globstar'; value: '**' };
+
+function parsedScopeSegments(path: string): ParsedScopeSegment[] {
+  return path.split('/').map((segment): ParsedScopeSegment => {
+    if (segment === '**') return { kind: 'globstar', value: '**' };
+    if (/[*!?[{]/.test(segment)) return { kind: 'wildcard', value: segment };
+    return { kind: 'literal', value: segment };
+  });
+}
 
 function parseDeclaredScope(rawValue: string): ParsedScope {
   const raw = rawValue.trim();
@@ -3493,7 +3509,12 @@ function parseDeclaredScope(rawValue: string): ParsedScope {
   if (globAt >= 0) {
     const literal = normalized.slice(0, globAt);
     const slash = literal.lastIndexOf('/');
-    return { kind: 'glob', raw, directoryPrefix: slash >= 0 ? literal.slice(0, slash) : '' };
+    return {
+      kind: 'glob',
+      raw,
+      directoryPrefix: slash >= 0 ? literal.slice(0, slash) : '',
+      segments: parsedScopeSegments(normalized),
+    };
   }
   if (explicitDirectory) return { kind: 'tree', raw, value: normalized };
   return { kind: 'exact', raw, value: normalized };
@@ -3520,11 +3541,19 @@ function parsedScopesMayOverlap(a: ParsedScope, b: ParsedScope): boolean {
     return !prefixesAreProvablyDisjoint(a.value, b.value);
   }
 
-  const aPrefix = a.kind === 'glob' ? a.directoryPrefix : a.kind === 'tree' ? a.value : a.value;
-  const bPrefix = b.kind === 'glob' ? b.directoryPrefix : b.kind === 'tree' ? b.value : b.value;
-  // A differing literal directory segment is a proof of disjointness. Any
-  // ambiguity inside the same directory is conservatively serialized.
-  return !prefixesAreProvablyDisjoint(aPrefix, bPrefix);
+  const aSegments = a.kind === 'glob' ? a.segments : parsedScopeSegments(a.value);
+  const bSegments = b.kind === 'glob' ? b.segments : parsedScopeSegments(b.value);
+  const length = Math.min(aSegments.length, bSegments.length);
+  for (let index = 0; index < length; index++) {
+    const left = aSegments[index];
+    const right = bSegments[index];
+    // A globstar destroys fixed segment alignment from this point onward.
+    if (left.kind === 'globstar' || right.kind === 'globstar') return true;
+    // Ordinary wildcard segments consume exactly one path segment, so later
+    // aligned literals can still prove that the two languages are disjoint.
+    if (left.kind === 'literal' && right.kind === 'literal' && left.value !== right.value) return false;
+  }
+  return true;
 }
 
 export interface ScopeConflict {
@@ -3879,6 +3908,8 @@ interface RunRollbackBaseline {
   images: Map<string, RepairFileImage>;
   fingerprints: Map<string, RepairFileFingerprint>;
   cleanTracked: Set<string>;
+  /** Immutable Git-index membership. Unlike cleanTracked, authorized writes never remove this proof. */
+  trackedPaths: Set<string>;
   gitIndexEntries: Map<string, { objectId: string; mode: string }>;
   gitRoot?: string;
   journal: Map<string, number>;
@@ -3941,7 +3972,10 @@ function normalizedProjectPath(value: string): string | undefined {
   return normalized;
 }
 
-function listProjectFiles(projectDir: string): string[] {
+function listProjectFiles(
+  projectDir: string,
+  options: { skipDirectory?: (relativePath: string) => boolean } = {},
+): string[] {
   const files: string[] = [];
   const walk = (dir: string, prefix: string): void => {
     let names: string[];
@@ -3953,7 +3987,9 @@ function listProjectFiles(projectDir: string): string[] {
       try {
         const stat = lstatSync(absolute);
         if (stat.isSymbolicLink()) files.push(relative);
-        else if (stat.isDirectory()) walk(absolute, relative);
+        else if (stat.isDirectory()) {
+          if (!options.skipDirectory?.(relative)) walk(absolute, relative);
+        }
         else if (stat.isFile()) files.push(relative);
       } catch { /* file changed while being enumerated */ }
     }
@@ -3979,13 +4015,66 @@ function listProjectFilesAt(projectDir: string, rawRoot: string): string[] {
 function scopeMatchesProjectPath(scope: ParsedScope, path: string): boolean {
   if (scope.kind === 'unknown') return true;
   if (scope.kind === 'glob') {
-    // Capturing the complete literal-prefix tree is intentionally conservative:
-    // it cannot miss brace/extglob variants that a narrow home-grown matcher would.
-    return !scope.directoryPrefix
-      || path === scope.directoryPrefix
-      || path.startsWith(`${scope.directoryPrefix}/`);
+    const pattern = normalizedProjectPath(scope.raw);
+    if (!pattern) return false;
+    // A terminal directory glob is the capability language for "everything
+    // below this literal tree". Node's matchesGlob excludes dotfile path
+    // segments by default, which made `dist/**` reject build manifests and
+    // atomic temporary files below dist. Keep other glob semantics exact and
+    // expand only this unambiguous literal-tree form.
+    if (pattern.endsWith('/**')) {
+      const literalTree = pattern.slice(0, -3);
+      if (literalTree && !/[*!?[{]/.test(literalTree)
+        && (path === literalTree || path.startsWith(`${literalTree}/`))) {
+        return true;
+      }
+    }
+    try {
+      // Concurrency admission is deliberately conservative, but authorization
+      // must describe the declared language exactly. A literal-prefix tree
+      // would grant one disjoint stage access to every peer below that prefix.
+      return posix.matchesGlob(path, pattern);
+    } catch {
+      // An invalid glob is never an implicit broad capability.
+      return false;
+    }
   }
   return path === scope.value || path.startsWith(`${scope.value}/`);
+}
+
+function literalTreeCapabilityRoot(scope: ParsedScope): string | undefined {
+  if (scope.kind === 'exact' || scope.kind === 'tree') return scope.value;
+  if (scope.kind !== 'glob') return undefined;
+  const pattern = normalizedProjectPath(scope.raw);
+  if (!pattern?.endsWith('/**')) return undefined;
+  const root = pattern.slice(0, -3);
+  return root && !/[*!?[{]/.test(root) ? root : undefined;
+}
+
+/** A request already contained by a stable declared tree is a no-op, not a
+ * new capability whose generated literal must retain an unchanged preimage. */
+function scopeRequestAlreadyAuthorized(
+  requested: ParsedScope,
+  priorScopes: readonly ParsedScope[],
+): boolean {
+  if (requested.kind === 'unknown') return false;
+  const requestedAnchor = requested.kind === 'glob'
+    ? requested.directoryPrefix
+    : requested.value;
+  if (!requestedAnchor) return false;
+  return priorScopes.some((prior) => {
+    if (prior.kind === 'unknown') return false;
+    const requestedPattern = requested.kind === 'glob'
+      ? normalizedProjectPath(requested.raw)
+      : undefined;
+    const priorPattern = prior.kind === 'glob'
+      ? normalizedProjectPath(prior.raw)
+      : undefined;
+    if (requestedPattern && requestedPattern === priorPattern) return true;
+    const priorRoot = literalTreeCapabilityRoot(prior);
+    return Boolean(priorRoot
+      && (requestedAnchor === priorRoot || requestedAnchor.startsWith(`${priorRoot}/`)));
+  });
 }
 
 function describeRepairError(error: unknown): string {
@@ -4115,6 +4204,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   const images = new Map<string, RepairFileImage>();
   const fingerprints = new Map<string, RepairFileFingerprint>();
   const cleanTracked = new Set<string>();
+  const trackedPaths = new Set<string>();
   const indexEntries = new Map<string, { objectId: string; mode: string }>();
   let filesEnumerated = 0;
   let filesRead = 0;
@@ -4126,13 +4216,14 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   try {
     gitRoot = gitOutput(projectDir, ['rev-parse', '--show-toplevel']).trim();
     const trackedEntries = gitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
-    for (const path of [...trackedEntries.keys()]) {
-      if (path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) trackedEntries.delete(path);
-    }
+    for (const path of trackedEntries.keys()) trackedPaths.add(path);
     const tracked = new Set(trackedEntries.keys());
     for (const [path, entry] of trackedEntries) indexEntries.set(path, entry);
     const dirty = new Set([
-      ...rollbackListedPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', 'HEAD', '--', '.'])),
+      // Every tracked path remains guardable even when it lives below a cache
+      // directory. Preserve a dirty run-start preimage instead of restoring
+      // such a path to the index blob.
+      ...nulPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', 'HEAD', '--', '.'])),
       ...rollbackListedPaths(gitOutput(projectDir, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.'])),
       // Ignored files are still pre-existing operator data. Image them once so
       // an out-of-scope write restores their run-start bytes rather than
@@ -4171,7 +4262,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
   }
   const baseline: RunRollbackBaseline = {
-    key, projectDir, runDirPath, images, fingerprints, cleanTracked, gitIndexEntries: indexEntries, gitRoot,
+    key, projectDir, runDirPath, images, fingerprints, cleanTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
     journal: new Map(), journalSequence: 0, reliable: true,
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
@@ -4610,7 +4701,14 @@ function decideScopeRevision(input: {
     normalizedPaths.push(normalized);
   }
   const requestedPaths = [...new Set(normalizedPaths)];
-  const effectiveScope = [...new Set([...(priorScope ?? []), ...requestedPaths])];
+  const requestedScopes = requestedPaths.map(parseDeclaredScope);
+  const priorScopes = (priorScope ?? []).map(parseDeclaredScope);
+  const alreadyAuthorizedPaths = requestedPaths.filter((_path, index) => (
+    scopeRequestAlreadyAuthorized(requestedScopes[index], priorScopes)
+  ));
+  const alreadyAuthorized = new Set(alreadyAuthorizedPaths);
+  const capabilityRequestPaths = requestedPaths.filter((path) => !alreadyAuthorized.has(path));
+  const effectiveScope = [...new Set([...(priorScope ?? []), ...capabilityRequestPaths])];
   const expanded: StageConfig = { ...stage, scope: effectiveScope };
   for (const peer of activePeers) {
     const conflict = findScopeConflict(expanded, peer);
@@ -4624,20 +4722,22 @@ function decideScopeRevision(input: {
     }
   }
   if (snapshot) {
-    const requestedScopes = requestedPaths.map(parseDeclaredScope);
-    const requestedCandidates = new Set(requestedPaths);
-    for (const scope of requestedScopes) {
+    const capabilityRequestScopes = capabilityRequestPaths.map(parseDeclaredScope);
+    const requestedCandidates = new Set(capabilityRequestPaths);
+    for (const scope of capabilityRequestScopes) {
       const root = scope.kind === 'glob' ? scope.directoryPrefix
         : scope.kind === 'unknown' ? undefined : scope.value;
       if (!root) continue;
-      for (const path of listProjectFilesAt(projectDir, root)) requestedCandidates.add(path);
+      for (const path of listProjectFilesAt(projectDir, root)) {
+        if (scopeMatchesProjectPath(scope, path)) requestedCandidates.add(path);
+      }
     }
     const directlyChanged = [...requestedCandidates].find((path) => compareRepairFileContents(
       snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path),
       readRepairFileImage(projectDir, path),
     ) === 'different');
     const changedPath = directlyChanged ?? changedProjectPathsSinceSnapshot(snapshot, projectDir)
-      .find((path) => requestedScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
+      .find((path) => capabilityRequestScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
     if (changedPath) {
       return scopeRevisionRejection(request, priorScope, `requested path changed before scope approval: ${changedPath}`);
     }
@@ -4647,15 +4747,18 @@ function decideScopeRevision(input: {
   // newly accepted path into first-class repair-diff evidence rather than a
   // post-hoc scope escape with an unavailable preimage.
   if (snapshot) {
-    for (const path of requestedPaths) snapshot.files.set(path, readRepairFileImage(projectDir, path));
+    for (const path of capabilityRequestPaths) snapshot.files.set(path, readRepairFileImage(projectDir, path));
   }
   return {
     requestedPaths,
-    authorizedPaths: requestedPaths,
+    authorizedPaths: capabilityRequestPaths,
+    ...(alreadyAuthorizedPaths.length > 0 ? { alreadyAuthorizedPaths } : {}),
     accepted: true,
     decision: 'accepted',
     decidedAt: new Date().toISOString(),
-    policyBasis: 'current attempt, unchanged preimage, valid project path, and no active-peer scope conflict',
+    policyBasis: capabilityRequestPaths.length === 0
+      ? 'requested paths are already authorized by the stable effective scope'
+      : 'current attempt, unchanged requested-path preimage, valid project path, and no active-peer scope conflict',
     priorScope,
     effectiveScope,
   };
@@ -4702,8 +4805,12 @@ function acceptedInheritedScope(
       requestedPaths, pathDigest: decision.pathDigest,
     };
     if (decision.identityDigest !== negotiationIdentity(persistedRequest)) continue;
-    const normalized = requestedPaths.map(normalizedProjectPath);
-    if (normalized.some((value) => value === undefined)) continue;
+    const authorizedPaths = Array.isArray(decision.authorizedPaths)
+      ? decision.authorizedPaths.filter((value): value is string => typeof value === 'string')
+      : requestedPaths;
+    const normalized = authorizedPaths.map(normalizedProjectPath);
+    if (normalized.some((value) => value === undefined)
+      || normalized.some((value) => !requestedPaths.includes(value!))) continue;
     for (const pathValue of normalized as string[]) scope.add(pathValue);
     decisionPaths.push(relative(runDirPath, path).replace(/\\/g, '/'));
   }
@@ -5182,10 +5289,7 @@ function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean {
   if (!path || !stage.scope) return false;
   return stage.scope.some((rawScope) => {
     const scope = parseDeclaredScope(rawScope);
-    if (scope.kind === 'exact') return scope.value === path;
-    if (scope.kind === 'tree') return scope.value === path || path.startsWith(`${scope.value}/`);
-    if (scope.kind === 'glob') return dispatchGlobRegex(rawScope)?.test(path) === true;
-    return false;
+    return scope.kind !== 'unknown' && scopeMatchesProjectPath(scope, path);
   });
 }
 
@@ -6735,16 +6839,21 @@ function explicitPassContradiction(
     : undefined;
 }
 
+function assignedGateCriterionRefs(base: string, stageId: string): string[] {
+  try {
+    const admission = JSON.parse(readFileSync(join(base, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    return admission.criterionGateRefs?.[stageId] ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function validateGateCriterionEvidence(
   base: string,
   stageId: string,
   verdict: Record<string, unknown>,
 ): string | undefined {
-  let refs: string[] = [];
-  try {
-    const admission = JSON.parse(readFileSync(join(base, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
-    refs = admission.criterionGateRefs?.[stageId] ?? [];
-  } catch { /* legacy/static run without a criteria assignment */ }
+  const refs = assignedGateCriterionRefs(base, stageId);
   if (refs.length === 0) return undefined;
   const criteria = verdict.criteria;
   if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) {
@@ -6807,6 +6916,45 @@ export function readGateVerdict(
   if (criterionViolation) {
     log.warn({ stageId, runId, criterionViolation }, 'Gate verdict rejected by canonical criterion coverage contract');
     return { pass: false, reason: criterionViolation };
+  }
+  if (runId) {
+    const controls = validateGateControls({
+      projectDir,
+      runDir: base,
+      gateStageId: stageId,
+      criterionRefs: assignedGateCriterionRefs(base, stageId),
+      verdict: v,
+    });
+    if (controls.conflicts.length > 0) {
+      const prior = readRunEvents(projectDir, runId);
+      for (const conflict of controls.conflicts) {
+        const duplicate = prior.some((event) => (
+          event.type === 'criterion_check_conflict'
+          && event.stageId === stageId
+          && event.criterionId === conflict.criterionId
+          && event.checkPath === conflict.path
+          && event.guidanceId === conflict.guidanceId
+        ));
+        if (duplicate) continue;
+        recordRunEvent(projectDir, runId, {
+          type: 'criterion_check_conflict',
+          runId,
+          timestamp: new Date().toISOString(),
+          stageId,
+          criterionId: conflict.criterionId,
+          checkPath: conflict.path,
+          authorStageId: conflict.authorStageId,
+          guidanceId: conflict.guidanceId,
+          detail: conflict.reason,
+          level: 'warning',
+          source: 'scheduler',
+        });
+      }
+    }
+    if (controls.violation) {
+      log.warn({ stageId, runId, violation: controls.violation }, 'Gate verdict rejected by guidance and feasibility controls');
+      return { pass: false, reason: controls.violation };
+    }
   }
   if (runId && isTerminalStudyCompletionArtifact(v)) {
     writeTerminalStudyCompletionArtifacts(projectDir, runId, stageId, v);
@@ -6923,6 +7071,38 @@ interface GateRuntimeFacts {
     attempts: number;
     effectiveVerdict: { pass: boolean; reason?: string } | null;
   }>;
+}
+
+/**
+ * Return the non-passing entries from the same raw verdict selected by
+ * readGateVerdict. Undefined means that verdict supplied no structured
+ * criterion map, so callers may fall back to admitted refs or the gate ID.
+ */
+function structuredFailingGateCriteria(
+  runDirPath: string,
+  stageId: string,
+): string[] | undefined {
+  let verdict: Record<string, unknown> | undefined;
+  for (const file of [`verdict_${stageId}.json`, 'verdict.json']) {
+    try {
+      const candidate = JSON.parse(readFileSync(join(runDirPath, file), 'utf-8')) as Record<string, unknown>;
+      if (typeof candidate.pass === 'boolean') {
+        verdict = candidate;
+        break;
+      }
+    } catch { /* try the effective verdict's legacy fallback */ }
+  }
+  const rawCriteria = verdict?.criteria;
+  if (!rawCriteria || typeof rawCriteria !== 'object' || Array.isArray(rawCriteria)) return undefined;
+  const entries = Object.entries(rawCriteria as Record<string, unknown>);
+  if (entries.length === 0) return undefined;
+  return entries.flatMap(([criterionId, evidence]) => {
+    const status = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+      && typeof (evidence as Record<string, unknown>).status === 'string'
+      ? ((evidence as Record<string, unknown>).status as string).trim().toLowerCase()
+      : '';
+    return status === 'pass' ? [] : [criterionId];
+  });
 }
 
 export function researchAdvanceEligible(input: {
@@ -8555,18 +8735,19 @@ export async function runWorkflow(
             const allRetryGateIds = new Set(activeGateIds);
 
             // Determine which gates to re-run
-            const gatesToRerun = sorted.filter(s => {
-              if (!s.is_gate || !allRetryGateIds.has(s.id)) return false;
-              const v = readGateVerdict(projectDir, s.id, runId);
-              return !v || v.pass !== true;
-            });
+            // A repair was admitted from the policy-aware dispatch snapshot,
+            // so every gate that authorized that repair must be re-evaluated.
+            // Re-reading the old live artifact here can race a metric source
+            // and incorrectly turn completed repair work into no-op success.
+            const gatesToRerun = sorted.filter(s => s.is_gate && allRetryGateIds.has(s.id));
             for (const gate of gatesToRerun) {
               const perGate = join(runDirPath, `verdict_${gate.id}.json`);
               if (existsSync(perGate)) unlinkSync(perGate);
               const gateMetric = join(runDirPath, 'stages', gate.id, 'metric.json');
               if (existsSync(gateMetric)) unlinkSync(gateMetric);
-              const staleCorrection = gateVerdictCorrectionPath(runDirPath, gate.id);
-              if (existsSync(staleCorrection)) unlinkSync(staleCorrection);
+              // Keep any structured correction until gate continuation choice:
+              // gateContinuationSessionForStage consumes it exactly once and
+              // cold-starts the re-evaluation when prior reasoning was wrong.
               state.stages[gate.id] = rependStageStatus(state.stages[gate.id], 0);
               mkdirSync(join(runDirPath, 'stages', gate.id), { recursive: true });
               // Clear live.log so the SSE feed shows only the current re-evaluation's output
@@ -8663,6 +8844,147 @@ export async function runWorkflow(
     clearGateContinuationsForStages(runDirPath, sorted);
 
     state = readRunState(projectDir, runId);
+
+    // A failed research gate invalidates the current round. Exhausting its
+    // bounded repair route must not emit iteration_completed or hand the same
+    // unaccepted evidence to the next research round. Route through a declared
+    // escalation owner when admission proved one; otherwise park for an
+    // operator with the exact round and criteria in the durable request.
+    const exhaustedResearchFacts = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+    if (state.research && exhaustedResearchFacts.rejectedGateIds.length > 0) {
+      let bankedRounds = 0;
+      try {
+        const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
+        bankedRounds = Array.isArray(journal.rounds) ? journal.rounds.length : 0;
+      } catch { /* an absent journal means this is round one */ }
+      const round = bankedRounds + 1;
+      const rejected = new Set(exhaustedResearchFacts.rejectedGateIds);
+      const failingGates = sorted.filter((stage) => rejected.has(stage.id));
+      const criteria = [...new Set(failingGates.flatMap((stage) => (
+        structuredFailingGateCriteria(runDirPath, stage.id)
+          ?? (stage.criterion_refs.length > 0 ? stage.criterion_refs : [stage.id])
+      )))];
+      const reasons = exhaustedResearchFacts.evaluations
+        .filter((evaluation) => rejected.has(evaluation.id))
+        .map((evaluation) => `${evaluation.id}: ${evaluation.effectiveVerdict?.reason ?? 'gate rejected the round'}`);
+      const detail = `Research round ${round} exhausted its gate retries; failing criteria: ${criteria.join(', ')}`
+        + (reasons.length > 0 ? ` (${reasons.join('; ')})` : '');
+      writeFileSync(join(runDirPath, 'research_gate_exhausted.json'), `${JSON.stringify({
+        version: 1,
+        round,
+        gateIds: exhaustedResearchFacts.rejectedGateIds,
+        criteria,
+        reasons,
+        detectedAt: new Date().toISOString(),
+      }, null, 2)}\n`, 'utf-8');
+      recordRunEvent(projectDir, runId, {
+        type: 'research_gate_exhausted',
+        runId,
+        timestamp: new Date().toISOString(),
+        iteration,
+        round,
+        criteria,
+        stageIds: exhaustedResearchFacts.rejectedGateIds,
+        detail,
+        source: 'scheduler',
+        level: 'warning',
+      });
+
+      const escalationSelection = state.terminalStates?.[RUN_STATUS.ESCALATED]?.paths
+        .map((terminalPath) => ({ terminalPath, terminalOwner: admittedTerminalOwner(runDirPath, terminalPath) }))
+        .find((selection): selection is { terminalPath: string; terminalOwner: string } => Boolean(selection.terminalOwner));
+      if (escalationSelection) {
+        writeFileSync(join(runDirPath, 'research_decision.json'), `${JSON.stringify({
+          decision: 'escalate',
+          runningBest: state.research.baseline,
+          keptLabels: [],
+          droppedLabels: [],
+          consecutiveNoImprovement: 0,
+          terminalStatus: RUN_STATUS.ESCALATED,
+          terminalPath: escalationSelection.terminalPath,
+          terminalOwner: escalationSelection.terminalOwner,
+          reason: detail,
+          round,
+          failingCriteria: criteria,
+        }, null, 2)}\n`, 'utf-8');
+        mkdirSync(join(runDirPath, 'signals'), { recursive: true });
+        writeFileSync(join(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+          version: 1,
+          decision: 'escalate',
+          terminalStatus: RUN_STATUS.ESCALATED,
+          terminalPath: escalationSelection.terminalPath,
+          terminalOwner: escalationSelection.terminalOwner,
+          reason: detail,
+          round,
+          failingCriteria: criteria,
+        }, null, 2)}\n`, 'utf-8');
+        const finalizer = sorted.find((stage) => stage.id === escalationSelection.terminalOwner);
+        if (finalizer && state.stages[finalizer.id]) {
+          state.stages[finalizer.id] = rependStageStatus(state.stages[finalizer.id], 0);
+          writeStageStatus(projectDir, runId, finalizer.id, state.stages[finalizer.id]);
+          writeRunState(projectDir, runId, state);
+          appendSchedulerGuidanceOnce(
+            runDirPath,
+            finalizer.id,
+            `[research-gate-exhausted:round-${round}]`,
+            `${detail}. Write only the admitted escalation terminal ${escalationSelection.terminalPath}.`,
+            Object.keys(state.stages),
+          );
+          await runScopeSafeStageGroup(
+            [finalizer],
+            projectDir,
+            runId,
+            iteration,
+            (stage, liveConstraintGuardFactory) => executeSingleStage(
+              stage, projectDir, runId, runDirPath, workflow, adapter, agents,
+              resolvedAgentsDir, state, sorted, skills, taskDescription,
+              undefined, undefined, undefined, availableSkillsList,
+              attemptDeadlineClockFactory, liveConstraintGuardFactory,
+            ),
+          );
+          syncStageStatuses(projectDir, runId, [finalizer.id]);
+          state = readRunState(projectDir, runId);
+          if (isPausedRunStatus(state.status)) return state;
+          const terminal = await tryTerminateOnTerminalState(
+            state,
+            { projectDir, runId, runDirPath, iteration, adapter },
+          );
+          if (terminal.decision === 'matched') return terminal.state;
+        }
+        state = readRunState(projectDir, runId);
+        state.status = RUN_STATUS.INCOMPLETE;
+        state.failureReason = `${detail}; admitted escalation terminal ${escalationSelection.terminalPath} was not produced`;
+        state.completedAt = new Date().toISOString();
+        markLeftoverStagesSkipped(state, state.failureReason);
+        writeRunState(projectDir, runId, state);
+        writeCampaignEntry(projectDir, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'run_completed', runId, timestamp: state.completedAt, iteration,
+          detail: state.failureReason,
+        });
+        return state;
+      }
+
+      const requestId = `research-gate-exhausted-i${iteration}-r${round}`;
+      const requestPath = join(runDirPath, `approval_request_${requestId}.json`);
+      if (!existsSync(requestPath)) {
+        writeFileSync(requestPath, `${JSON.stringify({
+          id: requestId,
+          action: 'resolve_exhausted_research_gate',
+          target: `round ${round}: ${criteria.join(', ')}`,
+          risk: 'unknown',
+          title: detail,
+          body: 'No admitted escalation terminal owner exists. Decide whether to revise the evidence/plan or stop the run.',
+          requestedAt: new Date().toISOString(),
+        }, null, 2)}\n`, 'utf-8');
+      }
+      const parked = await tryParkOnApprovalRequest(
+        state,
+        { projectDir, runId, runDirPath, iteration },
+      );
+      if (parked) return parked;
+      throw new Error(`Could not park exhausted research gate for operator review: ${requestId}`);
+    }
 
     // Issue 12 fix: finalize any retry_to stages still marked "running" after inner loop
     for (const s of sorted) {
@@ -9129,6 +9451,8 @@ interface ScopeBatchContext {
   declaredScopes: Map<string, string[] | null>;
   inheritedScopes: Map<string, string[]>;
   inheritedDecisionPaths: Map<string, Set<string>>;
+  /** First preimage seen before any partition advances the shared baseline. */
+  liveWritePreimages: Map<string, RepairFileImage>;
   liveViolationSequence: number;
   liveViolations: Array<{
     sequence: number;
@@ -9188,6 +9512,7 @@ function createScopeBatchContext(
     declaredScopes,
     inheritedScopes,
     inheritedDecisionPaths,
+    liveWritePreimages: new Map(),
     liveViolationSequence: 0,
     liveViolations: [],
     attempts: new Map(),
@@ -9202,7 +9527,12 @@ function getScopeAttemptContext(
   context: ScopeBatchContext,
   stageId: string,
   attemptIndex: number,
-): { effectiveScope: string[]; decisionPaths: Set<string>; mismatchPaths: Set<string>; acceptedDuringAttempt: boolean } {
+): {
+  effectiveScope: string[];
+  decisionPaths: Set<string>;
+  mismatchPaths: Set<string>;
+  acceptedDuringAttempt: boolean;
+} {
   const key = scopeAttemptKey(stageId, attemptIndex);
   const existing = context.attempts.get(key);
   if (existing) return existing;
@@ -9311,7 +9641,6 @@ async function monitorScopeRevisionRequests(input: {
         const inheritedPaths = input.context.inheritedDecisionPaths.get(stage.id) ?? new Set<string>();
         addScopeArtifactPath(inheritedPaths, publication.path, runDirPath);
         input.context.inheritedDecisionPaths.set(stage.id, inheritedPaths);
-        stage.scope = [...attemptContext.effectiveScope];
         attemptContext.acceptedDuringAttempt = true;
         appendGuidanceEnvelope({
           runDir: runDirPath,
@@ -9371,7 +9700,7 @@ async function monitorScopeRevisionRequests(input: {
   }
 }
 
-function scopeContainsPath(scope: string[], rawPath: string): boolean {
+export function scopeContainsPath(scope: string[], rawPath: string): boolean {
   const normalized = normalizedProjectPath(rawPath);
   if (!normalized) return false;
   return scope.some((entry) => scopeMatchesProjectPath(parseDeclaredScope(entry), normalized));
@@ -9425,6 +9754,7 @@ function peerScopeContainsPath(
 function enforceStageScopeWrites(input: {
   projectDir: string;
   snapshot: RepairRoundSnapshot;
+  preimages?: ReadonlyMap<string, RepairFileImage>;
   effectiveScope: string[] | null;
   rawWrites: string[];
   definiteWrites: ReadonlySet<string>;
@@ -9448,7 +9778,8 @@ function enforceStageScopeWrites(input: {
       }
       continue;
     }
-    const before = input.snapshot.files.get(normalized)
+    const before = input.preimages?.get(normalized)
+      ?? input.snapshot.files.get(normalized)
       ?? baselineImage(input.snapshot.rollbackBaseline, normalized);
     const current = readRepairFileImage(input.projectDir, normalized);
     const contentChanged = compareRepairFileContents(before, current) === 'different';
@@ -9487,6 +9818,7 @@ function enforceStageScopeWrites(input: {
     const restoration = restoreProjectPath(input.projectDir, normalized, before);
     if (restoration.restored) {
       rolledBackWrites.push(normalized);
+      settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
     } else {
       rollbackFailures.push(normalized);
       rollbackFailureReasons[normalized] = restoration.failure ?? `could not restore ${normalized}`;
@@ -9516,6 +9848,8 @@ function createSchedulerLiveConstraintGuardFactory(input: {
   // violation ledger lets every concurrent guard retain the same rollback fact.
   if (!input.stage.scope) return undefined;
   const runDirPath = runDir(input.projectDir, input.runId);
+  const projectDefaults = loadProjectDefaults(input.projectDir);
+  const exemptPatterns = projectDefaults.live_constraint_exempt_patterns;
   const factory: LiveConstraintGuardFactory = ({ attemptIndex }) => {
     const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attemptIndex);
     const currentAttemptKey = scopeAttemptKey(input.stage.id, attemptIndex);
@@ -9524,7 +9858,38 @@ function createSchedulerLiveConstraintGuardFactory(input: {
       runDir: runDirPath,
       stageId: input.stage.id,
       attemptIndex,
+      fallbackScanMs: projectDefaults.live_constraint_fallback_scan_ms,
+      monitorDeadlineMs: projectDefaults.live_constraint_monitor_deadline_ms,
       effectiveScope: () => attemptContext.effectiveScope,
+      onExemptions: (summary) => {
+        recordRunEvent(input.projectDir, input.runId, {
+          type: 'live_constraint_exemptions',
+          runId: input.runId,
+          timestamp: new Date().toISOString(),
+          stageId: input.stage.id,
+          attemptIndex,
+          invocationIndex: summary.invocationIndex,
+          exemptedCount: summary.exemptedCount,
+          detail: `${summary.exemptedCount} untracked generated path${summary.exemptedCount === 1 ? '' : 's'} exempted`,
+          source: 'scheduler',
+          level: 'info',
+        });
+      },
+      onMonitorFailure: (failure) => {
+        recordRunEvent(input.projectDir, input.runId, {
+          type: 'live_constraint_monitor_failure',
+          runId: input.runId,
+          timestamp: failure.detectedAt,
+          stageId: input.stage.id,
+          attemptIndex,
+          invocationIndex: failure.invocationIndex,
+          lastScanDurationMs: failure.lastScanDurationMs,
+          lastScanFileCount: failure.lastScanFileCount,
+          detail: failure.reason,
+          source: 'scheduler',
+          level: 'warning',
+        });
+      },
       scopeRevisionInstruction: (paths) => scopeRevisionInstruction({
         runDir: runDirPath,
         runId: input.runId,
@@ -9538,25 +9903,55 @@ function createSchedulerLiveConstraintGuardFactory(input: {
       scanAndRestore: (candidatePaths, trigger) => {
         const baseline = input.context.snapshot.rollbackBaseline;
         const candidates = new Set<string>();
+        const exemptedPaths = new Set<string>();
+        const addCandidate = (rawPath: string, directlyObserved = false): void => {
+          const path = normalizedProjectPath(rawPath);
+          if (!path) return;
+          if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)) {
+            const before = baselineImage(baseline, path);
+            const current = readRepairFileImage(input.projectDir, path);
+            if (directlyObserved || compareRepairFileContents(before, current) === 'different') {
+              exemptedPaths.add(path);
+            }
+            if (compareRepairFileContents(before, current) === 'different') {
+              settleRollbackBaselinePath(baseline, input.projectDir, path);
+            }
+            return;
+          }
+          candidates.add(path);
+        };
         const fullReconciliation = trigger === 'fallback' || trigger === 'phase_boundary';
         if (fullReconciliation) {
-          for (const path of listProjectFiles(input.projectDir)) candidates.add(path);
-          for (const path of baseline.images.keys()) candidates.add(path);
-          for (const path of baseline.cleanTracked) candidates.add(path);
-          for (const path of input.context.snapshot.files.keys()) candidates.add(path);
+          for (const path of listProjectFiles(input.projectDir, {
+            skipDirectory: (directory) => isLiveConstraintExemptDirectory(
+              directory,
+              exemptPatterns,
+              baseline.trackedPaths,
+            ),
+          })) addCandidate(path);
+          for (const path of baseline.images.keys()) addCandidate(path);
+          for (const path of baseline.cleanTracked) addCandidate(path);
+          for (const path of baseline.trackedPaths) addCandidate(path);
+          for (const path of input.context.snapshot.files.keys()) addCandidate(path);
         } else {
           for (const rawPath of candidatePaths) {
             const path = normalizedProjectPath(rawPath);
             if (!path) continue;
-            candidates.add(path);
-            for (const nested of listProjectFilesAt(input.projectDir, path)) candidates.add(nested);
+            addCandidate(path, true);
+            if (!isLiveConstraintExemptDirectory(path, exemptPatterns, baseline.trackedPaths)) {
+              for (const nested of listProjectFilesAt(input.projectDir, path)) addCandidate(nested);
+            }
             const prefix = `${path.replace(/\/$/, '')}/`;
-            for (const known of new Set([...baseline.cleanTracked, ...baseline.images.keys()])) {
-              if (known.startsWith(prefix)) candidates.add(known);
+            for (const known of new Set([
+              ...baseline.cleanTracked,
+              ...baseline.trackedPaths,
+              ...baseline.images.keys(),
+            ])) {
+              if (known.startsWith(prefix)) addCandidate(known);
             }
           }
           for (const path of changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir)) {
-            candidates.add(path);
+            addCandidate(path);
           }
         }
         for (const path of [...candidates].sort()) {
@@ -9567,6 +9962,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             // Commit an authorized write into the shared run baseline. The
             // round snapshot still preserves its preimage for post-attempt
             // per-stage audit and write-conflict checks.
+            if (!input.context.liveWritePreimages.has(path)) {
+              input.context.liveWritePreimages.set(path, before);
+            }
             settleRollbackBaselinePath(baseline, input.projectDir, path);
             continue;
           }
@@ -9578,6 +9976,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
           // generating an unbounded incident on every watcher/fallback scan.
           if (input.context.liveViolations.some((entry) => entry.path === path && !entry.restored)) continue;
           const restoration = restoreProjectPath(input.projectDir, path, before);
+          if (restoration.restored) {
+            settleRollbackBaselinePath(baseline, input.projectDir, path);
+          }
           input.context.liveViolationSequence++;
           input.context.liveViolations.push({
             sequence: input.context.liveViolationSequence,
@@ -9622,7 +10023,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             level: 'warning',
           });
         }
-        return { scannedPaths: candidates.size, violations };
+        return { scannedPaths: candidates.size, violations, exemptedPaths: [...exemptedPaths].sort() };
       },
     };
     return new LiveConstraintGuard(options);
@@ -9871,6 +10272,10 @@ function reconcileStageScope(input: {
   const enforcement = enforceStageScopeWrites({
     projectDir: input.projectDir,
     snapshot: input.context.snapshot,
+    // A peer guard can observe and provisionally settle a write before the
+    // structured writer finishes. Use the batch's first preimage so that the
+    // writer's own post-attempt audit can still restore a cross-scope write.
+    preimages: input.context.liveWritePreimages,
     effectiveScope: governedScope,
     rawWrites,
     definiteWrites,
@@ -10089,23 +10494,43 @@ function enforceTemporalResearchTestContract(
   projectDir: string,
   runId: string,
   stageId: string,
+  structuredOwners?: ReadonlyMap<string, string | null>,
 ): { violation: boolean; reason?: string } {
   const state = readRunState(projectDir, runId);
   if (!state.research) return { violation: false };
   const status = readStageStatus(projectDir, runId, stageId);
   const attempt = status.attempts?.at(-1);
   if (status.status !== STAGE_STATUS.COMPLETE || attempt?.exitCode !== 0) return { violation: false };
+  // A batch snapshot can contain a file written by any concurrently running
+  // stage. Only the adapter's structured write list identifies the writer, so
+  // snapshot/unknown attribution is evidence to audit, not grounds to fail the
+  // observing stage.
+  if (attempt.writeAttribution !== 'structured') return { violation: false };
+  const writes = (attempt.writes ?? status.writes ?? []).filter((rawPath) => {
+    if (!structuredOwners) return true;
+    const relativePath = isAbsolute(rawPath)
+      ? relative(projectDir, rawPath).replace(/\\/g, '/')
+      : rawPath;
+    const normalized = normalizedProjectPath(relativePath);
+    return normalized !== undefined && structuredOwners.get(normalized) === stageId;
+  });
   const findings = inspectTemporalResearchTests({
     projectDir,
-    writes: attempt.writes ?? status.writes ?? [],
+    writes,
     resultFile: state.research.resultFile,
     terminalPaths: Object.values(state.terminalStates ?? {}).flatMap((entry) => entry.paths),
   });
   if (findings.length === 0) return { violation: false };
+  const attributedFindings = findings.map((finding) => ({
+    ...finding,
+    stageId,
+    attemptIndex: attempt.index,
+    writeAttribution: 'structured' as const,
+  }));
   const reason = `Temporal test contract rejected ${findings.length} generated test(s): ${findings.map((finding) => `${finding.file}: ${finding.reason}`).join('; ')}`;
   const guardPath = join(runDir(projectDir, runId), 'stages', stageId, 'temporal_test_guard.json');
   try {
-    writeFileSync(guardPath, `${JSON.stringify({ version: 1, pass: false, findings }, null, 2)}\n`, 'utf-8');
+    writeFileSync(guardPath, `${JSON.stringify({ version: 1, pass: false, findings: attributedFindings }, null, 2)}\n`, 'utf-8');
   } catch { /* the status remains authoritative */ }
   status.status = STAGE_STATUS.FAILED;
   status.exitCode = 1;
@@ -10122,6 +10547,30 @@ function enforceTemporalResearchTestContract(
     status: STAGE_STATUS.FAILED, detail: reason, source: 'scheduler', level: 'warning',
   });
   return { violation: true, reason };
+}
+
+function uniqueStructuredWriteOwners(
+  projectDir: string,
+  runId: string,
+  stageIds: readonly string[],
+): Map<string, string | null> {
+  const owners = new Map<string, string | null>();
+  for (const stageId of stageIds) {
+    const status = readStageStatus(projectDir, runId, stageId);
+    const attempt = status.attempts?.at(-1);
+    if (attempt?.writeAttribution !== 'structured') continue;
+    for (const rawPath of attempt.writes ?? status.writes ?? []) {
+      const relativePath = isAbsolute(rawPath)
+        ? relative(projectDir, rawPath).replace(/\\/g, '/')
+        : rawPath;
+      const normalized = normalizedProjectPath(relativePath);
+      if (!normalized) continue;
+      const prior = owners.get(normalized);
+      if (prior === undefined) owners.set(normalized, stageId);
+      else if (prior !== stageId) owners.set(normalized, null);
+    }
+  }
+  return owners;
 }
 
 /**
@@ -10175,6 +10624,7 @@ async function runScopeSafeStageGroup(
   snapshot?: RepairRoundSnapshot,
 ): Promise<void> {
   const runDirPath = runDir(projectDir, runId);
+  const declaredStageById = new Map(stages.map((stage) => [stage.id, stage]));
   let pending = stages.map((stage) => stageWithInheritedScope(runDirPath, stage));
   while (pending.length > 0) {
     const { selected, deferred } = selectRunnableBatch(pending);
@@ -10188,7 +10638,12 @@ async function runScopeSafeStageGroup(
       });
     }
     const activeStageIds = new Set(selected.map((stage) => stage.id));
-    const context = createScopeBatchContext(projectDir, selected, snapshot, runId);
+    const context = createScopeBatchContext(
+      projectDir,
+      selected.map((stage) => declaredStageById.get(stage.id) ?? stage),
+      snapshot,
+      runId,
+    );
     let complete = false;
     const executions = Promise.all(selected.map(async (stage) => {
       try {
@@ -10236,9 +10691,14 @@ async function runScopeSafeStageGroup(
     // reach the run-scoped journal before reconciliation reads its cursor.
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
     const redispatch: StageConfig[] = [];
+    const temporalOwners = uniqueStructuredWriteOwners(
+      projectDir,
+      runId,
+      selected.map((stage) => stage.id),
+    );
     for (const stage of selected) {
       const reconciled = reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
-      const temporal = enforceTemporalResearchTestContract(projectDir, runId, stage.id);
+      const temporal = enforceTemporalResearchTestContract(projectDir, runId, stage.id, temporalOwners);
       const acceptedAttempt = reconciled.attemptIndex === undefined
         ? undefined
         : reconciled.status.attempts?.find((attempt) => attempt.index === reconciled.attemptIndex);
@@ -11283,7 +11743,13 @@ async function executeIteration(
     }
     writeRunState(projectDir, runId, state);
 
-    const ordinaryScopeContext = createScopeBatchContext(projectDir, toRun, undefined, runId);
+    const declaredCandidateById = new Map(runnableCandidates.map((stage) => [stage.id, stage]));
+    const ordinaryScopeContext = createScopeBatchContext(
+      projectDir,
+      toRun.map((stage) => declaredCandidateById.get(stage.id) ?? stage),
+      undefined,
+      runId,
+    );
     const activeScopeStageIds = new Set(toRun.map((stage) => stage.id));
     let ordinaryBatchComplete = false;
     const ordinaryScopeMonitor = monitorScopeRevisionRequests({
@@ -11496,6 +11962,11 @@ async function executeIteration(
     await ordinaryScopeMonitor;
     const parkedDuringExecution = await ordinaryApprovalMonitor;
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    const temporalOwners = uniqueStructuredWriteOwners(
+      projectDir,
+      runId,
+      results.map((item) => item.stage.id),
+    );
     for (const item of results) {
       const reconciled = reconcileCompletedStageAttempts({
         stage: item.stage,
@@ -11540,7 +12011,12 @@ async function executeIteration(
         item.result.suspended = true;
         item.result.suspensionReason ??= 'approval';
       }
-      if (item.result.exitCode === 0 && enforceTemporalResearchTestContract(projectDir, runId, item.stage.id).violation) {
+      if (item.result.exitCode === 0 && enforceTemporalResearchTestContract(
+        projectDir,
+        runId,
+        item.stage.id,
+        temporalOwners,
+      ).violation) {
         item.result.exitCode = 1;
         item.result.timedOut = false;
         item.result.timeoutTerminationCause = 'failed';

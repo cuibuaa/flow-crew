@@ -1,5 +1,6 @@
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { CommandLifecycleEvent } from './adapters/base.js';
 
 export interface CommandActivityRecord {
   id: string;
@@ -16,6 +17,53 @@ export interface CommandActivitySnapshot {
   active: CommandActivityRecord[];
   completedCount: number;
   streamClosed: boolean;
+}
+
+export interface ExplicitCommandTimeout {
+  timeoutMs: number;
+  duration: string;
+}
+
+const DURATION = /^(\d+(?:\.\d+)?)([smhd]?)$/i;
+
+/** Conservatively recognize a GNU-style `timeout` command and its explicit
+ * duration. Shell expressions and unknown options are intentionally ignored. */
+export function parseExplicitCommandTimeout(command: string): ExplicitCommandTimeout | undefined {
+  const match = /(?:^|(?:&&|\|\||;)\s*)(?:\/usr\/bin\/|\/bin\/)?timeout(?:\s+|$)([^;&|]*)/.exec(command);
+  if (!match) return undefined;
+  const tokens = match[1].match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g)?.map((token) => (
+    (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
+      ? token.slice(1, -1)
+      : token
+  )) ?? [];
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === '--') {
+      index++;
+      break;
+    }
+    if (token === '-s' || token === '--signal' || token === '-k' || token === '--kill-after') {
+      if (!tokens[index + 1]) return undefined;
+      index += 2;
+      continue;
+    }
+    if (/^(?:--signal|--kill-after)=\S+$/.test(token)
+      || /^(?:--preserve-status|--foreground|--verbose)$/.test(token)) {
+      index++;
+      continue;
+    }
+    if (token.startsWith('-')) return undefined;
+    break;
+  }
+  const duration = tokens[index];
+  const parsed = duration ? DURATION.exec(duration) : undefined;
+  if (!parsed) return undefined;
+  const value = Number(parsed[1]);
+  const multiplier = ({ '': 1_000, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const)[parsed[2].toLowerCase() as '' | 's' | 'm' | 'h' | 'd'];
+  const timeoutMs = value * multiplier;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > Number.MAX_SAFE_INTEGER) return undefined;
+  return { timeoutMs: Math.round(timeoutMs), duration };
 }
 
 function commandId(item: Record<string, unknown>, event: Record<string, unknown>): string | undefined {
@@ -41,6 +89,8 @@ export class CommandActivityTracker {
   private carry = '';
   private completedCount = 0;
   private streamClosed = false;
+  private readonly startedIds = new Set<string>();
+  private readonly completedIds = new Set<string>();
 
   constructor(private readonly input: {
     runDir: string;
@@ -48,6 +98,7 @@ export class CommandActivityTracker {
     attemptIndex: number;
     attemptStartedAt: string;
     now?: () => string;
+    onLifecycle?: (event: CommandLifecycleEvent) => void;
   }) {
     this.path = join(input.runDir, 'stages', input.stageId, 'command_activity.json');
     this.persist();
@@ -68,6 +119,35 @@ export class CommandActivityTracker {
     this.persist();
   }
 
+  started(id: string, command?: string): void {
+    const normalizedId = id.trim();
+    if (!normalizedId || this.startedIds.has(normalizedId)) return;
+    this.startedIds.add(normalizedId);
+    const timestamp = this.now();
+    const boundedCommand = command?.trim().slice(0, 500) || undefined;
+    this.active.set(normalizedId, {
+      id: normalizedId,
+      ...(boundedCommand ? { command: boundedCommand } : {}),
+      startedAt: timestamp,
+    });
+    this.persist();
+    this.input.onLifecycle?.({
+      phase: 'started', id: normalizedId, timestamp,
+      ...(boundedCommand ? { command: boundedCommand } : {}),
+    });
+  }
+
+  completed(id: string): void {
+    const normalizedId = id.trim();
+    if (!normalizedId || this.completedIds.has(normalizedId)) return;
+    this.completedIds.add(normalizedId);
+    if (!this.active.delete(normalizedId)) return;
+    this.completedCount++;
+    const timestamp = this.now();
+    this.persist();
+    this.input.onLifecycle?.({ phase: 'completed', id: normalizedId, timestamp });
+  }
+
   private consumeLine(line: string): void {
     if (!line.trim().startsWith('{')) return;
     let event: Record<string, unknown>;
@@ -81,15 +161,10 @@ export class CommandActivityTracker {
     const id = commandId(item, event);
     if (!id) return;
     if (type === 'item.started') {
-      this.active.set(id, {
-        id,
-        ...(commandText(item) ? { command: commandText(item) } : {}),
-        startedAt: this.now(),
-      });
+      this.started(id, commandText(item));
     } else {
-      if (this.active.delete(id)) this.completedCount++;
+      this.completed(id);
     }
-    this.persist();
   }
 
   private now(): string {
@@ -113,4 +188,3 @@ export class CommandActivityTracker {
     renameSync(temp, this.path);
   }
 }
-

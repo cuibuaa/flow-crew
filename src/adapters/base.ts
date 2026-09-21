@@ -30,6 +30,18 @@ export interface RunResult {
   suspensionRequestingStageId?: string;
 }
 
+export type CommandLifecyclePhase = 'started' | 'completed';
+
+/** Adapter-owned proof that an executable tool command crossed a lifecycle
+ * boundary. The worker treats this as control-plane evidence, never as agent
+ * prose. */
+export interface CommandLifecycleEvent {
+  phase: CommandLifecyclePhase;
+  id: string;
+  command?: string;
+  timestamp: string;
+}
+
 export interface RunOpts {
   /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
   timeout_ms: number;
@@ -50,6 +62,8 @@ export interface RunOpts {
    *  supervisor"). Used by worker.ts to honor supervisor ABORT verdicts that
    *  previously only wrote a signal file with no consumer. */
   abortSignal?: AbortSignal;
+  /** Trustworthy command boundaries emitted by the selected adapter. */
+  onCommandLifecycle?: (event: CommandLifecycleEvent) => void;
 }
 
 export interface AgentConfig {

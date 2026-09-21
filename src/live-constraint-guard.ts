@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { scopePathDigest } from './runtime-negotiation.js';
 
 export const LIVE_CONSTRAINT_FALLBACK_SCAN_MS = 30_000;
-export const LIVE_CONSTRAINT_MONITOR_DEADLINE_MS = 120_000;
+export const LIVE_CONSTRAINT_MONITOR_DEADLINE_MS = 600_000;
 export const LIVE_CONSTRAINT_MAX_REINVOCATIONS = 1;
 export const SCOPE_REVISION_REQUEST_FILE = 'scope_revision_request.json';
 
@@ -307,6 +307,8 @@ export interface LiveConstraintViolationDetection {
 export interface LiveConstraintScanResult {
   scannedPaths: number;
   violations: LiveConstraintViolationDetection[];
+  /** Unique untracked generated paths observed by this scan. */
+  exemptedPaths?: string[];
 }
 
 export interface LiveConstraintIncident {
@@ -335,11 +337,21 @@ export interface LiveConstraintMonitorFailure {
   invocationIndex: number;
   detectedAt: string;
   reason: string;
+  lastScanDurationMs: number;
+  lastScanFileCount: number;
 }
 
 export interface LiveConstraintInvocationResult {
   incidents: LiveConstraintIncident[];
+  exemptedCount: number;
   monitorFailure?: LiveConstraintMonitorFailure;
+}
+
+export interface LiveConstraintExemptionSummary {
+  stageId: string;
+  attemptIndex: number;
+  invocationIndex: number;
+  exemptedCount: number;
 }
 
 export interface LiveConstraintGuardOptions {
@@ -353,6 +365,8 @@ export interface LiveConstraintGuardOptions {
     trigger: LiveConstraintScanTrigger,
   ) => LiveConstraintScanResult | Promise<LiveConstraintScanResult>;
   scopeRevisionInstruction: (paths: readonly string[]) => string;
+  onExemptions?: (summary: LiveConstraintExemptionSummary) => void;
+  onMonitorFailure?: (failure: LiveConstraintMonitorFailure) => void;
   fallbackScanMs?: number;
   monitorDeadlineMs?: number;
   now?: () => number;
@@ -374,6 +388,8 @@ export interface LiveConstraintGuardFactory {
 }
 
 export interface LiveConstraintInvocationMonitor {
+  /** Structured adapter attribution closes watcher gaps without changing enforcement authority. */
+  observePaths(paths: readonly string[]): void;
   finish(): Promise<LiveConstraintInvocationResult>;
 }
 
@@ -389,7 +405,11 @@ interface ActiveInvocation {
   fallbackTimer?: ReturnType<typeof setInterval>;
   livenessTimer?: ReturnType<typeof setInterval>;
   lastSuccessfulScanAt: number;
+  lastScanDurationMs: number;
+  lastScanFileCount: number;
+  exemptedPaths: Set<string>;
   monitorFailure?: LiveConstraintMonitorFailure;
+  summaryReported: boolean;
   finished: boolean;
 }
 
@@ -400,6 +420,73 @@ function positiveInterval(value: number | undefined, fallback: number): number {
 function normalizeCandidatePath(path: string | undefined): string | undefined {
   const normalized = path?.replace(/\\/g, '/').replace(/^\.\//, '').trim();
   return normalized || undefined;
+}
+
+const liveConstraintPatternCache = new Map<string, RegExp>();
+const trackedDirectoryCache = new WeakMap<ReadonlySet<string>, Set<string>>();
+
+function globSegmentSource(segment: string): string {
+  return segment.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]');
+}
+
+/** Segment-aware matcher used only after the immutable Git tracked set wins. */
+export function matchesLiveConstraintExemptPattern(path: string, pattern: string): boolean {
+  const normalizedPath = path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+  const normalizedPattern = pattern.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+  let compiled = liveConstraintPatternCache.get(normalizedPattern);
+  if (!compiled) {
+    const segments = normalizedPattern.split('/').filter(Boolean);
+    let source = '^';
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      if (segment === '**') {
+        source += index === segments.length - 1 ? '.*' : '(?:[^/]+/)*';
+      } else {
+        source += globSegmentSource(segment);
+        if (index < segments.length - 1) source += '/';
+      }
+    }
+    compiled = new RegExp(`${source}$`);
+    liveConstraintPatternCache.set(normalizedPattern, compiled);
+  }
+  return compiled.test(normalizedPath);
+}
+
+export function isLiveConstraintExemptPath(
+  path: string,
+  patterns: readonly string[],
+  trackedPaths: ReadonlySet<string>,
+): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+  if (trackedPaths.has(normalized)) return false;
+  return patterns.some((pattern) => matchesLiveConstraintExemptPattern(normalized, pattern));
+}
+
+/** Only a cache-tree pattern ending in `/**` can prune traversal. */
+export function isLiveConstraintExemptDirectory(
+  path: string,
+  patterns: readonly string[],
+  trackedPaths: ReadonlySet<string>,
+): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+  let trackedDirectories = trackedDirectoryCache.get(trackedPaths);
+  if (!trackedDirectories) {
+    trackedDirectories = new Set<string>();
+    for (const tracked of trackedPaths) {
+      const segments = tracked.split('/');
+      for (let length = 1; length < segments.length; length++) {
+        trackedDirectories.add(segments.slice(0, length).join('/'));
+      }
+    }
+    trackedDirectoryCache.set(trackedPaths, trackedDirectories);
+  }
+  if (trackedPaths.has(normalized) || trackedDirectories.has(normalized)) return false;
+  return patterns.some((pattern) => (
+    pattern.replace(/\\/g, '/').endsWith('/**')
+    && matchesLiveConstraintExemptPattern(`${normalized}/__flowcrew_cache_probe__`, pattern)
+  ));
 }
 
 function incidentId(input: {
@@ -440,6 +527,10 @@ export class LiveConstraintGuard {
       firstObservedAt: new Map(),
       pendingPaths: new Set(),
       lastSuccessfulScanAt: this.now(),
+      lastScanDurationMs: 0,
+      lastScanFileCount: 0,
+      exemptedPaths: new Set(),
+      summaryReported: false,
       finished: false,
     };
     this.active = active;
@@ -483,12 +574,25 @@ export class LiveConstraintGuard {
         invocationIndex: active.index,
         detectedAt: new Date(this.now()).toISOString(),
         reason: `live constraint monitor completed no clean scan within ${this.monitorDeadlineMs}ms`,
+        lastScanDurationMs: active.lastScanDurationMs,
+        lastScanFileCount: active.lastScanFileCount,
       };
       active.abort('live_constraint_monitor_failure');
     }, livenessPollMs);
     this.queueScan(active, 'phase_start');
 
-    return { finish: () => this.finishInvocation(active) };
+    return {
+      observePaths: (paths) => {
+        for (const rawPath of paths) {
+          const path = normalizeCandidatePath(rawPath);
+          if (!path) continue;
+          active.pendingPaths.add(path);
+          if (!active.firstObservedAt.has(path)) active.firstObservedAt.set(path, this.now());
+        }
+        if (paths.length > 0) this.queueScan(active, 'watch');
+      },
+      finish: () => this.finishInvocation(active),
+    };
   }
 
   private queueScan(active: ActiveInvocation, trigger: LiveConstraintScanTrigger): void {
@@ -501,6 +605,7 @@ export class LiveConstraintGuard {
         active.pendingTrigger = undefined;
         const paths = [...active.pendingPaths];
         active.pendingPaths.clear();
+        const scanStartedAt = this.now();
         let result: LiveConstraintScanResult;
         try {
           result = await new Promise<LiveConstraintScanResult>((resolvePromise, rejectPromise) => {
@@ -533,11 +638,17 @@ export class LiveConstraintGuard {
             invocationIndex: active.index,
             detectedAt: new Date(this.now()).toISOString(),
             reason: `live constraint scan failed closed: ${error instanceof Error ? error.message : String(error)}`,
+            lastScanDurationMs: active.lastScanDurationMs,
+            lastScanFileCount: active.lastScanFileCount,
           };
           active.abort('live_constraint_monitor_failure');
           break;
         }
-        active.lastSuccessfulScanAt = this.now();
+        const scanCompletedAt = this.now();
+        active.lastSuccessfulScanAt = scanCompletedAt;
+        active.lastScanDurationMs = Math.max(0, scanCompletedAt - scanStartedAt);
+        active.lastScanFileCount = Math.max(0, Math.floor(result.scannedPaths));
+        for (const path of result.exemptedPaths ?? []) active.exemptedPaths.add(path);
         if (result.violations.length === 0) continue;
         const pathsForInstruction = [...new Set(result.violations.map((violation) => violation.path))].sort();
         const instruction = this.options.scopeRevisionInstruction(pathsForInstruction);
@@ -578,6 +689,8 @@ export class LiveConstraintGuard {
               invocationIndex: active.index,
               detectedAt,
               reason: 'live constraint incident could not be persisted after restoration',
+              lastScanDurationMs: active.lastScanDurationMs,
+              lastScanFileCount: active.lastScanFileCount,
             };
             active.abort('live_constraint_monitor_failure');
             break;
@@ -597,7 +710,11 @@ export class LiveConstraintGuard {
   }
 
   private async finishInvocation(active: ActiveInvocation): Promise<LiveConstraintInvocationResult> {
-    if (active.finished) return { incidents: [...active.incidents], ...(active.monitorFailure ? { monitorFailure: active.monitorFailure } : {}) };
+    if (active.finished) return {
+      incidents: [...active.incidents],
+      exemptedCount: active.exemptedPaths.size,
+      ...(active.monitorFailure ? { monitorFailure: active.monitorFailure } : {}),
+    };
     active.watcher?.close();
     if (active.fallbackTimer) clearInterval(active.fallbackTimer);
     if (active.livenessTimer) clearInterval(active.livenessTimer);
@@ -609,8 +726,25 @@ export class LiveConstraintGuard {
       if (active.scanPromise) await active.scanPromise;
     }
     active.finished = true;
+    if (!active.summaryReported) {
+      active.summaryReported = true;
+      if (active.exemptedPaths.size > 0) {
+        try {
+          this.options.onExemptions?.({
+            stageId: this.options.stageId,
+            attemptIndex: this.options.attemptIndex,
+            invocationIndex: active.index,
+            exemptedCount: active.exemptedPaths.size,
+          });
+        } catch { /* telemetry cannot weaken enforcement */ }
+      }
+      if (active.monitorFailure) {
+        try { this.options.onMonitorFailure?.(active.monitorFailure); } catch { /* telemetry cannot weaken enforcement */ }
+      }
+    }
     return {
       incidents: [...active.incidents],
+      exemptedCount: active.exemptedPaths.size,
       ...(active.monitorFailure ? { monitorFailure: active.monitorFailure } : {}),
     };
   }

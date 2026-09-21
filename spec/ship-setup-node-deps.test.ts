@@ -115,7 +115,7 @@ describe('ship-setup locked JavaScript dependency preparation', () => {
     const build = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
       cwd: upwardBuild.projectDir,
       encoding: 'utf-8',
-      env: { ...process.env, FC_HOME: join(root, 'build-state') },
+      env: { ...process.env, HOME: root, FC_HOME: join(root, 'build-state') },
       timeout: 120_000,
     });
 

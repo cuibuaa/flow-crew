@@ -64,7 +64,11 @@ function writeAgent(): string {
   return agentsDir;
 }
 
-async function runStatic(scopes: [string[], string[]], reportedWrites: string[] = []) {
+async function runStatic(
+  scopes: [string[], string[]],
+  reportedWrites: string[] | ((stageId: string) => string[]) = [],
+  mutate?: (stageId: string) => void,
+) {
   const yaml = [
     'name: scope-test',
     'defaults:',
@@ -87,9 +91,16 @@ async function runStatic(scopes: [string[], string[]], reportedWrites: string[] 
       if (opts.stageId === '_summary') return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
       active++;
       maxActive = Math.max(maxActive, active);
+      mutate?.(opts.stageId);
       await new Promise((resolve) => setTimeout(resolve, 25));
       active--;
-      return { output: opts.stageId, exitCode: 0, duration_ms: 25, writes: reportedWrites, writeAttribution: 'structured' };
+      return {
+        output: opts.stageId,
+        exitCode: 0,
+        duration_ms: 25,
+        writes: typeof reportedWrites === 'function' ? reportedWrites(opts.stageId) : reportedWrites,
+        writeAttribution: 'structured',
+      };
     },
   };
   const final = await runWorkflow(workflow, yaml, projectDir, adapter, new Map(), undefined, writeAgent(), created.runId);
@@ -194,6 +205,42 @@ beforeEach(() => {
 afterEach(() => rmSync(projectDir, { recursive: true, force: true }));
 
 describe('safe scope batching', () => {
+  it('H3a runs later-literal-disjoint globs concurrently and serializes real overlap', async () => {
+    const ownPath = 'a/round_1/control/owned.txt';
+    const peerPath = 'a/round_1/arms/x/escaped.txt';
+    const disjoint = await runStatic([
+      ['a/round_*/control/**'],
+      ['a/round_*/arms/x/**'],
+    ]);
+    expect(disjoint.final.status).toBe('complete');
+    expect(disjoint.maxActive).toBe(2);
+    expect(disjoint.events.some((event) => event.type === 'parallel_scope_serialized')).toBe(false);
+
+    const guarded = await runStatic([
+      ['a/round_*/control/**'],
+      ['a/round_*/arms/x/**'],
+    ], (stageId) => stageId === 'left' ? [ownPath, peerPath] : [], (stageId) => {
+      if (stageId !== 'left') return;
+      mkdirSync(join(projectDir, 'a', 'round_1', 'control'), { recursive: true });
+      mkdirSync(join(projectDir, 'a', 'round_1', 'arms', 'x'), { recursive: true });
+      writeFileSync(join(projectDir, ownPath), 'owned by control\n');
+      writeFileSync(join(projectDir, peerPath), 'must be reverted\n');
+    });
+    expect(guarded.maxActive).toBe(2);
+    expect(existsSync(join(projectDir, ownPath))).toBe(true);
+    expect(existsSync(join(projectDir, peerPath))).toBe(false);
+    expect(guarded.final.stages.left.error).toContain('scope_violation');
+    expect(guarded.final.stages.left.constraintAudit).toMatchObject({ violationCount: 1 });
+
+    const overlapping = await runStatic([
+      ['a/round_*/arms/**'],
+      ['a/round_*/arms/x/**'],
+    ]);
+    expect(overlapping.final.status).toBe('complete');
+    expect(overlapping.maxActive).toBe(1);
+    expect(overlapping.events.some((event) => event.type === 'parallel_scope_serialized')).toBe(true);
+  });
+
   it('A2 overlaps disjoint-scope attempts but serializes maybe-overlapping scopes with parallel_scope_serialized', async () => {
     const stages = [
       stage({ id: 'left', scope: ['src/left.ts'] }),

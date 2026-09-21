@@ -11,6 +11,23 @@ default_timeout_ms: 10800000
 # two other jobs were running, and the refusal named the timeout rather than the
 # load.
 default_validation_timeout_ms: 2700000
+
+# Regenerated tool caches are outside the project-write contract only while
+# untracked. A matching path present in Git's index is always guarded.
+live_constraint_exempt_patterns:
+  - "**/__pycache__/**"
+  - "**/*.pyc"
+  - "**/.pytest_cache/**"
+  - "**/.mypy_cache/**"
+  - "**/.ruff_cache/**"
+  - "**/*.tsbuildinfo"
+# Recursive watching is only an accelerator; these bounds govern the portable
+# reconciliation scan and how long an attempt may go without a completed scan.
+live_constraint_fallback_scan_ms: 30000
+live_constraint_monitor_deadline_ms: 600000
+# Large worktrees on slow filesystems need a checkout-specific bound. Ordinary
+# Git probes retain their smaller command-local bounds.
+git_worktree_add_timeout_ms: 1800000
 default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1

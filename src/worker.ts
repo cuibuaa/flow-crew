@@ -2,7 +2,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
-import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
+import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { buildStagePrompt } from './handoff.js';
 import { loadProjectDefaults } from './config.js';
@@ -33,11 +33,18 @@ import {
 } from './attempt-deadline.js';
 import {
   guidanceForStageFromText,
+  appendGuidanceEnvelope,
   readGuidanceForStage,
   renderGuidanceDelivery,
   routePendingOperatorGuidanceToStage,
 } from './guidance.js';
 import { recordRunEvent } from './run-events.js';
+import { parseExplicitCommandTimeout } from './command-activity.js';
+import {
+  commandFingerprint,
+  parseStageCommandInterrupt,
+  type StageCommandInterruptSignal,
+} from './command-interrupt.js';
 import {
   acquireAttributableWriterLease,
   compareLiveConstraintContentIdentities,
@@ -455,8 +462,9 @@ async function runStageWithWriterLease(
     } catch { /* the run event remains the delivery audit */ }
   };
   const consumeNewGuidance = (
-    boundary: 'attempt_start' | 'adapter_invocation',
+    boundary: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt',
     boundaryInvocationIndex?: number,
+    commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
   ): ReturnType<typeof readGuidanceForStage> => {
     let entries: ReturnType<typeof readGuidanceForStage> = [];
     try {
@@ -478,6 +486,8 @@ async function runStageWithWriterLease(
       attemptStartedAt,
       boundary,
       ...(boundaryInvocationIndex === undefined ? {} : { invocationIndex: boundaryInvocationIndex }),
+      ...(commandEvent?.id ? { commandId: commandEvent.id } : {}),
+      ...(commandEvent?.command ? { command: commandEvent.command } : {}),
       guidanceIds: boundary === 'attempt_start'
         ? [...deliveredGuidanceIds]
         : entries.map((entry) => entry.id),
@@ -576,7 +586,19 @@ async function runStageWithWriterLease(
   // stale/malformed envelopes are warned about and removed without firing.
   const attemptAbortController = new AbortController();
   const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
+  const commandInterruptSignalPath = join(opts.runDir, 'signals', `interrupt_${opts.stageId}.json`);
   const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
+  const activeCommands = new Map<string, CommandLifecycleEvent>();
+  const interruptedCommands = new Map<string, StageCommandInterruptSignal>();
+  let activeInvocationAbortController: AbortController | undefined;
+  let activeInvocationIndex: number | undefined;
+  type CommandBoundaryControl = {
+    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt';
+    command: CommandLifecycleEvent;
+    guidance: ReturnType<typeof readGuidanceForStage>;
+    interrupt?: StageCommandInterruptSignal;
+  };
+  let commandBoundaryControl: CommandBoundaryControl | undefined;
   let supervisorAborted = false;
   let approvalSuspended = false;
   let approvalRequestId: string | undefined;
@@ -594,6 +616,11 @@ async function runStageWithWriterLease(
   const removeAbortSignal = (): void => {
     try {
       if (existsSync(abortSignalPath)) unlinkSync(abortSignalPath);
+    } catch { /* non-critical */ }
+  };
+  const removeCommandInterruptSignal = (): void => {
+    try {
+      if (existsSync(commandInterruptSignalPath)) unlinkSync(commandInterruptSignalPath);
     } catch { /* non-critical */ }
   };
   const appendAbortWarning = (detail: string): void => {
@@ -647,6 +674,60 @@ async function runStageWithWriterLease(
       attemptAbortController.abort(approvalSignal ? 'approval_suspension' : 'supervisor_abort');
     } catch { /* non-critical */ }
   };
+  const pollCommandInterruptSignal = (): void => {
+    try {
+      if (!existsSync(commandInterruptSignalPath) || attemptAbortController.signal.aborted) return;
+      const parsed = parseStageCommandInterrupt(readFileSync(commandInterruptSignalPath, 'utf-8'));
+      if (!parsed.ok) {
+        removeCommandInterruptSignal();
+        appendAbortWarning(`Ignored malformed operator command interrupt (${parsed.error}); signal removed.`);
+        return;
+      }
+      const signal = parsed.signal;
+      const active = activeCommands.get(signal.commandId);
+      if (signal.stageId !== opts.stageId
+        || signal.attemptIndex !== attemptIndex
+        || signal.attemptStartedAt !== attemptStartedAt
+        || !active
+        || !active.command
+        || commandFingerprint(active.command) !== signal.commandFingerprint) {
+        removeCommandInterruptSignal();
+        appendAbortWarning(
+          `Ignored stale operator command interrupt ${signal.requestId}: it does not match the active command in attempt ${attemptIndex}.`,
+        );
+        return;
+      }
+
+      // Consume before stopping the child so a crash cannot replay this exact
+      // request into a later command or attempt.
+      removeCommandInterruptSignal();
+      interruptedCommands.set(signal.commandFingerprint, signal);
+      const guidance = consumeNewGuidance(
+        'operator_interrupt',
+        activeInvocationIndex,
+        { id: active.id, command: active.command },
+      );
+      const interruptGuidance = deliveredGuidance.find((entry) => entry.id === signal.guidanceId);
+      const priorGuidance = commandBoundaryControl?.guidance ?? [];
+      const mergedGuidance = [...priorGuidance, ...guidance, ...(interruptGuidance ? [interruptGuidance] : [])]
+        .filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index);
+      commandBoundaryControl = {
+        kind: 'operator_interrupt',
+        command: active,
+        guidance: mergedGuidance,
+        interrupt: signal,
+      };
+      try {
+        appendFileSync(
+          liveLogPath,
+          `\nOperator interrupt ${signal.requestId} matched command ${signal.commandId}; stopping only the current adapter invocation.\n`,
+        );
+      } catch { /* the event ledger and signal are the durable audit */ }
+      if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
+        activeInvocationAbortController.abort('operator_command_interrupt');
+      }
+    } catch { /* signal may be between publication and a complete read */ }
+  };
   const cleanupAbortSignalAtExit = (): void => {
     try {
       if (!existsSync(abortSignalPath)) return;
@@ -665,6 +746,17 @@ async function runStageWithWriterLease(
       // not occur in normal scheduling, but leaving it is safer than deleting
       // another execution's cancellation in a race.
     } catch { /* non-critical */ }
+  };
+  const cleanupCommandInterruptSignalAtExit = (): void => {
+    try {
+      if (!existsSync(commandInterruptSignalPath)) return;
+      const parsed = parseStageCommandInterrupt(readFileSync(commandInterruptSignalPath, 'utf-8'));
+      if (!parsed.ok
+        || parsed.signal.stageId !== opts.stageId
+        || parsed.signal.attemptIndex <= attemptIndex) {
+        removeCommandInterruptSignal();
+      }
+    } catch { /* retain an unreadable signal for diagnosis */ }
   };
   const stageTimeoutRequestPath = join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json');
   const engineTimeoutRequestPath = join(opts.runDir, 'signals', `timeout_extension_${opts.stageId}.json`);
@@ -759,8 +851,10 @@ async function runStageWithWriterLease(
   }
 
   pollAbortSignal();
+  pollCommandInterruptSignal();
   pollTimeoutExtensionRequests();
   const abortPollTimer = setInterval(pollAbortSignal, 1000);
+  const commandInterruptPollTimer = setInterval(pollCommandInterruptSignal, 250);
   const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 1000);
   const requestWatchers: import('node:fs').FSWatcher[] = [];
   try {
@@ -770,6 +864,7 @@ async function runStageWithWriterLease(
       requestWatchers.push(watch(directory, { persistent: false }, (_event, fileName) => {
         const name = fileName?.toString() ?? '';
         if (!name || name === `abort_${opts.stageId}.json`) pollAbortSignal();
+        if (!name || name === `interrupt_${opts.stageId}.json`) pollCommandInterruptSignal();
         if (!name || name.includes('timeout_extension')) pollTimeoutExtensionRequests();
       }));
     }
@@ -854,7 +949,144 @@ async function runStageWithWriterLease(
       ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}`
       : invocationPrompt;
     const invocationAbortController = new AbortController();
+    commandBoundaryControl = undefined;
+    activeInvocationAbortController = invocationAbortController;
+    activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
+    const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
+      if (event.phase === 'started') {
+        activeCommands.set(event.id, event);
+        recordRunEvent(opts.projectDir, opts.runId, {
+          type: 'stage_command_started',
+          runId: opts.runId,
+          timestamp: event.timestamp,
+          stageId: opts.stageId,
+          attemptIndex,
+          attemptStartedAt,
+          invocationIndex,
+          commandId: event.id,
+          ...(event.command ? {
+            command: event.command,
+            commandFingerprint: commandFingerprint(event.command),
+          } : {}),
+          source: 'worker',
+        });
+        const startGuidance = consumeNewGuidance(
+          'tool_call_start', invocationIndex, { id: event.id, command: event.command },
+        );
+        if (startGuidance.length > 0) {
+          commandBoundaryControl = { kind: 'guidance', command: event, guidance: startGuidance };
+          if (!invocationAbortController.signal.aborted) {
+            invocationAbortController.abort('guidance_delivery_at_tool_start');
+          }
+        }
+        if (event.command) {
+          const fingerprint = commandFingerprint(event.command);
+          const interrupted = interruptedCommands.get(fingerprint);
+          if (interrupted) {
+            recordRunEvent(opts.projectDir, opts.runId, {
+              type: 'interrupted_command_repeated',
+              runId: opts.runId,
+              timestamp: event.timestamp,
+              stageId: opts.stageId,
+              attemptIndex,
+              attemptStartedAt,
+              invocationIndex,
+              commandId: event.id,
+              command: event.command,
+              commandFingerprint: fingerprint,
+              originalRequestId: interrupted.requestId,
+              guidanceId: interrupted.guidanceId,
+              detail: interrupted.reason,
+              level: 'warning',
+              source: 'worker',
+            });
+          }
+          const explicitTimeout = parseExplicitCommandTimeout(event.command);
+          const remainingBudgetMs = Math.max(0, Math.floor(attemptDeadline.remainingMs()));
+          if (explicitTimeout && explicitTimeout.timeoutMs > remainingBudgetMs) {
+            const shortfallMs = explicitTimeout.timeoutMs - remainingBudgetMs;
+            recordRunEvent(opts.projectDir, opts.runId, {
+              type: 'command_timeout_projection',
+              runId: opts.runId,
+              timestamp: event.timestamp,
+              stageId: opts.stageId,
+              attemptIndex,
+              attemptStartedAt,
+              invocationIndex,
+              commandId: event.id,
+              command: event.command,
+              commandFingerprint: fingerprint,
+              commandTimeoutMs: explicitTimeout.timeoutMs,
+              remainingBudgetMs,
+              shortfallMs,
+              detail: `command timeout exceeds the remaining attempt budget by ${shortfallMs}ms`,
+              level: 'warning',
+              source: 'worker',
+            });
+            appendGuidanceEnvelope({
+              runDir: opts.runDir,
+              target: opts.stageId,
+              source: 'scheduler',
+              knownStageIds: [opts.stageId],
+              body: [
+                'The command was stopped before it could silently exceed this attempt budget.',
+                `Command: ${event.command}`,
+                `Explicit command timeout: ${explicitTimeout.timeoutMs} ms.`,
+                `Remaining stage budget at command start: ${remainingBudgetMs} ms.`,
+                `Projected shortfall: ${shortfallMs} ms.`,
+                'Choose a bounded alternative or report that the requested work is infeasible; the attempt deadline is unchanged.',
+              ].join('\n'),
+            });
+            const projectionGuidance = consumeNewGuidance(
+              'tool_call_start', invocationIndex, { id: event.id, command: event.command },
+            );
+            commandBoundaryControl = {
+              kind: 'timeout_projection',
+              command: event,
+              guidance: [...startGuidance, ...projectionGuidance],
+            };
+            if (!invocationAbortController.signal.aborted) {
+              invocationAbortController.abort('command_timeout_projection');
+            }
+          }
+        }
+        // Close a publication race where the operator signal landed between
+        // the adapter's activity snapshot and this callback.
+        pollCommandInterruptSignal();
+        return;
+      }
+
+      const started = activeCommands.get(event.id);
+      activeCommands.delete(event.id);
+      const completed = started
+        ? { ...event, ...(started.command ? { command: started.command } : {}) }
+        : event;
+      recordRunEvent(opts.projectDir, opts.runId, {
+        type: 'stage_command_completed',
+        runId: opts.runId,
+        timestamp: event.timestamp,
+        stageId: opts.stageId,
+        attemptIndex,
+        attemptStartedAt,
+        invocationIndex,
+        commandId: event.id,
+        ...(completed.command ? {
+          command: completed.command,
+          commandFingerprint: commandFingerprint(completed.command),
+        } : {}),
+        source: 'worker',
+      });
+      const guidance = consumeNewGuidance(
+        'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
+      );
+      if (guidance.length > 0 && !commandBoundaryControl) {
+        commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
+        if (!invocationAbortController.signal.aborted) {
+          invocationAbortController.abort('guidance_delivery_at_tool_completion');
+        }
+      }
+    };
     const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
       if (!invocationAbortController.signal.aborted) invocationAbortController.abort(reason);
     });
@@ -901,8 +1133,10 @@ async function runStageWithWriterLease(
         sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
         preserveSession: opts.preserveSession,
         abortSignal: invocationAbortSignal,
+        onCommandLifecycle,
       }).then(
         (value) => {
+          liveMonitor?.observePaths(value.writes ?? []);
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
@@ -921,6 +1155,14 @@ async function runStageWithWriterLease(
     try {
       return await invocation;
     } finally {
+      // Adapter settlement closes every command it owned, including one whose
+      // stream ended without a trustworthy completion record. A later
+      // interrupt must never bind to stale in-memory activity.
+      activeCommands.clear();
+      if (activeInvocationAbortController === invocationAbortController) {
+        activeInvocationAbortController = undefined;
+        activeInvocationIndex = undefined;
+      }
       latestLiveConstraintResult = await liveMonitor?.finish();
     }
   };
@@ -931,7 +1173,7 @@ async function runStageWithWriterLease(
     const structured = prior.writeAttribution === 'structured' && next.writeAttribution === 'structured';
     return {
       ...next,
-      output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked after live scope correction]\n\n'),
+      output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
       duration_ms: prior.duration_ms + next.duration_ms,
       tokens_in: (prior.tokens_in === undefined && next.tokens_in === undefined)
         ? undefined
@@ -956,6 +1198,44 @@ async function runStageWithWriterLease(
     while (true) {
       const current = await invokeAdapter(selectedAdapter, selectedRole, mayResume, invocationPrompt);
       combined = mergeInvocationTelemetry(combined, current);
+      const commandControl = commandBoundaryControl;
+      if (commandControl && !aggregateAbortSignal.aborted) {
+        activeCommands.delete(commandControl.command.id);
+        if (commandControl.kind === 'operator_interrupt' && commandControl.interrupt) {
+          recordRunEvent(opts.projectDir, opts.runId, {
+            type: 'stage_command_interrupted',
+            runId: opts.runId,
+            timestamp: new Date().toISOString(),
+            stageId: opts.stageId,
+            attemptIndex,
+            attemptStartedAt,
+            invocationIndex,
+            requestId: commandControl.interrupt.requestId,
+            guidanceId: commandControl.interrupt.guidanceId,
+            commandId: commandControl.command.id,
+            ...(commandControl.command.command ? {
+              command: commandControl.command.command,
+              commandFingerprint: commandControl.interrupt.commandFingerprint,
+            } : {}),
+            detail: commandControl.interrupt.reason,
+            source: 'worker',
+          });
+        }
+        mayResume = false;
+        const label = commandControl.kind === 'operator_interrupt'
+          ? 'Operator command interrupt'
+          : commandControl.kind === 'timeout_projection'
+            ? 'Command timeout projection'
+            : 'Live guidance delivered at tool completion';
+        invocationPrompt = `${prompt}\n\n# ${label}\n${guidanceBlock(commandControl.guidance)}`;
+        try {
+          appendFileSync(
+            liveLogPath,
+            `\n${label}; reinvoking inside immutable attempt ${attemptIndex}.\n`,
+          );
+        } catch { /* event/guidance ledgers remain authoritative */ }
+        continue;
+      }
       const live = latestLiveConstraintResult;
       if (live?.monitorFailure) {
         return {
@@ -1070,9 +1350,11 @@ async function runStageWithWriterLease(
   } finally {
     pollAbortSignal();
     clearInterval(abortPollTimer);
+    clearInterval(commandInterruptPollTimer);
     clearInterval(extensionPollTimer);
     for (const watcher of requestWatchers) watcher.close();
     cleanupAbortSignalAtExit();
+    cleanupCommandInterruptSignalAtExit();
     // The execution attempt ends when adapter/fallback child settlement ends.
     // A blocked event loop can settle after the immutable boundary before its
     // timer callback runs, so observe monotonic expiry before disposal.

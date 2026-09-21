@@ -142,6 +142,21 @@ recorded separately. Renaming the metric, quietly lowering the threshold, claimi
 value that misses, and returning a verdict with no numeric value at all are each rejected into
 a structured `{ pass: false, reason }` the retry loop can act on.
 
+A rejecting verdict that prescribes a sample, block, or iteration quantity must also say
+whether its cost is known. Known costs cite an artifact attributed to a completed attempt and
+state the checked multiplication, implied wall time, applicable stage budget, fit, and
+feasible/infeasible disposition. Unknown costs say so explicitly. Operator notes that name an
+unambiguous canonical criterion follow that criterion into later gate prompts; a gate may still
+disagree, but a failure must quote the ruling and explain why it does not apply. Reliably
+attributed stage-authored checks are likewise assessed against matching rulings, with conflicts
+surfaced as `criterion_check_conflict` rather than silently treated as the criterion itself.
+
+**A running stage has command boundaries.** Adapters report typed command start/completion
+events. The worker uses them to deliver newly written guidance, project an explicit GNU-style
+command timeout against the attempt's remaining budget, and honor an operator interrupt bound
+to the exact active attempt and command. A controlled boundary may reinvoke the adapter inside
+the same attempt; it never resets the deadline or executes advisory text on the stage's behalf.
+
 **A boundary that cannot be enforced is not a boundary.** Anything a stage writes outside its
 declared paths is restored to its pre-stage contents, and the restore is re-read to confirm it
 took. A stage that genuinely needs another file can ask, and the answer comes from a

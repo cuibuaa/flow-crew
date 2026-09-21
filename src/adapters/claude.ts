@@ -2,6 +2,7 @@ import { mkdirSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 import { execWithTimeout, execWithStdin } from './base.js';
+import { CommandActivityTracker } from '../command-activity.js';
 
 /** Parse token usage from claude output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -73,7 +74,18 @@ export class ClaudeAdapter implements Adapter {
     let childKill: (() => void) | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     const POST_RESULT_GRACE_MS = 5000;
-    const result = await execWithStdin('claude', args, prompt, {
+    const commandActivity = opts.attemptIndex !== undefined && opts.attemptStartedAt
+      ? new CommandActivityTracker({
+          runDir: opts.runDir,
+          stageId: opts.stageId,
+          attemptIndex: opts.attemptIndex,
+          attemptStartedAt: opts.attemptStartedAt,
+          onLifecycle: opts.onCommandLifecycle,
+        })
+      : undefined;
+    let result: RunResult;
+    try {
+      result = await execWithStdin('claude', args, prompt, {
       cwd: opts.workDir,
       timeout_ms: opts.timeout_ms,
       liveLogPath, // raw stream-json goes to live.log for debugging
@@ -95,6 +107,19 @@ export class ClaudeAdapter implements Adapter {
             if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
               for (const block of parsed.message.content) {
                 if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
+                if (block?.type === 'tool_use' && typeof block.id === 'string'
+                  && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
+                  const command = typeof block.input?.command === 'string'
+                    ? block.input.command
+                    : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
+                  commandActivity?.started(block.id, command);
+                }
+              }
+            } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
+              for (const block of parsed.message.content) {
+                if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+                  commandActivity?.completed(block.tool_use_id);
+                }
               }
             } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
               text = parsed.content;
@@ -120,8 +145,11 @@ export class ClaudeAdapter implements Adapter {
             }
           } catch { /* non-JSON line, skip */ }
         }
-      },
-    });
+        },
+      });
+    } finally {
+      commandActivity?.close();
+    }
     if (killTimer) clearTimeout(killTimer);
 
     // Use extracted text as the output (clean, no JSON wrappers)

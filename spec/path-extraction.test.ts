@@ -136,6 +136,25 @@ function stage(raw: Record<string, unknown>) {
 }
 
 describe('literal reality-check path extraction', () => {
+  it('H3b treats a literal parent scope as ownership of named descendants', () => {
+    const projectDir = temporaryProject();
+    const errors = inspectRealityCheckReachability({
+      markdown: markdownFor('file-exists-nonempty', {
+        paths: ['docs/honest_plan/evidence.json'],
+      }),
+      projectDir,
+      stages: [stage({
+        id: 'evidence_writer',
+        role: 'coder',
+        scope: ['docs/honest_plan'],
+        depends_on: [],
+        dependency_reasons: {},
+      })],
+    });
+
+    expect(errors).toEqual([]);
+  });
+
   const recordedFalsePositives = {
     research: [
       'console.error',

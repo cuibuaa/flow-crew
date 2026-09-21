@@ -577,7 +577,10 @@ describe('ship-preflight declared brief inputs fact', () => {
     const absolutePath = join(fixture.root, 'external.csv');
     writeFileSync(briefPath, [
       '---',
-      'input_manifest: data/prices.csv',
+      'inputs:',
+      '  - data/prices.csv',
+      '  - .cache/snapshot',
+      '  - locked',
       'terminal_states:',
       '  complete:',
       '    paths: [docs/report.md]',

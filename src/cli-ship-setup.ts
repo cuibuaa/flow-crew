@@ -12,6 +12,7 @@ import {
   readlinkSync,
   readdirSync,
   realpathSync,
+  rmSync,
   renameSync,
   statSync,
   symlinkSync,
@@ -34,13 +35,17 @@ import {
   type ValidationRunResponse,
 } from './project-validation.js';
 import {
-  verifyBriefInputs,
+  extractBriefPathMentions,
+  extractDeclaredBriefInputPaths,
+  verifyDeclaredBriefInputs,
   inspectBriefOutputs,
   type BriefOutputInventory,
   type BriefInputAssertionResult,
   type BriefInputVerification,
+  type BriefPathMention,
   type ShipInputFileSystem,
 } from './ship-inputs.js';
+import { loadProjectDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 import { parseTapOutput } from './tap-output.js';
@@ -53,8 +58,11 @@ export interface ShipSetupFileSystem extends ShipInputFileSystem {
   realpath(path: string): string;
   entryExists(path: string): boolean;
   createDirectory(path: string): void;
+  /** Reserve a previously absent directory; throw instead of adopting it. */
+  createDirectoryExclusive(path: string): void;
   createLink(source: string, target: string, type: 'file' | 'dir'): void;
   copyFile(source: string, target: string): void;
+  removeEntry(path: string): void;
   writeAtomic(path: string, contents: string): void;
 }
 
@@ -104,16 +112,30 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   realpath: (path) => realpathSync.native(path),
   entryExists: nodeEntryExists,
   createDirectory: (path) => mkdirSync(path, { recursive: true }),
+  createDirectoryExclusive: (path) => {
+    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(path);
+  },
   createLink: (source, target, type) => symlinkSync(source, target, type),
   copyFile: (source, target) => copyFileSync(source, target),
+  removeEntry: (path) => rmSync(path, { recursive: true, force: true }),
   writeAtomic: nodeAtomicWrite,
 };
+
+export interface GitCommandProgress {
+  elapsedMs: number;
+  message: string;
+}
 
 export interface GitWorktreeRequest {
   projectDir: string;
   targetDir: string;
   base: string;
   branch: string;
+  /** The managed setup transaction atomically created this branch already. */
+  branchAlreadyCreated?: boolean;
+  timeoutMs?: number;
+  onProgress?: (progress: GitCommandProgress) => void;
 }
 
 export interface GitWorktreeResponse {
@@ -131,6 +153,8 @@ export interface GitCommandRequest {
   command: 'git';
   args: string[];
   cwd: string;
+  timeoutMs?: number;
+  onProgress?: (progress: GitCommandProgress) => void;
 }
 
 export type GitCommandRunner = (
@@ -163,6 +187,7 @@ function bounded(value: string, maximum = 24 * 1024): string {
 }
 
 const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
+  const startedAt = Date.now();
   const child = spawn(
     request.command,
     request.args,
@@ -171,13 +196,20 @@ const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
       env: process.env,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 5 * 60 * 1_000,
+      timeout: request.timeoutMs ?? 5 * 60 * 1_000,
     },
   );
   let stdout = '';
   let stderr = '';
   let launchError: string | undefined;
   let settled = false;
+  const reportProgress = (): void => request.onProgress?.({
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    message: `${request.args.slice(0, 2).join(' ')} still running`,
+  });
+  reportProgress();
+  const progressTimer = setInterval(reportProgress, 15_000);
+  progressTimer.unref();
   child.stdout?.on('data', (chunk: Buffer | string) => {
     stdout = bounded(stdout + chunk.toString());
   });
@@ -190,6 +222,7 @@ const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
   child.once('close', (code, signal) => {
     if (settled) return;
     settled = true;
+    clearInterval(progressTimer);
     settle({
       exitCode: code,
       stdout,
@@ -243,8 +276,12 @@ export function createGitWorktree(
 ): Promise<GitWorktreeResponse> | GitWorktreeResponse {
   return runner({
     command: 'git',
-    args: ['worktree', 'add', '-b', request.branch, '--', request.targetDir, request.base],
+    args: request.branchAlreadyCreated
+      ? ['worktree', 'add', '--', request.targetDir, request.branch.replace(/^refs\/heads\//, '')]
+      : ['worktree', 'add', '-b', request.branch, '--', request.targetDir, request.base],
     cwd: request.projectDir,
+    ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+    ...(request.onProgress ? { onProgress: request.onProgress } : {}),
   });
 }
 
@@ -266,6 +303,7 @@ interface ResolvedShipSetupDependencies {
   cwd: string;
   fs: ShipSetupFileSystem;
   createWorktree: GitWorktreeCreator;
+  managedWorktreeCreation: boolean;
   runGitCommand: GitCommandRunner;
   runDependencyInstallCommand: DependencyInstallRunner;
   runValidationCommand?: ValidationCommandRunner;
@@ -375,6 +413,7 @@ interface ShipSetupFacts {
   copies: ShipSetupCopy[];
   sourceVerification: BriefInputVerification;
   sourceOutputInventory: BriefOutputInventory;
+  proseInputWarnings: BriefPathMention[];
   targetVerification?: BriefInputVerification;
   targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
@@ -409,6 +448,7 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
     fs: overrides.fs ?? nodeShipSetupFileSystem,
     createWorktree: overrides.createWorktree
       ?? ((request) => createGitWorktree(request, git)),
+    managedWorktreeCreation: overrides.createWorktree === undefined,
     runGitCommand: git,
     runDependencyInstallCommand: overrides.runDependencyInstallCommand ?? runDependencyInstallCommand,
     ...(overrides.runValidationCommand ? { runValidationCommand: overrides.runValidationCommand } : {}),
@@ -495,8 +535,13 @@ function verificationBlockers(
     reason: `Unresolved explicit input at line ${input.line}: ${input.reason}`,
   })));
   for (const input of verification.inputs) {
-    if (!input.exists) blockers.push({ phase, input: input.path, reason: 'Declared input does not exist' });
+    if (!input.exists) blockers.push({
+      phase,
+      input: input.path,
+      reason: `Declared input does not exist${input.checkedLocations?.length ? `; checked ${input.checkedLocations.join(' and ')}` : ''}`,
+    });
     else if (!input.readable) blockers.push({ phase, input: input.path, reason: 'Declared input is not readable' });
+    if (phase === 'source' && input.sourceExists === false && input.baseRefExists === true) continue;
     for (const assertion of input.assertions) {
       if (assertion.state !== 'confirmed') {
         blockers.push({
@@ -509,6 +554,49 @@ function verificationBlockers(
     }
   }
   return blockers;
+}
+
+async function verifyDeclaredInputsAgainstSourceAndBase(
+  brief: string,
+  projectDir: string,
+  base: string,
+  fs: ShipSetupFileSystem,
+  runner: GitCommandRunner,
+): Promise<BriefInputVerification> {
+  const source = verifyDeclaredBriefInputs(brief, projectDir, fs);
+  const inputs = await Promise.all(source.inputs.map(async (input) => {
+    const sourceLocation = `source working tree ${projectDir}`;
+    if (input.exists) {
+      return {
+        ...input,
+        sourceExists: true,
+        checkedLocations: [sourceLocation],
+      };
+    }
+    let response: GitWorktreeResponse;
+    try {
+      response = await runner({
+        command: 'git',
+        args: ['cat-file', '-e', `${base}:${input.path}`],
+        cwd: projectDir,
+      });
+    } catch (error) {
+      response = { exitCode: null, error: errorMessage(error) };
+    }
+    const baseRefExists = response.exitCode === 0 && !response.error;
+    return {
+      ...input,
+      // Reachability through the exact checkout base is sufficient for source
+      // admission. Target verification performs the readable/content checks
+      // after Git materializes the worktree.
+      exists: baseRefExists,
+      readable: baseRefExists,
+      sourceExists: false,
+      baseRefExists,
+      checkedLocations: [sourceLocation, `base ref ${base}`],
+    };
+  }));
+  return { ...source, inputs };
 }
 
 function refused(
@@ -691,6 +779,7 @@ function setupFacts(
   parsed: ParsedShipSetupArgs,
   sourceVerification: BriefInputVerification,
   sourceOutputInventory: BriefOutputInventory,
+  proseInputWarnings: BriefPathMention[],
 ): Omit<ShipSetupFacts, 'blockers'> {
   return {
     version: 1,
@@ -706,6 +795,7 @@ function setupFacts(
     copies: [],
     sourceVerification,
     sourceOutputInventory,
+    proseInputWarnings,
   };
 }
 
@@ -745,6 +835,162 @@ function parseWorktreeIdentities(raw: string): WorktreeIdentity[] {
   }
   finish();
   return records;
+}
+
+interface ManagedWorktreeOwnership {
+  targetReserved: true;
+  branchRef: string;
+  branchOid: string;
+}
+
+interface ManagedWorktreePreparation {
+  request?: GitWorktreeRequest;
+  ownership?: ManagedWorktreeOwnership;
+  failureReason?: string;
+  cleanup: string[];
+}
+
+function gitOperationFailure(action: string, response: GitWorktreeResponse): string {
+  const detail = response.error || response.stderr?.trim() || response.stdout?.trim();
+  const exit = response.exitCode === null ? 'without an exit code' : `with exit ${response.exitCode}`;
+  return `${action} failed ${exit}${detail ? `: ${detail}` : ''}`;
+}
+
+/**
+ * Establish resources with invocation-specific ownership before checkout:
+ * an OS-exclusive target directory and an atomic zero-old-value branch ref.
+ */
+async function prepareManagedWorktree(
+  request: GitWorktreeRequest,
+  runner: GitCommandRunner,
+  fs: ShipSetupFileSystem,
+): Promise<ManagedWorktreePreparation> {
+  let base: GitWorktreeResponse;
+  try {
+    base = await runner({
+      command: 'git',
+      args: ['rev-parse', '--verify', '--end-of-options', `${request.base}^{commit}`],
+      cwd: request.projectDir,
+    });
+  } catch (error) {
+    base = { exitCode: null, error: errorMessage(error) };
+  }
+  if (base.exitCode !== 0 || base.error) {
+    return { cleanup: [], failureReason: gitOperationFailure(`Git base resolution for ${request.base}`, base) };
+  }
+  const branchOid = (base.stdout ?? '').trim().split(/\r?\n/, 1)[0];
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(branchOid)) {
+    return { cleanup: [], failureReason: `Git base resolution for ${request.base} returned no commit object ID` };
+  }
+
+  try {
+    fs.createDirectoryExclusive(request.targetDir);
+  } catch (error) {
+    return {
+      cleanup: [],
+      failureReason: `Target could not be reserved exclusively at ${request.targetDir}: ${errorMessage(error)}`,
+    };
+  }
+
+  const branchRef = `refs/heads/${request.branch.replace(/^refs\/heads\//, '')}`;
+  let branch: GitWorktreeResponse;
+  try {
+    branch = await runner({
+      command: 'git',
+      args: ['update-ref', '--create-reflog', branchRef, branchOid, '0'.repeat(branchOid.length)],
+      cwd: request.projectDir,
+    });
+  } catch (error) {
+    branch = { exitCode: null, error: errorMessage(error) };
+  }
+  if (branch.exitCode !== 0 || branch.error) {
+    const cleanup: string[] = [];
+    try {
+      if (fs.entryExists(request.targetDir)) fs.removeEntry(request.targetDir);
+      cleanup.push('removed exclusively reserved target');
+    } catch (error) {
+      cleanup.push(`could not remove exclusively reserved target: ${errorMessage(error)}`);
+    }
+    return {
+      cleanup,
+      failureReason: gitOperationFailure(`Atomic branch creation for ${branchRef}`, branch),
+    };
+  }
+
+  return {
+    cleanup: [],
+    ownership: { targetReserved: true, branchRef, branchOid },
+    request: { ...request, branchAlreadyCreated: true },
+  };
+}
+
+async function rollbackOwnedFailedWorktree(
+  request: GitWorktreeRequest,
+  ownership: ManagedWorktreeOwnership,
+  runner: GitCommandRunner,
+  fs: ShipSetupFileSystem,
+): Promise<string[]> {
+  const diagnostics: string[] = [];
+  let registered = false;
+  let inventoryKnown = false;
+  try {
+    const inventory = await runner({
+      command: 'git',
+      args: ['worktree', 'list', '--porcelain', '-z'],
+      cwd: request.projectDir,
+    });
+    if (inventory.exitCode === 0 && !inventory.error) {
+      inventoryKnown = true;
+      const expectedBranch = request.branch.replace(/^refs\/heads\//, '');
+      registered = parseWorktreeIdentities(inventory.stdout ?? '').some((identity) => (
+        resolve(identity.path) === resolve(request.targetDir) && identity.branch === expectedBranch
+      ));
+    }
+  } catch (error) {
+    diagnostics.push(`could not inspect worktree residue: ${errorMessage(error)}`);
+  }
+
+  let registrationRemoved = !registered;
+  if (registered) {
+    try {
+      const removed = await runner({
+        command: 'git',
+        args: ['worktree', 'remove', '--force', '--', request.targetDir],
+        cwd: request.projectDir,
+      });
+      registrationRemoved = removed.exitCode === 0 && !removed.error;
+      diagnostics.push(registrationRemoved
+        ? 'removed registered partial worktree'
+        : `Git could not remove registered partial worktree: ${worktreeFailureReason(removed)}`);
+    } catch (error) {
+      diagnostics.push(`Git could not remove registered partial worktree: ${errorMessage(error)}`);
+    }
+  }
+  // The exclusive mkdir, not an absence-before observation, proves ownership.
+  if (ownership.targetReserved && inventoryKnown && registrationRemoved && fs.entryExists(request.targetDir)) {
+    try {
+      fs.removeEntry(request.targetDir);
+      diagnostics.push('removed invocation-owned partial target');
+    } catch (error) {
+      diagnostics.push(`could not remove invocation-owned partial target: ${errorMessage(error)}`);
+    }
+  }
+
+  if (!inventoryKnown || !registrationRemoved) {
+    diagnostics.push('branch rollback skipped because worktree registration cleanup was not proven');
+  } else try {
+    const deleted = await runner({
+      command: 'git',
+      args: ['update-ref', '-d', ownership.branchRef, ownership.branchOid],
+      cwd: request.projectDir,
+    });
+    diagnostics.push(deleted.exitCode === 0 && !deleted.error
+      ? 'removed the exact invocation-created branch ref'
+      : `branch changed or could not be compare-deleted; left in place: ${gitOperationFailure('Git branch rollback', deleted)}`);
+  } catch (error) {
+    diagnostics.push(`could not compare-delete invocation-created branch: ${errorMessage(error)}`);
+  }
+  return diagnostics;
 }
 
 async function verifyReusableWorktree(
@@ -1031,6 +1277,10 @@ function reconcileInputs(
   });
 
   for (const input of inputs) {
+    // Git materializes inputs that exist only on the selected base. There is no
+    // source-checkout path to link, and target verification below remains the
+    // authoritative readable/content check.
+    if (input.sourceExists === false && input.baseRefExists === true) continue;
     const source = resolve(projectDir, input.path);
     const target = resolve(targetDir, input.path);
     if (!within(resolve(targetDir), target)) {
@@ -1566,7 +1816,16 @@ export async function runShipSetup(
   const measuredBrief = safeReadBrief(briefPath, deps.fs);
   const brief = measuredBrief.text;
   const declaredValidation = parseBriefValidationCommands(brief, briefPath);
-  const sourceVerification = verifyBriefInputs(brief, projectDir, deps.fs);
+  const sourceVerification = await verifyDeclaredInputsAgainstSourceAndBase(
+    brief,
+    projectDir,
+    parsed.base as string,
+    deps.fs,
+    deps.runGitCommand,
+  );
+  const declaredInputPaths = new Set(extractDeclaredBriefInputPaths(brief));
+  const proseInputWarnings = extractBriefPathMentions(brief)
+    .filter((mention) => !declaredInputPaths.has(mention.path));
   const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs);
   let facts = setupFacts(
     projectDir,
@@ -1576,6 +1835,7 @@ export async function runShipSetup(
     parsed,
     sourceVerification,
     sourceOutputInventory,
+    proseInputWarnings,
   );
   if (declaredValidation.error) {
     return refused(facts, [{ phase: 'validation', reason: declaredValidation.error }]);
@@ -1606,14 +1866,49 @@ export async function runShipSetup(
     }
     facts = { ...facts, worktreeReused: true };
   } else {
+    const configured = deps.managedWorktreeCreation ? loadProjectDefaults(projectDir) : undefined;
+    let ownership: ManagedWorktreeOwnership | undefined;
+    let preparedRequest = worktreeRequest;
+    if (deps.managedWorktreeCreation) {
+      const prepared = await prepareManagedWorktree(worktreeRequest, deps.runGitCommand, deps.fs);
+      if (!prepared.request || !prepared.ownership || prepared.failureReason) {
+        return refused(facts, [{
+          phase: 'worktree',
+          reason: `${prepared.failureReason ?? 'Git worktree preparation failed'}`
+            + (prepared.cleanup.length ? `; cleanup: ${prepared.cleanup.join('; ')}` : ''),
+        }]);
+      }
+      preparedRequest = prepared.request;
+      ownership = prepared.ownership;
+    }
+    const creationRequest: GitWorktreeRequest = deps.managedWorktreeCreation
+      ? {
+          ...preparedRequest,
+          timeoutMs: configured?.git_worktree_add_timeout_ms,
+          onProgress: (progress) => {
+            deps.stderr.write(`${progress.message} (${Math.floor(progress.elapsedMs / 1_000)}s elapsed)\n`);
+          },
+        }
+      : preparedRequest;
     let git: GitWorktreeResponse;
     try {
-      git = await deps.createWorktree(worktreeRequest);
+      git = await deps.createWorktree(creationRequest);
     } catch (error) {
       git = { exitCode: null, error: errorMessage(error) };
     }
     if (git.exitCode !== 0 || git.error) {
-      return refused(facts, [{ phase: 'worktree', reason: worktreeFailureReason(git) }]);
+      const cleanup = deps.managedWorktreeCreation
+        ? await rollbackOwnedFailedWorktree(
+            worktreeRequest,
+            ownership as ManagedWorktreeOwnership,
+            deps.runGitCommand,
+            deps.fs,
+          )
+        : [];
+      return refused(facts, [{
+        phase: 'worktree',
+        reason: `${worktreeFailureReason(git)}${cleanup.length ? `; cleanup: ${cleanup.join('; ')}` : ''}`,
+      }]);
     }
     facts = { ...facts, worktreeCreated: true };
   }
@@ -1660,7 +1955,7 @@ export async function runShipSetup(
   facts = { ...facts, links: reconciled.links, copies: reconciled.copies };
   if (reconciled.blockers.length > 0) return refused(facts, reconciled.blockers);
 
-  const targetVerification = verifyBriefInputs(brief, targetDir, deps.fs);
+  const targetVerification = verifyDeclaredBriefInputs(brief, targetDir, deps.fs);
   const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs);
   facts = { ...facts, targetVerification, targetOutputInventory };
   const targetBlockers = verificationBlockers('target', targetVerification);
@@ -1819,6 +2114,9 @@ function renderVerification(report: ShipSetupReport, writer: Writer): void {
   renderOutputInventory('Source', report.sourceOutputInventory, writer);
   if (report.targetVerification) renderInputVerification('Target', report.targetVerification, writer);
   if (report.targetOutputInventory) renderOutputInventory('Target', report.targetOutputInventory, writer);
+  for (const warning of report.proseInputWarnings) {
+    writer.write(`  WARNING prose path ${warning.path} at line ${warning.line} is not a declared input\n`);
+  }
   for (const link of report.links) writer.write(`  LINK ${link.path} -> ${link.source}\n`);
   for (const copy of report.copies) writer.write(`  COPY ${copy.path} <- ${copy.source}\n`);
 }

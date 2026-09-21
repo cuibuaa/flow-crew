@@ -116,7 +116,10 @@ function followGuidanceEvent(runDirectory: string): Promise<{ status: number | n
       attemptIndex: 2,
       detail: 'inspect the immutable manifest',
     })}\n`, 'utf-8'), 750);
-    const hardTimeout = setTimeout(() => child.kill('SIGKILL'), 8_000);
+    // A full-suite worker can spend several seconds loading the TypeScript CLI
+    // before it begins following the file. Keep this a bounded black-box check
+    // without turning scheduler contention into a false product failure.
+    const hardTimeout = setTimeout(() => child.kill('SIGKILL'), 30_000);
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
       if (stdout.includes('inspect the immutable manifest')) child.kill('SIGINT');
@@ -220,8 +223,11 @@ describe('bounded task and status projections', () => {
             runStatus: live ? 'running' : 'complete',
             runElapsedMs: live ? 90_000 : 120_000,
             activeStages: live ? [{ id: 'implement', status: 'running', execution: 2, elapsedMs: 30_000 }] : [],
-            latestReason: { type: live ? 'admission_rejected' : 'run_status_changed', detail: live ? 'missing producer' : 'all gates passed' },
-            ...(live ? { lastRejection: { type: 'admission_rejected', detail: 'missing producer' } } : {}),
+            writerLeaseWaits: [],
+            latestReason: live
+              ? { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' }
+              : { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
+            ...(live ? { lastRejection: { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' } } : {}),
             pendingScope: [],
             sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
           },
@@ -236,7 +242,7 @@ describe('bounded task and status projections', () => {
       status: live.status,
       hasRun: live.stdout.includes('Run: live-run'),
       hasExecution: live.stdout.includes('Current stage: implement · execution 2 · 30s'),
-      hasRejection: live.stdout.includes('Latest rejection: missing producer'),
+      hasRejection: live.stdout.includes('Latest rejection [current · stage implement · attempt 2 · 2026-09-03T10:01:30.000Z]: missing producer'),
       rawHidden: live.stdout.includes('Raw ticks: hidden (pass --raw)'),
       rawLeaked: live.stdout.includes('x'.repeat(100)),
       rawOptInWorks: raw.stdout.includes('Recent ticks (raw JSON):') && raw.stdout.includes('x'.repeat(100)),
@@ -276,7 +282,8 @@ describe('bounded task and status projections', () => {
           runStatus: 'complete',
           runElapsedMs: 120_000,
           activeStages: [],
-          latestReason: { type: 'run_status_changed', detail: 'all gates passed' },
+          writerLeaseWaits: [],
+          latestReason: { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
           pendingScope: [],
           sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
         },
@@ -288,7 +295,7 @@ describe('bounded task and status projections', () => {
       status: finished.status,
       hasRun: finished.stdout.includes('Run: finished-run'),
       idle: finished.stdout.includes('Current stage: none executing'),
-      hasReason: finished.stdout.includes('Latest reason: all gates passed'),
+      hasReason: finished.stdout.includes('Latest reason [historical · stage implement · attempt 1 · 2026-09-03T10:02:00.000Z]: all gates passed'),
     }).toEqual({ status: 0, hasRun: true, idle: true, hasReason: true });
   });
 
@@ -317,8 +324,9 @@ describe('bounded task and status projections', () => {
         runStatus: 'running',
         runElapsedMs: 90_000,
         activeStages: [{ id: 'implement', status: 'running', execution: 2, elapsedMs: 30_000 }],
-        latestReason: { type: 'admission_rejected', detail: 'missing producer' },
-        lastRejection: { type: 'admission_rejected', detail: 'missing producer' },
+        writerLeaseWaits: [],
+        latestReason: { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' },
+        lastRejection: { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' },
         pendingScope: [],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
@@ -337,7 +345,8 @@ describe('bounded task and status projections', () => {
         runStatus: 'complete',
         runElapsedMs: 120_000,
         activeStages: [],
-        latestReason: { type: 'run_status_changed', detail: 'all gates passed' },
+        writerLeaseWaits: [],
+        latestReason: { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
         pendingScope: [],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
@@ -361,7 +370,7 @@ describe('bounded task and status projections', () => {
       status: live.status,
       hasRun: live.stdout.includes('Run: live-run'),
       hasExecution: live.stdout.includes('Now: implement · execution 2'),
-      hasRejection: live.stdout.includes('Latest rejection: the proposal omitted a declared producer'),
+      hasRejection: live.stdout.includes('Latest rejection [current · stage implement · attempt 2 · 2026-09-03T10:01:30.000Z]: the proposal omitted a declared producer'),
     }, live.stderr).toEqual({ status: 0, hasRun: true, hasExecution: true, hasRejection: true });
   });
 
@@ -372,7 +381,7 @@ describe('bounded task and status projections', () => {
       status: finished.status,
       hasRun: finished.stdout.includes('Run: finished-run'),
       idle: finished.stdout.includes('Now: no stage executing'),
-      hasReason: finished.stdout.includes('Latest reason: all declared gates passed'),
+      hasReason: finished.stdout.includes('Latest reason [historical · stage unknown · attempt unknown · 2026-09-03T10:02:00.000Z]: all declared gates passed'),
     }, finished.stderr).toEqual({ status: 0, hasRun: true, idle: true, hasReason: true });
   });
 });

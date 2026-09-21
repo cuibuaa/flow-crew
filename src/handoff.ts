@@ -5,6 +5,7 @@ import { readStageOutput } from './store.js';
 import { readStageStatus } from './store.js';
 import { getDefaultTimeout } from './config.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
+import { renderCriterionRulings, renderGateControlContract } from './verdict-controls.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
@@ -259,8 +260,28 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${guidanceDelivery}\n\n`
       + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.\n\n'
     : '';
+  const criterionRulingBlock = opts.criterionRefs?.length
+    ? renderCriterionRulings(opts.runDir, opts.criterionRefs)
+    : '';
+  const gateControlBlock = opts.isGate && opts.stageId && opts.criterionRefs?.length
+    ? renderGateControlContract({
+        projectDir: opts.projectDir,
+        runDir: opts.runDir,
+        gateStageId: opts.stageId,
+        criterionRefs: opts.criterionRefs,
+      })
+    : '';
 
-  const parts = [guidanceBlock, context, body, criterionBlock, anchor, skillsContent].filter(Boolean);
+  const parts = [
+    guidanceBlock,
+    context,
+    body,
+    criterionBlock,
+    criterionRulingBlock,
+    gateControlBlock,
+    anchor,
+    skillsContent,
+  ].filter(Boolean);
   const prompt = parts.join('\n\n');
   const handoffSuffix = substituteTemplate(HANDOFF_SUFFIX, vars);
 

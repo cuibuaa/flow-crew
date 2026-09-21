@@ -39,7 +39,7 @@ function runBuild(projectDir: string): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
     cwd: projectDir,
     encoding: 'utf-8',
-    env: { ...process.env, FC_HOME: join(projectDir, '.fc-test-state') },
+    env: { ...process.env, HOME: projectDir, FC_HOME: join(projectDir, '.fc-test-state') },
     timeout: 120_000,
   });
 }

@@ -104,7 +104,11 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   };
 }
 
-function dispatchYaml(includeUnrelatedRejectedGate = false, includeTerminalOwner = false): string {
+function dispatchYaml(
+  includeUnrelatedRejectedGate = false,
+  includeTerminalOwner = false,
+  includeEscalationOwner = false,
+): string {
   return [
     'stages:',
     `  - id: ${GATE_ID}`,
@@ -138,15 +142,27 @@ function dispatchYaml(includeUnrelatedRejectedGate = false, includeTerminalOwner
       `    dependency_reasons: {${GATE_ID}: "write the terminal report only after the repaired gate passes"}`,
       '    task: write the selected terminal report',
     ] : []),
+    ...(includeEscalationOwner ? [
+      '  - id: escalation_finalize',
+      '    role: repair',
+      '    scope: [docs/research_escalation.md]',
+      `    depends_on: [${GATE_ID}]`,
+      `    dependency_reasons: {${GATE_ID}: "record the exhausted rejected gate"}`,
+      '    condition: research.terminalStatus == "escalated"',
+      '    task: write the escalation terminal report',
+    ] : []),
   ].join('\n');
 }
 
 interface ScenarioOptions {
   gatePasses: boolean[];
+  gateCriteria?: Record<string, { status: 'pass' | 'fail' | 'judgement'; evidence: string }>;
   staleMetricReads?: number;
   logPath?: string;
   includeUnrelatedRejectedGate?: boolean;
   terminalArtifactOnPass?: boolean;
+  researchMode?: boolean;
+  escalationTerminal?: boolean;
 }
 
 async function runScenario(options: ScenarioOptions): Promise<{
@@ -154,11 +170,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
   runDirPath: string;
   gateCalls: number;
   repairCalls: number;
+  escalationCalls: number;
   repairSawArchivedNegative: boolean;
 }> {
   const { config, yaml } = workflow();
   let gateCalls = 0;
   let repairCalls = 0;
+  let escalationCalls = 0;
   let repairSawArchivedNegative = false;
   if (options.logPath) restoreLogs = routeLogsToFile(options.logPath);
   const adapter: Adapter = {
@@ -169,16 +187,22 @@ async function runScenario(options: ScenarioOptions): Promise<{
       if (opts.stageId === 'plan') {
         writeFileSync(
           join(opts.runDir, 'dispatch.yaml'),
-          dispatchYaml(options.includeUnrelatedRejectedGate, options.terminalArtifactOnPass),
+          dispatchYaml(
+            options.includeUnrelatedRejectedGate,
+            options.terminalArtifactOnPass,
+            options.escalationTerminal,
+          ),
         );
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       if (opts.stageId === GATE_ID) {
         const pass = options.gatePasses[Math.min(gateCalls, options.gatePasses.length - 1)];
         gateCalls++;
+        const verdict = scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection');
+        if (options.gateCriteria) verdict.criteria = options.gateCriteria;
         writeFileSync(
           join(opts.runDir, `verdict_${GATE_ID}.json`),
-          JSON.stringify(scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection'), null, 2) + '\n',
+          JSON.stringify(verdict, null, 2) + '\n',
         );
         const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
         writeFileSync(metricPath, JSON.stringify(metricArtifact(pass), null, 2) + '\n');
@@ -204,6 +228,21 @@ async function runScenario(options: ScenarioOptions): Promise<{
           exitCode: 0,
           duration_ms: 1,
           writes: ['docs/final_verification.md'],
+          writeAttribution: 'structured',
+        };
+      }
+      if (opts.stageId === 'escalation_finalize') {
+        escalationCalls++;
+        mkdirSync(join(projectDir, 'docs'), { recursive: true });
+        writeFileSync(
+          join(projectDir, 'docs', 'research_escalation.md'),
+          '# Research gate escalation\n\nThe rejected criteria remain unsatisfied.\n',
+        );
+        return {
+          output: 'escalation terminal written by its admitted owner',
+          exitCode: 0,
+          duration_ms: 1,
+          writes: ['docs/research_escalation.md'],
           writeAttribution: 'structured',
         };
       }
@@ -243,14 +282,25 @@ async function runScenario(options: ScenarioOptions): Promise<{
     undefined,
     options.terminalArtifactOnPass
       ? `---\nterminal_states:\n  complete:\n    paths: [docs/final_verification.md]\n---\n# E18 scheduler-level terminal fixture\n`
-      : 'E18 scheduler-level integration fixture',
+      : options.escalationTerminal
+        ? `---\nterminal_states:\n  escalated:\n    paths: [docs/research_escalation.md]\nresearch:\n  baseline: 0\n  policy: best_of_n\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
+        : options.researchMode
+          ? `---\nresearch:\n  baseline: 0\n  policy: best_of_n\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
+          : 'E18 scheduler-level integration fixture',
     true,
   );
   if (restoreLogs) {
     restoreLogs();
     restoreLogs = undefined;
   }
-  return { final, runDirPath: runDir(projectDir, final.runId), gateCalls, repairCalls, repairSawArchivedNegative };
+  return {
+    final,
+    runDirPath: runDir(projectDir, final.runId),
+    gateCalls,
+    repairCalls,
+    escalationCalls,
+    repairSawArchivedNegative,
+  };
 }
 
 beforeEach(() => {
@@ -275,6 +325,67 @@ afterEach(() => {
 });
 
 describe('gate retry loop entry', () => {
+  it('H7 parks or escalates an exhausted rejected research round without advancing', async () => {
+    const result = await runScenario({
+      gatePasses: [false],
+      researchMode: true,
+      gateCriteria: {
+        criterion_pass: { status: 'pass', evidence: 'accepted evidence' },
+        criterion_fail: { status: 'fail', evidence: 'still unsatisfied' },
+      },
+    });
+    const events = readRunEvents(projectDir, result.final.runId);
+    const exhausted = JSON.parse(readFileSync(
+      join(result.runDirPath, 'research_gate_exhausted.json'),
+      'utf-8',
+    )) as { criteria: string[] };
+
+    expect(result.final.status).toBe(RUN_STATUS.PARKED);
+    expect(result.final.completedAt).toBeUndefined();
+    expect(events.some((event) => event.type === 'iteration_completed')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'research_gate_exhausted',
+      round: 1,
+      criteria: ['criterion_fail'],
+    }));
+    expect(exhausted.criteria).toEqual(['criterion_fail']);
+    expect(result.final.parked?.target).toBe('round 1: criterion_fail');
+    expect(result.final.parked?.reason).toContain('round 1');
+    expect(result.final.parked?.reason).toContain('criterion_fail');
+  });
+
+  it('H7 runs an admitted escalation terminal owner after research gate exhaustion', async () => {
+    const result = await runScenario({
+      gatePasses: [false],
+      escalationTerminal: true,
+      gateCriteria: {
+        criterion_pass: { status: 'pass', evidence: 'accepted evidence' },
+        criterion_fail: { status: 'fail', evidence: 'still unsatisfied' },
+      },
+    });
+    const events = readRunEvents(projectDir, result.final.runId);
+    const decision = JSON.parse(readFileSync(
+      join(result.runDirPath, 'research_decision.json'),
+      'utf-8',
+    )) as { failingCriteria: string[] };
+    const ready = JSON.parse(readFileSync(
+      join(result.runDirPath, 'signals', 'research_terminal_ready.json'),
+      'utf-8',
+    )) as { failingCriteria: string[] };
+
+    expect(result.final.status).toBe(RUN_STATUS.ESCALATED);
+    expect(result.escalationCalls).toBe(1);
+    expect(readFileSync(join(projectDir, 'docs', 'research_escalation.md'), 'utf-8'))
+      .toContain('rejected criteria remain unsatisfied');
+    expect(events.some((event) => event.type === 'iteration_completed')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'research_gate_exhausted',
+      criteria: ['criterion_fail'],
+    }));
+    expect(decision.failingCriteria).toEqual(['criterion_fail']);
+    expect(ready.failingCriteria).toEqual(['criterion_fail']);
+  });
+
   it('treats pass=true at score=0/threshold=0 as accepted and never dispatches repair', async () => {
     const result = await runScenario({ gatePasses: [true] });
 

@@ -21,6 +21,14 @@ export interface ProjectDefaults {
    * exceed the slowest of them under whatever else the machine is doing. See
    * defaults.yaml. */
   validation_timeout_ms: number;
+  /** Project-level regenerated-tool output ignored by the live guard only when untracked. */
+  live_constraint_exempt_patterns: string[];
+  /** Portable full-tree reconciliation cadence when recursive watching is unavailable. */
+  live_constraint_fallback_scan_ms: number;
+  /** Longest interval without a completed live-constraint scan. */
+  live_constraint_monitor_deadline_ms: number;
+  /** Dedicated bound for potentially large `git worktree add` checkouts. */
+  git_worktree_add_timeout_ms: number;
   max_iterations: number;
   gate_retry_loops: number;
   stage_technical_retries: number;
@@ -178,6 +186,46 @@ function booleanValue(raw: Record<string, unknown>, template: Record<string, unk
   return value;
 }
 
+function positiveNumberValue(raw: Record<string, unknown>, template: Record<string, unknown>, key: string): number {
+  const value = numberValue(raw, template, key);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`config/defaults.yaml ${key} must be a positive finite number`);
+  }
+  return Math.floor(value);
+}
+
+function liveConstraintExemptPatternsValue(
+  raw: Record<string, unknown>,
+  template: Record<string, unknown>,
+): string[] {
+  const key = 'live_constraint_exempt_patterns';
+  const value = raw[key] ?? template[key];
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string' && entry.trim())) {
+    throw new Error(`config/defaults.yaml ${key} must be an array of non-empty strings`);
+  }
+  const patterns = [...new Set(value.map((entry) => String(entry).trim().replace(/\\/g, '/')))];
+  for (const pattern of patterns) {
+    const segments = pattern.split('/');
+    const safeCacheAnchor = segments.some((segment) => (
+      segment === '__pycache__'
+      || (/^\.[A-Za-z0-9_.-]*cache[A-Za-z0-9_.-]*$/i.test(segment) && !/[?*[{]/.test(segment))
+    ));
+    const safeGeneratedSuffix = /\.\*?(?:py[co]|tsbuildinfo)$/i.test(pattern)
+      || /\*\.(?:py[co]|tsbuildinfo)$/i.test(pattern);
+    if (
+      pattern.startsWith('/')
+      || /^[A-Za-z]:\//.test(pattern)
+      || segments.includes('..')
+      || (!safeCacheAnchor && !safeGeneratedSuffix)
+    ) {
+      throw new Error(
+        `config/defaults.yaml ${key} contains unsafe non-cache pattern ${JSON.stringify(pattern)}`,
+      );
+    }
+  }
+  return patterns;
+}
+
 // --- Public API: Project Defaults ---
 
 /**
@@ -243,6 +291,10 @@ export function loadProjectDefaults(projectDir?: string): ProjectDefaults {
   const parsed: ProjectDefaults = {
     timeout_ms: numberValue(raw, template, 'default_timeout_ms'),
     validation_timeout_ms: numberValue(raw, template, 'default_validation_timeout_ms'),
+    live_constraint_exempt_patterns: liveConstraintExemptPatternsValue(raw, template),
+    live_constraint_fallback_scan_ms: positiveNumberValue(raw, template, 'live_constraint_fallback_scan_ms'),
+    live_constraint_monitor_deadline_ms: positiveNumberValue(raw, template, 'live_constraint_monitor_deadline_ms'),
+    git_worktree_add_timeout_ms: positiveNumberValue(raw, template, 'git_worktree_add_timeout_ms'),
     max_iterations: numberValue(raw, template, 'default_max_iterations'),
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
     stage_technical_retries: numberValue(raw, template, 'default_stage_technical_retries'),

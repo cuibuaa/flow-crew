@@ -195,6 +195,10 @@ describe('population identity verification', () => {
   });
 
   it('keeps the exact Vitest collector strict when the target adds a test file', async () => {
+    const isolatedVitest = join(root, 'node_modules', 'vitest');
+    mkdirSync(isolatedVitest, { recursive: true });
+    writeFileSync(join(isolatedVitest, 'package.json'), JSON.stringify({ name: 'vitest', version: '0.0.0' }));
+    writeFileSync(join(isolatedVitest, 'vitest.mjs'), 'export {};\n');
     const briefPath = writeManifest('vitest run');
     const targetDir = join(root, 'target-vitest');
     const collector = vi.fn<ValidationCommandRunner>((request) => ({

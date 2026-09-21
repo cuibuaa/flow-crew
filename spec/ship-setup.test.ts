@@ -21,11 +21,13 @@ import {
   createGitWorktree,
   nodeShipSetupFileSystem,
   runShipSetup,
+  type GitCommandRequest,
   type GitCommandRunner,
   type GitWorktreeCreator,
   type GitWorktreeRequest,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
+import { extractBriefInputPaths } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 class Capture {
@@ -88,7 +90,17 @@ afterAll(() => {
 });
 
 function writeBrief(lines: string[]): void {
-  writeFileSync(fixture.brief, lines.join('\n'), 'utf-8');
+  const body = lines.join('\n');
+  // Legacy cases below exercise linking/assertion mechanics, not prose input
+  // discovery. Materialize their `# Inputs` paths as the frontmatter contract
+  // now required by ship-setup while retaining the body assertions verbatim.
+  const declared = !body.startsWith('---') && /^# Inputs\b/m.test(body)
+    ? extractBriefInputPaths(body)
+    : [];
+  const brief = declared.length > 0
+    ? ['---', 'inputs:', ...declared.map((path) => `  - ${path}`), '---', body].join('\n')
+    : body;
+  writeFileSync(fixture.brief, brief, 'utf-8');
 }
 
 function setupArgs(extra: string[] = []): string[] {
@@ -178,6 +190,188 @@ function noReadyRecord(): boolean {
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
+  it('H4 times worktree add from config, reports progress, and rolls back owned failure residue', async () => {
+    mkdirSync(join(fixture.project, 'config'), { recursive: true });
+    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), [
+      'default_timeout_ms: 60000',
+      'git_worktree_add_timeout_ms: 1800000',
+    ].join('\n') + '\n');
+    writeBrief(['# Goal', 'Create an isolated worktree.']);
+    const stderr = new Capture();
+    const calls: string[][] = [];
+    const baseOid = '0123456789012345678901234567890123456789';
+    let showRefChecks = 0;
+    const runner = vi.fn<GitCommandRunner>((request) => {
+      calls.push([...request.args]);
+      if (request.args[0] === 'rev-parse') return { exitCode: 0, stdout: `${baseOid}\n` };
+      if (request.args[0] === 'show-ref') {
+        showRefChecks++;
+        return { exitCode: showRefChecks === 1 ? 1 : 0 };
+      }
+      if (request.args[0] === 'update-ref') return { exitCode: 0 };
+      if (request.args[0] === 'worktree' && request.args[1] === 'add') {
+        const configured = request as GitCommandRequest & {
+          timeoutMs?: number;
+          onProgress?: (progress: { elapsedMs: number; message: string }) => void;
+        };
+        expect(configured.timeoutMs).toBe(1_800_000);
+        configured.onProgress?.({ elapsedMs: 61_000, message: 'git worktree add still running' });
+        mkdirSync(fixture.target, { recursive: true });
+        writeFileSync(join(fixture.target, '.git'), 'gitdir: fixture-owned-worktree\n');
+        return { exitCode: null, error: 'Git ended by signal SIGTERM' };
+      }
+      if (request.args.slice(0, 3).join(' ') === 'worktree list --porcelain') {
+        return {
+          exitCode: 0,
+          stdout: [
+            `worktree ${fixture.target}`,
+            `HEAD ${baseOid}`,
+            'branch refs/heads/autonomous-result',
+            '',
+          ].join('\0'),
+        };
+      }
+      if (request.args[0] === 'worktree' && request.args[1] === 'remove') {
+        rmSync(fixture.target, { recursive: true, force: true });
+        return { exitCode: 0 };
+      }
+      if (request.args[0] === 'branch' && request.args[1] === '-D') return { exitCode: 0 };
+      return { exitCode: 0 };
+    });
+
+    const report = await runShipSetup(setupArgs(), {
+      runGitCommand: runner,
+      stderr: stderr.writer,
+    });
+
+    expect(report.state).toBe('refused');
+    expect(stderr.value).toContain('git worktree add still running');
+    expect(existsSync(fixture.target)).toBe(false);
+    expect(calls).toContainEqual(['worktree', 'remove', '--force', '--', fixture.target]);
+    expect(calls).toContainEqual(['update-ref', '-d', 'refs/heads/autonomous-result', baseOid]);
+
+    mkdirSync(fixture.target, { recursive: true });
+    const sentinel = join(fixture.target, 'foreign.txt');
+    writeFileSync(sentinel, 'not created by this invocation\n');
+    const preExisting = await runShipSetup(setupArgs(), { runGitCommand: runner });
+    expect(preExisting.state).toBe('refused');
+    expect(readFileSync(sentinel, 'utf8')).toBe('not created by this invocation\n');
+
+    rmSync(fixture.target, { recursive: true, force: true });
+    let deletedConcurrentBranch = false;
+    let raceShowRefChecks = 0;
+    const branchRaceRunner = vi.fn<GitCommandRunner>((request) => {
+      if (request.args[0] === 'rev-parse') return { exitCode: 0, stdout: `${baseOid}\n` };
+      if (request.args[0] === 'update-ref' && request.args[1] !== '-d') {
+        return { exitCode: 128, stderr: 'cannot lock ref: reference already exists' };
+      }
+      if (request.args[0] === 'show-ref') {
+        raceShowRefChecks++;
+        return { exitCode: raceShowRefChecks === 1 ? 1 : 0 };
+      }
+      if (request.args[0] === 'worktree' && request.args[1] === 'add') {
+        return { exitCode: 128, stderr: 'fatal: a branch named autonomous-result already exists' };
+      }
+      if (request.args.slice(0, 3).join(' ') === 'worktree list --porcelain') {
+        return { exitCode: 0, stdout: '' };
+      }
+      if ((request.args[0] === 'branch' && request.args[1] === '-D')
+          || (request.args[0] === 'update-ref' && request.args[1] === '-d')) {
+        deletedConcurrentBranch = true;
+        return { exitCode: 0 };
+      }
+      return { exitCode: 0 };
+    });
+    const branchRace = await runShipSetup(setupArgs(), { runGitCommand: branchRaceRunner });
+    expect(branchRace.state).toBe('refused');
+    expect(deletedConcurrentBranch).toBe(false);
+
+    const targetRaceFs = {
+      ...nodeShipSetupFileSystem,
+      createDirectoryExclusive(path: string): void {
+        if (path !== fixture.target) {
+          nodeShipSetupFileSystem.createDirectoryExclusive(path);
+          return;
+        }
+        mkdirSync(fixture.target, { recursive: true });
+        writeFileSync(join(fixture.target, 'foreign.txt'), 'concurrent owner\n');
+        const error = new Error('target appeared concurrently') as NodeJS.ErrnoException;
+        error.code = 'EEXIST';
+        throw error;
+      },
+    };
+    const targetRaceRunner = vi.fn<GitCommandRunner>((request) => (
+      request.args[0] === 'rev-parse'
+        ? { exitCode: 0, stdout: `${baseOid}\n` }
+        : { exitCode: 0 }
+    ));
+    const targetRace = await runShipSetup(setupArgs(), {
+      fs: targetRaceFs,
+      runGitCommand: targetRaceRunner,
+    });
+    expect(targetRace.state).toBe('refused');
+    expect(readFileSync(join(fixture.target, 'foreign.txt'), 'utf8')).toBe('concurrent owner\n');
+    expect(targetRaceRunner.mock.calls.some(([request]) => request.args[0] === 'worktree')).toBe(false);
+  });
+
+  it('H5 blocks only frontmatter inputs and accepts a base-ref-only declared input', async () => {
+    writeBrief([
+      '---',
+      'inputs:',
+      '  - base/only.txt',
+      '---',
+      '# Context',
+      'The historical module is `prose/missing.ts`.',
+    ]);
+    const gitRunner = vi.fn<GitCommandRunner>((request) => {
+      if (request.args[0] === 'cat-file') {
+        return { exitCode: request.args.at(-1) === 'release-base:base/only.txt' ? 0 : 1 };
+      }
+      return { exitCode: 0 };
+    });
+    const createWorktree = successfulGit((request) => {
+      mkdirSync(join(request.targetDir, 'base'), { recursive: true });
+      writeFileSync(join(request.targetDir, 'base', 'only.txt'), 'from release base\n');
+    });
+
+    const accepted = await runShipSetup(setupArgs(), {
+      createWorktree,
+      runGitCommand: gitRunner,
+      runValidationCommand: validationRunner(),
+    });
+
+    expect(accepted.state).toBe('ready');
+    expect(accepted.sourceVerification.inputs).toEqual([
+      expect.objectContaining({
+        path: 'base/only.txt',
+        sourceExists: false,
+        baseRefExists: true,
+      }),
+    ]);
+    expect(accepted.proseInputWarnings).toEqual([
+      expect.objectContaining({ path: 'prose/missing.ts' }),
+    ]);
+    expect(gitRunner).toHaveBeenCalledWith(expect.objectContaining({
+      args: ['cat-file', '-e', 'release-base:base/only.txt'],
+    }));
+
+    rmSync(fixture.target, { recursive: true, force: true });
+    writeBrief(['---', 'inputs: [base/absent.txt]', '---', '# Goal']);
+    const refused = await runShipSetup(setupArgs(), {
+      createWorktree,
+      runGitCommand: gitRunner,
+    });
+    expect(refused).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({
+        phase: 'source',
+        input: 'base/absent.txt',
+        reason: expect.stringContaining('source working tree'),
+      })],
+    });
+    expect(refused.state === 'refused' && refused.blockers[0].reason).toContain('base ref release-base');
+  });
+
   it('refuses an occupied create-only output before creating a worktree', async () => {
     mkdirSync(join(fixture.project, 'docs'), { recursive: true });
     writeFileSync(join(fixture.project, 'docs', 'research-result.json'), 'x'.repeat(286 * 1024));

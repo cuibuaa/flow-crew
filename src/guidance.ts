@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { appendRunEventAtRunDir } from './run-events.js';
+import { isRunningStageStatus } from './store.js';
 
 export const RUN_WIDE_GUIDANCE_TARGET = '*';
 
@@ -12,6 +13,8 @@ export interface GuidanceEnvelope {
   source: 'supervisor' | 'operator' | 'scheduler';
   createdAt: string;
   body: string;
+  /** Canonical brief criteria this operator-authored ruling names. */
+  criterionIds?: string[];
   quarantined?: boolean;
   quarantineReason?: string;
 }
@@ -42,6 +45,7 @@ export function renderGuidanceEnvelope(envelope: GuidanceEnvelope): string {
     // Frame new entries so marker-shaped operator text remains opaque body
     // content instead of being reparsed as a second, forged envelope.
     bodyLength: body.length,
+    ...(envelope.criterionIds?.length ? { criterionIds: envelope.criterionIds } : {}),
     ...(envelope.quarantined ? { quarantined: true, quarantineReason: envelope.quarantineReason } : {}),
   });
   return `${ENVELOPE_PREFIX}${metadata}${ENVELOPE_SUFFIX}\n${body}`;
@@ -75,6 +79,10 @@ function parseEnvelopeBlock(metadataText: string, body: string): GuidanceEnvelop
       source: metadata.source,
       createdAt: metadata.createdAt,
       body: boundedBody(body),
+      ...(Array.isArray(metadata.criterionIds)
+        && metadata.criterionIds.every((value) => typeof value === 'string' && value.length > 0)
+        ? { criterionIds: [...new Set(metadata.criterionIds)] }
+        : {}),
       ...(metadata.quarantined === true ? {
         quarantined: true,
         quarantineReason: typeof metadata.quarantineReason === 'string'
@@ -184,6 +192,62 @@ export function readGuidanceForStage(runDir: string, stageId: string): GuidanceE
   return entries.filter((entry) => !seen.has(entry.id) && Boolean(seen.add(entry.id)));
 }
 
+function knownCriterionIds(runDir: string): string[] {
+  try {
+    const artifact = JSON.parse(readFileSync(join(runDir, 'brief_criteria.json'), 'utf-8')) as {
+      criteria?: Array<{ id?: unknown }>;
+    };
+    return (artifact.criteria ?? [])
+      .map((criterion) => criterion.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** Resolve only exact canonical IDs or an unambiguous numbered criterion.
+ * Ambiguous prose remains ordinary guidance rather than gaining authority. */
+export function inferOperatorCriterionIds(
+  runDir: string,
+  body: string,
+  explicit: readonly string[] = [],
+): string[] {
+  const known = knownCriterionIds(runDir);
+  const knownSet = new Set(known);
+  const resolved = new Set(explicit.filter((id) => knownSet.has(id)));
+  for (const id of known) {
+    if (body.includes(id)) resolved.add(id);
+  }
+  for (const match of body.matchAll(/\bcriteri(?:on|a)\s+((?:#?\d+\s*(?:(?:,|and|&)\s*)?)+)/gi)) {
+    for (const number of match[1].matchAll(/\d+/g)) {
+      const ordinal = Number(number[0]);
+      const candidates = known.filter((id) => id.includes(`_${ordinal}_`));
+      if (candidates.length === 1) resolved.add(candidates[0]);
+    }
+  }
+  return [...resolved];
+}
+
+export function readOperatorCriterionRulings(
+  runDir: string,
+  criterionIds?: readonly string[],
+): GuidanceEnvelope[] {
+  const wanted = criterionIds ? new Set(criterionIds) : undefined;
+  try {
+    const entries = parseGuidanceLedger(readFileSync(join(runDir, 'supervisor_guidance.md'), 'utf-8'));
+    const seen = new Set<string>();
+    return entries.filter((entry) => {
+      if (entry.source !== 'operator' || entry.quarantined || !entry.criterionIds?.length) return false;
+      if (wanted && !entry.criterionIds.some((id) => wanted.has(id))) return false;
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    });
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Route an unaddressed operator message without waiting for a supervisor model
  * call only when this worker is the sole provably running stage. With multiple
@@ -206,7 +270,10 @@ export function routePendingOperatorGuidanceToStage(
     knownStageIds = Object.keys(state.stages ?? {});
     if (!knownStageIds.includes(stageId)) knownStageIds.push(stageId);
     const running = knownStageIds.filter((id) => (
-      id === stageId || state.stages?.[id]?.status === 'running'
+      id === stageId || (
+        typeof state.stages?.[id]?.status === 'string'
+        && isRunningStageStatus(state.stages[id].status)
+      )
     ));
     if (running.length !== 1 || running[0] !== stageId) return undefined;
   } catch {
@@ -258,6 +325,7 @@ export function appendGuidanceEnvelope(input: {
   body: string;
   source: GuidanceEnvelope['source'];
   knownStageIds?: readonly string[];
+  criterionIds?: readonly string[];
   createdAt?: string;
 }): GuidanceEnvelope {
   const createdAt = input.createdAt ?? new Date().toISOString();
@@ -268,10 +336,14 @@ export function appendGuidanceEnvelope(input: {
       && (input.knownStageIds === undefined || input.knownStageIds.includes(requestedTarget)));
   const target = requestedTarget || '__missing__';
   const base = { target, source: input.source, createdAt, body };
+  const criterionIds = input.source === 'operator'
+    ? inferOperatorCriterionIds(input.runDir, body, input.criterionIds)
+    : [];
   const envelope: GuidanceEnvelope = {
     version: 1,
     id: envelopeId(base),
     ...base,
+    ...(criterionIds.length > 0 ? { criterionIds } : {}),
     ...(!targetIsKnown ? {
       quarantined: true,
       quarantineReason: requestedTarget
@@ -292,6 +364,8 @@ export function appendGuidanceEnvelope(input: {
         ? `${envelope.quarantineReason}: ${body}`
         : body,
       level: envelope.quarantined ? 'warning' : 'info',
+      guidanceId: envelope.id,
+      ...(criterionIds.length > 0 ? { criteria: criterionIds } : {}),
       source: input.source,
     });
   } catch { /* guidance durability must not depend on the optional event feed */ }

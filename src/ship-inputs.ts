@@ -62,6 +62,11 @@ export interface VerifiedBriefInput {
   resolvedPath: string;
   exists: boolean;
   readable: boolean;
+  /** Source/base provenance is populated by ship-setup. Ordinary verification
+   * leaves these unset because it checks one concrete project root. */
+  sourceExists?: boolean;
+  baseRefExists?: boolean;
+  checkedLocations?: string[];
   assertions: BriefInputAssertionResult[];
 }
 
@@ -729,6 +734,24 @@ export function parseBriefInputs(brief: string): ParsedBriefInputs {
   };
 }
 
+/** Parse only the leading frontmatter `inputs:` declaration. Body prose is
+ * intentionally excluded: it can be surfaced as a warning, but cannot make a
+ * checkout setup fail. */
+export function parseDeclaredBriefInputs(brief: string): ParsedBriefInputs {
+  const frontmatter = leadingFrontmatter(brief);
+  if (!frontmatter) return { references: [], unresolvedInputs: [], unboundAssertions: [] };
+  const frontmatterOnly = parseBriefInputs(`---\n${frontmatter.yaml}\n---\n`);
+  const complete = parseBriefInputs(brief);
+  const declared = new Set(extractDeclaredBriefInputPaths(brief));
+  return {
+    // Body assertions remain useful only when attached to a path that the
+    // frontmatter already declared. A prose-only path never enters this set.
+    references: complete.references.filter((reference) => declared.has(reference.path)),
+    unresolvedInputs: frontmatterOnly.unresolvedInputs,
+    unboundAssertions: frontmatterOnly.unboundAssertions,
+  };
+}
+
 /** Compatibility projection retained for existing callers. */
 export function extractBriefInputPaths(brief: string): string[] {
   return parseBriefInputs(brief).references.map((reference) => reference.path);
@@ -920,12 +943,11 @@ function evaluateAssertion(
 }
 
 /** Verify reachability and every mechanically checkable assertion under one project root. */
-export function verifyBriefInputs(
-  brief: string,
+function verifyParsedBriefInputs(
+  parsed: ParsedBriefInputs,
   projectRoot: string,
   fs: ShipInputFileSystem = nodeShipInputFileSystem,
 ): BriefInputVerification {
-  const parsed = parseBriefInputs(brief);
   const root = resolve(projectRoot);
   const inputs = parsed.references.map((reference): VerifiedBriefInput => {
     const lexical = resolve(root, reference.path);
@@ -960,6 +982,25 @@ export function verifyBriefInputs(
     unresolvedInputs: parsed.unresolvedInputs,
     unboundAssertions: parsed.unboundAssertions,
   };
+}
+
+/** Verify all legacy structured/prose input references. Retained for callers
+ * whose contract explicitly treats prose as input evidence. */
+export function verifyBriefInputs(
+  brief: string,
+  projectRoot: string,
+  fs: ShipInputFileSystem = nodeShipInputFileSystem,
+): BriefInputVerification {
+  return verifyParsedBriefInputs(parseBriefInputs(brief), projectRoot, fs);
+}
+
+/** Verify only the launch-blocking frontmatter input declaration. */
+export function verifyDeclaredBriefInputs(
+  brief: string,
+  projectRoot: string,
+  fs: ShipInputFileSystem = nodeShipInputFileSystem,
+): BriefInputVerification {
+  return verifyParsedBriefInputs(parseDeclaredBriefInputs(brief), projectRoot, fs);
 }
 
 function outputDisposition(value: unknown): BriefOutputDisposition {

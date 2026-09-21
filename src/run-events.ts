@@ -11,9 +11,18 @@ export type RunEventType =
   | 'attempt_suspended'
   | 'guidance_written'
   | 'guidance_delivery_checked'
+  | 'stage_command_started'
+  | 'stage_command_completed'
+  | 'command_timeout_projection'
+  | 'stage_command_interrupt_requested'
+  | 'stage_command_interrupted'
+  | 'interrupted_command_repeated'
+  | 'criterion_check_conflict'
   | 'scope_revision_requested'
   | 'scope_revision_decided'
   | 'live_constraint_violation'
+  | 'live_constraint_exemptions'
+  | 'live_constraint_monitor_failure'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'supervisor_reject_requested'
@@ -31,6 +40,7 @@ export type RunEventType =
   | 'supervisor_reject'
   | 'plan_dispatch_retry'
   | 'research_mode_degraded'
+  | 'research_gate_exhausted'
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'
   | 'parallel_write_conflict'
@@ -70,10 +80,26 @@ export interface RunEvent {
   waitedMs?: number;
   requestedAt?: string;
   detectedAt?: string;
-  boundary?: 'attempt_start' | 'adapter_invocation';
+  boundary?: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt';
   invocationIndex?: number;
+  exemptedCount?: number;
+  lastScanDurationMs?: number;
+  lastScanFileCount?: number;
+  round?: number;
+  criteria?: string[];
   guidanceIds?: string[];
+  guidanceId?: string;
   delivered?: boolean;
+  commandId?: string;
+  command?: string;
+  commandFingerprint?: string;
+  commandTimeoutMs?: number;
+  remainingBudgetMs?: number;
+  shortfallMs?: number;
+  originalRequestId?: string;
+  criterionId?: string;
+  checkPath?: string;
+  authorStageId?: string;
   decision?: 'accepted' | 'rejected' | 'discarded';
   evidenceGeneration?: string;
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';

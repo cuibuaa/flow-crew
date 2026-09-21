@@ -1,5 +1,114 @@
 # Changelog
 
+## Unreleased — engine state truthfulness
+
+### Fixed — generated caches and honest plans no longer stop guarded work
+
+The live constraint guard now exempts narrowly configured, untracked tool-cache
+output while preserving tracked-first rollback for every real project file. Its
+fallback and clean-scan deadline are configurable, cache trees are pruned from
+fallback walks, and deadline events carry the last scan's duration and file
+count. Existing process-group cancellation and symlink-safe walking are covered
+by regressions.
+
+Scope admission now treats literal parent scopes as directory trees and proves
+ordinary wildcard scopes disjoint when a later aligned literal segment differs;
+ambiguous glob languages remain serialized. Write authorization now evaluates
+the declared glob itself, so concurrency does not grant either stage the shared
+literal-prefix tree, and a batch-first preimage keeps cross-scope writes
+restorable after peer observation. Temporal research-test failures are charged
+only to the attempt with reliable structured authorship, and an exhausted
+rejected research round now escalates or parks instead of advancing; its event,
+artifact, and approval target name only non-passing structured criteria when the
+verdict supplies them.
+
+Ship setup gives `git worktree add` a configurable 30-minute default, periodic
+progress, and ownership-proved cleanup of a failed creation. It reserves the
+target exclusively, atomically creates the branch ref, and compare-deletes only
+that exact ref/object pair, leaving concurrently created or changed resources
+untouched. Only frontmatter `inputs:` entries can block setup or preflight;
+missing source inputs are also checked on the selected base ref, while prose path
+mentions are warnings.
+
+### Fixed — parallel work now runs in parallel without hiding serialization
+
+Read-only stages no longer take a writer lease, and stages whose declared scopes are
+provably disjoint receive separate batch-scoped leases. Potentially overlapping work
+remains serialized, but dispatch admission and run events now explain that decision;
+`task show` also reports stages currently waiting for a writer lease. Live-guard
+restoration and violation attribution are unchanged.
+
+### Fixed — control requests suspend the attempt that made them
+
+An accepted scope expansion now suspends a successful attempt and re-dispatches the
+same stage with its durable effective scope. Approval artifacts are watched while every
+ordinary, gate, and repair stage runs: unresolved requests park within one polling
+heartbeat, suspend active attempts, and resume by re-running the requesting stage.
+Operators may explicitly add project-and-action approval rules for otherwise unknown
+risk, with the stable rule id recorded on automatic decisions. A live replacement
+scheduler now takes precedence over the terminal status of the unit it replaced.
+
+### Fixed — registry growth no longer blinds task links
+
+The daemon invokes the existing backup-first registry compactor after growth thresholds
+are crossed and emits a maintenance event; the shared registry lock keeps concurrent
+appends intact. Task-link lookup keeps its bounded tail fast path but performs an exact
+forward scan for requested ids that fell outside it. Operational reasons now carry and
+display their stage, attempt, time, and whether they are historical.
+
+### Fixed — guidance reaches worker invocation boundaries
+
+Workers consume newly addressed guidance at every attempt start and before every adapter
+invocation, recording both delivery events and `guidance_consumed.md`. `flowcrew guide`
+accepts `--stage <id>` for direct, audited delivery while preserving supervisor routing
+for unaddressed messages.
+
+### Fixed — live commands can be stopped and gate remedies must be costed
+
+Guidance is now checked at typed command start and completion boundaries as well as
+attempt/adapter boundaries. A note written while one long command runs is recorded in
+`guidance_consumed.md`, ends only the current adapter invocation when the command reaches
+its boundary, and is supplied to a same-attempt continuation. Explicit GNU-style command
+timeouts that exceed the remaining attempt budget emit a projection with the command,
+timeout, remaining budget, and shortfall, then give those facts to the stage instead of
+silently burning past the available time.
+
+`flowcrew interrupt --run <run-id> --stage <stage-id> "reason"` now publishes a one-shot,
+attempt-and-command-bound operator interrupt after durably writing the reason as guidance.
+The resulting control path is distinct from crashes, supervisor aborts, and timeouts;
+repeating the normalized command is reported. New event types are
+`stage_command_started`, `stage_command_completed`, `command_timeout_projection`,
+`stage_command_interrupt_requested`, `stage_command_interrupted`, and
+`interrupted_command_repeated`. Command events carry stage/attempt/invocation and command
+identity; projections add `commandTimeoutMs`, `remainingBudgetMs`, and `shortfallMs`;
+interrupt events add request/guidance identity. `guidance_delivery_checked` adds
+`tool_call_start`, `tool_call_completion`, and `operator_interrupt` boundaries plus optional
+command identity, while `guidance_written` now records `guidanceId` and mapped `criteria`.
+
+Operator notes that unambiguously name canonical criteria now follow those criteria into
+later evaluations. A failing verdict must quote and reason about each matching ruling.
+Quantified sample/block/iteration remedies carry known-or-unknown cost evidence, with known
+cost arithmetic checked against an attributed completed attempt and the target stage budget.
+Stage-authored checks with reliable criterion attribution must be assessed against matching
+rulings; declared conflicts emit `criterion_check_conflict` naming the check, author,
+criterion, and guidance through `criterionId`, `checkPath`, `authorStageId`, and `guidanceId`.
+No new configuration keys were added.
+
+Directory-wide write scopes such as `.cache/**` and `dist/**` now include hidden descendants,
+including build manifests and atomic temporary files. Scope-revision preimage checks inspect
+only paths matched by the requested glob, so an already-authorized sibling write cannot make
+an unrelated dotfile capability impossible to approve. A generated literal already contained
+by a stable declared tree is returned in `alreadyAuthorizedPaths` without widening effective
+scope or requiring an impossible rotating-literal preimage.
+
+### Fixed — clean worktree setup and repeatable staging builds
+
+Incremental TypeScript state now shares the temporary build generation's lifecycle, so
+an absent staging directory cannot yield a false up-to-date build. Ship setup prepares
+missing npm dependencies with an audited `npm ci` when a lockfile exists, can safely
+retry the same worktree, and resolves TypeScript and Vitest through Node's standard
+module lookup instead of requiring a worktree-local `node_modules` path.
+
 ## [0.8.6] - 2026-09-04
 
 Two engine fixes found by real runs the day 0.8.5 went live, and the loop change the 0.8.5

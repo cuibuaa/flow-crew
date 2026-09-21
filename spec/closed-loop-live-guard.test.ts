@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,6 +17,7 @@ import {
   LiveConstraintGuard,
   acquireAttributableWriterLease,
 } from '../src/live-constraint-guard.js';
+import { loadProjectDefaults } from '../src/config.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
@@ -128,7 +130,7 @@ describe('portable live constraint guard', () => {
   it.each([
     { label: 'non-empty', scope: ['src/allowed.ts'] },
     { label: 'empty', scope: [] },
-  ])('restores an unlisted existing test live with a $label declared scope, reinvokes once in the same attempt, and retains the post-attempt audit', { timeout: 10_000 }, async ({ scope }) => {
+  ])('restores an unlisted existing test live with a $label declared scope, then re-dispatches its accepted revision', { timeout: 10_000 }, async ({ scope }) => {
     const testPath = seedProject();
     const preimage = readFileSync(testPath, 'utf-8');
     const { config, yaml } = workflowFixture(scope);
@@ -160,28 +162,36 @@ describe('portable live constraint guard', () => {
         };
       }
 
-      const marker = '# Live constraint correction\n';
-      const markerAt = prompt.indexOf(marker);
-      expect(markerAt).toBeGreaterThanOrEqual(0);
-      correctionBytes = Buffer.from(prompt.slice(markerAt + marker.length), 'utf-8');
-      const directory = join(opts.runDir, 'stages', opts.stageId);
-      const requestedPaths = ['spec/existing.test.ts'];
-      const requestId = 'authorize-existing-test';
-      writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-        version: 1,
-        kind: 'scope_revision',
-        requestId,
-        runId: created.runId,
-        stageId: opts.stageId,
-        attemptIndex: opts.attemptIndex,
-        requestedPaths,
-        pathDigest: scopePathDigest(requestedPaths),
-        reason: 'the corrected fixture explicitly needs this existing test',
-      }));
-      expect(await waitForDecision(directory, requestId)).toMatchObject({ accepted: true });
+      if (invocationCount === 2) {
+        const marker = '# Live constraint correction\n';
+        const markerAt = prompt.indexOf(marker);
+        expect(markerAt).toBeGreaterThanOrEqual(0);
+        correctionBytes = Buffer.from(prompt.slice(markerAt + marker.length), 'utf-8');
+        const directory = join(opts.runDir, 'stages', opts.stageId);
+        const requestedPaths = ['spec/existing.test.ts'];
+        const requestId = 'authorize-existing-test';
+        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
+          version: 1,
+          kind: 'scope_revision',
+          requestId,
+          runId: created.runId,
+          stageId: opts.stageId,
+          attemptIndex: opts.attemptIndex,
+          requestedPaths,
+          pathDigest: scopePathDigest(requestedPaths),
+          reason: 'the corrected fixture explicitly needs this existing test',
+        }));
+        expect(await waitForDecision(directory, requestId)).toMatchObject({ accepted: true });
+        return {
+          output: 'scope accepted; stop at the control boundary', exitCode: 0,
+          duration_ms: 2, writes: [], writeAttribution: 'structured',
+        };
+      }
+
+      expect(prompt).toContain('Scope revision authorize-existing-test was accepted');
       writeFileSync(testPath, 'export const invariant = "authorized-after-revision";\n');
       return {
-        output: 'corrected in the original attempt', exitCode: 0, duration_ms: 2,
+        output: 'corrected after scope re-dispatch', exitCode: 0, duration_ms: 2,
         writes: ['spec/existing.test.ts'], writeAttribution: 'structured',
       };
     } };
@@ -191,7 +201,7 @@ describe('portable live constraint guard', () => {
       join(projectDir, 'config', 'agents'), created.runId, 'live guard replay', true, false,
     );
     expect(final.status).toBe('complete');
-    expect(invocationCount).toBe(2);
+    expect(invocationCount).toBe(3);
     expect(restoreLatencyMs).toBeDefined();
     expect(restoreLatencyMs!).toBeLessThan(1_000);
     if (scope.length > 0) expect(readFileSync(join(projectDir, 'src', 'allowed.ts'), 'utf-8')).toContain('survives');
@@ -199,8 +209,10 @@ describe('portable live constraint guard', () => {
     expect(readFileSync(join(projectDir, 'operator-note.txt'), 'utf-8')).toBe('pre-existing dirt stays intact\n');
 
     const status = readStageStatus(projectDir, created.runId, 'writer');
-    expect(status.attempts).toHaveLength(1);
-    const audit = JSON.parse(readFileSync(join(created.runDirPath, status.constraintAudit!.path), 'utf-8')) as {
+    expect(status.attempts?.map((attempt) => attempt.status)).toEqual(['suspended', 'complete']);
+    const firstAudit = status.attempts?.[0].constraintAudit;
+    expect(firstAudit).toBeDefined();
+    const audit = JSON.parse(readFileSync(join(created.runDirPath, firstAudit!.path), 'utf-8')) as {
       liveIncidents: Array<{ path: string; restored: boolean; detectionLatencyMs: number; scopeRevisionInstruction: string }>;
       scopeRevisionInstructions: string[];
       violations: Array<{ path: string; resolution?: string }>;
@@ -281,6 +293,89 @@ describe('portable live constraint guard', () => {
     const deadline = await deadlineGuard.beginInvocation(1, (reason) => deadlineAborts.push(reason)).finish();
     expect(deadline.monitorFailure?.reason).toContain('monitor deadline');
     expect(deadlineAborts).toContain('live_constraint_monitor_failure');
+  });
+
+  it('H2 uses configured monitor timing and reports the last completed scan', async () => {
+    mkdirSync(join(projectDir, 'config'), { recursive: true });
+    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
+      'default_timeout_ms: 60000',
+      'live_constraint_fallback_scan_ms: 5',
+      'live_constraint_monitor_deadline_ms: 35',
+    ].join('\n') + '\n');
+    const defaults = loadProjectDefaults(projectDir);
+    expect(defaults.live_constraint_fallback_scan_ms).toBe(5);
+    expect(defaults.live_constraint_monitor_deadline_ms).toBe(35);
+
+    let scans = 0;
+    const failures: Array<Record<string, unknown>> = [];
+    const guard = new LiveConstraintGuard({
+      projectDir,
+      runDir: stateDir,
+      stageId: 'writer',
+      attemptIndex: 7,
+      effectiveScope: () => [],
+      fallbackScanMs: defaults.live_constraint_fallback_scan_ms,
+      monitorDeadlineMs: defaults.live_constraint_monitor_deadline_ms,
+      watchProject: () => undefined,
+      scanAndRestore: () => {
+        scans++;
+        if (scans === 1) return { scannedPaths: 17, violations: [] };
+        return new Promise(() => undefined);
+      },
+      scopeRevisionInstruction: () => 'request scope',
+      onMonitorFailure: (failure) => failures.push(failure as unknown as Record<string, unknown>),
+    });
+    const aborts: string[] = [];
+    const started = Date.now();
+    const result = await guard.beginInvocation(3, (reason) => aborts.push(reason)).finish();
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(aborts).toContain('live_constraint_monitor_failure');
+    expect(result.monitorFailure).toMatchObject({
+      lastScanFileCount: 17,
+      lastScanDurationMs: expect.any(Number),
+    });
+    expect(failures).toEqual([
+      expect.objectContaining({
+        stageId: 'writer', attemptIndex: 7, invocationIndex: 3,
+        lastScanFileCount: 17, lastScanDurationMs: expect.any(Number),
+      }),
+    ]);
+  });
+
+  it('H2 fallback scanning does not descend a symlinked input directory', { timeout: 10_000 }, async () => {
+    seedProject();
+    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
+      'default_timeout_ms: 60000',
+      'live_constraint_fallback_scan_ms: 5',
+      'live_constraint_monitor_deadline_ms: 500',
+    ].join('\n') + '\n');
+    const external = join(stateDir, 'large-input');
+    mkdirSync(external, { recursive: true });
+    const externalFile = join(external, 'checkpoint.bin');
+    writeFileSync(externalFile, 'before\n');
+    symlinkSync(external, join(projectDir, 'linked-input'), 'dir');
+    const { config, yaml } = workflowFixture([]);
+    const created = createRun(projectDir, config.name, yaml, ['writer']);
+    const state = readRunState(projectDir, created.runId);
+    state.autoApprove = true;
+    writeRunState(projectDir, created.runId, state);
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      writeFileSync(externalFile, 'updated outside the project tree\n');
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      return { output: 'read-only project stage', exitCode: 0, duration_ms: 50, writes: [], writeAttribution: 'structured' };
+    } };
+
+    const final = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      join(projectDir, 'config', 'agents'), created.runId, 'symlink fallback replay', true, false,
+    );
+
+    expect(final.status).toBe('complete');
+    expect(readFileSync(externalFile, 'utf-8')).toBe('updated outside the project tree\n');
+    expect(readStageStatus(projectDir, created.runId, 'writer').attempts?.at(-1)?.constraintAudit)
+      .toMatchObject({ liveViolationCount: 0 });
   });
 
   it('serializes attributable writers while leaving an explicitly read-only lease free', async () => {

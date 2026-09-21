@@ -481,6 +481,7 @@ export class CodexAdapter implements Adapter {
               stageId: opts.stageId,
               attemptIndex: opts.attemptIndex,
               attemptStartedAt: opts.attemptStartedAt,
+              onLifecycle: opts.onCommandLifecycle,
             })
           : undefined;
         try {

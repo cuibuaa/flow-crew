@@ -301,6 +301,99 @@ describe('scheduler-authoritative full-tree enforcement', () => {
     });
     expect(existsSync(join(projectDir, prewrittenPath))).toBe(false);
   });
+
+  it('[J8] ignores already-owned changes, rejects changed requested paths, and resolves generated literals against a stable tree', { timeout: 45_000 }, async () => {
+    async function revisionDecision(input: {
+      name: string;
+      scope: string[];
+      requestedPaths: string[];
+      initial?: Array<{ path: string; body: string }>;
+      mutation: { path: string; body: string };
+    }): Promise<Record<string, any>> {
+      for (const file of input.initial ?? []) {
+        mkdirSync(join(projectDir, file.path, '..'), { recursive: true });
+        writeFileSync(join(projectDir, file.path), file.body);
+      }
+      const config: WorkflowConfig = {
+        name: input.name,
+        defaults: { max_iterations: 1, max_retries: 0 },
+        stages: [{
+          id: 'subject', role: 'coder', depends_on: [], prompt_template: 'J8 fixture', skills: [],
+          dynamic_dispatch: false, is_gate: false, scope: input.scope,
+        }],
+      };
+      const yaml = [
+        `name: ${input.name}`, 'defaults:', '  max_iterations: 1', '  max_retries: 0',
+        'stages:', '  - id: subject', '    role: coder',
+        `    scope: ${JSON.stringify(input.scope)}`,
+        '    prompt_template: J8 fixture',
+      ].join('\n');
+      const created = prepareRun(config, yaml);
+      let decision: Record<string, any> | undefined;
+      let calls = 0;
+      const adapter: Adapter = { async run(_prompt, _agent, opts) {
+        const summary = summaryResult(opts);
+        if (summary) return summary;
+        calls++;
+        if (calls > 1) return { output: 'continued after accepted no-op', exitCode: 0, duration_ms: 1 };
+        mkdirSync(join(projectDir, input.mutation.path, '..'), { recursive: true });
+        writeFileSync(join(projectDir, input.mutation.path), input.mutation.body);
+        const directory = join(opts.runDir, 'stages', opts.stageId);
+        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
+          version: 1, kind: 'scope_revision', requestId: `${input.name}-request`,
+          runId: created.runId, stageId: opts.stageId, attemptIndex: opts.attemptIndex,
+          requestedPaths: input.requestedPaths, pathDigest: scopePathDigest(input.requestedPaths),
+          reason: 'J8 requested-path precondition fixture',
+        }));
+        decision = await waitForDecision(directory);
+        return {
+          output: 'scope decision observed', exitCode: 0, duration_ms: 2,
+          writes: [input.mutation.path], writeAttribution: 'structured',
+        };
+      } };
+
+      await runWorkflow(
+        config, yaml, projectDir, adapter, new Map(), undefined,
+        writeRoles('coder'), created.runId, input.name, true,
+      );
+      if (!decision) throw new Error(`No scope decision for ${input.name}`);
+      return decision;
+    }
+
+    const ownedSibling = await revisionDecision({
+      name: 'j8-owned-sibling',
+      scope: ['dist-j8/**'],
+      requestedPaths: ['dist-j8/**/.*'],
+      initial: [{ path: 'dist-j8/adapters/base.d.ts', body: 'before\n' }],
+      mutation: { path: 'dist-j8/adapters/base.d.ts', body: 'owned change\n' },
+    });
+    expect(ownedSibling).toMatchObject({
+      accepted: true, decision: 'accepted', authorizedPaths: [],
+      alreadyAuthorizedPaths: ['dist-j8/**/.*'],
+    });
+
+    const changedRequested = await revisionDecision({
+      name: 'j8-changed-requested',
+      scope: [],
+      requestedPaths: ['requested-j8/new.ts'],
+      initial: [{ path: 'requested-j8/new.ts', body: 'before\n' }],
+      mutation: { path: 'requested-j8/new.ts', body: 'changed before approval\n' },
+    });
+    expect(changedRequested).toMatchObject({ accepted: false, decision: 'rejected' });
+    expect(String(changedRequested.rejectionReason)).toContain('requested-j8/new.ts');
+
+    const generatedLiteral = '.cache-j8/build-generations/generation-2/.flowcrew-build-manifest.json';
+    const stableTree = await revisionDecision({
+      name: 'j8-stable-tree',
+      scope: ['.cache-j8/**'],
+      requestedPaths: [generatedLiteral],
+      mutation: { path: generatedLiteral, body: '{"generation":2}\n' },
+    });
+    expect(stableTree).toMatchObject({
+      accepted: true, decision: 'accepted', authorizedPaths: [],
+      alreadyAuthorizedPaths: [generatedLiteral], effectiveScope: ['.cache-j8/**'],
+    });
+  });
 });
 
 // Each entry reproduces the shape of a stage that was measured writing outside an
@@ -339,20 +432,29 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
       const created = prepareRun(config, yaml);
       const requestedPaths = Array.from({ length: shape.writes }, (_, index) => `synthetic/${shape.stage}/write_${index + 1}.txt`);
       const canonicalPaths = [...requestedPaths].sort();
+      let stageCalls = 0;
       const adapter: Adapter = { async run(prompt, _agent, opts) {
         const summary = summaryResult(opts);
         if (summary) return summary;
-        expect(prompt).toContain('Declared project-write scope: [] (declaration missing)');
+        stageCalls++;
         expect(prompt).toContain(`"runId":"${created.runId}"`);
-        const directory = join(opts.runDir, 'stages', opts.stageId);
-        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-          version: 1, kind: 'scope_revision', requestId: `synthetic-${shape.stage}`,
-          runId: created.runId, stageId: opts.stageId, attemptIndex: 1,
-          requestedPaths, pathDigest: scopePathDigest(requestedPaths),
-          reason: `stage autonomously declares the ${shape.writes} synthetic project writes`,
-        }));
-        const decision = await waitForDecision(directory);
-        expect(decision).toMatchObject({ accepted: true, requestedPaths: canonicalPaths });
+        if (stageCalls === 1) {
+          expect(prompt).toContain('Declared project-write scope: [] (declaration missing)');
+          const directory = join(opts.runDir, 'stages', opts.stageId);
+          writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
+            version: 1, kind: 'scope_revision', requestId: `synthetic-${shape.stage}`,
+            runId: created.runId, stageId: opts.stageId, attemptIndex: opts.attemptIndex,
+            requestedPaths, pathDigest: scopePathDigest(requestedPaths),
+            reason: `stage autonomously declares the ${shape.writes} synthetic project writes`,
+          }));
+          const decision = await waitForDecision(directory);
+          expect(decision).toMatchObject({ accepted: true, requestedPaths: canonicalPaths });
+          return {
+            output: 'scope accepted; stop at the control boundary', exitCode: 0,
+            duration_ms: 20, writes: [], writeAttribution: 'structured',
+          };
+        }
+        expect(prompt).toContain(`Scope revision synthetic-${shape.stage} was accepted`);
         for (const path of requestedPaths) {
           mkdirSync(join(projectDir, path, '..'), { recursive: true });
           writeFileSync(join(projectDir, path), `${shape.origin}\n`);
@@ -368,7 +470,9 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
         writeRoles('coder', 'qa'), created.runId, `synthetic ${shape.origin}`, true,
       );
       expect(final.status).toBe('complete');
+      expect(stageCalls).toBe(2);
       const status = readStageStatus(projectDir, created.runId, shape.stage);
+      expect(status.attempts?.map((attempt) => attempt.status)).toEqual(['suspended', 'complete']);
       expect(status.constraintAudit).toMatchObject({
         declaredScope: null,
         effectiveScope: canonicalPaths,

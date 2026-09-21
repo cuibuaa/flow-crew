@@ -17,6 +17,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
   if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
   if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--supervise] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
+  if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
   if (command === 'campaign') return 'Usage: flowcrew campaign run|list|show|stop ...';
   if (command === 'brief') return 'Usage: flowcrew brief head|diff|rollback|log ...';
   return undefined;
@@ -56,6 +57,7 @@ const [
   terminalArtifactStatusModule,
   cliEventsModule,
   guidanceModule,
+  commandInterruptModule,
 ] = await Promise.all([
   import('node:fs'),
   import('node:path'),
@@ -74,6 +76,7 @@ const [
   import('./terminal-artifact-status.js'),
   import('./cli-events.js'),
   import('./guidance.js'),
+  import('./command-interrupt.js'),
 ]);
 
 const {
@@ -129,6 +132,7 @@ const {
   readOperationalProjection,
 } = cliEventsModule;
 const { appendGuidanceEnvelope } = guidanceModule;
+const { requestStageCommandInterrupt } = commandInterruptModule;
 
 const args = bootstrapArgs;
 const command = args[0];
@@ -1670,6 +1674,48 @@ function cmdGuide() {
   console.log(`\nThe supervisor will pick this up on its next heartbeat (normally within 30s).`);
 }
 
+function cmdInterrupt() {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"');
+    console.log('');
+    console.log('Stops the command currently running in the named stage and delivers the reason as operator guidance.');
+    return;
+  }
+  const { message: reason, targetRunId, targetStageId } = parseGuideArguments();
+  if (!targetRunId || !targetStageId) {
+    console.error('Both --run and --stage are required for a command interrupt.');
+    console.error('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"');
+    process.exit(1);
+  }
+  const root = runsRoot();
+  if (!safeGuideRunId(targetRunId)) {
+    console.error(`Run "${targetRunId}" is unsafe; no command was interrupted.`);
+    process.exit(1);
+  }
+  const candidate = readGuideCandidate(root, targetRunId);
+  if (!candidate || !isRunningRunStatus(candidate.status)) {
+    console.error(`Run "${targetRunId}" is not running; no command was interrupted.`);
+    process.exit(1);
+  }
+  if (!candidate.stageIds.includes(targetStageId)) {
+    console.error(`Stage "${targetStageId}" is not part of run "${targetRunId}"; no command was interrupted.`);
+    process.exit(1);
+  }
+  try {
+    const signal = requestStageCommandInterrupt({
+      runDir: join(root, targetRunId),
+      stageId: targetStageId,
+      reason,
+    });
+    console.log(`Interrupt ${signal.requestId} sent to stage ${targetStageId} in run ${targetRunId}.`);
+    console.log(`Command: ${signal.command}`);
+    console.log('The reason was recorded as operator guidance before the one-shot interrupt was published.');
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 function cmdClean() {
   if (args.includes('--help') || args.includes('-h')) {
     console.log('Usage: flowcrew clean [--keep N]');
@@ -1974,6 +2020,7 @@ Commands:
   status    Show the latest run for this project (--all/--project for others)
   list      Show all recent runs with status and duration
   guide     Send guidance to the running supervisor
+  interrupt Stop the active command in a named stage and deliver a reason
   clean     Delete old runs (keeps 5 most recent by default)
   export    Export a run as JSON bundle
   campaign  Run, inspect, or stop an outer-loop research campaign
@@ -2015,6 +2062,7 @@ Examples:
   flowcrew task list
   flowcrew fc_tasks render
   flowcrew guide --run <run-id> "try a different approach"
+  flowcrew interrupt --run <run-id> --stage <stage-id> "stop the oversized job"
   flowcrew clean --keep 3
   flowcrew campaign run examples/example_campaign.yaml --dry-run
   flowcrew ship-preflight --brief docs/task_brief.md
@@ -2241,6 +2289,9 @@ switch (command) {
     break;
   case 'guide':
     cmdGuide();
+    break;
+  case 'interrupt':
+    cmdInterrupt();
     break;
   case 'clean':
     cmdClean();

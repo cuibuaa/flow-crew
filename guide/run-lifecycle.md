@@ -66,6 +66,13 @@ deliberate: terminal does not mean productive. If an ordinary dependent remains
 behind skipped or failed work, the run stays unresolved and ultimately records
 `incomplete` rather than executing the dependent or claiming plain completion.
 
+While an execution is running, `flowcrew interrupt --run <run-id> --stage <stage-id>
+"reason"` can stop its one attributable active command without cancelling the run or
+creating a new execution. The reason is persisted as operator guidance before the
+attempt-and-command-bound signal is published. The adapter is then continued inside
+the same execution and deadline. Events distinguish the request and controlled
+interruption from a crash; a repeated normalized command is reported separately.
+
 ## The distinctions that carry meaning
 
 ### `ceiling_hit` is a successful honest negative

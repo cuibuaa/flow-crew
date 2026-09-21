@@ -12,6 +12,7 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `status` | Show the latest project run's current stage execution, elapsed time, and latest reason. |
 | `list` | List recent runs. |
 | `guide` | Send guidance to one explicitly selected running supervisor. |
+| `interrupt` | Stop the active command in a named running stage and deliver the reason as operator guidance. |
 | `clean` | Delete old run directories. |
 | `export` | Export a run as JSON. |
 | `campaign` | Run and manage configured campaigns. |
@@ -45,6 +46,7 @@ flowcrew rehearse <brief.md>
 flowcrew status
 flowcrew list
 flowcrew guide --run <run-id> "message"
+flowcrew interrupt --run <run-id> --stage <stage-id> "reason"
 flowcrew start                       # web dashboard only
 flowcrew daemon status               # background orchestrator identity/freshness
 flowcrew daemon restart              # reload the background orchestrator
@@ -414,6 +416,30 @@ executing. With no running run or multiple candidates, the command exits non-zer
 without writing any `user_input.md`; the ambiguous case lists the candidate run IDs
 and task titles. Explicit targets must exist and still be running. The selected supervisor
 consumes the input on its next heartbeat, normally within 30 seconds.
+
+Direct stage guidance is also checked at executable tool-call start and completion
+boundaries. When new guidance is found there, FlowCrew closes only that adapter
+invocation and gives the text to a same-attempt continuation; it does not execute
+the guidance, extend the deadline, widen scope, or lower a gate.
+
+## `flowcrew interrupt`
+
+Stop the one command currently attributed to a named running stage:
+
+```bash
+flowcrew interrupt --run 2026-08-02T12-00-00-a1b2c3 --stage repair \
+  "the projected sample cannot fit; stop it and report the measured rate"
+```
+
+Both selectors and a non-empty reason are required. The command refuses if the run
+or stage is not running, command lifecycle evidence is stale, no command is active,
+or more than one command is active. It writes the reason as operator guidance first,
+then atomically publishes a one-shot request bound to the current attempt, command ID,
+and normalized command fingerprint. The worker terminates the current adapter process
+group and continues within the same immutable attempt. This is distinct from an adapter
+crash, supervisor abort, attempt timeout, and whole-run cancellation. If the stage starts
+the same normalized command again, `interrupted_command_repeated` records the original
+request and guidance IDs.
 
 ## `flowcrew quick`
 

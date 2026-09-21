@@ -214,6 +214,7 @@ describe('Orchestrator', () => {
     `;
     const compactor = spawn(process.execPath, ['--input-type=module', '-e', compactorScript, tempDir, heldPath, releasePath], {
       cwd: process.cwd(),
+      env: { ...process.env, HOME: tempDir, FC_HOME: tempDir },
     });
     const compactorOutcome = childOutcome(compactor);
     let updater: ChildProcessWithoutNullStreams | undefined;
@@ -222,7 +223,10 @@ describe('Orchestrator', () => {
       updater = spawn(process.execPath, [
         '--input-type=module', '-e', updaterScript,
         tempDir, String(created.id), appendStartedPath, appendFinishedPath,
-      ], { cwd: process.cwd() });
+      ], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: tempDir, FC_HOME: tempDir },
+      });
       const updaterOutcome = childOutcome(updater);
       await waitForPathEvent(tempDir, () => existsSync(appendStartedPath) ? true : undefined);
       expect(existsSync(appendFinishedPath)).toBe(false);

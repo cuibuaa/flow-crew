@@ -65,7 +65,7 @@ describe('operator approval standing rules', () => {
       projectDir: resolve(projectDir),
       actionPattern: 'launch_*training*',
       decision: 'approve',
-      grantedBy: process.env.USER || 'operator',
+      grantedBy: expect.any(String),
       grantedAt: expect.any(String),
     });
 
