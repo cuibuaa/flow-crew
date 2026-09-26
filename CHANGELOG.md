@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.9.1] - 2026-09-26
+
+### Fixed — places where the engine said one thing would happen and did another
+
+Three runs stopped emitting events for 35 to 100 minutes because two reads on the
+scheduler's own loop grew without bound: the approval monitor re-read a
+run-history file that had reached 168 MB, and the live guard re-hashed changed
+ignored content such as an 18 GB model directory on every scan. Both are bounded
+and off the loop, and an independent watcher now reports a scheduler whose
+heartbeat stops advancing. Live-constraint incidents are persisted in one append
+per scan with a shared scope-revision instruction stored once by digest; one scan
+of 12,888 paths had produced a 23 GB incident file and held the loop for minutes.
+
+An accepted scope revision's re-dispatched attempt keeps a required file the stage
+produced before acceptance. Plan retry no longer resubmits an identical refused
+proposal, and `task retry` starts the run it reports. The artifact contract
+resolves a bare filename that the prompt placed in the run directory against that
+directory. A stage that wrote nothing cannot receive incidents for files that
+existed before it started.
+
+Eight checks whose answer did not depend on what they were meant to check were
+tied back to it, among them adapter-capacity attribution: a stage that quotes
+"model is at capacity" is no longer recorded as an upstream failure. Supervisor
+GUIDE, direction ABORT and REPLAN must cite current ACTION evidence, and text a
+stage merely read cannot establish what it pursued. Validation deltas no longer
+merge "could not run" with a named test failure. The engine's own bookkeeping
+writes are no longer charged to stages, and ledger entries close where their work
+is accepted rather than where their run ends.
+
+### Changed — supervisor cadence
+
+`supervisor.min_delta_bytes` defaults to 98304, bounding content-triggered review
+to about one per three minutes of busy output. After a WAIT on an artifact event
+spanning at least two running stages and two changed paths, further such events
+wait for `routine_assessment_interval_ms`; replayed over seven recorded days this
+omits 281 of 8,633 assessment opportunities and keeps all 127 non-WAIT decisions
+at their original times. The configuration comments now describe what each
+supervisor key does, including that the per-iteration maximum is telemetry only.
+
 ## [0.9.0] - 2026-09-20
 
 ### Fixed — twenty-seven controls that judged from evidence they did not have
