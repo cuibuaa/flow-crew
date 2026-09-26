@@ -300,7 +300,15 @@ export class Orchestrator {
   }
 
   async retry(id: number): Promise<TaskEntry> {
-    const task = this.mustGet(id);
+    let task = this.mustGet(id);
+    const bound = this.readBoundRun(task);
+    if (task.kind !== 'campaign' && task.status !== TASK_STATUS.RUNNING
+        && bound && isTerminalRunStatus(bound.status)) {
+      // A manual retry explicitly asks for a fresh execution of the brief.
+      // Keeping the terminal binding makes the queue drain reconcile that old
+      // run and discard the request before its backoff window expires.
+      task = this.registry.update(id, { run_id: undefined });
+    }
     return this.relaunch(task, 'manual retry');
   }
 

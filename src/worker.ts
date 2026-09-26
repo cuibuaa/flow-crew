@@ -56,6 +56,7 @@ import {
   type LiveConstraintInvocationResult,
 } from './live-constraint-guard.js';
 import {
+  captureDeferredStageArtifactContract,
   captureStageArtifactContractPreimages,
   inspectStageArtifactContract,
   writeStageArtifactContractAudit,
@@ -616,6 +617,7 @@ async function runStageWithWriterLease(
     interrupt?: StageCommandInterruptSignal;
   };
   let commandBoundaryControl: CommandBoundaryControl | undefined;
+  let scopeRevisionBoundaryReached = false;
   let supervisorAborted = false;
   let approvalSuspended = false;
   let approvalRequestId: string | undefined;
@@ -1225,6 +1227,27 @@ async function runStageWithWriterLease(
       const commandControl = commandBoundaryControl;
       if (commandControl && !aggregateAbortSignal.aborted) {
         activeCommands.delete(commandControl.command.id);
+        // The scheduler has already persisted the accepted decision before
+        // publishing this guidance. The current tool has settled and the
+        // adapter child has closed, so no same-attempt reinvocation is needed.
+        // The scheduler will suspend this successful attempt and re-dispatch
+        // with the inherited capability after its normal reconciliation.
+        const acceptedScopeRevision = commandControl.guidance.some((entry) => (
+          entry.source === 'scheduler'
+          && /^Scope revision [^\s]+ was accepted\. This attempt stops at the control boundary\b/.test(entry.body)
+        ));
+        if (acceptedScopeRevision && commandControl.kind !== 'operator_interrupt'
+            && !latestLiveConstraintResult?.monitorFailure
+            && !(latestLiveConstraintResult?.incidents.length)) {
+          scopeRevisionBoundaryReached = true;
+          return {
+            ...combined,
+            exitCode: 0,
+            timedOut: false,
+            adapterError: false,
+            output: `${combined.output}${combined.output ? '\n\n' : ''}Accepted scope revision ended this attempt at the control boundary.`,
+          };
+        }
         if (commandControl.kind === 'operator_interrupt' && commandControl.interrupt) {
           recordRunEvent(opts.projectDir, opts.runId, {
             type: 'stage_command_interrupted',
@@ -1397,7 +1420,7 @@ async function runStageWithWriterLease(
 
   if (result.exitCode === 0 && opts.artifactObligationTemplate?.trim()) {
     try {
-      const audit = inspectStageArtifactContract({
+      const artifactInput = {
         stageId: opts.stageId,
         template: opts.artifactObligationTemplate,
         projectDir: opts.projectDir,
@@ -1405,9 +1428,12 @@ async function runStageWithWriterLease(
         writes: result.writes,
         preimages: artifactContractPreimages,
         priorProducedPromptArtifacts,
-      });
+      };
+      const audit = scopeRevisionBoundaryReached
+        ? captureDeferredStageArtifactContract(artifactInput)
+        : inspectStageArtifactContract(artifactInput);
       if (audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
-      if (audit.violations.length > 0) {
+      if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
         const detail = audit.violations.map((violation) => violation.reason).join('; ');
         result.exitCode = 1;
         result.timedOut = false;

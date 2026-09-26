@@ -122,6 +122,7 @@ import {
   type LiveConstraintGuardOptions,
   type LiveConstraintGuardFactory,
   type LiveConstraintIncident,
+  resolvePersistedLiveConstraintIncident,
 } from './live-constraint-guard.js';
 // Compatibility-visible transport basename; its canonical definition lives in
 // live-constraint-guard.ts: scope_revision_request.json.
@@ -12641,7 +12642,14 @@ function createSchedulerLiveConstraintGuardFactory(input: {
           settleRollbackBaselinePath(baseline, input.projectDir, path);
         }
         for (const path of [...candidates].sort()) {
-          const before = baselineImage(baseline, path);
+          const runBefore = baselineImage(baseline, path);
+          // Dependency/cache trees are intentionally omitted from the run
+          // baseline. A scoped snapshot still proves their state when this
+          // stage batch began. Compare against that image before attributing
+          // any later content delta to the stage.
+          const before = !runBefore.exists && runBefore.provenance === 'unknown'
+            ? input.context.snapshot.files.get(path) ?? runBefore
+            : runBefore;
           const current = await readRollbackCurrentImageCooperatively(
             baseline,
             input.projectDir,
@@ -12786,7 +12794,7 @@ function readLiveConstraintIncidents(
           && incident.stageId === stageId
           && incident.attemptIndex === attemptIndex
           && typeof incident.path === 'string'
-          ? [incident]
+          ? [resolvePersistedLiveConstraintIncident(join(runDirPath, 'stages', stageId), incident)]
           : [];
       } catch {
         return [];

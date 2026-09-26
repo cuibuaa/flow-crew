@@ -322,7 +322,25 @@ function implicatedStageFields(requirements: readonly PlanRetryRequirement[]): {
   let dependencyRepair = false;
   let dispatchRepair = false;
   for (const requirement of requirements) {
-    if (requirement.id.startsWith('reality-check:')) continue;
+    if (requirement.id.startsWith('reality-check:')) {
+      // Reachability can fail because the only producer of an absent hard-check
+      // input is conditional. Its gate dependency can also block the report
+      // when that gate rejects, even after the condition is removed. Unlock
+      // scheduling fields only on that producer; an edit to the check itself
+      // must not unlock dispatch.
+      const absentProducer = /\breferences absent (\S+), but every producer is conditional or repair-only\b/.exec(requirement.detail);
+      if (absentProducer) {
+        const path = absentProducer[1];
+        const current = fields.get(`producer-path:${path}`) ?? new Set<string>();
+        current.add('condition');
+        current.add('retry_to');
+        current.add('depends_on');
+        current.add('dependency_reasons');
+        fields.set(`producer-path:${path}`, current);
+        dispatchRepair = true;
+      }
+      continue;
+    }
     dispatchRepair = true;
     if (requirement.id.startsWith('criterion:')) criterionRepair = true;
     if (requirement.id.startsWith('terminal-owner:')) {
@@ -426,6 +444,21 @@ export function mergePlanRetryPair(
       dispatch = proposed.dispatch;
     } else {
       const incumbentSemantic = JSON.stringify(incumbentDocument.stages);
+      const exactProducerIds = new Set<string>();
+      for (const [key, repairFields] of [...unlocked.fields]) {
+        if (!key.startsWith('producer-path:')) continue;
+        const path = key.slice('producer-path:'.length);
+        for (const stage of incumbentDocument.stages) {
+          if (typeof stage.id !== 'string' || !Array.isArray(stage.scope)
+              || !stage.scope.includes(path)) continue;
+          const stageKey = boundedSlug(stage.id);
+          const fields = unlocked.fields.get(stageKey) ?? new Set<string>();
+          for (const field of repairFields) fields.add(field);
+          unlocked.fields.set(stageKey, fields);
+          exactProducerIds.add(stage.id);
+        }
+        unlocked.fields.delete(key);
+      }
       const proposedById = new Map(proposedDocument.stages
         .filter((stage) => typeof stage.id === 'string')
         .map((stage) => [stage.id as string, stage]));
@@ -462,6 +495,9 @@ export function mergePlanRetryPair(
       const incumbentIds = new Set(incumbentDocument.stages
         .map((stage) => typeof stage.id === 'string' ? stage.id : undefined)
         .filter((id): id is string => Boolean(id)));
+      const incumbentById = new Map(incumbentDocument.stages
+        .filter((stage) => typeof stage.id === 'string')
+        .map((stage) => [stage.id as string, stage]));
       const byId = new Map(mergedStages
         .filter((stage) => typeof stage.id === 'string')
         .map((stage) => [stage.id as string, stage]));
@@ -480,6 +516,43 @@ export function mergePlanRetryPair(
         }
         return false;
       };
+      for (const producerId of exactProducerIds) {
+        const priorProducer = incumbentById.get(producerId);
+        const producer = byId.get(producerId);
+        if (!priorProducer || !producer || producer.condition
+          || (Array.isArray(producer.retry_to) && producer.retry_to.length > 0)) continue;
+        const priorDependencies = Array.isArray(priorProducer.depends_on)
+          ? priorProducer.depends_on.filter((id): id is string => typeof id === 'string')
+          : [];
+        for (const gateId of priorDependencies) {
+          const priorGate = incumbentById.get(gateId);
+          const proposedGate = proposedById.get(gateId);
+          const gate = byId.get(gateId);
+          if (priorGate?.is_gate !== true || proposedGate?.is_gate !== true || gate?.is_gate !== true
+            || !Array.isArray(proposedGate.depends_on)
+            || !proposedGate.depends_on.includes(producerId)
+            || dependsOn(producerId, gateId)
+            || dependsOn(gateId, producerId)) continue;
+          // The retry moved this exact report writer ahead of its old gate.
+          // Honor only the proposed reciprocal edge; keep the gate's other
+          // prerequisites and fields locked.
+          gate.depends_on = uniqueStrings(gate.depends_on, [producerId]) ?? [producerId];
+          if (gate.dependency_reasons && typeof gate.dependency_reasons === 'object') {
+            const proposedReasons = proposedGate.dependency_reasons;
+            const proposedReason = proposedReasons && typeof proposedReasons === 'object'
+              ? (proposedReasons as Record<string, unknown>)[producerId]
+              : undefined;
+            gate.dependency_reasons = {
+              ...gate.dependency_reasons as Record<string, unknown>,
+              [producerId]: typeof proposedReason === 'string' && proposedReason.trim()
+                ? proposedReason
+                : 'This gate follows the report writer moved ahead by the accepted reachability repair.',
+            };
+          }
+          const retainedIndex = retainedStageIds.indexOf(gateId);
+          if (retainedIndex >= 0) retainedStageIds.splice(retainedIndex, 1);
+        }
+      }
       const newMandatoryIds = mergedStages.flatMap((stage) => {
         const id = typeof stage.id === 'string' ? stage.id : undefined;
         if (!id || incumbentIds.has(id) || stage.condition) return [];

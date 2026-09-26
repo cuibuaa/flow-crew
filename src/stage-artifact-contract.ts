@@ -27,6 +27,7 @@ export interface StageArtifactContractAudit {
   version: 1;
   stageId: string;
   checkedAt: string;
+  completionDeferred?: boolean;
   obligations: StageArtifactObligation[];
   producedPromptArtifacts: string[];
   replayExecutions: StageArtifactReplayExecution[];
@@ -388,7 +389,10 @@ function promptArtifactObligations(
       .split(/\b(?:with\s+)?replay command\s*:/i)[0]
       .split(/\b(?:selected by|described by|provided by|read from|based on|according to|using)\b/i)[0];
     for (const mention of pathMentions(artifactClause)) {
-      const path = resolveMention(mention, projectDir, runDir);
+      const mentionIndex = artifactClause.indexOf(mention);
+      const runLocal = mentionIndex >= 0
+        && /\bthis run['’]s\s*[`"']?$/i.test(artifactClause.slice(0, mentionIndex));
+      const path = resolveMention(mention, runLocal ? runDir : projectDir, runDir);
       if (path) obligations.push({ kind: 'prompt_artifact', mention, path, source: 'prompt' });
     }
   }
@@ -701,6 +705,49 @@ export function captureStageArtifactContractPreimages(
     }));
 }
 
+function producedPromptArtifactPaths(
+  input: StageArtifactContractInput,
+  obligations: readonly StageArtifactObligation[],
+): Set<string> {
+  const preimages = new Map((input.preimages ?? []).map((entry) => [resolve(entry.path), entry.identity]));
+  const reportedWrites = new Set((input.writes ?? [])
+    .map((write) => absoluteWritePath(write, input.projectDir, input.runDir))
+    .filter((path): path is string => path !== undefined)
+    .map((path) => resolve(path)));
+  const produced = new Set((input.priorProducedPromptArtifacts ?? []).map((path) => resolve(path)));
+  for (const obligation of obligations) {
+    const path = resolve(obligation.path);
+    if (reportedWrites.has(path)) {
+      produced.add(path);
+      continue;
+    }
+    const before = preimages.get(path);
+    if (before && compareLiveConstraintContentIdentities(
+      before,
+      readLiveConstraintContentIdentity(path),
+    ) === 'different') produced.add(path);
+  }
+  return produced;
+}
+
+/** Record durable production at a scope boundary without judging unfinished work. */
+export function captureDeferredStageArtifactContract(input: StageArtifactContractInput): StageArtifactContractAudit {
+  const obligations = dedupe(promptArtifactObligations(input.template, input.projectDir, input.runDir));
+  return {
+    version: 1,
+    stageId: input.stageId,
+    checkedAt: new Date().toISOString(),
+    completionDeferred: true,
+    obligations,
+    producedPromptArtifacts: [...producedPromptArtifactPaths(input, obligations)]
+      .filter((path) => {
+        try { return statSync(path).isFile(); } catch { return false; }
+      }).sort(),
+    replayExecutions: [],
+    violations: [],
+  };
+}
+
 /**
  * Check only attributable, unambiguous promises: imperative file paths in the
  * stage's own template and exact test-file arguments in a requested replay
@@ -747,26 +794,11 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput):
     ));
   }
   const obligations = dedupe([...promptObligations, ...commandObligations, ...publishedObligations]);
-  const preimages = new Map((input.preimages ?? []).map((entry) => [resolve(entry.path), entry.identity]));
   const reportedWrites = new Set((input.writes ?? [])
     .map((write) => absoluteWritePath(write, input.projectDir, input.runDir))
     .filter((path): path is string => path !== undefined)
     .map((path) => resolve(path)));
-  const producedPromptArtifacts = new Set((input.priorProducedPromptArtifacts ?? []).map((path) => resolve(path)));
-  for (const obligation of promptObligations) {
-    const path = resolve(obligation.path);
-    if (reportedWrites.has(path)) {
-      producedPromptArtifacts.add(path);
-      continue;
-    }
-    const before = preimages.get(path);
-    if (before && compareLiveConstraintContentIdentities(
-      before,
-      readLiveConstraintContentIdentity(path),
-    ) === 'different') {
-      producedPromptArtifacts.add(path);
-    }
-  }
+  const producedPromptArtifacts = producedPromptArtifactPaths(input, promptObligations);
   const existenceViolations = obligations.flatMap((obligation): StageArtifactContractViolation[] => {
     try {
       if (existsSync(obligation.path) && statSync(obligation.path).isFile()) {

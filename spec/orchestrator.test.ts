@@ -552,6 +552,40 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
+  it('manual retry of a failed terminal run queues and then launches a fresh run', async () => {
+    const runId = 'failed-plan-run';
+    writeRun(runId, 'failed');
+    const task = registry.create({
+      ...admittedBrief('manual retry fixture'), projectDir: tempDir,
+      status: 'failed', run_id: runId, max_retries: 2,
+    });
+
+    const queued = await orchestrator.retry(task.id);
+    expect(queued).toMatchObject({ status: 'deferred', attempt: 1, defer_kind: 'retry' });
+    expect(queued.run_id).toBeUndefined();
+    expect(systemd.runs).toHaveLength(0);
+
+    advance(31_000);
+    await orchestrator.tickOnce();
+
+    expect(systemd.runs).toHaveLength(1);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 2 });
+    expect(registry.get(task.id)?.run_id).not.toBe(runId);
+    expect(registry.get(task.id)?.systemd_unit).toBe(`flowcrew-task-${task.id}-attempt-2.service`);
+  });
+
+  it('keeps a nonterminal bound run attached when a manual retry is queued', async () => {
+    const runId = 'still-running-run';
+    writeRun(runId, 'running');
+    const task = registry.create({
+      ...admittedBrief('live run retry fixture'), projectDir: tempDir,
+      status: 'running', run_id: runId,
+    });
+    const queued = await orchestrator.retry(task.id);
+    expect(queued).toMatchObject({ status: 'deferred', run_id: runId, attempt: 1 });
+    expect(systemd.runs).toHaveLength(0);
+  });
+
   it('registers and cancels a launched task', async () => {
     mkdirSync(join(tempDir, 'project'), { recursive: true });
     const task = await orchestrator.register({ ...admittedBrief('task'), projectDir: join(tempDir, 'project') });

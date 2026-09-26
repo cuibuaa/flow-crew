@@ -115,7 +115,7 @@ export async function cmdTask(
     if (sub === 'retry') {
       const id = parseId(args[2]);
       const res = await rpc<{ new_attempt: number; unit: string }>({ cmd: 'retry', id });
-      stdout.write(`Task #${id} launch ${res.new_attempt} requested. Unit: ${res.unit}\n`);
+      stdout.write(`Task #${id} retry queued after launch ${res.new_attempt}. Current unit: ${res.unit}\n`);
       return 0;
     }
     if (sub === 'tail') {

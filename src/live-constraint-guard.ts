@@ -2,16 +2,19 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readlinkSync,
   readSync,
   watch,
+  writeFileSync,
   type FSWatcher,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { scopePathDigest } from './runtime-negotiation.js';
 import { stableGeneratedScope } from './generated-path-policy.js';
 
@@ -414,6 +417,35 @@ export interface LiveConstraintIncident {
   scopeRevisionInstruction?: string;
 }
 
+/** Persisted reference to an instruction stored once beside the incident file. */
+export interface LiveConstraintInstructionRef {
+  sha256: string;
+  bytes: number;
+}
+
+export function liveConstraintInstructionFileName(sha256: string): string {
+  return `live_constraint_instruction_${sha256}.txt`;
+}
+
+/**
+ * Restore the instruction text of a persisted incident. Records written before
+ * instructions were stored by reference carry the text inline and pass through.
+ */
+export function resolvePersistedLiveConstraintIncident(
+  stageDir: string,
+  record: LiveConstraintIncident & { scopeRevisionInstructionRef?: LiveConstraintInstructionRef },
+): LiveConstraintIncident {
+  const { scopeRevisionInstructionRef: ref, ...incident } = record;
+  if (!ref || incident.scopeRevisionInstruction !== undefined) return incident;
+  try {
+    const text = readFileSync(join(stageDir, liveConstraintInstructionFileName(ref.sha256)), 'utf-8');
+    if (createHash('sha256').update(text, 'utf-8').digest('hex') !== ref.sha256) return incident;
+    return { ...incident, scopeRevisionInstruction: text };
+  } catch {
+    return incident;
+  }
+}
+
 export interface LiveConstraintMonitorFailure {
   kind: 'monitor_failure';
   stageId: string;
@@ -776,6 +808,7 @@ export class LiveConstraintGuard {
           : undefined;
         const detectedMs = this.now();
         const detectedAt = new Date(detectedMs).toISOString();
+        const scanIncidents: LiveConstraintIncident[] = [];
         for (const violation of result.violations) {
           const observedMs = active.firstObservedAt.get(violation.path) ?? detectedMs;
           const incident: LiveConstraintIncident = {
@@ -806,23 +839,29 @@ export class LiveConstraintGuard {
             effectiveScope: [...this.options.effectiveScope()],
             ...(instruction ? { scopeRevisionInstruction: instruction } : {}),
           };
-          if (!this.appendIncident(incident)) {
-            active.monitorFailure = {
-              kind: 'monitor_failure',
-              stageId: this.options.stageId,
-              attemptIndex: this.options.attemptIndex,
-              invocationIndex: active.index,
-              detectedAt,
-              reason: 'live constraint incident could not be persisted after restoration',
-              lastScanDurationMs: active.lastScanDurationMs,
-              lastScanFileCount: active.lastScanFileCount,
-            };
-            active.abort('live_constraint_monitor_failure');
-            break;
-          }
-          // Comparison-unavailable observations are durable audit evidence but
-          // are not writes and therefore do not enter the worker's correction
-          // loop or abort the invocation.
+          scanIncidents.push(incident);
+        }
+        // One scan can report thousands of paths, and the instruction names all
+        // of them; persist the scan's incidents in a single write and the shared
+        // instruction once, so record size does not grow with the path count.
+        if (!this.appendIncidents(scanIncidents)) {
+          active.monitorFailure = {
+            kind: 'monitor_failure',
+            stageId: this.options.stageId,
+            attemptIndex: this.options.attemptIndex,
+            invocationIndex: active.index,
+            detectedAt,
+            reason: 'live constraint incident could not be persisted after restoration',
+            lastScanDurationMs: active.lastScanDurationMs,
+            lastScanFileCount: active.lastScanFileCount,
+          };
+          active.abort('live_constraint_monitor_failure');
+          break;
+        }
+        // Comparison-unavailable observations are durable audit evidence but
+        // are not writes and therefore do not enter the worker's correction
+        // loop or abort the invocation.
+        for (const incident of scanIncidents) {
           if (incident.changeObserved) active.incidents.push(incident);
         }
         if (active.monitorFailure) break;
@@ -883,16 +922,26 @@ export class LiveConstraintGuard {
     };
   }
 
-  private appendIncident(incident: LiveConstraintIncident): boolean {
-    const path = join(
-      this.options.runDir,
-      'stages',
-      this.options.stageId,
-      `live_constraint_incidents_attempt_${this.options.attemptIndex}.jsonl`,
-    );
+  private appendIncidents(incidents: readonly LiveConstraintIncident[]): boolean {
+    if (incidents.length === 0) return true;
+    const stageDir = join(this.options.runDir, 'stages', this.options.stageId);
+    const path = join(stageDir, `live_constraint_incidents_attempt_${this.options.attemptIndex}.jsonl`);
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      appendFileSync(path, `${JSON.stringify(incident)}\n`, 'utf-8');
+      mkdirSync(stageDir, { recursive: true });
+      const written = new Set<string>();
+      const lines = incidents.map((incident) => {
+        if (incident.scopeRevisionInstruction === undefined) return JSON.stringify(incident);
+        const { scopeRevisionInstruction: text, ...rest } = incident;
+        const sha256 = createHash('sha256').update(text, 'utf-8').digest('hex');
+        if (!written.has(sha256)) {
+          const sidecar = join(stageDir, liveConstraintInstructionFileName(sha256));
+          if (!existsSync(sidecar)) writeFileSync(sidecar, text, 'utf-8');
+          written.add(sha256);
+        }
+        const ref: LiveConstraintInstructionRef = { sha256, bytes: Buffer.byteLength(text, 'utf-8') };
+        return JSON.stringify({ ...rest, scopeRevisionInstructionRef: ref });
+      });
+      appendFileSync(path, `${lines.join('\n')}\n`, 'utf-8');
       return true;
     } catch {
       return false;

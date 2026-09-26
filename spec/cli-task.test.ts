@@ -317,6 +317,7 @@ describe('cmdTask', () => {
     expect(await cmdTask(['task', 'tail', '1', '--tail', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
 
     expect(requests.map((r) => r.cmd)).toEqual(['show', 'cancel', 'retry', 'tail']);
+    expect(out.text()).toContain('retry queued after launch 2');
     expect(out.text()).toContain('journal');
   });
 
