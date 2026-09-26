@@ -1,4 +1,4 @@
-import { readFileSync, readlinkSync, realpathSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch, type Stats } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
@@ -103,7 +103,7 @@ import {
   resolveCampaignStorageKey,
 } from './campaigns.js';
 import { formatCampaignContextBlock, selectRelevantCampaignContext } from './campaign-context.js';
-import { readRunEvents, recordRunEvent, recordStageOutcome } from './run-events.js';
+import { readRunEvents, recordRunEvent, recordStageOutcome, type RunEvent } from './run-events.js';
 import { readKG, summarizeKG, ratchetCheck, markDeadEnd, updateMetadata } from './knowledge-graph.js';
 import { appendTraceEvent } from './trace.js';
 import { generateRunSummary } from './run-summary.js';
@@ -113,8 +113,11 @@ import {
   SCOPE_REVISION_REQUEST_FILE,
   isLiveConstraintExemptDirectory,
   isLiveConstraintExemptPath,
+  parseLiveConstraintGitIndexEntries,
   scopeRevisionContract,
   scopeRevisionInstruction,
+  type LiveConstraintGitIndexEntry,
+  type LiveConstraintGitIndexEntryKind,
   type LiveConstraintGuardOptions,
   type LiveConstraintGuardFactory,
   type LiveConstraintIncident,
@@ -142,6 +145,10 @@ import {
   type ProjectValidationDependencies,
   type ValidationDeltaResult,
 } from './project-validation.js';
+import {
+  inspectValidationPlanConflicts,
+  type ValidationPlanConflict,
+} from './validation-plan-conflicts.js';
 import {
   ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES,
   stableGeneratedScope,
@@ -174,6 +181,7 @@ import {
   type PlanRetryRequirement,
   type PreparedPlanRetryCandidate,
 } from './plan-retry-monotone.js';
+import { isGenericPathLexeme } from './path-lexeme.js';
 
 const log = createLogger({ name: 'scheduler' });
 const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
@@ -3762,6 +3770,325 @@ export const WorkflowConfigSchema = z.object({
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
+export interface SupervisorReplanSignalV2 {
+  version: 2;
+  assessmentId: string;
+  targetStage: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  evidenceIds: string[];
+  reason: string;
+  timestamp: string;
+}
+
+export interface SupervisorReplanFreshness {
+  decision: 'replay' | 'discard';
+  signalVersion: 'legacy' | 'legacy_resolved' | 2 | 'malformed_v2';
+  reason: string;
+  supersedingAssessmentIds: string[];
+  completedTarget: boolean;
+  relatedAcceptedGateIds: string[];
+}
+
+interface SupervisorActionRecord {
+  timestamp: string;
+  verdict: string;
+  targetStage?: string;
+  reason: string;
+  targetAttemptIndex?: number;
+  attemptStartedAt?: string;
+  assessmentId?: string;
+  supersedesAssessmentId?: string;
+  evidenceIds?: string[];
+}
+
+export interface ReconciledSupervisorReplan {
+  signal: unknown;
+  events: RunEvent[];
+  identitySource: 'structured_signal' | 'supervisor_state' | 'supervisor_log' | 'unresolved_legacy';
+}
+
+function supervisorActionRecordsFromState(value: unknown): SupervisorActionRecord[] {
+  if (!value || typeof value !== 'object') return [];
+  const actions = (value as { actions?: unknown }).actions;
+  if (!Array.isArray(actions)) return [];
+  return actions.flatMap((raw): SupervisorActionRecord[] => {
+    if (!raw || typeof raw !== 'object') return [];
+    const action = raw as Record<string, unknown>;
+    const direction = action.directionEvidence && typeof action.directionEvidence === 'object'
+      ? action.directionEvidence as Record<string, unknown>
+      : undefined;
+    if (typeof action.timestamp !== 'string'
+      || !Number.isFinite(Date.parse(action.timestamp))
+      || typeof action.verdict !== 'string'
+      || typeof action.reason !== 'string') return [];
+    const evidenceIds = Array.isArray(action.evidenceIds)
+      ? action.evidenceIds.filter((id): id is string => typeof id === 'string' && /^ev_[0-9a-f]{20}$/.test(id))
+      : undefined;
+    return [{
+      timestamp: action.timestamp,
+      verdict: action.verdict,
+      reason: action.reason,
+      ...(typeof action.targetStage === 'string' && action.targetStage ? { targetStage: action.targetStage } : {}),
+      ...(Number.isSafeInteger(action.targetAttemptIndex)
+        ? { targetAttemptIndex: Number(action.targetAttemptIndex) }
+        : Number.isSafeInteger(direction?.attemptIndex)
+          ? { targetAttemptIndex: Number(direction?.attemptIndex) }
+          : {}),
+      ...(typeof direction?.attemptStartedAt === 'string' && Number.isFinite(Date.parse(direction.attemptStartedAt))
+        ? { attemptStartedAt: direction.attemptStartedAt }
+        : {}),
+      ...(typeof action.assessmentId === 'string' && /^sa_[0-9a-f]{20}$/.test(action.assessmentId)
+        ? { assessmentId: action.assessmentId }
+        : {}),
+      ...(typeof action.supersedesAssessmentId === 'string' && /^sa_[0-9a-f]{20}$/.test(action.supersedesAssessmentId)
+        ? { supersedesAssessmentId: action.supersedesAssessmentId }
+        : {}),
+      ...(evidenceIds?.length ? { evidenceIds } : {}),
+    }];
+  });
+}
+
+function supervisorActionRecordsFromLog(value: string): SupervisorActionRecord[] {
+  const sections = value.split(/(?=^## Tick \d+ — )/m);
+  return sections.flatMap((section): SupervisorActionRecord[] => {
+    const timestamp = /^## Tick \d+ — (\S+)$/m.exec(section)?.[1];
+    const verdict = /^Verdict: \*\*([A-Z]+)\*\*(?: → (.+))?$/m.exec(section);
+    const reason = /^Reason: (.*)$/m.exec(section)?.[1];
+    if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || !verdict || reason === undefined) return [];
+    const attempt = /^Direction evidence: attempt (\d+) · [0-9a-f]{64}$/m.exec(section)?.[1];
+    const assessmentId = /^Assessment id: (sa_[0-9a-f]{20})$/m.exec(section)?.[1];
+    const supersedesAssessmentId = /^Supersedes: (sa_[0-9a-f]{20})$/m.exec(section)?.[1];
+    const cited = /^Cited evidence: (.+)$/m.exec(section)?.[1]
+      ?.split(', ')
+      .filter((id) => /^ev_[0-9a-f]{20}$/.test(id));
+    return [{
+      timestamp,
+      verdict: verdict[1],
+      reason,
+      ...(verdict[2]?.trim() ? { targetStage: verdict[2].trim() } : {}),
+      ...(attempt ? { targetAttemptIndex: Number(attempt) } : {}),
+      ...(assessmentId ? { assessmentId } : {}),
+      ...(supersedesAssessmentId ? { supersedesAssessmentId } : {}),
+      ...(cited?.length ? { evidenceIds: cited } : {}),
+    }];
+  });
+}
+
+/** Reconcile the old one-shot `{reason,timestamp}` signal with the structured
+ * supervisor action record that created it. The match is exact on reason and
+ * bounded to one minute around publication; ambiguous or incomplete matches
+ * remain legacy and cannot acquire discard authority. */
+export function reconcileSupervisorReplan(input: {
+  signal: unknown;
+  events: readonly RunEvent[];
+  supervisorState?: unknown;
+  supervisorLog?: string;
+}): ReconciledSupervisorReplan {
+  const stateActions = supervisorActionRecordsFromState(input.supervisorState);
+  const logActions = supervisorActionRecordsFromLog(input.supervisorLog ?? '');
+  const actionKey = (action: SupervisorActionRecord): string => JSON.stringify([
+    action.timestamp, action.verdict, action.targetStage ?? null, action.reason,
+  ]);
+  const stateActionKeys = new Set(stateActions.map(actionKey));
+  const actionByKey = new Map<string, SupervisorActionRecord>();
+  for (const action of logActions) actionByKey.set(actionKey(action), action);
+  // The bounded JSON state carries attempt identity that the Markdown log does
+  // not, so it wins when both serialize the same assessment.
+  for (const action of stateActions) actionByKey.set(actionKey(action), action);
+  const actions = [...actionByKey.values()];
+  const actionEvents: RunEvent[] = actions.flatMap((action): RunEvent[] => (
+    action.assessmentId
+      ? [{
+          type: 'supervisor_assessment',
+          runId: input.events[0]?.runId ?? 'unknown',
+          timestamp: action.timestamp,
+          stageId: action.targetStage,
+          attemptIndex: action.targetAttemptIndex,
+          attemptStartedAt: action.attemptStartedAt,
+          assessmentId: action.assessmentId,
+          supersedesAssessmentId: action.supersedesAssessmentId,
+          supervisorVerdict: action.verdict,
+          evidenceIds: action.evidenceIds,
+          detail: action.reason,
+          source: 'supervisor',
+        }]
+      : []
+  ));
+  const events = [...input.events, ...actionEvents].filter((event, index, all) => (
+    all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(event)) === index
+  ));
+  if (supervisorReplanSignalV2(input.signal)) {
+    return { signal: input.signal, events, identitySource: 'structured_signal' };
+  }
+  const legacy = input.signal && typeof input.signal === 'object'
+    ? input.signal as { version?: unknown; reason?: unknown; timestamp?: unknown }
+    : undefined;
+  if (legacy?.version === 2
+    || typeof legacy?.reason !== 'string'
+    || typeof legacy.timestamp !== 'string'
+    || !Number.isFinite(Date.parse(legacy.timestamp))) {
+    return { signal: input.signal, events, identitySource: 'unresolved_legacy' };
+  }
+  const signalAt = Date.parse(legacy.timestamp);
+  const candidates = actions
+    .filter((action) => (
+      action.verdict === 'REPLAN'
+      && action.reason === legacy.reason
+      && action.targetStage
+      && Math.abs(Date.parse(action.timestamp) - signalAt) <= 60_000
+    ))
+    .sort((left, right) => (
+      Math.abs(Date.parse(left.timestamp) - signalAt) - Math.abs(Date.parse(right.timestamp) - signalAt)
+    ));
+  if (candidates.length === 0) {
+    return { signal: input.signal, events, identitySource: 'unresolved_legacy' };
+  }
+  const closestDistance = Math.abs(Date.parse(candidates[0].timestamp) - signalAt);
+  if (candidates.length > 1
+    && Math.abs(Date.parse(candidates[1].timestamp) - signalAt) === closestDistance) {
+    return { signal: input.signal, events, identitySource: 'unresolved_legacy' };
+  }
+  const action = candidates[0];
+  const started = [...events]
+    .filter((event) => (
+      event.type === 'attempt_started'
+      && event.stageId === action.targetStage
+      && (action.targetAttemptIndex === undefined || event.attemptIndex === action.targetAttemptIndex)
+      && Date.parse(event.timestamp) <= signalAt
+      && typeof event.attemptIndex === 'number'
+      && typeof event.attemptStartedAt === 'string'
+    ))
+    .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0];
+  const attemptIndex = action.targetAttemptIndex ?? started?.attemptIndex;
+  const attemptStartedAt = action.attemptStartedAt ?? started?.attemptStartedAt;
+  if (typeof attemptIndex !== 'number'
+    || !Number.isSafeInteger(attemptIndex)
+    || typeof attemptStartedAt !== 'string'
+    || !Number.isFinite(Date.parse(attemptStartedAt))) {
+    return { signal: input.signal, events, identitySource: 'unresolved_legacy' };
+  }
+  const assessmentId = action.assessmentId ?? `sa_${createHash('sha256').update(JSON.stringify([
+    action.timestamp,
+    action.targetStage,
+    action.targetAttemptIndex,
+    action.reason,
+  ])).digest('hex').slice(0, 20)}`;
+  return {
+    signal: {
+      version: 2,
+      assessmentId,
+      targetStage: action.targetStage!,
+      attemptIndex,
+      attemptStartedAt,
+      evidenceIds: action.evidenceIds ?? [],
+      reason: legacy.reason,
+      timestamp: legacy.timestamp,
+    } satisfies SupervisorReplanSignalV2,
+    events,
+    identitySource: stateActionKeys.has(actionKey(action)) ? 'supervisor_state' : 'supervisor_log',
+  };
+}
+
+function supervisorReplanSignalV2(value: unknown): SupervisorReplanSignalV2 | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const signal = value as Partial<SupervisorReplanSignalV2>;
+  if (signal.version !== 2
+    || typeof signal.assessmentId !== 'string' || !/^sa_[0-9a-f]{20}$/.test(signal.assessmentId)
+    || typeof signal.targetStage !== 'string' || !signal.targetStage
+    || !Number.isSafeInteger(signal.attemptIndex)
+    || typeof signal.attemptStartedAt !== 'string' || !Number.isFinite(Date.parse(signal.attemptStartedAt))
+    || !Array.isArray(signal.evidenceIds) || !signal.evidenceIds.every((id) => typeof id === 'string')
+    || typeof signal.reason !== 'string'
+    || typeof signal.timestamp !== 'string' || !Number.isFinite(Date.parse(signal.timestamp))) return undefined;
+  return signal as SupervisorReplanSignalV2;
+}
+
+function transitivelyDependsOnStage(
+  stage: StageConfig,
+  targetStage: string,
+  byId: ReadonlyMap<string, StageConfig>,
+  seen = new Set<string>(),
+): boolean {
+  if (stage.depends_on.includes(targetStage)) return true;
+  if (seen.has(stage.id)) return false;
+  seen.add(stage.id);
+  return stage.depends_on.some((dependency) => {
+    const parent = byId.get(dependency);
+    return parent ? transitivelyDependsOnStage(parent, targetStage, byId, seen) : false;
+  });
+}
+
+/** Decide whether a retained structured REPLAN is still current. Legacy
+ * signals remain replayable because they carry no target/assessment identity
+ * with which to prove staleness. */
+export function evaluateSupervisorReplanFreshness(input: {
+  signal: unknown;
+  events: readonly RunEvent[];
+  stages: readonly StageConfig[];
+  passedGateIds: readonly string[];
+}): SupervisorReplanFreshness {
+  const raw = input.signal && typeof input.signal === 'object'
+    ? input.signal as { version?: unknown }
+    : {};
+  if (raw.version !== 2) {
+    return {
+      decision: 'replay',
+      signalVersion: 'legacy',
+      reason: 'legacy REPLAN has no structured identity with which to prove staleness',
+      supersedingAssessmentIds: [],
+      completedTarget: false,
+      relatedAcceptedGateIds: [],
+    };
+  }
+  const signal = supervisorReplanSignalV2(input.signal);
+  if (!signal) {
+    return {
+      decision: 'discard',
+      signalVersion: 'malformed_v2',
+      reason: 'version-2 REPLAN is malformed and cannot authorize a pivot instruction',
+      supersedingAssessmentIds: [],
+      completedTarget: false,
+      relatedAcceptedGateIds: [],
+    };
+  }
+  const signalAt = Date.parse(signal.timestamp);
+  const laterEvents = input.events.filter((event) => Date.parse(event.timestamp) > signalAt);
+  const supersedingAssessmentIds = [...new Set(laterEvents.flatMap((event) => (
+    event.type === 'supervisor_assessment'
+    && event.supersedesAssessmentId === signal.assessmentId
+    && event.assessmentId
+      ? [event.assessmentId]
+      : []
+  )))].sort();
+  const completedTarget = laterEvents.some((event) => (
+    event.type === 'stage_complete'
+    && event.stageId === signal.targetStage
+    && (event.attemptIndex === undefined || event.attemptIndex === signal.attemptIndex)
+    && (event.attemptStartedAt === undefined || event.attemptStartedAt === signal.attemptStartedAt)
+  ));
+  const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
+  const relatedGateIds = new Set(input.stages
+    .filter((stage) => stage.is_gate && transitivelyDependsOnStage(stage, signal.targetStage, byId))
+    .map((stage) => stage.id));
+  const relatedAcceptedGateIds = [...new Set(input.passedGateIds.filter((gateId) => relatedGateIds.has(gateId)))].sort();
+  const decidingFacts = [
+    ...(supersedingAssessmentIds.length > 0 ? [`superseded by ${supersedingAssessmentIds.join(', ')}`] : []),
+    ...(completedTarget ? [`target ${signal.targetStage} execution ${signal.attemptIndex} subsequently completed`] : []),
+    ...(relatedAcceptedGateIds.length > 0 ? [`related gate(s) accepted: ${relatedAcceptedGateIds.join(', ')}`] : []),
+  ];
+  return {
+    decision: decidingFacts.length > 0 ? 'discard' : 'replay',
+    signalVersion: 2,
+    reason: decidingFacts.length > 0
+      ? decidingFacts.join('; ')
+      : 'no later supersession, target completion, or related gate acceptance was recorded',
+    supersedingAssessmentIds,
+    completedTarget,
+    relatedAcceptedGateIds,
+  };
+}
+
 const RESEARCH_DECISION_STATUS_ALIASES = new Map<string, string>([
   [RUN_STATUS.SHIPPED, 'ship'],
   [RUN_STATUS.CEILING_HIT, 'stop_ceiling'],
@@ -4344,7 +4671,9 @@ interface RepairFileImage {
   /** In-memory rollback bytes; omitted from serialized audit artifacts. */
   bytes?: Buffer;
   symlink?: boolean;
-  type?: 'file' | 'symlink';
+  type?: 'file' | 'symlink' | 'gitlink' | 'sparse_tree' | 'unmerged';
+  /** The index kind stays explicit even when filesystem bytes are readable. */
+  indexEntryKind?: LiveConstraintGitIndexEntryKind;
   /** Git blob identity proves bytes even when the blob cannot be materialized. */
   gitObjectId?: string;
   /** Exact preimage bytes could not be obtained; never interpret this as absence. */
@@ -4358,7 +4687,7 @@ interface RepairFileImage {
 interface RepairFileFingerprint {
   sha256: string;
   byteLength: number;
-  type: 'file' | 'symlink';
+  type: 'file' | 'symlink' | 'gitlink' | 'sparse_tree' | 'unmerged';
   mode: number;
 }
 
@@ -4371,7 +4700,7 @@ interface RunRollbackBaseline {
   cleanTracked: Set<string>;
   /** Immutable Git-index membership. Unlike cleanTracked, authorized writes never remove this proof. */
   trackedPaths: Set<string>;
-  gitIndexEntries: Map<string, { objectId: string; mode: string }>;
+  gitIndexEntries: Map<string, LiveConstraintGitIndexEntry[]>;
   gitRoot?: string;
   journal: Map<string, number>;
   journalSequence: number;
@@ -4696,18 +5025,138 @@ function describeRepairError(error: unknown): string {
   return `${code}${error.message}`;
 }
 
-function readRepairFileImage(projectDir: string, relativePath: string): RepairFileImage {
+function stageZeroIndexEntry(entries: readonly LiveConstraintGitIndexEntry[] | undefined): LiveConstraintGitIndexEntry | undefined {
+  return entries?.find((entry) => entry.stage === 0);
+}
+
+function indexEntryKind(entries: readonly LiveConstraintGitIndexEntry[] | undefined): LiveConstraintGitIndexEntryKind | undefined {
+  const stageZero = stageZeroIndexEntry(entries);
+  if (stageZero) return stageZero.kind;
+  return entries?.length ? 'unmerged' : undefined;
+}
+
+/** Gitlinks are one superproject entry even when their initialized worktree is
+ * a populated directory. Collapse descendant notifications and scans to that
+ * entry instead of treating submodule-owned files as untracked superproject
+ * writes. */
+function trackedGitlinkAncestor(
+  baseline: Pick<RunRollbackBaseline, 'gitIndexEntries'>,
+  rawPath: string,
+): string | undefined {
+  let path = normalizedProjectPath(rawPath);
+  while (path) {
+    if (stageZeroIndexEntry(baseline.gitIndexEntries.get(path))?.kind === 'gitlink') return path;
+    const separator = path.lastIndexOf('/');
+    if (separator < 0) break;
+    path = path.slice(0, separator);
+  }
+  return undefined;
+}
+
+function readGitlinkFileImage(
+  projectDir: string,
+  normalized: string,
+  entry: LiveConstraintGitIndexEntry,
+  stat: Stats,
+): RepairFileImage {
+  const absolute = join(projectDir, normalized);
+  if (!stat.isDirectory()) {
+    return {
+      exists: true,
+      type: 'gitlink',
+      indexEntryKind: 'gitlink',
+      gitObjectId: entry.objectId,
+      mode: stat.mode & 0o7777,
+      inspectionFailure: `gitlink worktree path ${normalized} is not a directory`,
+    };
+  }
+  let names: string[];
+  try { names = readdirSync(absolute).sort(); } catch (error) {
+    return {
+      exists: true,
+      type: 'gitlink',
+      indexEntryKind: 'gitlink',
+      gitObjectId: entry.objectId,
+      mode: stat.mode & 0o7777,
+      inspectionFailure: `could not inspect gitlink directory ${normalized}: ${describeRepairError(error)}`,
+    };
+  }
+  if (names.length === 0) {
+    const identity = Buffer.from(`gitlink\0${entry.objectId}\0uninitialized-empty-directory`, 'utf-8');
+    return {
+      exists: true,
+      type: 'gitlink',
+      indexEntryKind: 'gitlink',
+      gitObjectId: entry.objectId,
+      sha256: createHash('sha256').update(identity).digest('hex'),
+      byteLength: 0,
+      binary: false,
+      mode: stat.mode & 0o7777,
+    };
+  }
+  try {
+    const head = execFileSync('git', ['-C', absolute, 'rev-parse', '--verify', 'HEAD'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+    }).trim();
+    const status = execFileSync('git', ['-C', absolute, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const identity = Buffer.concat([
+      Buffer.from(`gitlink\0${entry.objectId}\0${head}\0`, 'utf-8'),
+      status,
+    ]);
+    return {
+      exists: true,
+      type: 'gitlink',
+      indexEntryKind: 'gitlink',
+      gitObjectId: entry.objectId,
+      sha256: createHash('sha256').update(identity).digest('hex'),
+      byteLength: identity.byteLength,
+      binary: true,
+      mode: stat.mode & 0o7777,
+    };
+  } catch (error) {
+    return {
+      exists: true,
+      type: 'gitlink',
+      indexEntryKind: 'gitlink',
+      gitObjectId: entry.objectId,
+      mode: stat.mode & 0o7777,
+      inspectionFailure: `gitlink worktree representation is unavailable for ${normalized}: ${describeRepairError(error)}`,
+    };
+  }
+}
+
+function readRepairFileImage(
+  projectDir: string,
+  relativePath: string,
+  indexEntries?: readonly LiveConstraintGitIndexEntry[],
+): RepairFileImage {
   const normalized = normalizedProjectPath(relativePath);
   if (!normalized) return { exists: false, provenance: 'unknown' };
   const absolute = join(projectDir, normalized);
+  const kind = indexEntryKind(indexEntries);
+  const stageZero = stageZeroIndexEntry(indexEntries);
   let stat: ReturnType<typeof lstatSync>;
   try {
     stat = lstatSync(absolute);
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
     return code === 'ENOENT' || code === 'ENOTDIR'
-      ? { exists: false, provenance: 'observed' }
+      ? { exists: false, provenance: 'observed', ...(kind ? { indexEntryKind: kind } : {}) }
       : { exists: false, provenance: 'unknown', inspectionFailure: `could not inspect ${normalized}: ${describeRepairError(error)}` };
+  }
+  if (stageZero?.kind === 'gitlink') return readGitlinkFileImage(projectDir, normalized, stageZero, stat);
+  if (stageZero?.kind === 'sparse_tree') {
+    return {
+      exists: true,
+      type: 'sparse_tree',
+      indexEntryKind: 'sparse_tree',
+      gitObjectId: stageZero.objectId,
+      mode: stat.mode & 0o7777,
+      inspectionFailure: `sparse index tree ${normalized} has no file-level worktree representation`,
+    };
   }
   if (stat.isSymbolicLink()) {
     try {
@@ -4723,18 +5172,20 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
         ...(text === undefined ? {} : { text }),
         symlink: true,
         type: 'symlink',
+        ...(kind ? { indexEntryKind: kind } : {}),
         mode: stat.mode & 0o7777,
       };
     } catch (error) {
       return {
         exists: true,
         type: 'symlink',
+        ...(kind ? { indexEntryKind: kind } : {}),
         mode: stat.mode & 0o7777,
         materializationFailure: `could not read symbolic-link preimage ${normalized}: ${describeRepairError(error)}`,
       };
     }
   }
-  if (!stat.isFile()) return { exists: false, provenance: 'unknown' };
+  if (!stat.isFile()) return { exists: false, provenance: 'unknown', ...(kind ? { indexEntryKind: kind } : {}) };
   try {
     const bytes = readFileSync(absolute);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -4743,12 +5194,13 @@ function readRepairFileImage(projectDir: string, relativePath: string): RepairFi
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary/non-UTF8 */ }
     }
     return text === undefined
-      ? { exists: true, sha256, byteLength: bytes.byteLength, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777 }
-      : { exists: true, sha256, byteLength: bytes.byteLength, binary: false, text, type: 'file', mode: stat.mode & 0o7777 };
+      ? { exists: true, sha256, byteLength: bytes.byteLength, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}) }
+      : { exists: true, sha256, byteLength: bytes.byteLength, binary: false, text, type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}) };
   } catch (error) {
     return {
       exists: true,
       type: 'file',
+      ...(kind ? { indexEntryKind: kind } : {}),
       mode: stat.mode & 0o7777,
       materializationFailure: `could not read regular-file preimage ${normalized}: ${describeRepairError(error)}`,
     };
@@ -4769,21 +5221,6 @@ function rollbackListedPaths(output: string): string[] {
   return nulPaths(output).filter((path) => !path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part)));
 }
 
-function gitIndexEntries(output: string): Map<string, { objectId: string; mode: string }> {
-  const entries = new Map<string, { objectId: string; mode: string }>();
-  for (const record of output.split('\0')) {
-    if (!record) continue;
-    const tab = record.indexOf('\t');
-    if (tab < 0) continue;
-    const [mode, objectId, stage] = record.slice(0, tab).split(' ');
-    const path = record.slice(tab + 1).replace(/\\/g, '/');
-    if (stage === '0' && mode && /^[0-9a-f]{40,64}$/i.test(objectId ?? '') && path) {
-      entries.set(path, { objectId, mode });
-    }
-  }
-  return entries;
-}
-
 function gitOutput(projectDir: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd: projectDir,
@@ -4799,8 +5236,9 @@ function rollbackBaselineKey(projectDir: string, runDirPath?: string): string {
 }
 
 function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void {
-  const path = normalizedProjectPath(rawPath);
-  if (!path || path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) return;
+  const observedPath = normalizedProjectPath(rawPath);
+  if (!observedPath || observedPath.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) return;
+  const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
   baseline.journalSequence++;
   baseline.journal.set(path, baseline.journalSequence);
   if (baseline.runDirPath) {
@@ -4818,7 +5256,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   const fingerprints = new Map<string, RepairFileFingerprint>();
   const cleanTracked = new Set<string>();
   const trackedPaths = new Set<string>();
-  const indexEntries = new Map<string, { objectId: string; mode: string }>();
+  const indexEntries = new Map<string, LiveConstraintGitIndexEntry[]>();
   let filesEnumerated = 0;
   let filesRead = 0;
   let filesHashed = 0;
@@ -4828,10 +5266,10 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   let gitRoot: string | undefined;
   try {
     gitRoot = gitOutput(projectDir, ['rev-parse', '--show-toplevel']).trim();
-    const trackedEntries = gitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
+    const trackedEntries = parseLiveConstraintGitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
     for (const path of trackedEntries.keys()) trackedPaths.add(path);
     const tracked = new Set(trackedEntries.keys());
-    for (const [path, entry] of trackedEntries) indexEntries.set(path, entry);
+    for (const [path, entries] of trackedEntries) indexEntries.set(path, entries);
     const dirty = new Set([
       // Every tracked path remains guardable even when it lives below a cache
       // directory. Preserve a dirty run-start preimage instead of restoring
@@ -4846,7 +5284,23 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     filesEnumerated = tracked.size + [...dirty].filter((path) => !tracked.has(path)).length;
     for (const path of tracked) if (!dirty.has(path)) cleanTracked.add(path);
     for (const path of dirty) {
-      const image = readRepairFileImage(projectDir, path);
+      const image = readRepairFileImage(projectDir, path, indexEntries.get(path));
+      images.set(path, image);
+      const fingerprint = repairFileFingerprint(image);
+      if (fingerprint) fingerprints.set(path, fingerprint);
+      filesRead++;
+      bytesRead += repairFileImageBytes(image);
+      if (image.exists) {
+        filesHashed++;
+        bytesHashed += repairFileImageBytes(image);
+      }
+    }
+    // A clean blob can be recreated from its immutable index object lazily. A
+    // gitlink's initialized/uninitialized worktree state cannot, so freeze it
+    // now, before any stage can change a nested repository.
+    for (const [path, entries] of trackedEntries) {
+      if (stageZeroIndexEntry(entries)?.kind !== 'gitlink' || images.has(path)) continue;
+      const image = readRepairFileImage(projectDir, path, entries);
       images.set(path, image);
       const fingerprint = repairFileFingerprint(image);
       if (fingerprint) fingerprints.set(path, fingerprint);
@@ -4886,7 +5340,9 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
         return;
       }
       const path = name.toString().replace(/\\/g, '/');
+      const gitlink = trackedGitlinkAncestor(baseline, path);
       noteRollbackPath(baseline, path);
+      if (gitlink) return;
       try {
         if (lstatSync(join(projectDir, path)).isDirectory()) {
           for (const nested of listProjectFilesAt(projectDir, path)) noteRollbackPath(baseline, nested);
@@ -4918,8 +5374,9 @@ function ensureRollbackBaseline(projectDir: string, runDirPath?: string): { base
 
 function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): RepairFileImage {
   if (!baseline.gitRoot || !baseline.cleanTracked.has(path)) return { exists: false, provenance: 'unknown' };
-  const entry = baseline.gitIndexEntries.get(path);
-  if (!entry) {
+  const entries = baseline.gitIndexEntries.get(path);
+  const entry = stageZeroIndexEntry(entries);
+  if (!entries?.length) {
     const image: RepairFileImage = {
       exists: true,
       type: 'file',
@@ -4928,8 +5385,32 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     baseline.images.set(path, image);
     return image;
   }
+  if (!entry) {
+    const image = readRepairFileImage(baseline.projectDir, path, entries);
+    if (!image.indexEntryKind) image.indexEntryKind = 'unmerged';
+    baseline.images.set(path, image);
+    return image;
+  }
+  if (entry.kind === 'gitlink') {
+    const image = readRepairFileImage(baseline.projectDir, path, entries);
+    baseline.images.set(path, image);
+    const fingerprint = repairFileFingerprint(image);
+    if (fingerprint) baseline.fingerprints.set(path, fingerprint);
+    return image;
+  }
+  if (entry.kind === 'sparse_tree' || entry.kind === 'unknown') {
+    const image: RepairFileImage = {
+      exists: true,
+      type: entry.kind === 'sparse_tree' ? 'sparse_tree' : 'file',
+      indexEntryKind: entry.kind,
+      gitObjectId: entry.objectId,
+      materializationFailure: `Git index kind ${entry.kind} cannot be materialized as a file preimage for ${path}`,
+    };
+    baseline.images.set(path, image);
+    return image;
+  }
   const rawMode = Number.parseInt(entry.mode, 8);
-  const symlink = entry.mode === '120000';
+  const symlink = entry.kind === 'symlink';
   try {
     const bytes = execFileSync('git', ['cat-file', 'blob', entry.objectId], {
       cwd: baseline.projectDir, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'],
@@ -4947,6 +5428,7 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
       ...(symlink || text === undefined ? { bytes } : {}),
       ...(text === undefined ? {} : { text }),
       ...(symlink ? { symlink: true, type: 'symlink' as const } : { type: 'file' as const }),
+      indexEntryKind: entry.kind,
       mode: symlink ? 0o777 : (Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644),
     };
     baseline.images.set(path, image);
@@ -4957,6 +5439,7 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     const image: RepairFileImage = {
       exists: true,
       type: symlink ? 'symlink' : 'file',
+      indexEntryKind: entry.kind,
       mode: symlink ? 0o777 : (Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644),
       gitObjectId: entry.objectId,
       materializationFailure: `could not materialize Git preimage for ${path}: ${describeRepairError(error)}`,
@@ -4980,8 +5463,16 @@ function baselineImage(baseline: RunRollbackBaseline, path: string): RepairFileI
   return { exists: false, provenance: 'observed' };
 }
 
+function readRollbackCurrentImage(
+  baseline: RunRollbackBaseline,
+  projectDir: string,
+  path: string,
+): RepairFileImage {
+  return readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path));
+}
+
 function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
-  const image = readRepairFileImage(projectDir, path);
+  const image = readRollbackCurrentImage(baseline, projectDir, path);
   baseline.images.set(path, image);
   const fingerprint = repairFileFingerprint(image);
   if (fingerprint) baseline.fingerprints.set(path, fingerprint);
@@ -5070,11 +5561,17 @@ function changedProjectPathsSinceSnapshot(
           .filter(([, sequence]) => sequence > snapshot.journalCursor)
           .map(([path]) => path),
       ])
-    : new Set([...listProjectFiles(projectDir), ...baseline.images.keys(), ...snapshot.files.keys()]);
+    : new Set([
+        ...listProjectFiles(projectDir, {
+          skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
+        }),
+        ...baseline.images.keys(),
+        ...snapshot.files.keys(),
+      ]);
   if (!baseline.reliable) snapshot.measurement.conservativeFallback = true;
   return [...candidates].sort().filter((path) => {
     const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
-    const after = readRepairFileImage(projectDir, path);
+    const after = readRollbackCurrentImage(baseline, projectDir, path);
     return compareRepairFileContents(before, after) === 'different';
   });
 }
@@ -5103,32 +5600,53 @@ export function captureRepairRoundSnapshot(
   }
 
   const scopedPaths = new Set<string>();
+  const addScopedTree = (root: string): void => {
+    const gitlink = trackedGitlinkAncestor(baseline, root);
+    if (gitlink) {
+      scopedPaths.add(gitlink);
+      return;
+    }
+    for (const path of listProjectFilesAt(projectDir, root)) scopedPaths.add(path);
+  };
   if (captureAll) {
-    for (const path of listProjectFiles(projectDir)) scopedPaths.add(path);
+    for (const path of listProjectFiles(projectDir, {
+      skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
+    })) scopedPaths.add(path);
+    for (const [path, entries] of baseline.gitIndexEntries) {
+      if (stageZeroIndexEntry(entries)?.kind === 'gitlink') scopedPaths.add(path);
+    }
   } else {
     for (const scope of parsedScopes) {
       if (scope.kind === 'exact' || scope.kind === 'tree') {
-        for (const path of listProjectFilesAt(projectDir, scope.value)) scopedPaths.add(path);
+        addScopedTree(scope.value);
         if (scope.kind === 'exact') scopedPaths.add(scope.value);
       } else if (scope.kind === 'glob') {
         if (!scope.directoryPrefix) {
-          for (const path of listProjectFiles(projectDir)) scopedPaths.add(path);
+          for (const path of listProjectFiles(projectDir, {
+            skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
+          })) scopedPaths.add(path);
         } else {
-          for (const path of listProjectFilesAt(projectDir, scope.directoryPrefix)) scopedPaths.add(path);
+          addScopedTree(scope.directoryPrefix);
         }
+      }
+    }
+    for (const [path, entries] of baseline.gitIndexEntries) {
+      if (stageZeroIndexEntry(entries)?.kind === 'gitlink'
+          && parsedScopes.some((scope) => scopeMatchesProjectPath(scope, path))) {
+        scopedPaths.add(path);
       }
     }
   }
   const files = new Map<string, RepairFileImage>();
   for (const path of scopedPaths) {
-    const image = readRepairFileImage(projectDir, path);
+    const image = readRollbackCurrentImage(baseline, projectDir, path);
     files.set(path, image);
   }
   // Exact paths need an explicit absent preimage so a newly-created file is
   // distinguishable from an out-of-scope write whose preimage was unavailable.
   for (const scope of parsedScopes) {
     if (scope.kind === 'exact' && !files.has(scope.value)) {
-      files.set(scope.value, readRepairFileImage(projectDir, scope.value));
+      files.set(scope.value, readRollbackCurrentImage(baseline, projectDir, scope.value));
     }
   }
   const scopedBytes = [...files.values()].reduce((total, image) => total + repairFileImageBytes(image), 0);
@@ -5413,7 +5931,7 @@ export function decideScopeRevision(input: {
     }
     const changedPaths = new Set([...requestedCandidates].filter((path) => compareRepairFileContents(
       snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path),
-      readRepairFileImage(projectDir, path),
+      readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path),
     ) === 'different'));
     for (const path of changedProjectPathsSinceSnapshot(snapshot, projectDir)) {
       if (capabilityRequestScopes.some((scope) => scopeMatchesProjectPath(scope, path))) changedPaths.add(path);
@@ -5439,7 +5957,9 @@ export function decideScopeRevision(input: {
   // newly accepted path into first-class repair-diff evidence rather than a
   // post-hoc scope escape with an unavailable preimage.
   if (snapshot) {
-    for (const path of capabilityRequestPaths) snapshot.files.set(path, readRepairFileImage(projectDir, path));
+    for (const path of capabilityRequestPaths) {
+      snapshot.files.set(path, readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
+    }
   }
   return {
     requestedPaths,
@@ -5579,7 +6099,7 @@ export function writeRepairRoundDiffArtifact(input: {
   const files: Record<string, unknown>[] = [];
   for (const path of [...allPaths].sort()) {
     const before = snapshot.files.get(path);
-    const after = readRepairFileImage(projectDir, path);
+    const after = readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path);
     const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
     const baselineBefore = before ?? baselineImage(snapshot.rollbackBaseline, path);
     const comparison = compareRepairFileContents(baselineBefore, after);
@@ -5922,6 +6442,14 @@ interface DispatchAdmissionReport {
   /** Closed planning-time relation between configured-command runners and generated outputs. */
   configuredCommandScopes?: string[];
   configuredCommandStageRoles?: Record<string, string[]>;
+  /** Advisory-only literal negative assertions that intersect future write capabilities. */
+  validationPlanConflicts?: ValidationPlanConflict[];
+  validationAssertionScan?: {
+    sourceFiles: string[];
+    sourceBytes: number;
+    assertionCount: number;
+    truncated: boolean;
+  };
 }
 
 /** Materialize the admitted scope after subtracting exact framework-owned
@@ -6355,6 +6883,12 @@ export function inspectDispatchAdmission(input: {
 }): DispatchAdmissionReport {
   const errors: string[] = [];
   const warnings = parallelScopeAdmissionWarnings(input.dispatched);
+  const validationPlanInspection = input.projectDir
+    ? inspectValidationPlanConflicts(input.projectDir, input.dispatched)
+    : undefined;
+  if (validationPlanInspection) {
+    warnings.push(...validationPlanInspection.conflicts.map((conflict) => conflict.message));
+  }
   const all = [...input.baseStages, ...input.dispatched];
   const byId = new Map(all.map((stage) => [stage.id, stage]));
   const knownIds = new Set(byId.keys());
@@ -6641,6 +7175,15 @@ export function inspectDispatchAdmission(input: {
     frameworkReservedScopes: Object.fromEntries(frameworkReservedScopes),
     configuredCommandScopes,
     configuredCommandStageRoles: Object.fromEntries(configuredCommandStageRoles),
+    ...(validationPlanInspection ? {
+      validationPlanConflicts: validationPlanInspection.conflicts,
+      validationAssertionScan: {
+        sourceFiles: validationPlanInspection.sourceFiles,
+        sourceBytes: validationPlanInspection.sourceBytes,
+        assertionCount: validationPlanInspection.assertions.length,
+        truncated: validationPlanInspection.truncated,
+      },
+    } : {}),
     ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
   };
 }
@@ -6677,12 +7220,15 @@ function addRealityCheckLiteralPath(
   value: string,
   out: Set<string>,
   context: 'explicit-file' | 'generic-literal',
+  authoredValue = value,
 ): void {
   const raw = value.trim();
+  const authored = authoredValue.trim();
   if (!raw
       || /[\0\r\n$<>{}|;&]/.test(raw)
       || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)
       || (context === 'generic-literal' && /\s/.test(raw))) return;
+  if (context === 'generic-literal' && !isGenericPathLexeme(authored)) return;
   const candidate = normalizedProjectPath(raw);
   if (!candidate) return;
   if (context === 'generic-literal' && !/[\\/]/.test(raw)) return;
@@ -6691,32 +7237,41 @@ function addRealityCheckLiteralPath(
 
 interface RealityCheckShellToken {
   value: string;
+  authored: string;
   operator: boolean;
 }
 
 function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
   const tokens: RealityCheckShellToken[] = [];
   let word = '';
+  let authored = '';
   const flush = (): void => {
-    if (word) tokens.push({ value: word, operator: false });
+    if (word) tokens.push({ value: word, authored, operator: false });
     word = '';
+    authored = '';
   };
   for (let index = 0; index < script.length;) {
     const character = script[index];
     if (character === '\\' && index + 1 < script.length) {
+      authored += character + script[index + 1];
       word += script[index + 1];
       index += 2;
       continue;
     }
     if (character === '"' || character === "'" || character === '`') {
       const quote = character;
-      if (quote === '`') word += '$';
+      if (quote === '`') {
+        word += '$';
+        authored += '$';
+      }
       index += 1;
       while (index < script.length && script[index] !== quote) {
         if (script[index] === '\\' && quote !== "'" && index + 1 < script.length) {
+          authored += script[index] + script[index + 1];
           word += script[index + 1];
           index += 2;
         } else {
+          authored += script[index];
           word += script[index];
           index += 1;
         }
@@ -6730,7 +7285,7 @@ function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
     }
     if (/\s/.test(character)) {
       flush();
-      if (character === '\n') tokens.push({ value: '\n', operator: true });
+      if (character === '\n') tokens.push({ value: '\n', authored: '\n', operator: true });
       index += 1;
       continue;
     }
@@ -6740,10 +7295,11 @@ function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
       while (index + operator.length < script.length
           && script[index + operator.length] === character
           && operator.length < 3) operator += character;
-      tokens.push({ value: operator, operator: true });
+      tokens.push({ value: operator, authored: operator, operator: true });
       index += operator.length;
       continue;
     }
+    authored += character;
     word += character;
     index += 1;
   }
@@ -6958,7 +7514,7 @@ function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void 
     if (!token.operator
         && !sedProgramIndexes.has(index)
         && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) {
-      addRealityCheckLiteralPath(token.value, out, 'generic-literal');
+      addRealityCheckLiteralPath(token.value, out, 'generic-literal', token.authored);
     }
   }
   let commandStart = true;
@@ -7731,12 +8287,22 @@ const GATE_METRIC_SYNONYMS: Record<string, string[]> = {
   qa_skeptical_audience: ['skeptical_audience', 'qa_audience'],
 };
 
-function metricNamesMatch(metricName: string, verdictName: string): boolean {
+function metricNamesMatch(
+  metricName: string,
+  verdictName: string,
+  contract?: GateContract | null,
+): boolean {
   const metric = metricName.toLowerCase();
   const verdict = verdictName.toLowerCase();
   if (metric === verdict) return true;
-  return (GATE_METRIC_SYNONYMS[metric] ?? []).map(s => s.toLowerCase()).includes(verdict)
-    || (GATE_METRIC_SYNONYMS[verdict] ?? []).map(s => s.toLowerCase()).includes(metric);
+  if ((GATE_METRIC_SYNONYMS[metric] ?? []).map(s => s.toLowerCase()).includes(verdict)
+      || (GATE_METRIC_SYNONYMS[verdict] ?? []).map(s => s.toLowerCase()).includes(metric)) return true;
+  if (!contract) return false;
+  const contractedNames = new Set([
+    contract.metric.toLowerCase(),
+    ...(contract.metricSynonyms ?? []).map((name) => name.toLowerCase()),
+  ]);
+  return contractedNames.has(metric) && contractedNames.has(verdict);
 }
 
 /**
@@ -7758,6 +8324,7 @@ function metricFileIndicatesFailure(metric: Record<string, unknown>): boolean {
 export function validateVerdictAgainstMetricFile(
   verdict: Record<string, unknown>,
   metric: Record<string, unknown>,
+  contract?: GateContract | null,
 ): string | null {
   const metricContradiction = explicitPassContradiction(metric, 'metric.json', verdict.pass === true);
   if (metricContradiction) return metricContradiction;
@@ -7777,7 +8344,7 @@ export function validateVerdictAgainstMetricFile(
   if (
     typeof metric.metric === 'string'
     && typeof verdict.metric === 'string'
-    && !metricNamesMatch(metric.metric, verdict.metric)
+    && !metricNamesMatch(metric.metric, verdict.metric, contract)
     // A rename is evidence of self-deception only when there is a failure for it
     // to hide. When the metric file reports no failure, the two files simply name
     // different things — a gate's own health metric ("failing_checks") beside the
@@ -7787,7 +8354,16 @@ export function validateVerdictAgainstMetricFile(
   ) {
     return `metric name redefined: metric.json="${metric.metric}" vs verdict="${verdict.metric}"`;
   }
-  if (typeof metric.threshold === 'number' && typeof verdict.threshold === 'number' && verdict.threshold < metric.threshold) {
+  if (
+    typeof metric.metric === 'string'
+    && typeof verdict.metric === 'string'
+    && metricNamesMatch(metric.metric, verdict.metric, contract)
+    && typeof metric.threshold === 'number'
+    && typeof verdict.threshold === 'number'
+    && (metric.higherIsBetter !== false && metric.higher_is_better !== false
+      ? verdict.threshold < metric.threshold
+      : verdict.threshold > metric.threshold)
+  ) {
     return 'threshold downgraded';
   }
   return null;
@@ -8307,7 +8883,11 @@ export function readGateVerdict(
     const metricPath = join(stageDir(projectDir, runId, stageId), 'metric.json');
     try {
       const metric = JSON.parse(readFileSync(metricPath, 'utf-8')) as Record<string, unknown>;
-      const violation = validateVerdictAgainstMetricFile(v, metric);
+      const applicableContract = contract
+        && (!contract.appliesToGates || contract.appliesToGates.includes(stageId))
+        ? contract
+        : null;
+      const violation = validateVerdictAgainstMetricFile(v, metric, applicableContract);
       if (violation) {
         log.warn({ stageId, runId, violation }, 'Gate verdict rejected by metric.json consistency check');
         return { pass: false, reason: violation };
@@ -9865,19 +10445,91 @@ export async function runWorkflow(
       const replanPath = join(runDir(projectDir, runId), 'signals', 'replan.json');
       if (existsSync(replanPath)) {
         let replanReason = 'supervisor judged the approach fundamentally wrong';
+        let replanSignal: unknown = {};
         try {
           const sig = JSON.parse(readFileSync(replanPath, 'utf-8')) as { reason?: string };
+          replanSignal = sig;
           if (sig.reason) replanReason = sig.reason;
         } catch { /* malformed; keep generic reason */ }
+        const events = readRunEvents(projectDir, runId);
+        const allKnownStages = [
+          ...baseStages,
+          ...((Array.isArray(state.dispatchedStages) ? state.dispatchedStages : []) as StageConfig[]),
+        ];
+        const uniqueStages = [...new Map(allKnownStages.map((stage) => [stage.id, stage])).values()];
+        const signalTimestamp = replanSignal && typeof replanSignal === 'object'
+          && typeof (replanSignal as { timestamp?: unknown }).timestamp === 'string'
+          ? String((replanSignal as { timestamp: string }).timestamp)
+          : undefined;
+        const passedGateIds = uniqueStages.flatMap((stage) => {
+          if (!stage.is_gate) return [];
+          let passed = false;
+          try {
+            const verdict = JSON.parse(readFileSync(join(runDirPath, `verdict_${stage.id}.json`), 'utf-8')) as { pass?: unknown };
+            passed = verdict.pass === true;
+          } catch { /* not an accepted gate */ }
+          if (!passed) return [];
+          const acceptedAfterSignal = !signalTimestamp || events.some((event) => (
+            event.type === 'stage_complete'
+            && event.stageId === stage.id
+            && Date.parse(event.timestamp) > Date.parse(signalTimestamp)
+          ));
+          return acceptedAfterSignal ? [stage.id] : [];
+        });
+        let supervisorState: unknown;
+        let supervisorLog: string | undefined;
+        try { supervisorState = JSON.parse(readFileSync(join(runDirPath, 'supervisor_state.json'), 'utf-8')); } catch { /* absent legacy state */ }
+        try { supervisorLog = readFileSync(join(runDirPath, 'supervisor_log.md'), 'utf-8'); } catch { /* absent legacy log */ }
+        const reconciled = reconcileSupervisorReplan({
+          signal: replanSignal,
+          events,
+          supervisorState,
+          supervisorLog,
+        });
+        const evaluatedFreshness = evaluateSupervisorReplanFreshness({
+          signal: reconciled.signal,
+          events: reconciled.events,
+          stages: uniqueStages,
+          passedGateIds,
+        });
+        const freshness: SupervisorReplanFreshness = (
+          reconciled.identitySource === 'supervisor_state' || reconciled.identitySource === 'supervisor_log'
+        ) ? { ...evaluatedFreshness, signalVersion: 'legacy_resolved' } : evaluatedFreshness;
         try { unlinkSync(replanPath); } catch { /* already consumed */ }
-        appendSchedulerGuidanceOnce(
-          runDir(projectDir, runId),
-          RUN_WIDE_GUIDANCE_TARGET,
-          `[supervisor-replan:iteration-${iteration}]`,
-          `⚠️ PIVOT REQUIRED (supervisor REPLAN): ${replanReason}\nThe previous approach was judged fundamentally wrong. Plan a materially DIFFERENT approach; do not repeat the rejected direction.`,
-        );
-        recordRunEvent(projectDir, runId, { type: 'supervisor_replan', runId, timestamp: new Date().toISOString(), iteration, detail: replanReason });
-        log.info({ runId, iteration, replanReason }, 'Supervisor REPLAN consumed; pivot hint injected for this iteration plan');
+        const structuredSignal = supervisorReplanSignalV2(reconciled.signal);
+        if (freshness.decision === 'replay') {
+          appendSchedulerGuidanceOnce(
+            runDir(projectDir, runId),
+            RUN_WIDE_GUIDANCE_TARGET,
+            `[supervisor-replan:iteration-${iteration}]`,
+            `⚠️ PIVOT REQUIRED (supervisor REPLAN): ${replanReason}\nThe previous approach was judged fundamentally wrong. Plan a materially DIFFERENT approach; do not repeat the rejected direction.`,
+          );
+          recordRunEvent(projectDir, runId, {
+            type: 'supervisor_replan', runId, timestamp: new Date().toISOString(), iteration,
+            stageId: structuredSignal?.targetStage,
+            attemptIndex: structuredSignal?.attemptIndex,
+            attemptStartedAt: structuredSignal?.attemptStartedAt,
+            assessmentId: structuredSignal?.assessmentId,
+            evidenceIds: structuredSignal?.evidenceIds,
+            decision: 'accepted',
+            detail: replanReason,
+            source: 'scheduler',
+          });
+          log.info({ runId, iteration, replanReason, freshness, identitySource: reconciled.identitySource }, 'Supervisor REPLAN consumed; pivot hint injected for this iteration plan');
+        } else {
+          recordRunEvent(projectDir, runId, {
+            type: 'supervisor_replan', runId, timestamp: new Date().toISOString(), iteration,
+            stageId: structuredSignal?.targetStage,
+            attemptIndex: structuredSignal?.attemptIndex,
+            attemptStartedAt: structuredSignal?.attemptStartedAt,
+            assessmentId: structuredSignal?.assessmentId,
+            evidenceIds: structuredSignal?.evidenceIds,
+            decision: 'discarded',
+            detail: `stale REPLAN discarded: ${freshness.reason}; original reason: ${replanReason}`,
+            source: 'scheduler',
+          });
+          log.info({ runId, iteration, replanReason, freshness, identitySource: reconciled.identitySource }, 'Stale supervisor REPLAN discarded before planner guidance');
+        }
       }
     }
 
@@ -11081,6 +11733,10 @@ interface ScopeBatchContext {
     reason: string;
     restored: boolean;
     rollbackFailure?: string;
+    entryKind: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
+    comparisonOutcome: 'different' | 'unavailable';
+    changeObserved: boolean;
+    rollbackAttempted: boolean;
     targetStageIds: Set<string>;
     deliveredAttemptKeys: Set<string>;
   }>;
@@ -11439,7 +12095,7 @@ function enforceStageScopeWrites(input: {
     const before = input.preimages?.get(normalized)
       ?? input.snapshot.files.get(normalized)
       ?? baselineImage(input.snapshot.rollbackBaseline, normalized);
-    const current = readRepairFileImage(input.projectDir, normalized);
+    const current = readRollbackCurrentImage(input.snapshot.rollbackBaseline, input.projectDir, normalized);
     const contentChanged = compareRepairFileContents(before, current) === 'different';
     if (contentChanged) contentChangedWrites.push(normalized);
     // Preserve the established rollback of an explicitly attributed
@@ -11563,11 +12219,12 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         const candidates = new Set<string>();
         const exemptedPaths = new Set<string>();
         const addCandidate = (rawPath: string, directlyObserved = false): void => {
-          const path = normalizedProjectPath(rawPath);
-          if (!path) return;
+          const observedPath = normalizedProjectPath(rawPath);
+          if (!observedPath) return;
+          const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
           if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)) {
             const before = baselineImage(baseline, path);
-            const current = readRepairFileImage(input.projectDir, path);
+            const current = readRollbackCurrentImage(baseline, input.projectDir, path);
             if (directlyObserved || compareRepairFileContents(before, current) === 'different') {
               exemptedPaths.add(path);
             }
@@ -11581,10 +12238,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         const fullReconciliation = trigger === 'fallback' || trigger === 'phase_boundary';
         if (fullReconciliation) {
           for (const path of listProjectFiles(input.projectDir, {
-            skipDirectory: (directory) => isLiveConstraintExemptDirectory(
-              directory,
-              exemptPatterns,
-              baseline.trackedPaths,
+            skipDirectory: (directory) => (
+              trackedGitlinkAncestor(baseline, directory) !== undefined
+              || isLiveConstraintExemptDirectory(directory, exemptPatterns, baseline.trackedPaths)
             ),
           })) addCandidate(path);
           for (const path of baseline.images.keys()) addCandidate(path);
@@ -11595,7 +12251,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
           for (const rawPath of candidatePaths) {
             const path = normalizedProjectPath(rawPath);
             if (!path) continue;
-            addCandidate(path, true);
+            const gitlink = trackedGitlinkAncestor(baseline, path);
+            addCandidate(gitlink ?? path, true);
+            if (gitlink) continue;
             if (!isLiveConstraintExemptDirectory(path, exemptPatterns, baseline.trackedPaths)) {
               for (const nested of listProjectFilesAt(input.projectDir, path)) addCandidate(nested);
             }
@@ -11614,8 +12272,32 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         }
         for (const path of [...candidates].sort()) {
           const before = baselineImage(baseline, path);
-          const current = readRepairFileImage(input.projectDir, path);
-          if (compareRepairFileContents(before, current) !== 'different') continue;
+          const current = readRollbackCurrentImage(baseline, input.projectDir, path);
+          const comparison = compareRepairFileContents(before, current);
+          if (comparison === 'equal') continue;
+          if (comparison === 'unavailable') {
+            const entryKind = before.indexEntryKind ?? current.indexEntryKind;
+            if (entryKind === 'gitlink' || entryKind === 'sparse_tree' || entryKind === 'unmerged' || entryKind === 'unknown') {
+              if (!input.context.liveViolations.some((entry) => (
+                entry.path === path && entry.changeObserved === false
+              ))) {
+                input.context.liveViolationSequence++;
+                input.context.liveViolations.push({
+                  sequence: input.context.liveViolationSequence,
+                  path,
+                  reason: `the ${entryKind} index entry cannot be compared to its current worktree representation; no content write was claimed and rollback was not attempted`,
+                  restored: false,
+                  entryKind,
+                  comparisonOutcome: 'unavailable',
+                  changeObserved: false,
+                  rollbackAttempted: false,
+                  targetStageIds: new Set(input.context.declaredScopes.keys()),
+                  deliveredAttemptKeys: new Set(),
+                });
+              }
+            }
+            continue;
+          }
           if (scopeContainsPath(attemptContext.effectiveScope, path)) {
             // Commit an authorized write into the shared run baseline. The
             // round snapshot still preserves its preimage for post-attempt
@@ -11645,6 +12327,10 @@ function createSchedulerLiveConstraintGuardFactory(input: {
               ? 'the concurrent batch observed a write outside every admitted scope partition; live enforcement restored its preimage before the invocation ended'
               : 'the concurrent batch observed a write outside every admitted scope partition; live enforcement could not restore its preimage',
             restored: restoration.restored,
+            entryKind: before.indexEntryKind ?? current.indexEntryKind ?? (before.exists ? 'filesystem' : 'untracked'),
+            comparisonOutcome: 'different',
+            changeObserved: true,
+            rollbackAttempted: true,
             ...(restoration.restored ? {} : { rollbackFailure: restoration.failure ?? `could not restore ${path}` }),
             // The complete scheduler-selected batch is the attribution cohort.
             // A peer can reach its first guard scan just after this restoration,
@@ -11665,12 +12351,18 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             path: violation.path,
             reason: violation.reason,
             restored: violation.restored,
+            entryKind: violation.entryKind,
+            comparisonOutcome: violation.comparisonOutcome,
+            changeObserved: violation.changeObserved,
+            rollbackAttempted: violation.rollbackAttempted,
             ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
           }];
         });
         for (const violation of violations) {
           recordRunEvent(input.projectDir, input.runId, {
-            type: 'live_constraint_violation',
+            type: violation.changeObserved === false
+              ? 'live_constraint_comparison_unavailable'
+              : 'live_constraint_violation',
             runId: input.runId,
             timestamp: new Date().toISOString(),
             stageId: input.stage.id,
@@ -11678,7 +12370,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             files: [violation.path],
             detail: violation.reason,
             source: 'scheduler',
-            level: 'warning',
+            level: violation.changeObserved === false ? 'info' : 'warning',
           });
         }
         return { scannedPaths: candidates.size, violations, exemptedPaths: [...exemptedPaths].sort() };
@@ -11884,16 +12576,23 @@ function reconcileStageScope(input: {
   const mismatches = [...attemptContext.mismatchPaths];
   const runDirPath = runDir(input.projectDir, input.runId);
   const liveIncidents = readLiveConstraintIncidents(runDirPath, input.stage.id, attempt.index);
+  const liveWriteIncidents = liveIncidents.filter((incident) => incident.changeObserved !== false);
   const attributedWrites = attempt.writes ?? [];
   const schedulerObservedWrites = changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir);
+  const canonicalAttributedWrites = attributedWrites.map((rawPath) => {
+    const normalized = normalizedProjectPath(rawPath);
+    return normalized
+      ? trackedGitlinkAncestor(input.context.snapshot.rollbackBaseline, normalized) ?? normalized
+      : rawPath;
+  });
   const rawWrites = canonicalProjectWriteUnion(
-    attributedWrites,
+    canonicalAttributedWrites,
     schedulerObservedWrites,
-    liveIncidents.map((incident) => incident.path),
+    liveWriteIncidents.map((incident) => incident.path),
   );
   const definiteWrites = new Set(
     attempt.writeAttribution === 'structured'
-      ? canonicalProjectWriteUnion(attributedWrites)
+      ? canonicalProjectWriteUnion(canonicalAttributedWrites)
       : [],
   );
   if (attempt.writeAttribution !== 'structured') {
@@ -11924,7 +12623,7 @@ function reconcileStageScope(input: {
   // attempt before terminal evaluation.
   const governedScope: string[] | null = input.terminalDurableScope ?? ordinaryGovernedScope;
   const terminalValidationOnly = input.terminalDurableScope !== undefined;
-  const restoredLivePaths = new Set(liveIncidents
+  const restoredLivePaths = new Set(liveWriteIncidents
     .filter((incident) => incident.restored)
     .map((incident) => normalizedProjectPath(incident.path) ?? incident.path));
   const enforcement = enforceStageScopeWrites({
@@ -12053,7 +12752,9 @@ function reconcileStageScope(input: {
       })
     : undefined;
   const scopeRevisionInstructions = [...new Set([
-    ...liveIncidents.map((incident) => incident.scopeRevisionInstruction),
+    ...liveWriteIncidents.flatMap((incident) => incident.scopeRevisionInstruction
+      ? [incident.scopeRevisionInstruction]
+      : []),
     ...(postAttemptInstruction ? [postAttemptInstruction] : []),
   ])];
   const rolledBackSet = new Set([
@@ -12103,8 +12804,9 @@ function reconcileStageScope(input: {
     rejectedRevisionCount,
     mismatchCount: mismatches.length,
     violationCount: definite.length,
-    liveViolationCount: liveIncidents.length,
-    liveRestoredCount: liveIncidents.filter((incident) => incident.restored).length,
+    liveViolationCount: liveWriteIncidents.length,
+    liveComparisonUnavailableCount: liveIncidents.filter((incident) => incident.changeObserved === false).length,
+    liveRestoredCount: liveWriteIncidents.filter((incident) => incident.restored).length,
     unresolvedViolationCount: unresolvedDefinite.length,
     unverifiedCount: unverified.length,
     rawWriteCount: enforcement.rawWrites.length,
@@ -12542,6 +13244,22 @@ function archivedGateOutputReadPath(
   return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `previous_output_${gateId}.md`);
 }
 
+function archivedGateInputWritePath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `evaluated_input_${gateId}.md`);
+}
+
+function archivedGateInputReadPath(
+  runDirPath: string,
+  coordinate: GateArchiveCoordinate,
+  gateId: string,
+): string {
+  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `evaluated_input_${gateId}.md`);
+}
+
 function archiveGateRoundEvidence(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
@@ -12555,9 +13273,11 @@ function archiveGateRoundEvidence(
     const verdict = existsSync(perGateVerdict) ? perGateVerdict : join(runDirPath, 'verdict.json');
     const output = join(runDirPath, 'stages', gateId, 'output.md');
     const metric = join(runDirPath, 'stages', gateId, 'metric.json');
+    const input = join(runDirPath, 'stages', gateId, 'input.md');
     try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     try { if (existsSync(output)) copyFileSync(output, archivedGateOutputWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     try { if (existsSync(metric)) copyFileSync(metric, archivedGateMetricWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
+    try { if (existsSync(input)) copyFileSync(input, archivedGateInputWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     // The archived verdict is the file the gate WROTE. The engine can reject it
     // for reasons the file cannot show — a metric.json inconsistency, a contract
     // violation — and a repair handed only the written file then sees `pass:
@@ -12626,11 +13346,32 @@ export function buildGateReevaluationPreamble(input: {
   const firstCoverageCoordinate = gateArchiveCoordinate(input.iteration, 1);
   const firstCoverageOutput = archivedGateOutputReadPath(input.runDirPath, firstCoverageCoordinate, input.gateId);
   const previousOutput = archivedGateOutputReadPath(input.runDirPath, coordinate, input.gateId);
+  const evaluatedInput = archivedGateInputReadPath(input.runDirPath, coordinate, input.gateId);
+  const rejectedVerdict = archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId);
+  if (!existsSync(rejectedVerdict)) {
+    return [
+      `INTERRUPTED EVALUATION (round ${input.evaluationRound}): The prior gate attempt ended without a durable verdict; run the gate as an initial evaluation, not as a re-evaluation of a rejection.`,
+      '',
+      'Evidence retained from the interrupted attempt:',
+      ...(existsSync(evaluatedInput)
+        ? [`- Exact input seen by the interrupted gate: ${evaluatedInput}`]
+        : ['- Exact input seen by the interrupted gate: unavailable']),
+      ...(existsSync(previousOutput) ? [`- Partial prior gate output: ${previousOutput}`] : []),
+      ...(existsSync(input.roundDiffPath) ? [`- Complete round diff available at dispatch: ${input.roundDiffPath}`] : []),
+      ...(fixOutputs ? ['- Intervening stage output(s):', fixOutputs] : []),
+      '',
+      'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
+      'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a new validator-owned Coverage Map.',
+    ].join('\n');
+  }
   return [
     `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a repair.`,
     '',
     'Evidence you must read:',
-    `- Rejected verdict: ${archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
+    `- Rejected verdict: ${rejectedVerdict}`,
+    ...(existsSync(evaluatedInput)
+      ? [`- Exact input evaluated by the rejected gate: ${evaluatedInput}`]
+      : ['- Exact input evaluated by the rejected gate: unavailable (this round predates input archiving or did not retain an input)']),
     `- The engine's own conclusion and rejection reason: ${archivedGateEffectiveVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
     `- Metric artifact actually evaluated: ${archivedGateMetricReadPath(input.runDirPath, coordinate, input.gateId)}`,
     '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
@@ -12655,13 +13396,19 @@ function buildGateFixCorrectionContract(
   gateIds: string[],
   coordinate: GateArchiveCoordinate,
 ): string {
-  const entries = gateIds.map((gateId) => [
-    `- Gate ${gateId}:`,
-    `  - archived rejected verdict: ${archivedGateVerdictReadPath(runDirPath, coordinate, gateId)}`,
-    `  - archived evaluated metric: ${archivedGateMetricReadPath(runDirPath, coordinate, gateId)}`,
-    `  - archived QA output: ${archivedGateOutputReadPath(runDirPath, coordinate, gateId)}`,
-    `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
-  ].join('\n')).join('\n');
+  const entries = gateIds.map((gateId) => {
+    const evaluatedInput = archivedGateInputReadPath(runDirPath, coordinate, gateId);
+    return [
+      `- Gate ${gateId}:`,
+      `  - archived rejected verdict: ${archivedGateVerdictReadPath(runDirPath, coordinate, gateId)}`,
+      existsSync(evaluatedInput)
+        ? `  - archived evaluated input: ${evaluatedInput}`
+        : '  - archived evaluated input: unavailable (this round predates input archiving or did not retain an input)',
+      `  - archived evaluated metric: ${archivedGateMetricReadPath(runDirPath, coordinate, gateId)}`,
+      `  - archived QA output: ${archivedGateOutputReadPath(runDirPath, coordinate, gateId)}`,
+      `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
+    ].join('\n');
+  }).join('\n');
   return [
     `Gate repair round ${coordinate.round}: read the archived rejection evidence before changing anything:`,
     entries,

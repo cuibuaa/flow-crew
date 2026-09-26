@@ -81,14 +81,417 @@ export interface SupervisorAssessment {
   /** Stable identity for one concrete wrong direction. GUIDE and direction-
    * ABORT assessments reuse this key; idle ABORT and all other verdicts omit it. */
   directionKey?: string;
+  /** Stable identity assigned to one completed model assessment. */
+  assessmentId?: string;
+  assessedAt?: string;
+  /** Evidence rows the model says its consequential judgment rests on. */
+  evidenceIds?: string[];
+  /** Explicit retraction/replacement of one earlier assessment. */
+  supersedesAssessmentId?: string;
+  /** Exact envelope written for an effective GUIDE. */
+  guidanceId?: string;
+}
+
+export type SupervisorEvidenceKind =
+  | 'agent_statement'
+  | 'command_invocation'
+  | 'file_change'
+  | 'tool_output'
+  | 'unattributed';
+
+export interface SupervisorEvidenceRow {
+  id: string;
+  kind: SupervisorEvidenceKind;
+  authority: 'action' | 'inspection';
+  text: string;
+}
+
+export interface SupervisorStageEvidence {
+  version: 1;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  rows: SupervisorEvidenceRow[];
+}
+
+interface SupervisorShellToken {
+  value: string;
+  operator: boolean;
+}
+
+const SUPERVISOR_INSPECTION_COMMANDS = new Set([
+  '[',
+  'basename',
+  'cat',
+  'cmp',
+  'diff',
+  'dirname',
+  'echo',
+  'file',
+  'find',
+  'grep',
+  'head',
+  'ls',
+  'pwd',
+  'readlink',
+  'realpath',
+  'rg',
+  'sed',
+  'sha256sum',
+  'stat',
+  'tail',
+  'test',
+  'wc',
+]);
+
+const SUPERVISOR_INSPECTION_GIT_SUBCOMMANDS = new Set([
+  'blame',
+  'branch',
+  'diff',
+  'grep',
+  'log',
+  'ls-files',
+  'ls-tree',
+  'rev-parse',
+  'show',
+  'status',
+]);
+
+const SUPERVISOR_CLAIM_STOP_WORDS = new Set([
+  'about', 'after', 'again', 'assessment', 'attempt', 'because', 'before',
+  'being', 'continue', 'continues', 'correction', 'current', 'direction',
+  'evidence', 'instead', 'instruction', 'required', 'stage', 'still',
+  'their', 'there', 'these', 'this', 'those', 'wrong', 'work',
+]);
+
+function supervisorShellTokens(command: string): SupervisorShellToken[] | undefined {
+  const tokens: SupervisorShellToken[] = [];
+  let value = '';
+  let quote: '"' | "'" | undefined;
+  const flush = (): void => {
+    if (value) tokens.push({ value, operator: false });
+    value = '';
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      } else if (character === '\\' && quote === '"' && index + 1 < command.length) {
+        value += command[index + 1];
+        index += 1;
+      } else {
+        value += character;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '\\' && index + 1 < command.length) {
+      value += command[index + 1];
+      index += 1;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      flush();
+      if (character === '\n') tokens.push({ value: '\n', operator: true });
+      continue;
+    }
+    if (';|&<>'.includes(character)) {
+      flush();
+      let operator = character;
+      while (index + 1 < command.length && command[index + 1] === character && operator.length < 2) {
+        operator += command[index + 1];
+        index += 1;
+      }
+      tokens.push({ value: operator, operator: true });
+      continue;
+    }
+    value += character;
+  }
+  if (quote) return undefined;
+  flush();
+  return tokens;
+}
+
+function supervisorCommandSegments(command: string): string[][] | undefined {
+  // Command substitutions and shell programs can hide arbitrary writes. Keep
+  // them action-bearing unless a structured adapter reports their inner work.
+  if (command.includes('$(') || command.includes('`')) return undefined;
+  const tokens = supervisorShellTokens(command);
+  if (!tokens) return undefined;
+  const segments: string[][] = [[]];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token.operator) {
+      segments.at(-1)!.push(token.value);
+      continue;
+    }
+    if (token.value === '<') {
+      const target = tokens[index + 1];
+      if (!target || target.operator) return undefined;
+      segments.at(-1)!.push('<', target.value);
+      index += 1;
+      continue;
+    }
+    // Output redirection is observable work even when the producer itself is
+    // read-only. A pipeline/conditional is inspection only when every member
+    // is independently inspection-only.
+    if (token.value === '>' || token.value === '>>' || token.value === '<<') return undefined;
+    if (!['\n', ';', '|', '||', '&&', '&'].includes(token.value)) return undefined;
+    if (segments.at(-1)!.length === 0) return undefined;
+    segments.push([]);
+  }
+  if (segments.length === 0 || segments.at(-1)!.length === 0) return undefined;
+  return segments;
+}
+
+function unwrapSupervisorCommand(tokens: string[]): string[] {
+  let cursor = 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[cursor] ?? '')) cursor += 1;
+  if (tokens[cursor] === 'command') cursor += 1;
+  if (tokens[cursor] === 'env') {
+    cursor += 1;
+    while ((tokens[cursor] ?? '').startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[cursor] ?? '')) cursor += 1;
+  }
+  if (tokens[cursor] === 'timeout') {
+    cursor += 1;
+    while ((tokens[cursor] ?? '').startsWith('-')) cursor += 1;
+    if (tokens[cursor]) cursor += 1;
+  }
+  return tokens.slice(cursor);
+}
+
+function supervisorSedIsInspection(tokens: string[]): boolean {
+  if (tokens.some((token) => token === '-i' || token.startsWith('-i') || token.startsWith('--in-place'))) return false;
+  // GNU sed's e/w commands execute a program or write a file. This is a
+  // deliberately conservative recognizer; unfamiliar programs remain ACTION.
+  const programs = tokens.slice(1).filter((token) => !token.startsWith('-'));
+  return programs.every((program) => !/(?:^|[;{}\s])(?:e|w|W)(?:\s|$)/.test(program));
+}
+
+/**
+ * Decide whether a shell invocation can establish pursuit or only inspection.
+ * The inspection set is intentionally narrow: every command in a compound
+ * invocation must be a known read-only form and no output redirection or
+ * opaque shell expansion may be present. Unknown commands remain ACTION.
+ */
+export function classifySupervisorCommandEvidence(command: string): SupervisorEvidenceRow['authority'] {
+  const segments = supervisorCommandSegments(command.trim());
+  if (!segments) return 'action';
+  for (const rawSegment of segments) {
+    const segment = unwrapSupervisorCommand(rawSegment);
+    const executable = (segment[0] ?? '').split('/').at(-1) ?? '';
+    if (!SUPERVISOR_INSPECTION_COMMANDS.has(executable) && executable !== 'git') return 'action';
+    if (executable === 'sed' && !supervisorSedIsInspection(segment)) return 'action';
+    if (executable === 'find' && segment.some((token) => /^-(?:delete|exec|execdir|ok|okdir)$/.test(token))) return 'action';
+    if (executable === 'git') {
+      const subcommand = segment.slice(1).find((token) => !token.startsWith('-'));
+      if (!subcommand || !SUPERVISOR_INSPECTION_GIT_SUBCOMMANDS.has(subcommand)) return 'action';
+    }
+  }
+  return 'inspection';
+}
+
+function classifySupervisorToolUseEvidence(name: unknown, input: unknown): SupervisorEvidenceRow['authority'] {
+  if (typeof name !== 'string') return 'action';
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (/^(?:read|view|search|glob|grep|find|list|get|open)(?:_|$)/.test(normalized)) return 'inspection';
+  if (/^(?:bash|shell|exec|exec_command|run_command)$/.test(normalized) && input && typeof input === 'object') {
+    const payload = input as Record<string, unknown>;
+    const command = typeof payload.command === 'string' ? payload.command
+      : typeof payload.cmd === 'string' ? payload.cmd
+        : undefined;
+    return command ? classifySupervisorCommandEvidence(command) : 'action';
+  }
+  return 'action';
+}
+
+function supervisorClaimTerms(value: string): Set<string> {
+  const normalized = value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  return new Set(normalized.split(/[^a-z0-9]+/).filter((term) => (
+    term.length >= 4
+    && !/^\d+$/.test(term)
+    && !SUPERVISOR_CLAIM_STOP_WORDS.has(term)
+  )));
+}
+
+function supervisorEvidenceSupportsAssessment(
+  assessment: SupervisorAssessment,
+  rows: readonly SupervisorEvidenceRow[],
+): { supported: boolean; sharedTerms: string[] } {
+  const claimTerms = supervisorClaimTerms(`${assessment.reason} ${assessment.directionKey ?? ''}`);
+  const sharedTerms = [...new Set(rows.flatMap((row) => {
+    const evidenceTerms = supervisorClaimTerms(row.text);
+    return [...claimTerms].filter((term) => evidenceTerms.has(term));
+  }))].sort();
+  return { supported: sharedTerms.length > 0, sharedTerms };
+}
+
+function boundedEvidenceText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/\r\n/g, '\n').trim();
+  return text ? text.slice(0, 4_000) : undefined;
+}
+
+function evidenceRow(
+  input: Pick<SupervisorStageEvidence, 'stageId' | 'attemptIndex' | 'attemptStartedAt'>,
+  kind: SupervisorEvidenceKind,
+  authority: SupervisorEvidenceRow['authority'],
+  text: string,
+  identity: unknown,
+): SupervisorEvidenceRow {
+  const id = `ev_${createHash('sha256').update(JSON.stringify([
+    input.stageId,
+    input.attemptIndex,
+    input.attemptStartedAt,
+    kind,
+    identity,
+  ])).digest('hex').slice(0, 20)}`;
+  return { id, kind, authority, text };
+}
+
+/**
+ * Project supported adapter JSONL into evidence that preserves provenance.
+ * Agent statements, mutating/action-bearing invocations, and file changes can
+ * establish what a stage did. Read-only invocations, tool results, and opaque
+ * legacy text remain visible for inspection, but cannot by themselves
+ * establish what the stage was pursuing.
+ */
+export function projectSupervisorStageEvidence(input: {
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  raw: string;
+}): SupervisorStageEvidence {
+  const rows: SupervisorEvidenceRow[] = [];
+  const add = (
+    kind: SupervisorEvidenceKind,
+    authority: SupervisorEvidenceRow['authority'],
+    textValue: unknown,
+    identity: unknown,
+  ): void => {
+    const text = boundedEvidenceText(textValue);
+    if (!text) return;
+    rows.push(evidenceRow(input, kind, authority, text, identity));
+  };
+
+  for (const [lineIndex, rawLine] of input.raw.replace(/\r\n/g, '\n').split('\n').entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      add('unattributed', 'inspection', line, ['plain', lineIndex, line]);
+      continue;
+    }
+
+    const eventType = typeof event.type === 'string' ? event.type : 'unknown';
+    const item = event.item && typeof event.item === 'object'
+      ? event.item as Record<string, unknown>
+      : undefined;
+    const itemType = typeof item?.type === 'string' ? item.type : undefined;
+    const eventIdentity = [eventType, item?.id ?? event.id ?? null, line];
+    let recognized = false;
+
+    // Codex JSONL.
+    if (itemType === 'agent_message') {
+      add('agent_statement', 'action', item?.text, [...eventIdentity, 'agent_message']);
+      recognized = true;
+    }
+    if (eventType === 'message' && event.role === 'assistant') {
+      add('agent_statement', 'action', event.content, [...eventIdentity, 'assistant_message']);
+      recognized = true;
+    }
+    if (itemType === 'command_execution') {
+      const command = boundedEvidenceText(item?.command);
+      if (command) add('command_invocation', classifySupervisorCommandEvidence(command), command, [...eventIdentity, 'command']);
+      add('tool_output', 'inspection', item?.aggregated_output, [...eventIdentity, 'command_output']);
+      add('tool_output', 'inspection', item?.output, [...eventIdentity, 'command_output_fallback']);
+      recognized = true;
+    }
+    if (itemType === 'file_change' || eventType === 'file_change') {
+      const payload = item ?? event;
+      add('file_change', 'action', JSON.stringify(payload.changes ?? payload), [...eventIdentity, 'file_change']);
+      recognized = true;
+    }
+
+    // Claude stream-json. A single assistant event can contain both authored
+    // text/tool requests and later tool-result blocks, so classify each block.
+    const message = event.message && typeof event.message === 'object'
+      ? event.message as Record<string, unknown>
+      : undefined;
+    const content = Array.isArray(message?.content)
+      ? message.content
+      : Array.isArray(event.content) ? event.content : undefined;
+    if ((eventType === 'assistant' || eventType === 'user') && content) {
+      for (const [blockIndex, rawBlock] of content.entries()) {
+        if (!rawBlock || typeof rawBlock !== 'object') continue;
+        const block = rawBlock as Record<string, unknown>;
+        if (block.type === 'text' && eventType === 'assistant') {
+          add('agent_statement', 'action', block.text, [...eventIdentity, 'text', blockIndex]);
+          recognized = true;
+        } else if (block.type === 'tool_use' && eventType === 'assistant') {
+          add(
+            'command_invocation',
+            classifySupervisorToolUseEvidence(block.name, block.input),
+            JSON.stringify({ name: block.name, input: block.input }),
+            [...eventIdentity, 'tool_use', blockIndex],
+          );
+          recognized = true;
+        } else if (block.type === 'tool_result') {
+          add('tool_output', 'inspection', typeof block.content === 'string' ? block.content : JSON.stringify(block.content), [...eventIdentity, 'tool_result', blockIndex]);
+          recognized = true;
+        }
+      }
+    } else if (eventType === 'assistant') {
+      add('agent_statement', 'action', event.content, [...eventIdentity, 'assistant_fallback']);
+      recognized = true;
+    } else if (eventType === 'content_block_delta') {
+      const delta = event.delta && typeof event.delta === 'object' ? event.delta as Record<string, unknown> : undefined;
+      add('agent_statement', 'action', delta?.text, [...eventIdentity, 'assistant_delta']);
+      recognized = true;
+    } else if (eventType === 'result') {
+      add('unattributed', 'inspection', event.result, [...eventIdentity, 'result']);
+      recognized = true;
+    }
+
+    if (!recognized) add('unattributed', 'inspection', line, [...eventIdentity, 'unrecognized']);
+  }
+
+  const uniqueRows = [...new Map(rows.map((row) => [row.id, row])).values()];
+  return {
+    version: 1,
+    stageId: input.stageId,
+    attemptIndex: input.attemptIndex,
+    attemptStartedAt: input.attemptStartedAt,
+    rows: uniqueRows,
+  };
 }
 
 const DIRECTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/;
+const EVIDENCE_ID_PATTERN = /^ev_[0-9a-f]{20}$/;
+const ASSESSMENT_ID_PATTERN = /^sa_[0-9a-f]{20}$/;
 
 function normalizeDirectionKey(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
   return DIRECTION_KEY_PATTERN.test(normalized) ? normalized : undefined;
+}
+
+function normalizeEvidenceIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = [...new Set(value.filter((entry): entry is string => (
+    typeof entry === 'string' && EVIDENCE_ID_PATTERN.test(entry)
+  )))];
+  return ids.length > 0 ? ids : undefined;
+}
+
+function normalizeAssessmentId(value: unknown): string | undefined {
+  return typeof value === 'string' && ASSESSMENT_ID_PATTERN.test(value) ? value : undefined;
 }
 
 export function summarizeSupervisorGuidanceHistory(
@@ -159,12 +562,16 @@ export function parseSupervisorVerdict(output: string): SupervisorAssessment | n
       const directionKey = parsed.verdict === 'GUIDE' || parsed.verdict === 'ABORT'
         ? normalizeDirectionKey(parsed.direction_key)
         : undefined;
+      const evidenceIds = normalizeEvidenceIds(parsed.evidence_ids);
+      const supersedesAssessmentId = normalizeAssessmentId(parsed.supersedes_assessment_id);
       return {
         verdict: parsed.verdict,
         targetStage: parsed.target_stage ?? null,
         reason: parsed.reason ?? '',
         guidance: parsed.guidance ?? null,
         ...(directionKey ? { directionKey } : {}),
+        ...(evidenceIds ? { evidenceIds } : {}),
+        ...(supersedesAssessmentId ? { supersedesAssessmentId } : {}),
       };
     } catch { /* try the next earlier match */ }
   }
@@ -261,28 +668,24 @@ export interface DirectionPersistenceResult {
   verified: boolean;
   guideCount: number;
   matchingGuideCount: number;
-  mode: 'bound_progress_chain' | 'legacy_unchanged' | 'unverified';
+  mode: 'delivered_opportunities' | 'unverified';
   generations: string[];
+  opportunities: string[];
   reason: string;
 }
 
-function canonicalDirectionText(value: string | null): string {
-  return (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-}
-
-/** A count is not proof of persistence. The normal path requires the same
- * explicit direction key over two GUIDE judgments and the proposed ABORT,
- * with a different attempt-scoped progress generation at each judgment. The
- * narrow legacy path exists for pre-binding in-memory callers only: it accepts
- * two identical corrections solely when no newer durable worker evidence was
- * observed after them. */
+/** A count or advancing file hash is not proof that a correction was declined.
+ * Each GUIDE must have been delivered in its target attempt, followed by a
+ * distinct adapter invocation in which the worker could act. The next
+ * judgment must then cite new action-bearing evidence for the same direction. */
 export function verifyRepeatedWrongDirection(input: {
   stageId: string;
   attemptIndex: number | undefined;
   assessment: SupervisorAssessment;
   currentEvidence?: DirectionEvidenceBinding;
   guidance: readonly DirectionGuidanceFact[];
-  durableProgressAfterLatestGuide: boolean;
+  deliveryEvents?: readonly RunEvent[];
+  assessmentTimestamp?: string;
 }): DirectionPersistenceResult {
   const guides = input.guidance.filter((action) => (
     action.assessment.verdict === 'GUIDE'
@@ -299,12 +702,14 @@ export function verifyRepeatedWrongDirection(input: {
     && Number.isFinite(Date.parse(currentEvidence.attemptStartedAt))
     && /^[0-9a-f]{64}$/.test(currentEvidence.generation);
   const boundToCurrentDirection = (guide: DirectionGuidanceFact): boolean => Boolean(
-        normalizeDirectionKey(guide.assessment.directionKey) === directionKey
-        && guide.directionEvidence?.version === 1
-        && guide.directionEvidence?.stageId === input.stageId
-        && guide.directionEvidence.attemptIndex === input.attemptIndex
-        && guide.directionEvidence.attemptStartedAt === currentEvidence!.attemptStartedAt
-        && /^[0-9a-f]{64}$/.test(guide.directionEvidence.generation)
+    normalizeDirectionKey(guide.assessment.directionKey) === directionKey
+      && guide.directionEvidence?.version === 1
+      && guide.directionEvidence?.stageId === input.stageId
+      && guide.directionEvidence.attemptIndex === input.attemptIndex
+      && guide.directionEvidence.attemptStartedAt === currentEvidence!.attemptStartedAt
+      && /^[0-9a-f]{64}$/.test(guide.directionEvidence.generation)
+      && guide.assessment.guidanceId
+      && guide.assessment.evidenceIds?.length
   );
   const matching = directionKey && currentEvidenceValid
     ? guides.filter(boundToCurrentDirection)
@@ -313,58 +718,101 @@ export function verifyRepeatedWrongDirection(input: {
   const latestMatching = directionKey && currentEvidenceValid
     ? latestGuides.filter(boundToCurrentDirection)
     : [];
-  if (latestMatching.length === 2 && currentEvidenceValid) {
+  const deliveryEvents = input.deliveryEvents ?? [];
+  const opportunityFor = (guide: DirectionGuidanceFact): { key: string; timestamp: string } | undefined => {
+    const guidanceId = guide.assessment.guidanceId;
+    if (!guidanceId) return undefined;
+    const guideAt = Date.parse(guide.timestamp);
+    const delivered = deliveryEvents.find((event) => (
+      event.type === 'guidance_delivery_checked'
+      && event.delivered === true
+      && event.stageId === input.stageId
+      && event.attemptIndex === input.attemptIndex
+      && event.attemptStartedAt === currentEvidence?.attemptStartedAt
+      && event.guidanceIds?.includes(guidanceId)
+      && (!Number.isFinite(guideAt) || Date.parse(event.timestamp) >= guideAt)
+    ));
+    if (!delivered) return undefined;
+    const invocation = delivered.boundary === 'adapter_invocation'
+      ? delivered
+      : deliveryEvents.find((event) => (
+          event.type === 'guidance_delivery_checked'
+          && event.boundary === 'adapter_invocation'
+          && event.stageId === input.stageId
+          && event.attemptIndex === input.attemptIndex
+          && event.attemptStartedAt === currentEvidence?.attemptStartedAt
+          && Date.parse(event.timestamp) >= Date.parse(delivered.timestamp)
+          && (delivered.invocationIndex === undefined
+            || event.invocationIndex === undefined
+            || event.invocationIndex > delivered.invocationIndex)
+        ));
+    if (!invocation) return undefined;
+    return {
+      key: `${input.stageId}:${input.attemptIndex ?? 'unknown'}:${invocation.invocationIndex ?? invocation.timestamp}`,
+      timestamp: invocation.timestamp,
+    };
+  };
+
+  if (latestMatching.length === 2 && currentEvidenceValid && latestMatching.length === latestGuides.length) {
     const generations = [
       latestMatching[0].directionEvidence!.generation,
       latestMatching[1].directionEvidence!.generation,
       currentEvidence.generation,
     ];
-    if (new Set(generations).size === generations.length) {
+    const opportunities = latestMatching.map(opportunityFor);
+    const currentAssessmentAt = input.assessmentTimestamp ?? new Date().toISOString();
+    const nextJudgments = [
+      {
+        timestamp: latestMatching[1].timestamp,
+        evidenceIds: latestMatching[1].assessment.evidenceIds ?? [],
+        priorEvidenceIds: latestMatching[0].assessment.evidenceIds ?? [],
+      },
+      {
+        timestamp: currentAssessmentAt,
+        evidenceIds: input.assessment.evidenceIds ?? [],
+        priorEvidenceIds: latestMatching[1].assessment.evidenceIds ?? [],
+      },
+    ];
+    const eachOpportunityPrecedesNewActionEvidence = opportunities.every((opportunity, index) => {
+      if (!opportunity) return false;
+      const next = nextJudgments[index];
+      const opportunityAt = Date.parse(opportunity.timestamp);
+      const judgmentAt = Date.parse(next.timestamp);
+      return Number.isFinite(opportunityAt)
+        && Number.isFinite(judgmentAt)
+        && opportunityAt <= judgmentAt
+        && next.evidenceIds.some((id) => !next.priorEvidenceIds.includes(id));
+    });
+    const opportunityKeys = opportunities.flatMap((opportunity) => opportunity?.key ?? []);
+    if (
+      new Set(generations).size === generations.length
+      && opportunityKeys.length === 2
+      && new Set(opportunityKeys).size === opportunityKeys.length
+      && eachOpportunityPrecedesNewActionEvidence
+    ) {
       return {
         verified: true,
         guideCount,
         matchingGuideCount: matching.length,
-        mode: 'bound_progress_chain',
+        mode: 'delivered_opportunities',
         generations,
-        reason: `direction ${directionKey} was judged on three advancing evidence generations`,
+        opportunities: opportunityKeys,
+        reason: `direction ${directionKey} persisted after two separately delivered corrections and two distinct worker invocation opportunities`,
       };
     }
   }
-  const legacySignatures = latestGuides.map((guide) => JSON.stringify([
-    canonicalDirectionText(guide.assessment.reason),
-    canonicalDirectionText(guide.assessment.guidance),
-  ]));
-  const isUnboundLegacy = !directionKey
-    && currentEvidence === undefined
-    && latestGuides.length === 2
-    && latestGuides.every((guide) => (
-      normalizeDirectionKey(guide.assessment.directionKey) === undefined
-      && guide.directionEvidence === undefined
-    ));
-  if (
-    isUnboundLegacy
-    && !input.durableProgressAfterLatestGuide
-    && legacySignatures[0] === legacySignatures[1]
-  ) {
-    return {
-      verified: true,
-      guideCount,
-      matchingGuideCount: 2,
-      mode: 'legacy_unchanged',
-      generations: [],
-      reason: 'two identical legacy corrections remain unchanged and no newer durable worker evidence was observed',
-    };
-  }
-
+  const opportunities = latestMatching.flatMap((guide) => opportunityFor(guide)?.key ?? []);
   const reason = guideCount < 2
     ? `only ${guideCount} prior GUIDE decision(s) were observed`
-    : input.durableProgressAfterLatestGuide && isUnboundLegacy
-      ? 'durable worker evidence changed after the latest unbound GUIDE decision'
-      : !directionKey
+    : !directionKey
         ? 'the ABORT supplied no stable wrong-direction key'
         : matching.length < 2
-          ? `only ${matching.length} GUIDE decision(s) were bound to direction ${directionKey} and this attempt`
-          : 'the repeated judgments did not span three advancing evidence generations';
+          ? `only ${matching.length} GUIDE decision(s) were evidence-bound to direction ${directionKey} and this attempt`
+          : opportunities.length < 2
+            ? `only ${opportunities.length} matching GUIDE decision(s) had a recorded delivery followed by a worker invocation opportunity`
+            : new Set(opportunities).size < 2
+              ? 'the matching GUIDE decisions were delivered together and provided only one worker response opportunity'
+              : 'the later judgments did not cite new action evidence after each delivered correction';
   return {
     verified: false,
     guideCount,
@@ -372,6 +820,7 @@ export function verifyRepeatedWrongDirection(input: {
     mode: 'unverified',
     generations: latestMatching.flatMap((guide) => guide.directionEvidence?.generation ?? [])
       .concat(currentEvidence?.generation ?? []),
+    opportunities,
     reason,
   };
 }
@@ -629,7 +1078,7 @@ export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
-Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>","direction_key":"<stable lower_snake_case key for one concrete wrong direction, else null>"}
+Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>","direction_key":"<stable lower_snake_case key for one concrete wrong direction, else null>","evidence_ids":["<exact evidence id>"] ,"supersedes_assessment_id":"<exact prior assessment id or null>"}
 
 Verdicts:
 ${verdictList}
@@ -641,6 +1090,8 @@ Rules:
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
 - ABORT only in either of these cases: (1) a stage has made no real progress for ${stuckMinutes}+ minutes and is truly stuck, or (2) the same concrete wrong direction continues after repeated GUIDE decisions. Active or high-volume output is not proof that the direction is correct and must not prevent case (2) from escalating to ABORT. Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT infer case (1) from stdout silence alone if you can see file/artifact activity in the snapshot.
 - For every GUIDE, set direction_key to a short lower_snake_case identity for the concrete wrong direction. For ABORT case (2), reuse that exact key only when the evidence produced after each correction still shows the same direction. Set direction_key to null for idle ABORT and every other verdict.
+- Evidence rows marked ACTION can establish what a stage said or did. Rows marked INSPECTION are read-only commands, text the stage read, or tool output it received; they remain context, but cannot establish that the stage pursued the content. Every GUIDE, direction-based ABORT, and REPLAN must name the exact current ACTION rows it relies on in evidence_ids, and its reason or direction_key must repeat at least one concrete term from those rows. Do not cite an adjacent action for a claim found only in inspection output. Idle ABORT, WAIT, REJECT, and DONE may use an empty array.
+- If this assessment explicitly retracts or replaces one prior assessment, copy that assessment's exact id into supersedes_assessment_id. Otherwise use null.
 - Treat the verified stage-facts line as authoritative. \`output.md\` is not a verdict: say a verdict exists only when the facts explicitly say "verdict observed". Never ABORT during a stated finalization window; the stage timeout remains the outer bound.
 - Do not ABORT slow but correct work, ordinary progress, or an honestly reported negative result.
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
@@ -1083,6 +1534,11 @@ export class Supervisor {
         reason: a.assessment.reason,
         guidance: a.assessment.guidance,
         directionKey: a.assessment.directionKey,
+        assessmentId: a.assessment.assessmentId,
+        assessedAt: a.assessment.assessedAt,
+        evidenceIds: a.assessment.evidenceIds,
+        supersedesAssessmentId: a.assessment.supersedesAssessmentId,
+        guidanceId: a.assessment.guidanceId,
         directionEvidence: a.directionEvidence,
         targetAttemptIndex: a.targetAttemptIndex,
         source: a.source,
@@ -1249,44 +1705,6 @@ export class Supervisor {
       attemptStartedAt: attempt.startedAt,
       generation,
     };
-  }
-
-  /** Latest worker-owned bytes that can contradict an unbound legacy direction
-   * judgment. Supervisor guidance/status files are deliberately excluded. */
-  private latestDurableDirectionEvidenceMs(stageId: string, status: StageStatus): number | undefined {
-    const attempt = currentRunningAttempt(status);
-    if (!attempt) return undefined;
-    const attemptStartedMs = Date.parse(attempt.startedAt);
-    if (!Number.isFinite(attemptStartedMs)) return undefined;
-    let latest: number | undefined;
-    const consider = (path: string): void => {
-      try {
-        const stat = statSync(path);
-        if (!stat.isFile() || stat.size === 0 || stat.mtimeMs < attemptStartedMs) return;
-        latest = Math.max(latest ?? stat.mtimeMs, stat.mtimeMs);
-      } catch { /* a racing write cannot become abort authority */ }
-    };
-    const ignored = new Set([
-      'status.json', 'input.md', 'guidance.md', 'guidance_consumed.md',
-      'command_activity.json', 'attempt_generation.json',
-    ]);
-    const walk = (dir: string, depth: number): void => {
-      if (depth > 3) return;
-      let entries: import('node:fs').Dirent[];
-      try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return; }
-      for (const entry of entries) {
-        if (ignored.has(entry.name)
-          || /^attempt_deadline_execution_/.test(entry.name)
-          || /^constraint_audit_attempt_/.test(entry.name)) continue;
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) walk(path, depth + 1);
-        else if (entry.isFile()) consider(path);
-      }
-    };
-    walk(join(this.runDir(), 'stages', stageId), 0);
-    consider(join(this.runDir(), `verdict_${stageId}.json`));
-    consider(join(this.runDir(), `handoff_${stageId}.md`));
-    return latest;
   }
 
   private authoritativeStageStatus(stageId: string, fallback: StageStatus): StageStatus {
@@ -1798,15 +2216,30 @@ export class Supervisor {
     const assessmentTails = new Map(this.pendingTails);
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
     const observedDirectionEvidence = new Map<string, DirectionEvidenceBinding>();
+    const observedStageEvidence = new Map<string, SupervisorStageEvidence>();
     for (const stageId of runningStages) {
-      const binding = this.bindDirectionEvidence(
-        stageId,
-        this.authoritativeStageStatus(stageId, state.stages[stageId]),
-      );
+      const authoritative = this.authoritativeStageStatus(stageId, state.stages[stageId]);
+      const binding = this.bindDirectionEvidence(stageId, authoritative);
       if (binding) observedDirectionEvidence.set(stageId, binding);
+      const attempt = currentRunningAttempt(authoritative);
+      if (attempt) {
+        observedStageEvidence.set(stageId, projectSupervisorStageEvidence({
+          stageId,
+          attemptIndex: attempt.index,
+          attemptStartedAt: attempt.startedAt,
+          raw: assessmentTails.get(stageId) ?? '',
+        }));
+      }
     }
     this.iterationAssessmentCount++;
-    const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
+    const prompt = this.buildAssessmentPrompt(
+      assessmentTails,
+      state,
+      runningStages,
+      assessmentArtifacts,
+      stageFacts,
+      observedStageEvidence,
+    ) + extraContext;
     let assessment = await this.assess(prompt, triggeringEvent);
     this.accumulatedOutputBytes = 0;
     this.pendingTails.clear();
@@ -1856,6 +2289,7 @@ export class Supervisor {
       userInput ? 'operator' : 'supervisor',
       observedEvidenceBindings,
       observedDirectionEvidence,
+      observedStageEvidence,
     );
     this.recordEffectiveAssessment(effectiveAssessment);
 
@@ -1886,6 +2320,25 @@ export class Supervisor {
         : {}),
     };
     this.actions.push(action);
+    if (effectiveAssessment.assessmentId) {
+      recordRunEvent(this.projectDir, this.runId, {
+        type: 'supervisor_assessment',
+        runId: this.runId,
+        timestamp: action.timestamp,
+        iteration: state.currentIteration,
+        stageId: effectiveAssessment.targetStage ?? undefined,
+        attemptIndex: action.targetAttemptIndex,
+        attemptStartedAt: action.directionEvidence?.attemptStartedAt,
+        evidenceGeneration: action.directionEvidence?.generation,
+        assessmentId: effectiveAssessment.assessmentId,
+        supersedesAssessmentId: effectiveAssessment.supersedesAssessmentId,
+        supervisorVerdict: effectiveAssessment.verdict,
+        evidenceIds: effectiveAssessment.evidenceIds,
+        guidanceId: effectiveAssessment.guidanceId,
+        detail: effectiveAssessment.reason,
+        source: action.source,
+      });
+    }
 
     // Log
     this.appendLog(action);
@@ -1964,6 +2417,7 @@ export class Supervisor {
     runningStages: string[],
     recentArtifacts: Array<{ path: string; content: string }>,
     stageFacts: ReadonlyMap<string, StageExecutionFacts>,
+    stageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): string {
     const parts: string[] = [];
 
@@ -1972,13 +2426,23 @@ export class Supervisor {
     // Running stages with output (8 KB per stage so silent fallbacks are visible in stdout)
     parts.push('\n# Running Stages');
     for (const stageId of runningStages) {
-      const ss = state.stages[stageId];
       const facts = stageFacts.get(stageId);
       const elapsed = facts?.attemptStartedAt ? Math.round((Date.now() - new Date(facts.attemptStartedAt).getTime()) / 1000) : 0;
-      const tail = tails.get(stageId) ?? '(no output yet)';
+      const tail = tails.get(stageId) ?? '';
       parts.push(`\n## ${stageId} — ${elapsed}s elapsed`);
       if (facts) parts.push(`Verified facts: ${describeStageExecutionFacts(facts)}.`);
-      parts.push(`\`\`\`\n${tail.slice(-8000)}\n\`\`\``);
+      const projection = stageEvidence?.get(stageId);
+      if (projection && projection.rows.length > 0) {
+        parts.push('Evidence projection (cite exact ids; INSPECTION rows cannot establish pursuit; consequential reasons must share a concrete term with cited ACTION rows):');
+        for (const row of projection.rows) {
+          const label = row.authority === 'action' ? 'ACTION' : 'INSPECTION';
+          parts.push(`[${row.id}] [${label}:${row.kind}] ${row.text}`);
+        }
+      } else {
+        // Direct legacy callers can still inspect their raw bytes, but the
+        // production path always supplies a provenance projection.
+        parts.push(tail ? `\`\`\`\n${tail.slice(-8000)}\n\`\`\`` : '(no output yet)');
+      }
     }
 
     // Recent JSON artifacts: capability reports, gate verdicts, metric files modified
@@ -2020,7 +2484,7 @@ export class Supervisor {
     // Previous supervisor actions (last 3)
     if (this.actions.length > 0) {
       const recent = this.actions.slice(-3).map(a =>
-        `- Tick ${a.tick}: ${a.assessment.verdict}${a.assessment.targetStage ? ` → ${a.assessment.targetStage}` : ''} — ${a.assessment.reason}`
+        `- ${a.assessment.assessmentId ?? 'legacy-assessment'} · Tick ${a.tick}: ${a.assessment.verdict}${a.assessment.targetStage ? ` → ${a.assessment.targetStage}` : ''} — ${a.assessment.reason}`
       );
       parts.push(`\n# Previous Supervisor Actions\n${recent.join('\n')}`);
     }
@@ -2120,8 +2584,16 @@ export class Supervisor {
       log.warn({ outputPreview: result.output.slice(-500) }, 'No parseable supervisor verdict in response');
       return null;
     }
-    this.recordAssessmentUsage(startedAt, result, verdict, trigger);
-    return verdict;
+    const assessedAt = new Date().toISOString();
+    const assessmentId = `sa_${createHash('sha256').update(JSON.stringify([
+      this.runId,
+      trigger.eventId,
+      startedAt,
+      result.output,
+    ])).digest('hex').slice(0, 20)}`;
+    const identifiedVerdict: SupervisorAssessment = { ...verdict, assessmentId, assessedAt };
+    this.recordAssessmentUsage(startedAt, result, identifiedVerdict, trigger);
+    return identifiedVerdict;
   }
 
   private writeVerifiedAbort(
@@ -2224,8 +2696,61 @@ export class Supervisor {
     source: 'supervisor' | 'operator' = 'supervisor',
     observedEvidenceBindings?: ReadonlyMap<string, SupervisorEvidenceBinding>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+    observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
+    const citedActionEvidence = (): {
+      verified: boolean;
+      reason: string;
+      attempt?: { index: number; startedAt: string };
+    } => {
+      // Direct unit callers that do not provide the production projection keep
+      // their narrow compatibility behavior. Every production tick supplies
+      // this map, including an empty projection when no attributable evidence
+      // was observed.
+      if (observedStageEvidence === undefined) return { verified: true, reason: 'direct caller supplied no projection' };
+      if (!assessment.targetStage) return { verified: false, reason: 'the assessment named no target stage' };
+      let attempt: { index: number; startedAt: string } | undefined;
+      try {
+        const state = readRunState(this.projectDir, this.runId);
+        const status = state.stages[assessment.targetStage];
+        if (status) attempt = currentRunningAttempt(this.authoritativeStageStatus(assessment.targetStage, status));
+      } catch { /* fail closed below */ }
+      if (!attempt) return { verified: false, reason: 'the target has no current running execution' };
+      const projection = observedStageEvidence.get(assessment.targetStage);
+      if (!projection
+        || projection.attemptIndex !== attempt.index
+        || projection.attemptStartedAt !== attempt.startedAt) {
+        return { verified: false, reason: 'the cited evidence is not bound to the current target execution', attempt };
+      }
+      const ids = assessment.evidenceIds ?? [];
+      if (ids.length === 0) return { verified: false, reason: 'the assessment cited no action-bearing evidence', attempt };
+      const actionIds = new Set(projection.rows
+        .filter((row) => row.authority === 'action')
+        .map((row) => row.id));
+      const invalid = ids.filter((id) => !actionIds.has(id));
+      if (invalid.length > 0) {
+        return {
+          verified: false,
+          reason: `evidence ${invalid.join(', ')} is absent, stale, or inspection-only`,
+          attempt,
+        };
+      }
+      const citedRows = projection.rows.filter((row) => ids.includes(row.id));
+      const support = supervisorEvidenceSupportsAssessment(assessment, citedRows);
+      if (!support.supported) {
+        return {
+          verified: false,
+          reason: 'the cited action rows share no concrete claim term with the assessment reason or direction key',
+          attempt,
+        };
+      }
+      return {
+        verified: true,
+        reason: `${ids.length} current action evidence row(s) verified with concrete support term(s): ${support.sharedTerms.join(', ')}`,
+        attempt,
+      };
+    };
 
     switch (assessment.verdict) {
       case 'WAIT':
@@ -2233,6 +2758,17 @@ export class Supervisor {
 
       case 'GUIDE':
         if (assessment.targetStage && assessment.guidance) {
+          if (source === 'supervisor') {
+            const evidence = citedActionEvidence();
+            if (!evidence.verified) {
+              return {
+                ...assessment,
+                verdict: 'WAIT',
+                guidance: null,
+                reason: `GUIDE suppressed for ${assessment.targetStage}: ${evidence.reason}.`,
+              };
+            }
+          }
           let knownStageIds: string[] = [];
           try { knownStageIds = Object.keys(readRunState(this.projectDir, this.runId).stages); } catch { /* quarantine below */ }
           const envelope = appendGuidanceEnvelope({
@@ -2242,11 +2778,20 @@ export class Supervisor {
             source,
             knownStageIds,
           });
+          if (envelope.quarantined) {
+            return {
+              ...assessment,
+              verdict: 'WAIT',
+              guidance: null,
+              reason: `GUIDE suppressed for ${assessment.targetStage}: ${envelope.quarantineReason ?? 'guidance target was quarantined'}.`,
+            };
+          }
           if (!envelope.quarantined && assessment.targetStage !== RUN_WIDE_GUIDANCE_TARGET) {
             const guidancePath = join(this.runDir(), 'stages', assessment.targetStage, 'guidance.md');
             mkdirSync(join(this.runDir(), 'stages', assessment.targetStage), { recursive: true });
             appendFileSync(guidancePath, `${existsSync(guidancePath) ? '\n\n' : ''}${renderGuidanceEnvelope(envelope)}\n`, 'utf-8');
           }
+          assessment = { ...assessment, guidanceId: envelope.id };
         }
         this.lastActionTime = Date.now();
         return assessment;
@@ -2259,6 +2804,17 @@ export class Supervisor {
           };
         }
         {
+          if (assessment.directionKey && source === 'supervisor') {
+            const evidence = citedActionEvidence();
+            if (!evidence.verified) {
+              return {
+                ...assessment,
+                verdict: 'WAIT',
+                guidance: null,
+                reason: `Direction ABORT suppressed for ${assessment.targetStage}: ${evidence.reason}.`,
+              };
+            }
+          }
           let targetAttemptIndex: number | undefined;
           let targetStatus: StageStatus | undefined;
           try {
@@ -2278,26 +2834,14 @@ export class Supervisor {
           }));
           const lastProgressAt = this.stageLastProgressMs[assessment.targetStage];
           const idleMs = lastProgressAt === undefined ? -1 : Date.now() - lastProgressAt;
-          const latestGuideAt = guidance
-            .filter((action) => (
-              action.assessment.verdict === 'GUIDE'
-              && action.assessment.targetStage === assessment.targetStage
-              && (action.source ?? 'supervisor') === 'supervisor'
-              && action.targetAttemptIndex === targetAttemptIndex
-            ))
-            .reduce((latest, action) => Math.max(latest, Date.parse(action.timestamp) || 0), 0);
-          const latestDurableEvidenceAt = targetStatus
-            ? this.latestDurableDirectionEvidenceMs(assessment.targetStage, targetStatus)
-            : undefined;
           const persistence = verifyRepeatedWrongDirection({
             stageId: assessment.targetStage,
             attemptIndex: targetAttemptIndex,
             assessment,
             currentEvidence: observedDirectionEvidence?.get(assessment.targetStage),
             guidance,
-            durableProgressAfterLatestGuide: latestGuideAt > 0
-              && latestDurableEvidenceAt !== undefined
-              && latestDurableEvidenceAt >= latestGuideAt,
+            deliveryEvents: readRunEvents(this.projectDir, this.runId),
+            assessmentTimestamp: assessment.assessedAt ?? new Date().toISOString(),
           });
           const basis: AbortBasis = idleMs >= this.config.stuckThresholdMs
             ? { kind: 'idle', stalledMs: idleMs }
@@ -2330,8 +2874,30 @@ export class Supervisor {
         }
 
       case 'REPLAN':
-        writeFileSync(join(signalDir, 'replan.json'),
-          JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        if (source === 'supervisor') {
+          const evidence = citedActionEvidence();
+          if (!evidence.verified || !evidence.attempt || !assessment.targetStage || !assessment.assessmentId) {
+            return {
+              ...assessment,
+              verdict: 'WAIT',
+              guidance: null,
+              reason: `REPLAN suppressed${assessment.targetStage ? ` for ${assessment.targetStage}` : ''}: ${evidence.reason}.`,
+            };
+          }
+          writeFileSync(join(signalDir, 'replan.json'), JSON.stringify({
+            version: 2,
+            assessmentId: assessment.assessmentId,
+            targetStage: assessment.targetStage,
+            attemptIndex: evidence.attempt.index,
+            attemptStartedAt: evidence.attempt.startedAt,
+            evidenceIds: assessment.evidenceIds,
+            reason: assessment.reason,
+            timestamp: assessment.assessedAt ?? new Date().toISOString(),
+          }, null, 2), 'utf-8');
+        } else {
+          writeFileSync(join(signalDir, 'replan.json'),
+            JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
+        }
         this.lastActionTime = Date.now();
         return assessment;
 
@@ -2410,6 +2976,10 @@ export class Supervisor {
       `Verdict: **${action.assessment.verdict}**${action.assessment.targetStage ? ` → ${action.assessment.targetStage}` : ''}`,
       `Reason: ${action.assessment.reason}`,
     ];
+    if (action.assessment.assessmentId) entry.push(`Assessment id: ${action.assessment.assessmentId}`);
+    if (action.assessment.evidenceIds?.length) entry.push(`Cited evidence: ${action.assessment.evidenceIds.join(', ')}`);
+    if (action.assessment.supersedesAssessmentId) entry.push(`Supersedes: ${action.assessment.supersedesAssessmentId}`);
+    if (action.assessment.guidanceId) entry.push(`Guidance envelope: ${action.assessment.guidanceId}`);
     if (action.assessment.directionKey) {
       entry.push(`Direction key: ${action.assessment.directionKey}`);
     }

@@ -176,7 +176,7 @@ describe('baseline failure identity extraction', () => {
       .toMatchObject({ state: 'unresolved', newFailureIdentifiers: [] });
   });
 
-  it('refuses red-to-red conclusions when either side has partial evidence, while green transitions stay decisive', async () => {
+  it('refuses conclusions from partial failure evidence while preserving decisive recovery', async () => {
     const partialBaseline = await baselineFor({
       exitCode: 1,
       stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/partial.test.ts\nTests 1 failed',
@@ -205,7 +205,7 @@ describe('baseline failure identity extraction', () => {
     expect(evaluateValidationDelta(partialBaseline, [passed]).find(({ role }) => role === 'test'))
       .toMatchObject({ state: 'pass', reason: expect.stringContaining('improved to green') });
     expect(evaluateValidationDelta(greenBaseline, [partial]).find(({ role }) => role === 'test'))
-      .toMatchObject({ state: 'regression', reason: expect.stringContaining('green') });
+      .toMatchObject({ state: 'unresolved', reason: expect.stringContaining('partial') });
   });
 
   it('keeps opaque non-TAP unknown, records its cause, and leaves the delta unresolved', async () => {

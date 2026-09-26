@@ -1056,9 +1056,39 @@ export function evaluateValidationDelta(
     const next = current.find((result) => result.role === prior.role);
     if (!next) return { role: prior.role, state: 'unresolved', reason: 'Current validation result is missing', newFailureIdentifiers: [] };
     if (prior.state === 'passed') {
-      return next.state === 'passed'
-        ? { role: prior.role, state: 'pass', reason: 'Green baseline remains green', newFailureIdentifiers: [] }
-        : { role: prior.role, state: 'regression', reason: 'A green baseline no longer passes', newFailureIdentifiers: next.failureIdentifiers };
+      if (next.state === 'passed') {
+        return { role: prior.role, state: 'pass', reason: 'Green baseline remains green', newFailureIdentifiers: [] };
+      }
+      if (next.state !== FAILED_VALIDATION_STATE) {
+        return {
+          role: prior.role,
+          state: 'unresolved',
+          reason: `Current validation did not execute to a comparable pass/fail result (${next.state})`,
+          newFailureIdentifiers: [],
+        };
+      }
+      if (next.failureIdentity !== 'known') {
+        return {
+          role: prior.role,
+          state: 'unresolved',
+          reason: 'Green baseline no longer passes, but current failure identity/count is unavailable',
+          newFailureIdentifiers: [],
+        };
+      }
+      if (next.failureEvidence === 'partial') {
+        return {
+          role: prior.role,
+          state: 'unresolved',
+          reason: 'Green baseline no longer passes, but current failure evidence is partial',
+          newFailureIdentifiers: [],
+        };
+      }
+      return {
+        role: prior.role,
+        state: 'regression',
+        reason: 'A green baseline no longer passes',
+        newFailureIdentifiers: next.failureIdentifiers,
+      };
     }
     if (prior.state !== FAILED_VALIDATION_STATE) {
       return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -71,6 +71,32 @@ describe('tolerant shared JSONL reader', () => {
       'run_completed',
     ]);
     expect(readRunEvents(projectDir, 'missing-run')).toEqual([]);
+  });
+
+  it('starts a complete event record after a torn NUL tail without rewriting the torn bytes', () => {
+    const projectDir = join(tempDir, 'project');
+    const runId = 'torn-event-tail';
+    appendRunEvent(projectDir, runId, {
+      type: 'iteration_completed',
+      runId,
+      timestamp: '2026-09-22T00:00:00.000Z',
+    });
+    const path = join(fcGlobalDir(), 'runs', runId, 'events.jsonl');
+    appendFileSync(path, Buffer.from([0, 0, 0]));
+
+    appendRunEvent(projectDir, runId, {
+      type: 'run_completed',
+      runId,
+      timestamp: '2026-09-22T00:01:00.000Z',
+    });
+
+    const bytes = readFileSync(path);
+    expect(bytes.includes(Buffer.from([0, 0, 0, 0x0a, 0x7b]))).toBe(true);
+    expect(readRunEvents(projectDir, runId).map((event) => event.type)).toEqual([
+      'iteration_completed',
+      'run_completed',
+    ]);
+    expect(readJsonlFileWithDiagnostics(path).unreadableRecords).toBe(1);
   });
 
   it('keeps task registry rows before and after a corrupt append', () => {

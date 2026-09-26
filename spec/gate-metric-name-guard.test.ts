@@ -46,6 +46,23 @@ describe('validateVerdictAgainstMetricFile — metric name differences', () => {
     expect(validateVerdictAgainstMetricFile(verdict, metric)).toBeNull();
   });
 
+  it('does not compare thresholds belonging to different quantities — the recorded regression', () => {
+    const verdict = {
+      pass: false,
+      metric: 'failing_required_checks',
+      score: 1,
+      threshold: 0,
+    };
+    const metric = {
+      pass: true,
+      metric: 'round01_member_arm_level',
+      value: 0.180675,
+      threshold: 0.1,
+    };
+
+    expect(validateVerdictAgainstMetricFile(verdict, metric)).toBeNull();
+  });
+
   it('still rejects a rename when the numeric metric misses its threshold', () => {
     // This is the case the guard exists for: the domain metric failed, and the
     // verdict reports a different, passing metric instead.
@@ -87,9 +104,9 @@ describe('validateVerdictAgainstMetricFile — metric name differences', () => {
     expect(validateVerdictAgainstMetricFile(verdict, metric)).toBeNull();
   });
 
-  it('leaves threshold-downgrade detection untouched', () => {
-    const verdict = { pass: true, metric: DOMAIN, threshold: 5 };
-    const metric = { metric: DOMAIN, threshold: 15 };
+  it('leaves a same-quantity threshold downgrade detectable', () => {
+    const verdict = { pass: false, metric: DOMAIN, score: 10, threshold: 5 };
+    const metric = { pass: true, metric: DOMAIN, value: 20, threshold: 15 };
 
     expect(validateVerdictAgainstMetricFile(verdict, metric)).toBe('threshold downgraded');
   });

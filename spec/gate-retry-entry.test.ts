@@ -172,12 +172,14 @@ async function runScenario(options: ScenarioOptions): Promise<{
   repairCalls: number;
   escalationCalls: number;
   repairSawArchivedNegative: boolean;
+  gateInputs: string[];
 }> {
   const { config, yaml } = workflow();
   let gateCalls = 0;
   let repairCalls = 0;
   let escalationCalls = 0;
   let repairSawArchivedNegative = false;
+  const gateInputs: string[] = [];
   if (options.logPath) restoreLogs = routeLogsToFile(options.logPath);
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
@@ -196,6 +198,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       if (opts.stageId === GATE_ID) {
+        gateInputs.push(readFileSync(join(opts.runDir, 'stages', GATE_ID, 'input.md'), 'utf-8'));
         const pass = options.gatePasses[Math.min(gateCalls, options.gatePasses.length - 1)];
         gateCalls++;
         const verdict = scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection');
@@ -300,6 +303,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
     repairCalls,
     escalationCalls,
     repairSawArchivedNegative,
+    gateInputs,
   };
 }
 
@@ -420,6 +424,18 @@ describe('gate retry loop entry', () => {
       'round_1',
       `rejected_verdict_${GATE_ID}.json`,
     ), 'utf-8'))).toMatchObject({ pass: false, score: -1, threshold: 0 });
+    const archivedInput = readFileSync(join(
+      result.runDirPath,
+      'gate_reevaluation',
+      'iteration_1',
+      'round_1',
+      `evaluated_input_${GATE_ID}.md`,
+    ), 'utf-8');
+    expect(result.gateInputs).toHaveLength(2);
+    expect(archivedInput).toBe(result.gateInputs[0]);
+    expect(archivedInput).not.toBe(result.gateInputs[1]);
+    expect(readFileSync(join(result.runDirPath, 'stages', GATE_ID, 'input.md'), 'utf-8'))
+      .toBe(result.gateInputs[1]);
     expect(existsSync(join(
       result.runDirPath,
       'gate_reevaluation',

@@ -15,6 +15,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   isNegatedPathMention,
 } from './brief-negation.js';
+import { isGenericPathLexeme } from './path-lexeme.js';
 
 export type BriefInputAssertionKind = 'row_count' | 'time_span' | 'file_count' | 'sha256';
 export type BriefInputAssertionState = 'confirmed' | 'refuted' | 'not_checkable';
@@ -184,6 +185,9 @@ function normalizedBriefInputPath(raw: string, explicit: boolean): NormalizedBri
   }
   if (explicit && authored.includes('\\')) {
     return { reason: 'Explicit input must use project-relative forward-slash separators' };
+  }
+  if (!explicit && !isGenericPathLexeme(authored, 'prose')) {
+    return { reason: 'Prose token is pattern or label text, not a literal project path' };
   }
   let candidate = explicit
     ? authored.replace(/^\.\//, '')

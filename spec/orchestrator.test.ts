@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -1042,6 +1042,53 @@ describe('portable log tail snapshots', () => {
       },
     });
     expect(Buffer.byteLength(log)).toBeGreaterThan(log.length);
+  });
+});
+
+describe('systemd inactive identity', () => {
+  it('separates a never-loaded unit from genuine inactive states', async () => {
+    const baseDir = join(tempDir, 'inactive-systemd');
+    const binDir = join(baseDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const systemctl = join(binDir, 'systemctl');
+    writeFileSync(systemctl, [
+      '#!/bin/sh',
+      'if [ "$2" = "is-active" ]; then printf "inactive\\n"; exit 3; fi',
+      'if [ "$2" = "show" ]; then printf "%s\\n" "${FLOWCREW_TEST_LOAD_STATE:-not-found}"; exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'), 'utf-8');
+    chmodSync(systemctl, 0o755);
+    const previousPath = process.env.PATH;
+    const previousLoadState = process.env.FLOWCREW_TEST_LOAD_STATE;
+    process.env.PATH = `${binDir}:/usr/bin:/bin`;
+    try {
+      const backend = new NodeSystemd(baseDir);
+      await expect(backend.isActive('never-created.service')).resolves.toEqual({ kind: 'absent' });
+
+      process.env.FLOWCREW_TEST_LOAD_STATE = 'loaded';
+      await expect(backend.isActive('genuinely-inactive.service')).resolves.toEqual({
+        kind: 'terminal-unknown',
+        reason: 'systemd reported inactive without an exit status',
+      });
+
+      const legacyUnit = 'legacy-inactive.service';
+      const legacyPath = join(baseDir, 'systemd-fallback', `${legacyUnit}.json`);
+      writeFileSync(legacyPath, JSON.stringify({
+        state: 'inactive',
+        reason: 'portable exit status was not recorded',
+        completedAt: '2026-09-22T00:00:00.000Z',
+      }), 'utf-8');
+      await expect(backend.isActive(legacyUnit)).resolves.toEqual({
+        kind: 'terminal-unknown',
+        reason: 'systemd reported inactive without an exit status',
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousLoadState === undefined) delete process.env.FLOWCREW_TEST_LOAD_STATE;
+      else process.env.FLOWCREW_TEST_LOAD_STATE = previousLoadState;
+    }
   });
 });
 

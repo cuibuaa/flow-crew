@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
 import { isPausedRunStatus, readRunState, runsRoot } from './store.js';
 import { claimLaunchIntent, releaseLaunchIntent } from './run-lock.js';
+import { inspectApprovalRunStanding } from './run-standing.js';
 import {
   formatBriefPreflightReport,
   verifyBriefAdmission,
@@ -56,9 +57,11 @@ function findByRequestId(requestId: string, runIdHint?: string): { runId: string
 
 function fmtRow(item: InboxItem): string {
   const state = isPendingInboxItemState(item.state) ? 'PENDING' : item.state.toUpperCase();
+  const standing = inspectApprovalRunStanding(item.projectDir, item.runId);
   return [
     item.requestId.padEnd(24),
     state.padEnd(9),
+    standing.kind.toUpperCase().padEnd(10),
     (item.risk ?? 'unknown').padEnd(9),
     `${item.action}${item.target ? ` → ${item.target}` : ''}`.padEnd(38),
     item.runId,
@@ -144,7 +147,7 @@ export async function cmdInbox(
         out.write(state === INBOX_FILTER_STATE.PENDING ? 'No pending approval requests.\n' : `No ${state} approval requests.\n`);
         return 0;
       }
-      out.write(['REQUEST'.padEnd(24), 'STATE'.padEnd(9), 'RISK'.padEnd(9), 'ACTION'.padEnd(38), 'RUN'].join(' ') + '\n');
+      out.write(['REQUEST'.padEnd(24), 'STATE'.padEnd(9), 'STANDING'.padEnd(10), 'RISK'.padEnd(9), 'ACTION'.padEnd(38), 'RUN ID'].join(' ') + '\n');
       for (const item of items) out.write(fmtRow(item) + '\n');
       if (state === INBOX_FILTER_STATE.PENDING) out.write('\nResolve with: flowcrew inbox approve <REQUEST>  |  flowcrew inbox deny <REQUEST>\n');
       return 0;
@@ -155,9 +158,10 @@ export async function cmdInbox(
       const found = findByRequestId(positional, valueAfter(args, '--run'));
       if (!found) { err.write(`Unknown request: ${positional}\n`); return 1; }
       const { item } = found;
+      const standing = inspectApprovalRunStanding(item.projectDir, item.runId);
       out.write(`request:   ${item.requestId}\nstate:     ${item.state}\nrisk:      ${item.risk}\n`
         + `action:    ${item.action}${item.target ? `\ntarget:    ${item.target}` : ''}\n`
-        + `run:       ${item.runId}\nproject:   ${item.projectDir}\ncreated:   ${item.createdAt}\n`
+        + `run:       ${item.runId}\nstanding:  ${standing.kind} — ${standing.reason}\nproject:   ${item.projectDir}\ncreated:   ${item.createdAt}\n`
         + `title:     ${item.title}\n${item.body ? `\n${item.body}\n` : ''}`);
       if (item.resolution) {
         out.write(`\nresolved:  ${item.resolution.decision} by ${item.resolution.by} at ${item.resolution.at}`

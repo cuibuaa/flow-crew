@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { appendTextRecord } from './append-boundary.js';
 import { readJsonlFile } from './jsonl.js';
 import type { StageStatus, StoreState } from './store.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
@@ -21,12 +22,14 @@ export type RunEventType =
   | 'scope_revision_requested'
   | 'scope_revision_decided'
   | 'live_constraint_violation'
+  | 'live_constraint_comparison_unavailable'
   | 'live_constraint_exemptions'
   | 'live_constraint_monitor_failure'
   | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'operator_wrap_up_required'
+  | 'supervisor_assessment'
   | 'supervisor_reject_requested'
   | 'supervisor_reject_discarded'
   | 'stage_complete'
@@ -106,6 +109,10 @@ export interface RunEvent {
   authorStageId?: string;
   decision?: 'accepted' | 'rejected' | 'discarded';
   evidenceGeneration?: string;
+  assessmentId?: string;
+  supersedesAssessmentId?: string;
+  supervisorVerdict?: string;
+  evidenceIds?: string[];
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';
   runStatus?: StoreState['status'];
   /** Stable identity for retrying one cursor transition without duplicate events. */
@@ -188,7 +195,7 @@ export function readAttemptSummaryRefreshState(
 
 export function appendRunEvent(projectDir: string, runId: string, event: RunEvent): void {
   requireRunArtifactDirectory(projectDir, runId);
-  appendFileSync(eventsPath(projectDir, runId), JSON.stringify(event) + '\n', 'utf-8');
+  appendTextRecord(eventsPath(projectDir, runId), JSON.stringify(event));
 }
 
 /** Append when a caller already owns the exact run directory. This keeps
@@ -196,7 +203,7 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
  * project root from an arbitrary run path. */
 export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): void {
   requireExistingRunArtifactDirectory(runDirectory);
-  appendFileSync(join(runDirectory, 'events.jsonl'), JSON.stringify(event) + '\n', 'utf-8');
+  appendTextRecord(join(runDirectory, 'events.jsonl'), JSON.stringify(event));
 }
 
 export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
@@ -363,6 +370,7 @@ export function recordStageOutcome(
   }
 
   const timestamp = status.completedAt ?? new Date().toISOString();
+  const settledAttempt = status.attempts?.at(-1);
   const stageEvent: RunEvent = {
     type: status.status === STAGE_STATUS.COMPLETE
       ? 'stage_complete'
@@ -375,6 +383,8 @@ export function recordStageOutcome(
     stageId,
     status: status.status,
     artifacts: status.artifacts,
+    attemptIndex: settledAttempt?.index,
+    attemptStartedAt: settledAttempt?.startedAt,
   };
 
   const events = [stageEvent, ...buildArtifactEvents(runId, stageEvent)];

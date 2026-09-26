@@ -106,6 +106,7 @@ export interface StageConstraintAuditSummary {
   rolledBackWriteCount?: number;
   rejectedDigestCount?: number;
   liveViolationCount?: number;
+  liveComparisonUnavailableCount?: number;
   liveRestoredCount?: number;
   unresolvedViolationCount?: number;
 }

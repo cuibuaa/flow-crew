@@ -49,6 +49,8 @@ const [
   storeModule,
   configModule,
   campaignModule,
+  campaignsModule,
+  campaignHygieneModule,
   briefVersioningModule,
   campaignReviewModule,
   adapterLoaderModule,
@@ -68,6 +70,8 @@ const [
   import('./store.js'),
   import('./config.js'),
   import('./campaign.js'),
+  import('./campaigns.js'),
+  import('./campaign-hygiene.js'),
   import('./brief-versioning.js'),
   import('./campaign-review.js'),
   import('./adapters/loader.js'),
@@ -114,6 +118,8 @@ const {
 } = storeModule;
 const { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } = configModule;
 const { loadCampaignConfig, runCampaign, stopCampaign } = campaignModule;
+const { readCampaignEntries } = campaignsModule;
+const { assessCampaignHygiene } = campaignHygieneModule;
 const { diffVersions, readHead, rollback } = briefVersioningModule;
 const { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } = campaignReviewModule;
 const { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } = adapterLoaderModule;
@@ -891,6 +897,7 @@ async function cmdQuick() {
   let campaignArg: string | undefined; // --campaign <name> wins over defaults.yaml; --no-campaign forces undefined
   let campaignDisabled = false;
   let inheritCampaignContext = true; // Context is independent from campaign ownership; legacy alias maps to skip.
+  let campaignContextExplicit = false;
   let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
   let background = false;
   let acknowledgementPresent = false;
@@ -923,13 +930,14 @@ async function cmdQuick() {
         throw new Error(`Invalid --campaign-context value "${mode}"; expected inherit or skip.`);
       }
       inheritCampaignContext = mode === 'inherit';
+      campaignContextExplicit = true;
       launchArgs.push(args[i]);
       continue;
     }
     if (args[i] === '--campaign-context') {
       throw new Error('Invalid --campaign-context syntax; use --campaign-context=inherit or --campaign-context=skip.');
     }
-    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; launchArgs.push('--no-inherit-campaign'); continue; }
+    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; campaignContextExplicit = true; launchArgs.push('--no-inherit-campaign'); continue; }
     if (args[i] === '--task' && args[i + 1]) { task = args[++i]; taskSupplied = true; continue; }
     if (args[i] === '--brief-input-base64' && args[i + 1]) {
       try {
@@ -992,7 +1000,7 @@ async function cmdQuick() {
     console.error('  --no-supervise          Disable supervisor brain (opt-out)');
     console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug of the main worktree)');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
-    console.error('  --campaign-context=inherit|skip  Planner history context; skip preserves campaign ownership (default: inherit)');
+    console.error('  --campaign-context=inherit|skip  Planner history context; no flag skips after 3 recent adverse endings');
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
     console.error('  --background            Register and launch under the flowcrew daemon');
@@ -1121,6 +1129,36 @@ async function cmdQuick() {
     }
   }
 
+  const projectDefaults = loadProjectDefaults(projectDir);
+  const campaignFromDefaults = projectDefaults.campaign;
+  const campaignBaseDir = campaignBaseDirectory(projectDir);
+  const campaignBaseSlug = (campaignBaseDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const resolvedCampaign = campaignDisabled
+    ? undefined
+    : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
+
+  if (!campaignContextExplicit && initializedContinuation && existingRunId) {
+    try {
+      const continuation = readRunState(projectDir, existingRunId);
+      inheritCampaignContext = continuation.inheritCampaignContext !== false;
+      if (background) launchArgs.push(`--campaign-context=${inheritCampaignContext ? 'inherit' : 'skip'}`);
+    } catch { /* scheduler remains authoritative for an unreadable continuation */ }
+  } else if (!campaignContextExplicit && resolvedCampaign) {
+    try {
+      const hygiene = assessCampaignHygiene(readCampaignEntries(projectDir, resolvedCampaign));
+      if (hygiene.suggestContextSkip) {
+        inheritCampaignContext = false;
+        launchArgs.push('--campaign-context=skip');
+        console.error(
+          `Note: campaign ${resolvedCampaign} has ${hygiene.recentAdverse}/${hygiene.recentEnded} recent adverse endings; defaulted planner context to skip (pass --campaign-context=inherit to override).`,
+        );
+      }
+    } catch { /* unreadable hygiene preserves the established inherit default */ }
+  }
+
   if (background) {
     if (adapter) {
       const candidate = adapter.trim();
@@ -1151,6 +1189,7 @@ async function cmdQuick() {
         brief_text: task,
         brief_admission: briefAdmission,
         projectDir,
+        ...(existingRunId ? { run_id: existingRunId } : {}),
         launch_args: launchArgs,
       });
       return;
@@ -1229,21 +1268,11 @@ async function cmdQuick() {
   console.log(`Task: ${task.slice(0, 100)}${task.length > 100 ? '...' : ''}`);
   console.log(`Project: ${projectDir}`);
   console.log(`Adapter: ${adapter}`);
-  const projectDefaults = loadProjectDefaults(projectDir);
   console.log(`Max iterations: ${config.defaults.max_iterations ?? projectDefaults.max_iterations}`);
   console.log(`Stage timeout: ${projectDefaults.timeout_ms}ms (config/defaults.yaml::default_timeout_ms)`);
   console.log(`Supervisor: ${supervise ? 'enabled' : 'disabled'}`);
   // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).
-  const campaignFromDefaults = projectDefaults.campaign;
-  const campaignBaseDir = campaignBaseDirectory(projectDir);
-  const campaignBaseSlug = (campaignBaseDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  const resolvedCampaign = campaignDisabled
-    ? undefined
-    : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
   if (!campaignDisabled && !campaignArg && !campaignFromDefaults && campaignBaseDir !== projectDir) {
     // Only reachable inside a linked worktree. Say so, because the name does

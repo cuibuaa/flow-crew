@@ -25,8 +25,10 @@ import {
 import {
   inspectStageExecutionFacts,
   Supervisor,
+  type DirectionEvidenceBinding,
   type SupervisorAssessment,
 } from '../src/supervisor.js';
+import { recordRunEvent } from '../src/run-events.js';
 import { readTraceEvents } from '../src/trace.js';
 import { runStage } from '../src/worker.js';
 
@@ -393,6 +395,9 @@ describe('factual supervisor stall decisions', () => {
 
   it('still aborts a productive wrong direction after repeated GUIDE decisions', async () => {
     markRunningAttempt();
+    const attempt = readRunState(projectDir, currentRunId).stages[stageId].attempts!.at(-1)!;
+    const now = Date.now();
+    const directionKey = 'same_wrong_implementation_path';
     const adapter: Adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
     const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
     const guideAssessment: SupervisorAssessment = {
@@ -400,23 +405,55 @@ describe('factual supervisor stall decisions', () => {
       targetStage: stageId,
       reason: 'same wrong implementation path',
       guidance: 'use the required production path',
+      directionKey,
     };
     const internals = supervisor as unknown as {
-      act(assessment: SupervisorAssessment): Promise<SupervisorAssessment>;
+      act(
+        assessment: SupervisorAssessment,
+        progressSinceMs?: number,
+        source?: 'supervisor' | 'operator',
+        observedDeliverables?: ReadonlyMap<string, never>,
+        observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+      ): Promise<SupervisorAssessment>;
       actions: Array<{
         timestamp: string;
         tick: number;
         assessment: SupervisorAssessment;
         runningStages: string[];
+        targetAttemptIndex: number;
+        source: 'supervisor';
+        directionEvidence: DirectionEvidenceBinding;
       }>;
       stageLastProgressMs: Record<string, number>;
     };
     internals.actions = [1, 2].map((tick) => ({
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(now - (tick === 1 ? 4_000 : 2_000)).toISOString(),
       tick,
-      assessment: guideAssessment,
+      assessment: {
+        ...guideAssessment,
+        guidanceId: `guide-${tick}`,
+        evidenceIds: [`ev_${tick === 1 ? 'a' : 'b'}`.padEnd(23, tick === 1 ? 'a' : 'b')],
+      },
       runningStages: [stageId],
+      targetAttemptIndex: attempt.index,
+      source: 'supervisor',
+      directionEvidence: {
+        version: 1,
+        stageId,
+        attemptIndex: attempt.index,
+        attemptStartedAt: attempt.startedAt,
+        generation: (tick === 1 ? 'a' : 'b').repeat(64),
+      },
     }));
+    for (const [offset, guidanceId, invocationIndex] of [[3_000, 'guide-1', 8], [1_000, 'guide-2', 9]] as const) {
+      recordRunEvent(projectDir, currentRunId, {
+        type: 'guidance_delivery_checked', runId: currentRunId,
+        timestamp: new Date(now - offset).toISOString(), stageId,
+        attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
+        boundary: 'adapter_invocation', invocationIndex,
+        guidanceIds: [guidanceId], delivered: true, source: 'worker',
+      });
+    }
     internals.stageLastProgressMs = { [stageId]: Date.now() };
 
     const result = await internals.act({
@@ -424,7 +461,13 @@ describe('factual supervisor stall decisions', () => {
       targetStage: stageId,
       reason: 'the same wrong direction continues despite active output',
       guidance: null,
-    });
+      directionKey,
+      evidenceIds: ['ev_cccccccccccccccccccc'],
+      assessedAt: new Date(now).toISOString(),
+    }, Date.now() + 1_000, 'supervisor', undefined, new Map([[stageId, {
+      version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
+      generation: 'c'.repeat(64),
+    }]]));
 
     expect(result.verdict).toBe('ABORT');
     expect(result.reason).toContain('2 prior GUIDE decisions observed');

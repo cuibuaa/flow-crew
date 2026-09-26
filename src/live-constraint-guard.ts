@@ -92,6 +92,61 @@ export type LiveConstraintContentIdentity =
 
 export type LiveConstraintContentComparison = 'equal' | 'different' | 'unavailable';
 
+export type LiveConstraintGitIndexEntryKind =
+  | 'regular'
+  | 'executable'
+  | 'symlink'
+  | 'gitlink'
+  | 'sparse_tree'
+  | 'unmerged'
+  | 'unknown';
+
+export interface LiveConstraintGitIndexEntry {
+  path: string;
+  objectId: string;
+  mode: string;
+  stage: number;
+  kind: LiveConstraintGitIndexEntryKind;
+}
+
+export function classifyLiveConstraintGitIndexEntry(mode: string, stage: number): LiveConstraintGitIndexEntryKind {
+  if (stage !== 0) return 'unmerged';
+  switch (mode) {
+    case '100644': return 'regular';
+    case '100755': return 'executable';
+    case '120000': return 'symlink';
+    case '160000': return 'gitlink';
+    case '040000': return 'sparse_tree';
+    default: return 'unknown';
+  }
+}
+
+/** Retain every index stage; stage 1/2/3 entries are evidence, not noise. */
+export function parseLiveConstraintGitIndexEntries(output: string): Map<string, LiveConstraintGitIndexEntry[]> {
+  const entries = new Map<string, LiveConstraintGitIndexEntry[]>();
+  for (const record of output.split('\0')) {
+    if (!record) continue;
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, objectId, rawStage] = record.slice(0, tab).split(' ');
+    const path = record.slice(tab + 1).replace(/\\/g, '/');
+    const stage = Number(rawStage);
+    if (!mode || !/^[0-7]{6}$/.test(mode) || !/^[0-9a-f]{40,64}$/i.test(objectId ?? '')
+        || !Number.isInteger(stage) || stage < 0 || stage > 3 || !path) continue;
+    const row: LiveConstraintGitIndexEntry = {
+      path,
+      objectId,
+      mode,
+      stage,
+      kind: classifyLiveConstraintGitIndexEntry(mode, stage),
+    };
+    const prior = entries.get(path) ?? [];
+    prior.push(row);
+    entries.set(path, prior);
+  }
+  return entries;
+}
+
 function errorReason(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const code = 'code' in error && typeof error.code === 'string' ? `${error.code}: ` : '';
@@ -320,6 +375,11 @@ export interface LiveConstraintViolationDetection {
   reason: string;
   restored: boolean;
   rollbackFailure?: string;
+  entryKind?: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
+  comparisonOutcome?: 'different' | 'unavailable';
+  /** False records an unrepresentable comparison without claiming a write. */
+  changeObserved?: boolean;
+  rollbackAttempted?: boolean;
 }
 
 export interface LiveConstraintScanResult {
@@ -339,13 +399,17 @@ export interface LiveConstraintIncident {
   trigger: LiveConstraintScanTrigger;
   path: string;
   reason: string;
+  entryKind: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
+  comparisonOutcome: 'different' | 'unavailable';
+  changeObserved: boolean;
+  rollbackAttempted: boolean;
   restored: boolean;
   rollbackFailure?: string;
   writeObservedAt: string;
   detectedAt: string;
   detectionLatencyMs: number;
   effectiveScope: string[];
-  scopeRevisionInstruction: string;
+  scopeRevisionInstruction?: string;
 }
 
 export interface LiveConstraintMonitorFailure {
@@ -668,8 +732,11 @@ export class LiveConstraintGuard {
         active.lastScanFileCount = Math.max(0, Math.floor(result.scannedPaths));
         for (const path of result.exemptedPaths ?? []) active.exemptedPaths.add(path);
         if (result.violations.length === 0) continue;
-        const pathsForInstruction = [...new Set(result.violations.map((violation) => violation.path))].sort();
-        const instruction = this.options.scopeRevisionInstruction(pathsForInstruction);
+        const writeViolations = result.violations.filter((violation) => violation.changeObserved !== false);
+        const pathsForInstruction = [...new Set(writeViolations.map((violation) => violation.path))].sort();
+        const instruction = pathsForInstruction.length > 0
+          ? this.options.scopeRevisionInstruction(pathsForInstruction)
+          : undefined;
         const detectedMs = this.now();
         const detectedAt = new Date(detectedMs).toISOString();
         for (const violation of result.violations) {
@@ -690,15 +757,18 @@ export class LiveConstraintGuard {
             trigger: nextTrigger,
             path: violation.path,
             reason: violation.reason,
+            entryKind: violation.entryKind ?? 'filesystem',
+            comparisonOutcome: violation.comparisonOutcome ?? 'different',
+            changeObserved: violation.changeObserved !== false,
+            rollbackAttempted: violation.rollbackAttempted ?? violation.changeObserved !== false,
             restored: violation.restored,
             ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
             writeObservedAt: new Date(observedMs).toISOString(),
             detectedAt,
             detectionLatencyMs: Math.max(0, detectedMs - observedMs),
             effectiveScope: [...this.options.effectiveScope()],
-            scopeRevisionInstruction: instruction,
+            ...(instruction ? { scopeRevisionInstruction: instruction } : {}),
           };
-          active.incidents.push(incident);
           if (!this.appendIncident(incident)) {
             active.monitorFailure = {
               kind: 'monitor_failure',
@@ -713,9 +783,14 @@ export class LiveConstraintGuard {
             active.abort('live_constraint_monitor_failure');
             break;
           }
+          // Comparison-unavailable observations are durable audit evidence but
+          // are not writes and therefore do not enter the worker's correction
+          // loop or abort the invocation.
+          if (incident.changeObserved) active.incidents.push(incident);
         }
         if (active.monitorFailure) break;
-        active.abort(result.violations.every((violation) => violation.restored)
+        if (writeViolations.length === 0) continue;
+        active.abort(writeViolations.every((violation) => violation.restored)
           ? 'live_constraint_violation'
           : 'live_constraint_rollback_failure');
       }

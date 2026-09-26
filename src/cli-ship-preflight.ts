@@ -60,6 +60,7 @@ import {
 } from './store.js';
 import { assertDistFresh } from './build-manifest.js';
 import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
+import { assessCampaignHygiene } from './campaign-hygiene.js';
 
 export { extractBriefInputPaths } from './ship-inputs.js';
 
@@ -239,21 +240,6 @@ const PRIOR_RUN_EVIDENCE_ACTIONS = {
   [RUN_STATUS.INCOMPLETE]: 'inspect',
 } as const satisfies Record<RunStatus, PriorRunEvidenceAction>;
 
-const CAMPAIGN_HYGIENE_ADVERSE = {
-  [RUN_STATUS.PENDING]: false,
-  [RUN_STATUS.RUNNING]: false,
-  [RUN_STATUS.PARKED]: false,
-  [RUN_STATUS.COMPLETE]: false,
-  [RUN_STATUS.FAILED]: true,
-  [RUN_STATUS.AWAITING_APPROVAL]: false,
-  [RUN_STATUS.SHIPPED]: false,
-  [RUN_STATUS.CEILING_HIT]: true,
-  [RUN_STATUS.ESCALATED]: true,
-  [RUN_STATUS.REALITY_GATE_FAILED]: true,
-  [RUN_STATUS.PHASE_COMPLETE]: false,
-  [RUN_STATUS.STOPPED]: true,
-  [RUN_STATUS.INCOMPLETE]: true,
-} as const satisfies Record<RunStatus, boolean>;
 const DAEMON_CAVEAT = 'Daemon freshness compares the running daemon with dist, not src with dist. A dist build that is behind src can still report FRESH; inspect sourceToDist too.';
 
 function isNodeError(error: unknown, code: string): boolean {
@@ -596,19 +582,9 @@ function campaignHygiene(
   if (resolution.state === 'unknown' || !resolution.storageKey) return resolution;
   try {
     const entries = deps.readCampaignEntries(project, resolution.storageKey);
-    const ended = entries.filter((entry) => entry.kind === 'task_ended' && typeof entry.status === 'string');
-    const recent = ended.slice(-10);
-    const recentAdverse = recent.filter((entry) => {
-      const status = resolveRunStatus(entry.status);
-      return status.kind === 'unknown' || CAMPAIGN_HYGIENE_ADVERSE[status.status];
-    }).length;
     return {
       ...resolution,
-      totalEntries: entries.length,
-      totalEnded: ended.length,
-      recentEnded: recent.length,
-      recentAdverse,
-      suggestContextSkip: recentAdverse >= 3,
+      ...assessCampaignHygiene(entries),
     };
   } catch (error) {
     return {

@@ -365,6 +365,25 @@ describe('literal reality-check path extraction', () => {
     ]);
   });
 
+  it('does not convert regex escapes into project separators in any quoted generic literal', () => {
+    const escaped = [
+      String.raw`grep -E 'round_result\.json(\.no_candidate\.json)?'`,
+      String.raw`grep -E "round_result\.json(\.no_candidate\.json)?"`,
+      'grep -E `round_result\\.json(\\.no_candidate\\.json)?`',
+    ].map((script) => reachabilityErrors('exec-script-exit-zero', { script }));
+    const unescaped = reachabilityErrors('exec-script-exit-zero', {
+      script: "grep -E 'round_result.json(.no_candidate.json)?'",
+    });
+    const realOperand = reachabilityErrors('exec-script-exit-zero', {
+      script: 'test -s docs/report.json',
+    });
+
+    expect({ escaped, unescaped }).toEqual({ escaped: [[], [], []], unescaped: [] });
+    expect(realOperand).toEqual([
+      'reality check "path boundary probe" references absent docs/report.json, but no admitted stage or framework emitter owns it',
+    ]);
+  });
+
   it('still extracts sed script files, input files, and redirection targets', () => {
     const errors = reachabilityErrors('exec-script-exit-zero', {
       script: 'sed -f scripts/filter.sed data/input.json > out/result.txt',

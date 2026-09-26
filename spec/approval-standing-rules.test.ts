@@ -14,8 +14,11 @@ import {
 import {
   createRun,
   fcGlobalDir,
+  readRunState,
   runDir,
   setFcGlobalDir,
+  writeRunState,
+  RUN_STATUS,
 } from '../src/store.js';
 
 let fixtureRoot: string;
@@ -137,5 +140,36 @@ describe('operator approval standing rules', () => {
 
     expect(matchStandingRule({ ...request, projectDir: join(fixtureRoot, 'other-project') })).toBeUndefined();
     expect(matchStandingRule({ ...request, action: 'prelaunch_long_shared_gpu_training' })).toBeUndefined();
+  });
+
+  it('shows that a pending obligation belongs to an ended run without auto-closing it', async () => {
+    const { runId } = createRun(projectDir, 'default', 'name: default\nstages: []\n', []);
+    recordRequest({
+      runId,
+      projectDir,
+      requestId: 'ended-run-cleanup',
+      action: 'remove_generated_cache',
+      risk: 'write',
+      title: 'Review post-run cleanup',
+      createdAt: '2026-09-14T00:00:00.000Z',
+    });
+    const state = readRunState(projectDir, runId);
+    state.status = RUN_STATUS.STOPPED;
+    state.completedAt = '2026-09-18T00:00:00.000Z';
+    writeRunState(projectDir, runId, state);
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    let rendered = '';
+    stdout.setEncoding('utf-8');
+    stdout.on('data', (chunk: string) => { rendered += chunk; });
+
+    expect(await cmdInbox(['inbox', 'list', '--state', 'pending'], {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+    })).toBe(0);
+
+    expect(rendered).toContain('ENDED');
+    expect(rendered).toContain('ended-run-cleanup');
+    expect(foldItems(runId).get('ended-run-cleanup')).toMatchObject({ state: 'pending' });
   });
 });

@@ -134,6 +134,15 @@ export interface InboxItem {
   stageId?: string;
   state: "pending" | "approved" | "denied";
   resolution?: InboxResolution;
+  runStanding?: {
+    kind: "live" | "parked" | "ended" | "orphaned" | "unknown";
+    live: boolean | null;
+    runId: string;
+    runStatus?: string;
+    completedAt?: string;
+    reason: string;
+    scheduler?: { kind: string; pid?: number; detail?: string };
+  };
   standingRuleEligible: { ok: boolean; reason?: string };
   campaignId?: string;
   campaignName?: string;

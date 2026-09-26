@@ -135,6 +135,16 @@ function isInboxResolution(value: unknown): boolean {
     && (value.always === undefined || typeof value.always === "boolean");
 }
 
+function isRunStanding(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isEnumString(value.kind, ["live", "parked", "ended", "orphaned", "unknown"] as const)
+    && (typeof value.live === "boolean" || value.live === null)
+    && isNonEmptyString(value.runId)
+    && isOptionalString(value.runStatus)
+    && isOptionalString(value.completedAt)
+    && isNonEmptyString(value.reason);
+}
+
 function isInboxItem(value: unknown): value is InboxItem {
   if (!isRecord(value) || !isRecord(value.standingRuleEligible)) return false;
   const standingRule = value.standingRuleEligible;
@@ -151,6 +161,7 @@ function isInboxItem(value: unknown): value is InboxItem {
     && isOptionalString(value.stageId)
     && isEnumString(value.state, ["pending", "approved", "denied"] as const)
     && (value.resolution === undefined || isInboxResolution(value.resolution))
+    && (value.runStanding === undefined || isRunStanding(value.runStanding))
     && typeof standingRule.ok === "boolean"
     && isOptionalString(standingRule.reason)
     && isOptionalString(value.campaignId)
@@ -565,6 +576,12 @@ export default function Inbox({
                             <span>{campaign ? `campaign ${campaign}` : "Standalone"}</span>
                             <span>Waiting for {waitingTime(item.createdAt)}</span>
                           </div>
+                          {item.runStanding ? (
+                            <div className={`inbox-run-standing standing-${item.runStanding.kind}`}>
+                              <strong>Originating run: {item.runStanding.kind}</strong>
+                              <span>{item.runStanding.reason}</span>
+                            </div>
+                          ) : null}
                           {itemErrors[itemKey] ? <div className="inbox-item-error" role="alert">{itemErrors[itemKey]}</div> : null}
                           {briefReview ? (
                             <>
@@ -611,7 +628,7 @@ export default function Inbox({
                             </>
                           ) : (
                             <div className="inbox-actions">
-                              <button className="btn" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve")}>Approve and resume</button>
+                              <button className="btn" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve")}>{!item.runStanding || item.runStanding.kind === "parked" ? "Approve and resume" : "Approve"}</button>
                               <button className="btn ghost" type="button" disabled={busy} onClick={() => void resolveApproval(item, "deny")}>Deny</button>
                               {item.standingRuleEligible.ok ? <button className="btn ghost always" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve", true)}>Always allow</button> : null}
                             </div>

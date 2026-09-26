@@ -1116,11 +1116,11 @@ export class NodeSystemd implements SupervisorBackend {
         ['--user', 'is-active', unit],
         { encoding: 'utf-8', timeout: 1_000 },
       );
-      return mergeSupervisorStatuses(portable, normalizeSystemdStatus(stdout));
+      return this.mergeSystemdObservation(unit, portable, normalizeSystemdStatus(stdout));
     } catch (err) {
       const stdout = (err as { stdout?: string | Buffer }).stdout;
       if (stdout !== undefined && String(stdout).trim()) {
-        return mergeSupervisorStatuses(portable, normalizeSystemdStatus(String(stdout)));
+        return this.mergeSystemdObservation(unit, portable, normalizeSystemdStatus(String(stdout)));
       }
       const failure = err as { killed?: boolean; signal?: string; code?: string | number };
       if (failure.killed || failure.signal === 'SIGTERM' || failure.code === 'ETIMEDOUT') {
@@ -1135,6 +1135,30 @@ export class NodeSystemd implements SupervisorBackend {
       if (legacy.kind === 'active' || legacy.kind === 'deactivating') return legacy;
       return { kind: 'unobservable', reason: 'systemctl probe failed' };
     }
+  }
+
+  private async mergeSystemdObservation(
+    unit: string,
+    portable: UnitStatus,
+    systemd: UnitStatus,
+  ): Promise<UnitStatus> {
+    if (portable.kind === 'absent'
+        && systemd.kind === 'terminal-unknown'
+        && systemd.reason === 'systemd reported inactive without an exit status') {
+      try {
+        const { stdout } = await execFileAsync(
+          'systemctl',
+          ['--user', 'show', unit, '--property=LoadState', '--value'],
+          { encoding: 'utf-8', timeout: 1_000 },
+        );
+        if (String(stdout).trim() === 'not-found') return { kind: 'absent' };
+      } catch {
+        // `inactive` alone cannot distinguish an ended unit from a name that
+        // never existed. Keep the conservative terminal-unknown result when
+        // the additional load-state observation is unavailable.
+      }
+    }
+    return mergeSupervisorStatuses(portable, systemd);
   }
 
   async runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void> {

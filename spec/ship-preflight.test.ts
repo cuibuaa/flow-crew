@@ -437,6 +437,20 @@ describe('ship-preflight declared brief inputs fact', () => {
     ]);
   });
 
+  it('does not report escaped patterns or acronym pairs as prose paths', () => {
+    const brief = [
+      '# Pattern examples',
+      String.raw`\`input\.md\` and \`scheduler\.ts\` are regex fragments.`,
+      'V1389 CPI/FOMC is a corpus label.',
+      'The old warnings were `input/.md` and `scheduler/.ts`.',
+      'The literal input is `docs/report.md`.',
+    ].join('\n');
+
+    expect(extractBriefPathMentions(brief).map((mention) => mention.path)).toEqual([
+      'docs/report.md',
+    ]);
+  });
+
   it('takes explicit bare-directory entries literally, reports invalid declarations, and keeps prose conservative', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     const brief = [

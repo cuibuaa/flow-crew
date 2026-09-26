@@ -692,6 +692,57 @@ describe('quick and operator entry behavior', () => {
     }
   });
 
+  it('consumes adverse campaign hygiene as a no-flag skip default while explicit inherit wins', async () => {
+    const isolated = cliFixture();
+    const brief = '# Goal\nKeep campaign context bounded.\n\n## What the report must show\n1. Preserve an explicit context override.\n';
+    writeReadySetupRecord(isolated.project, brief, isolated.fcHome);
+    const campaignDir = join(isolated.project, '.fc', 'campaigns');
+    mkdirSync(campaignDir, { recursive: true });
+    writeFileSync(join(campaignDir, 'hygiene.jsonl'), [1, 2, 3].map((seq) => JSON.stringify({
+      seq,
+      runId: `adverse-${seq}`,
+      kind: 'task_ended',
+      pass: false,
+      status: 'failed',
+      timestamp: `2026-08-03T00:0${seq}:00.000Z`,
+      campaignId: 'hygiene',
+      campaignStorageKey: 'hygiene',
+    })).join('\n') + '\n', 'utf-8');
+
+    const socketPath = join(isolated.fcHome, 'daemon.sock');
+    const requests: RpcRequest[] = [];
+    const server = await startRpcServer(socketPath, (incoming) => {
+      requests.push(incoming);
+      return { id: requests.length, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
+    });
+    try {
+      const automatic = await runQuick(isolated, [
+        'quick', '--background', '--acknowledge-brief-warnings', '--project', isolated.project,
+        '--campaign', 'hygiene', '-',
+      ], brief, socketPath);
+      expect(automatic.code).toBe(0);
+      expect(automatic.stderr).toContain('defaulted planner context to skip');
+      expect((requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args)
+        .toContain('--campaign-context=skip');
+
+      const explicit = await runQuick(isolated, [
+        'quick', '--background', '--acknowledge-brief-warnings', '--project', isolated.project,
+        '--campaign', 'hygiene', '--campaign-context=inherit', '-',
+      ], brief, socketPath);
+      expect(explicit.code).toBe(0);
+      expect(explicit.stderr).not.toContain('defaulted planner context to skip');
+      const explicitArgs = (requests[1] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args;
+      expect(explicitArgs).toContain('--campaign-context=inherit');
+      expect(explicitArgs).not.toContain('--campaign-context=skip');
+      console.info(`[ENGINE_INSTRUMENT_ITEM3] ${JSON.stringify({
+        automatic: { stderr: automatic.stderr, launchArgs: (requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args },
+        explicit: { stderr: explicit.stderr, launchArgs: explicitArgs },
+      })}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it('requires a fresh decision for missing existing-run admission and reuses a valid same-digest record', () => {
     const isolated = cliFixture();
     const runId = 'existing-fixture';
@@ -724,6 +775,50 @@ describe('quick and operator entry behavior', () => {
     expect(valid.status).toBe(1);
     expect(`${valid.stdout}${valid.stderr}`).toContain('Workflow not found: p11-missing.yaml');
     expect(`${valid.stdout}${valid.stderr}`).not.toContain('Launch paused before run creation');
+  });
+
+  it('binds a background continuation to its named run while a fresh background launch stays unbound', async () => {
+    const isolated = cliFixture();
+    const runId = 'background-existing-run';
+    const runPath = join(isolated.fcHome, 'runs', runId);
+    const brief = '# Goal\nContinue the named run.\n\n## What the report must show\n1. Preserve the existing run identity.\n';
+    mkdirSync(runPath, { recursive: true });
+    writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+      runId,
+      projectDir: isolated.project,
+      status: 'failed',
+      taskDescription: brief,
+      briefAdmission: explicitAdmission(brief),
+      stages: {},
+    }), 'utf-8');
+
+    const socketPath = join(isolated.fcHome, 'daemon.sock');
+    const requests: RpcRequest[] = [];
+    const server = await startRpcServer(socketPath, (incoming) => {
+      requests.push(incoming);
+      return { id: requests.length, unit: `fixture-${requests.length}.service`, pid: process.pid, build: 'fixture' };
+    });
+    try {
+      const resumed = await runQuick(isolated, [
+        'quick', '--background', '--existing-run-id', runId,
+        '--project', isolated.project, '--adapter', 'mock',
+      ], '', socketPath);
+      expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+      const resumedTask = (requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task;
+      expect(resumedTask.run_id).toBe(runId);
+
+      writeReadySetupRecord(isolated.project, brief, isolated.fcHome);
+      const fresh = await runQuick(isolated, [
+        'quick', '--background', '--project', isolated.project, '--adapter', 'mock', '-',
+        '--acknowledge-brief-warnings',
+      ], brief, socketPath);
+      expect(fresh.code, `${fresh.stdout}\n${fresh.stderr}`).toBe(0);
+      const freshTask = (requests[1] as Extract<RpcRequest, { cmd: 'register' }>).task;
+      expect(freshTask.run_id).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it('uses an internally transported admitted snapshot instead of a later sidecar edit', () => {

@@ -12,14 +12,17 @@ import {
   writeRunState,
   writeStageStatus,
 } from '../src/store.js';
+import { recordRunEvent, type RunEvent } from '../src/run-events.js';
 import {
   buildSupervisorSystemPrompt,
   parseSupervisorVerdict,
+  projectSupervisorStageEvidence,
   Supervisor,
   verifyRepeatedWrongDirection,
   type DirectionEvidenceBinding,
   type DirectionGuidanceFact,
   type SupervisorAssessment,
+  type SupervisorStageEvidence,
 } from '../src/supervisor.js';
 
 const stageId = 'work';
@@ -51,6 +54,7 @@ interface SupervisorInternals {
     source?: 'supervisor' | 'operator',
     observedDeliverables?: ReadonlyMap<string, never>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+    observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment>;
 }
 
@@ -127,6 +131,8 @@ function guide(input: {
   generation?: string;
   reason?: string;
   guidance?: string;
+  guidanceId?: string;
+  evidenceIds?: string[];
 }): ActionFixture {
   return {
     timestamp: input.timestamp,
@@ -137,6 +143,8 @@ function guide(input: {
       reason: input.reason ?? 'same concrete wrong direction',
       guidance: input.guidance ?? 'use the required evidence path',
       ...(input.directionKey ? { directionKey: input.directionKey } : {}),
+      ...(input.guidanceId ? { guidanceId: input.guidanceId } : {}),
+      ...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),
     },
     runningStages: [stageId],
     targetAttemptIndex: 2,
@@ -145,12 +153,137 @@ function guide(input: {
   };
 }
 
+function deliveryEvent(input: {
+  timestamp: string;
+  invocationIndex: number;
+  guidanceIds: string[];
+}): RunEvent {
+  const state = readRunState(projectDir, runId);
+  const attempt = state.stages[stageId].attempts!.at(-1)!;
+  return {
+    type: 'guidance_delivery_checked',
+    runId,
+    timestamp: input.timestamp,
+    stageId,
+    attemptIndex: attempt.index,
+    attemptStartedAt: attempt.startedAt,
+    boundary: 'adapter_invocation',
+    invocationIndex: input.invocationIndex,
+    guidanceIds: input.guidanceIds,
+    delivered: true,
+    source: 'worker',
+  };
+}
+
 function signalPath(): string {
   return join(runDirectory, 'signals', `abort_${stageId}.json`);
 }
 
 describe('repeated wrong-direction abort evidence', () => {
-  it('replays the recorded two-GUIDE case and suppresses ABORT after newer corrective progress', async () => {
+  it('separates inspected corpus output from action evidence before delivering GUIDE', async () => {
+    const supervisor = supervisorFixture();
+    const attempt = readRunState(projectDir, runId).stages[stageId].attempts!.at(-1)!;
+    const projection = projectSupervisorStageEvidence({
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      raw: [
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'read-corpus', type: 'command_execution', command: "sed -n '1p' committed/corpus.jsonl",
+            aggregated_output: 'V1389 CPI/FOMC workflow is being backtested',
+          },
+        }),
+        JSON.stringify({
+          type: 'item.completed',
+          item: { id: 'statement', type: 'agent_message', text: 'I am replacing the required evidence source.' },
+        }),
+      ].join('\n'),
+    });
+    const inspected = projection.rows.find((row) => row.text.includes('V1389'))!;
+    const readCommand = projection.rows.find((row) => row.kind === 'command_invocation')!;
+    const authored = projection.rows.find((row) => row.text.includes('I am replacing'))!;
+    expect({ command: readCommand.authority, inspected: inspected.authority, authored: authored.authority }).toEqual({
+      command: 'inspection', inspected: 'inspection', authored: 'action',
+    });
+
+    const commandSuppressed = await supervisor.act({
+      verdict: 'GUIDE', targetStage: stageId,
+      reason: 'the corpus output was mistaken for pursuit', guidance: 'stop the unrelated workflow',
+      directionKey: 'unrelated_workflow', evidenceIds: [readCommand.id],
+    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    expect(commandSuppressed).toMatchObject({ verdict: 'WAIT', guidance: null });
+    expect(commandSuppressed.reason).toContain('inspection-only');
+
+    const suppressed = await supervisor.act({
+      verdict: 'GUIDE', targetStage: stageId,
+      reason: 'the corpus output was mistaken for pursuit', guidance: 'stop the unrelated workflow',
+      directionKey: 'unrelated_workflow', evidenceIds: [inspected.id],
+    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    expect(suppressed).toMatchObject({ verdict: 'WAIT', guidance: null });
+    expect(suppressed.reason).toContain('inspection-only');
+
+    const delivered = await supervisor.act({
+      verdict: 'GUIDE', targetStage: stageId,
+      reason: 'the stage authored a replacement of the required source', guidance: 'retain the required source and annotate it',
+      directionKey: 'replacing_required_source', evidenceIds: [authored.id],
+    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    expect(delivered.verdict).toBe('GUIDE');
+    expect(delivered.guidanceId).toMatch(/^[0-9a-f]{20}$/);
+  });
+
+  it('requires a cited action to support the consequential claim while retaining a real invocation control', async () => {
+    const supervisor = supervisorFixture();
+    const attempt = readRunState(projectDir, runId).stages[stageId].attempts!.at(-1)!;
+    const projection = projectSupervisorStageEvidence({
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      raw: [
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'unrelated-action', type: 'command_execution', command: 'npm test',
+            aggregated_output: 'market workflow text appeared in a fixture',
+          },
+        }),
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'wrong-workflow', type: 'command_execution',
+            command: 'python scripts/run_market_workflow.py --write reports/result.json',
+            aggregated_output: 'wrote reports/result.json',
+          },
+        }),
+      ].join('\n'),
+    });
+    const unrelated = projection.rows.find((row) => row.text === 'npm test')!;
+    const wrongWorkflow = projection.rows.find((row) => row.text.includes('run_market_workflow.py'))!;
+    expect({ unrelated: unrelated.authority, wrongWorkflow: wrongWorkflow.authority }).toEqual({
+      unrelated: 'action', wrongWorkflow: 'action',
+    });
+
+    const unsupported = await supervisor.act({
+      verdict: 'GUIDE', targetStage: stageId,
+      reason: 'the stage is pursuing an unrelated market workflow',
+      guidance: 'return to the declared objective', directionKey: 'unrelated_market_workflow',
+      evidenceIds: [unrelated.id],
+    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    expect(unsupported).toMatchObject({ verdict: 'WAIT', guidance: null });
+    expect(unsupported.reason).toContain('share no concrete claim term');
+
+    const supported = await supervisor.act({
+      verdict: 'GUIDE', targetStage: stageId,
+      reason: 'the stage is pursuing an unrelated market workflow',
+      guidance: 'return to the declared objective', directionKey: 'unrelated_market_workflow',
+      evidenceIds: [wrongWorkflow.id],
+    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    expect(supported.verdict).toBe('GUIDE');
+    expect(supported.guidanceId).toMatch(/^[0-9a-f]{20}$/);
+  });
+
+  it('suppresses a direction ABORT when no correction has a recorded delivery opportunity', async () => {
     const supervisor = supervisorFixture();
     const now = Date.now();
     supervisor.actions = [
@@ -169,11 +302,11 @@ describe('repeated wrong-direction abort evidence', () => {
     }, Date.now() + 1_000);
 
     expect(result).toMatchObject({ verdict: 'WAIT', targetStage: stageId });
-    expect(result.reason).toContain('durable worker evidence changed after the latest unbound GUIDE');
+    expect(result.reason).toContain('no stable wrong-direction key');
     expect(existsSync(signalPath())).toBe(false);
   });
 
-  it('keeps the old judgment for a bound unchanged direction over three advancing generations', async () => {
+  it('keeps the old judgment after two separately delivered corrections and later action evidence', async () => {
     const supervisor = supervisorFixture();
     const now = Date.now();
     const directionKey = 'replacing_required_evidence_source';
@@ -185,6 +318,8 @@ describe('repeated wrong-direction abort evidence', () => {
         generation: 'a'.repeat(64),
         reason: 'the stage keeps replacing the required evidence source',
         guidance: 'read the required evidence source before deriving the result',
+        guidanceId: 'guide-one',
+        evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
       }),
       guide({
         tick: 2,
@@ -193,9 +328,17 @@ describe('repeated wrong-direction abort evidence', () => {
         generation: 'b'.repeat(64),
         reason: 'the stage keeps replacing the required evidence source',
         guidance: 'read the required evidence source before deriving the result',
+        guidanceId: 'guide-two',
+        evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'],
       }),
     ];
     supervisor.stageLastProgressMs = { [stageId]: now };
+    recordRunEvent(projectDir, runId, deliveryEvent({
+      timestamp: new Date(now - 3_000).toISOString(), invocationIndex: 8, guidanceIds: ['guide-one'],
+    }));
+    recordRunEvent(projectDir, runId, deliveryEvent({
+      timestamp: new Date(now - 1_000).toISOString(), invocationIndex: 9, guidanceIds: ['guide-two'],
+    }));
 
     const result = await supervisor.act({
       verdict: 'ABORT',
@@ -203,17 +346,65 @@ describe('repeated wrong-direction abort evidence', () => {
       reason: 'the stage still replaces the required evidence source after both corrections',
       guidance: null,
       directionKey,
+      evidenceIds: ['ev_cccccccccccccccccccc'],
+      assessedAt: new Date(now).toISOString(),
     }, Date.now() + 1_000, 'supervisor', undefined, new Map([
       [stageId, evidence('c'.repeat(64))],
     ]));
 
     expect(result.verdict).toBe('ABORT');
-    expect(result.reason).toContain('three advancing evidence generations');
+    expect(result.reason).toContain('two distinct worker invocation opportunities');
     expect(JSON.parse(readFileSync(signalPath(), 'utf-8'))).toMatchObject({
       stageId,
       attemptIndex: 2,
       source: 'supervisor',
     });
+  });
+
+  it('refuses the recorded same-turn pair when both corrections first become visible together', async () => {
+    const supervisor = supervisorFixture();
+    const now = Date.now();
+    const directionKey = 'replacing_required_evidence_source';
+    supervisor.actions = [
+      guide({
+        tick: 1,
+        timestamp: new Date(now - 4_000).toISOString(),
+        directionKey,
+        generation: 'a'.repeat(64),
+        guidanceId: 'guide-one',
+        evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
+      }),
+      guide({
+        tick: 2,
+        timestamp: new Date(now - 3_953).toISOString(),
+        directionKey,
+        generation: 'b'.repeat(64),
+        guidanceId: 'guide-two',
+        evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'],
+      }),
+    ];
+    supervisor.stageLastProgressMs = { [stageId]: now };
+    recordRunEvent(projectDir, runId, deliveryEvent({
+      timestamp: new Date(now - 2_000).toISOString(),
+      invocationIndex: 8,
+      guidanceIds: ['guide-one', 'guide-two'],
+    }));
+
+    const result = await supervisor.act({
+      verdict: 'ABORT',
+      targetStage: stageId,
+      reason: 'the direction allegedly persisted after both corrections',
+      guidance: null,
+      directionKey,
+      evidenceIds: ['ev_cccccccccccccccccccc'],
+      assessedAt: new Date(now).toISOString(),
+    }, Date.now() + 1_000, 'supervisor', undefined, new Map([
+      [stageId, evidence('c'.repeat(64))],
+    ]));
+
+    expect(result.verdict).toBe('WAIT');
+    expect(result.reason).toContain('only one worker response opportunity');
+    expect(existsSync(signalPath())).toBe(false);
   });
 
   it('preserves a true idle ABORT independently of direction history', async () => {
@@ -260,30 +451,62 @@ describe('repeated wrong-direction abort evidence', () => {
     expect(existsSync(signalPath())).toBe(false);
   });
 
-  it('enumerates the bound-chain decision population and calibrates both outcomes', () => {
+  it('enumerates the delivery-opportunity decision population and calibrates both outcomes', () => {
     const now = Date.now();
     const directionKey = 'replacing_required_evidence_source';
     const boundGuides = [
-      guide({ tick: 1, timestamp: new Date(now - 4_000).toISOString(), directionKey, generation: 'a'.repeat(64) }),
-      guide({ tick: 2, timestamp: new Date(now - 2_000).toISOString(), directionKey, generation: 'b'.repeat(64) }),
+      guide({
+        tick: 1, timestamp: new Date(now - 4_000).toISOString(), directionKey,
+        generation: 'a'.repeat(64), guidanceId: 'guide-one', evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
+      }),
+      guide({
+        tick: 2, timestamp: new Date(now - 2_000).toISOString(), directionKey,
+        generation: 'b'.repeat(64), guidanceId: 'guide-two', evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'],
+      }),
     ];
     const assessment = (key?: string): SupervisorAssessment => ({
       verdict: 'ABORT', targetStage: stageId, reason: 'direction judgment', guidance: null,
+      evidenceIds: ['ev_cccccccccccccccccccc'], assessedAt: new Date(now).toISOString(),
       ...(key ? { directionKey: key } : {}),
     });
+    const distinctDeliveries = [
+      deliveryEvent({ timestamp: new Date(now - 3_000).toISOString(), invocationIndex: 8, guidanceIds: ['guide-one'] }),
+      deliveryEvent({ timestamp: new Date(now - 1_000).toISOString(), invocationIndex: 9, guidanceIds: ['guide-two'] }),
+    ];
     const cases = [
       {
         id: 'known-positive',
         guidance: boundGuides,
         assessment: assessment(directionKey),
         currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
         expected: true,
+      },
+      {
+        id: 'same-turn-delivery',
+        guidance: boundGuides,
+        assessment: assessment(directionKey),
+        currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: [deliveryEvent({
+          timestamp: new Date(now - 1_500).toISOString(), invocationIndex: 8,
+          guidanceIds: ['guide-one', 'guide-two'],
+        })],
+        expected: false,
+      },
+      {
+        id: 'not-delivered',
+        guidance: boundGuides,
+        assessment: assessment(directionKey),
+        currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: [],
+        expected: false,
       },
       {
         id: 'missing-key',
         guidance: boundGuides,
         assessment: assessment(),
         currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
         expected: false,
       },
       {
@@ -291,6 +514,7 @@ describe('repeated wrong-direction abort evidence', () => {
         guidance: boundGuides,
         assessment: assessment('different_direction'),
         currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
         expected: false,
       },
       {
@@ -302,16 +526,21 @@ describe('repeated wrong-direction abort evidence', () => {
             timestamp: new Date(now - 3_000).toISOString(),
             directionKey: 'different_direction',
             generation: 'd'.repeat(64),
+            guidanceId: 'guide-other',
+            evidenceIds: ['ev_dddddddddddddddddddd'],
           }),
           guide({
             tick: 3,
             timestamp: new Date(now - 2_000).toISOString(),
             directionKey,
             generation: 'e'.repeat(64),
+            guidanceId: 'guide-three',
+            evidenceIds: ['ev_eeeeeeeeeeeeeeeeeeee'],
           }),
         ],
         assessment: assessment(directionKey),
         currentEvidence: evidence('f'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
         expected: false,
       },
       {
@@ -319,6 +548,15 @@ describe('repeated wrong-direction abort evidence', () => {
         guidance: boundGuides,
         assessment: assessment(directionKey),
         currentEvidence: evidence('b'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
+        expected: false,
+      },
+      {
+        id: 'no-new-action-evidence-after-second-guide',
+        guidance: boundGuides,
+        assessment: { ...assessment(directionKey), evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'] },
+        currentEvidence: evidence('c'.repeat(64)),
+        deliveryEvents: distinctDeliveries,
         expected: false,
       },
       {
@@ -326,45 +564,7 @@ describe('repeated wrong-direction abort evidence', () => {
         guidance: boundGuides.slice(0, 1),
         assessment: assessment(directionKey),
         currentEvidence: evidence('c'.repeat(64)),
-        durableProgressAfterLatestGuide: true,
-        expected: false,
-      },
-      {
-        id: 'legacy-identical-no-new-durable-evidence',
-        guidance: [
-          guide({ tick: 1, timestamp: new Date(now - 4_000).toISOString() }),
-          guide({ tick: 2, timestamp: new Date(now - 2_000).toISOString() }),
-        ],
-        assessment: assessment(),
-        currentEvidence: undefined,
-        durableProgressAfterLatestGuide: false,
-        expected: true,
-      },
-      {
-        id: 'legacy-identical-with-new-durable-evidence',
-        guidance: [
-          guide({ tick: 1, timestamp: new Date(now - 4_000).toISOString() }),
-          guide({ tick: 2, timestamp: new Date(now - 2_000).toISOString() }),
-        ],
-        assessment: assessment(),
-        currentEvidence: undefined,
-        durableProgressAfterLatestGuide: true,
-        expected: false,
-      },
-      {
-        id: 'legacy-different-corrections',
-        guidance: [
-          guide({ tick: 1, timestamp: new Date(now - 4_000).toISOString() }),
-          guide({
-            tick: 2,
-            timestamp: new Date(now - 2_000).toISOString(),
-            reason: 'a different concrete wrong direction',
-            guidance: 'use a different required path',
-          }),
-        ],
-        assessment: assessment(),
-        currentEvidence: undefined,
-        durableProgressAfterLatestGuide: false,
+        deliveryEvents: distinctDeliveries,
         expected: false,
       },
     ];
@@ -376,7 +576,8 @@ describe('repeated wrong-direction abort evidence', () => {
         assessment: candidate.assessment,
         currentEvidence: candidate.currentEvidence,
         guidance: candidate.guidance,
-        durableProgressAfterLatestGuide: candidate.durableProgressAfterLatestGuide ?? true,
+        deliveryEvents: candidate.deliveryEvents,
+        assessmentTimestamp: new Date(now).toISOString(),
       }).verified,
       expected: candidate.expected,
     }));
@@ -386,8 +587,8 @@ describe('repeated wrong-direction abort evidence', () => {
       verified: candidate.expected,
       expected: candidate.expected,
     })));
-    expect(observed.filter((candidate) => candidate.verified)).toHaveLength(2);
-    expect(observed.filter((candidate) => !candidate.verified)).toHaveLength(7);
+    expect(observed.filter((candidate) => candidate.verified)).toHaveLength(1);
+    expect(observed.filter((candidate) => !candidate.verified)).toHaveLength(8);
   });
 
   it('publishes and parses the stable direction identity without changing other verdicts', () => {

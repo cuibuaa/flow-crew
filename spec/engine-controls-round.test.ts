@@ -25,7 +25,7 @@ import {
 } from '../src/live-constraint-guard.js';
 import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import { runAllChecks } from '../src/reality-gate/index.js';
-import { readRunEvents } from '../src/run-events.js';
+import { readRunEvents, recordRunEvent } from '../src/run-events.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
@@ -38,7 +38,11 @@ import {
   writeRunState,
   writeStageStatus,
 } from '../src/store.js';
-import { Supervisor, type SupervisorAssessment } from '../src/supervisor.js';
+import {
+  Supervisor,
+  type DirectionEvidenceBinding,
+  type SupervisorAssessment,
+} from '../src/supervisor.js';
 import type { SupervisorConfig } from '../src/config.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
 
@@ -860,7 +864,16 @@ describe('engine controls round replays', () => {
         targetStage: stageId,
         reason: 'the same implementation direction is wrong',
         guidance: 'use the required direction',
+        directionKey: 'same_implementation_direction',
       };
+      const now = Date.now();
+      const directionEvidence = (generation: string): DirectionEvidenceBinding => ({
+        version: 1,
+        stageId,
+        attemptIndex: 1,
+        attemptStartedAt: startedAt,
+        generation: generation.repeat(64),
+      });
       const internals = supervisor as unknown as {
         actions: Array<{
           timestamp: string;
@@ -869,29 +882,57 @@ describe('engine controls round replays', () => {
           runningStages: string[];
           targetAttemptIndex: number;
           source: 'supervisor' | 'operator';
+          directionEvidence: DirectionEvidenceBinding;
         }>;
         stageLastProgressMs: Record<string, number>;
         act(
           assessment: SupervisorAssessment,
           progressSinceMs: number,
           source: 'supervisor' | 'operator',
+          observedDeliverables?: ReadonlyMap<string, never>,
+          observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
         ): Promise<SupervisorAssessment>;
       };
       internals.actions = variant.priorSources.map((source, index) => ({
-        timestamp: new Date(Date.now() - (variant.priorSources.length - index) * 1_000).toISOString(),
+        timestamp: new Date(now - (variant.priorSources.length - index) * 2_000).toISOString(),
         tick: index + 1,
-        assessment: guideAssessment,
+        assessment: {
+          ...guideAssessment,
+          guidanceId: `guide-${index + 1}`,
+          evidenceIds: [`ev_${(index === 0 ? 'a' : 'b').repeat(20)}`],
+        },
         runningStages: [stageId],
         targetAttemptIndex: 1,
         source,
+        directionEvidence: directionEvidence(index === 0 ? 'a' : 'b'),
       }));
+      variant.priorSources.forEach((_source, index) => {
+        recordRunEvent(projectDir, created.runId, {
+          type: 'guidance_delivery_checked',
+          runId: created.runId,
+          timestamp: new Date(now - (variant.priorSources.length - index) * 2_000 + 1_000).toISOString(),
+          stageId,
+          attemptIndex: 1,
+          attemptStartedAt: startedAt,
+          boundary: 'adapter_invocation',
+          invocationIndex: index + 8,
+          guidanceIds: [`guide-${index + 1}`],
+          delivered: true,
+          source: 'worker',
+        });
+      });
       internals.stageLastProgressMs = { [stageId]: Date.now() };
       const result = await internals.act({
         verdict: 'ABORT',
         targetStage: stageId,
         reason: 'assessment made when operator supplied a missing fact',
         guidance: null,
-      }, Date.now() + 1_000, variant.triggerSource);
+        directionKey: 'same_implementation_direction',
+        evidenceIds: ['ev_cccccccccccccccccccc'],
+        assessedAt: new Date(now).toISOString(),
+      }, Date.now() + 1_000, variant.triggerSource, undefined, new Map([
+        [stageId, directionEvidence('c')],
+      ]));
       const signalPath = join(created.runDirPath, 'signals', `abort_${stageId}.json`);
       const signal = existsSync(signalPath) ? readJson(signalPath) : undefined;
       expect(result.verdict).toBe(variant.expected);

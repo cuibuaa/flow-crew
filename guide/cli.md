@@ -501,7 +501,7 @@ Common flags:
 | `--no-supervise` | off | Disable supervisor for this run |
 | `--campaign <name>` | config or cwd slug | Attach run to a campaign |
 | `--no-campaign` | off | Run without campaign tagging |
-| `--campaign-context=inherit\|skip` | `inherit` | Include or skip relevant planner history without changing campaign ownership |
+| `--campaign-context=inherit\|skip` | history-sensitive | Include or skip relevant planner history without changing campaign ownership. With no flag, three or more adverse endings among the ten most recent completed campaign tasks default to `skip`; otherwise context is inherited. |
 | `--background` | off | Register with daemon and detach |
 | `--acknowledge-brief-warnings[=<digest>]` | off | Explicitly continue the current inspected brief; never skip the report |
 | `--task "text"` | none | Provide task as a flag |
@@ -519,6 +519,10 @@ ungrouped in the dashboard. `--campaign-context=skip` keeps the run attached and
 verbose prior-run score/phase block from planner prompts. The compact deduplicated ledger, including all
 known dead ends, remains available. `--no-inherit-campaign` is retained only as a compatibility alias for
 `--campaign-context=skip`; new commands and scripts should use the explicit context form.
+When neither context flag is supplied, `quick` consumes the same campaign-hygiene decision shown by
+`ship-preflight`: three or more adverse endings among the ten most recent completed campaign tasks
+selects `skip` and prints the reason. An explicit `--campaign-context=inherit` always overrides that
+reversible default. Continuations retain their recorded choice.
 
 Research configuration belongs in the brief's leading YAML frontmatter. See
 [Brief and file contract](brief-contract.md).

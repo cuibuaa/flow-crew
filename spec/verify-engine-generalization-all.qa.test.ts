@@ -6,7 +6,7 @@ const PROJECT_ROOT = resolve(import.meta.dirname, "..");
 
 const CASES = [
   { id: 1, file: "engine-generalization-contracts.test.ts", anchor: "1 — reserves the framework research manifest" },
-  { id: 2, file: "engine-generalization-supervisor.test.ts", anchor: "replays the recorded two-GUIDE case" },
+  { id: 2, file: "engine-generalization-supervisor.test.ts", anchor: "refuses the recorded same-turn pair" },
   { id: 3, file: "engine-generalization-contracts.test.ts", anchor: "3 — compares and reports rounds" },
   { id: 4, file: "engine-generalization-contracts.test.ts", anchor: "4 — keeps a declared but skipped gate non-passing" },
   { id: 5, file: "engine-generalization-contracts.test.ts", anchor: "5 — rejects terminal condition sets" },

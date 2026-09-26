@@ -344,18 +344,23 @@ describe('compressed acceptance loop', () => {
     const artifactMatrix = roundDirs.flatMap((roundDir) => [
       join(roundDir, `rejected_verdict_${GATE_ID}.json`),
       join(roundDir, `previous_output_${GATE_ID}.md`),
+      join(roundDir, `evaluated_input_${GATE_ID}.md`),
     ]);
-    expect(new Set(artifactMatrix).size).toBe(4);
+    expect(new Set(artifactMatrix).size).toBe(6);
     for (const path of artifactMatrix) expect(existsSync(path)).toBe(true);
 
     for (const iteration of [1, 2]) {
       const roundDir = roundDirs[iteration - 1];
       const verdict = readFileSync(join(roundDir, `rejected_verdict_${GATE_ID}.json`), 'utf-8');
       const output = readFileSync(join(roundDir, `previous_output_${GATE_ID}.md`), 'utf-8');
+      const evaluatedInputPath = join(roundDir, `evaluated_input_${GATE_ID}.md`);
+      const evaluatedInput = readFileSync(evaluatedInputPath, 'utf-8');
       expect(verdict).toContain(`iteration-${iteration}-round-1-verdict`);
       expect(output).toContain(`iteration-${iteration}-round-1-output`);
       expect(verdict).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
       expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-output`);
+      expect(evaluatedInput).toBe(result.gatePrompts[iteration === 1 ? 0 : 2]);
+      expect(evaluatedInput).not.toBe(result.gatePrompts[iteration === 1 ? 1 : 3]);
       expect(JSON.parse(readFileSync(join(roundDir, 'repair_diff.json'), 'utf-8'))).toMatchObject({
         iteration,
         round: 1,
@@ -367,6 +372,7 @@ describe('compressed acceptance loop', () => {
       for (const prompt of [reevaluationPrompt, fixPrompt]) {
         expect(prompt).toContain(join(roundDir, `rejected_verdict_${GATE_ID}.json`));
         expect(prompt).toContain(join(roundDir, `previous_output_${GATE_ID}.md`));
+        expect(prompt).toContain(evaluatedInputPath);
         expect(prompt).not.toContain(join(archiveRoot, `iteration_${iteration === 1 ? 2 : 1}`));
         expect(prompt).not.toContain(join(archiveRoot, 'round_1'));
       }
@@ -398,6 +404,8 @@ describe('compressed acceptance loop', () => {
 
     expect(legacyPreamble).toContain(`Rejected verdict: ${legacyVerdict}`);
     expect(legacyPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${legacyOutput}`);
+    expect(legacyPreamble).toContain('Exact input evaluated by the rejected gate: unavailable');
+    expect(legacyPreamble).not.toContain(`evaluated_input_${GATE_ID}.md`);
     expect(readFileSync(legacyVerdict, 'utf-8')).toBe(verdictContents);
     expect(readFileSync(legacyOutput, 'utf-8')).toBe(outputContents);
     expect(readdirSync(join(legacyRunDir, 'gate_reevaluation'))).toEqual(['round_1']);
@@ -427,8 +435,10 @@ describe('compressed acceptance loop', () => {
       roundDiffPath: join(requestedCanonicalRound, 'repair_diff.json'),
     });
 
-    expect(mixedPreamble).toContain(`Rejected verdict: ${canonicalVerdict}`);
-    expect(mixedPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${canonicalOutput}`);
+    expect(mixedPreamble).toContain('INTERRUPTED EVALUATION (round 2)');
+    expect(mixedPreamble).toContain('No rejected verdict was recorded');
+    expect(mixedPreamble).not.toContain(canonicalVerdict);
+    expect(mixedPreamble).not.toContain(canonicalOutput);
     expect(mixedPreamble).not.toContain(staleLegacyVerdict);
     expect(mixedPreamble).not.toContain(staleLegacyOutput);
     expect(mixedPreamble).not.toContain(otherIterationRound);
@@ -488,14 +498,18 @@ describe('compressed acceptance loop', () => {
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
     const qa = readFileSync(join(process.cwd(), 'config', 'agents', 'qa.yaml'), 'utf-8');
     const source = readFileSync(join(process.cwd(), 'src', 'scheduler.ts'), 'utf-8');
+    const runDirPath = join(root, 'prompt-contract-run');
+    const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    mkdirSync(roundDir, { recursive: true });
+    writeFileSync(join(roundDir, `rejected_verdict_${GATE_ID}.json`), '{"pass":false}\n');
     const preamble = buildGateReevaluationPreamble({
       evaluationRound: 2,
       iteration: 1,
       repairRound: 1,
-      runDirPath: '/tmp/e7-run',
+      runDirPath,
       gateId: GATE_ID,
       fixStageIds: [FIX_ID],
-      roundDiffPath: '/tmp/e7-run/gate_reevaluation/iteration_1/round_1/repair_diff.json',
+      roundDiffPath: join(roundDir, 'repair_diff.json'),
     });
 
     expect(base).toContain('validator-owned Coverage Map');

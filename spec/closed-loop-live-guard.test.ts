@@ -9,6 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -103,6 +104,45 @@ async function waitForDecision(directory: string, requestId: string): Promise<Re
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`scope decision ${requestId} was not published`);
+}
+
+function seedInitializedGitlink(): string {
+  seedProject();
+  const nested = join(projectDir, 'submodule-dir');
+  const child = join(nested, 'tracked.txt');
+  const fixtureScript = String.raw`
+    import { execFileSync } from 'node:child_process';
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    const projectDir = process.argv[1];
+    const nested = join(projectDir, 'submodule-dir');
+    const git = (cwd, args) => execFileSync('git', args, {
+      cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    const initialize = (cwd) => {
+      git(cwd, ['init', '-q']);
+      git(cwd, ['config', 'user.email', 'fixture@example.invalid']);
+      git(cwd, ['config', 'user.name', 'FlowCrew Fixture']);
+    };
+    initialize(projectDir);
+    git(projectDir, ['add', '.']);
+    git(projectDir, ['commit', '-qm', 'parent baseline']);
+    mkdirSync(nested);
+    initialize(nested);
+    writeFileSync(join(nested, 'tracked.txt'), 'pre-existing child content\n');
+    git(nested, ['add', 'tracked.txt']);
+    git(nested, ['commit', '-qm', 'nested baseline']);
+    const nestedCommit = git(nested, ['rev-parse', 'HEAD']);
+    git(projectDir, ['update-index', '--add', '--cacheinfo', '160000', nestedCommit, 'submodule-dir']);
+    git(projectDir, ['commit', '-qm', 'record initialized gitlink']);
+    if (git(projectDir, ['status', '--porcelain=v1']) !== '') throw new Error('fixture is not clean');
+  `;
+  execFileSync(process.execPath, ['--input-type=module', '-e', fixtureScript, projectDir], {
+    cwd: projectDir,
+    env: { ...process.env, HOME: stateDir, FC_HOME: stateDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return child;
 }
 
 describe('portable live constraint guard', () => {
@@ -226,6 +266,77 @@ describe('portable live constraint guard', () => {
     expect(existsSync(join(created.runDirPath, 'stages', 'writer', 'constraint_audit_attempt_1.json'))).toBe(true);
   });
 
+  it('keeps a clean initialized gitlink intact during an explicit read-only stage', { timeout: 20_000 }, async () => {
+    const child = seedInitializedGitlink();
+
+    const { config, yaml } = workflowFixture([]);
+    const created = createRun(projectDir, config.name, yaml, ['writer']);
+    const state = readRunState(projectDir, created.runId);
+    state.maxRetries = 0;
+    writeRunState(projectDir, created.runId, state);
+    let invocationCount = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      invocationCount++;
+      return { output: 'read-only', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+    } };
+
+    const final = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      join(projectDir, 'config', 'agents'), created.runId, 'initialized gitlink replay', true, false,
+    );
+    expect(final.status).toBe('complete');
+    expect(invocationCount).toBe(1);
+    expect(readFileSync(child, 'utf-8')).toBe('pre-existing child content\n');
+    const stagePath = join(created.runDirPath, 'stages', 'writer');
+    expect(readdirSync(stagePath).filter((name) => name.startsWith('live_constraint_incidents_'))).toEqual([]);
+    expect(readStageStatus(projectDir, created.runId, 'writer').constraintAudit).toMatchObject({
+      liveViolationCount: 0,
+      liveComparisonUnavailableCount: 0,
+      unresolvedViolationCount: 0,
+    });
+  });
+
+  it('attributes a real initialized-gitlink change to the opaque root without deleting nested content', { timeout: 20_000 }, async () => {
+    const child = seedInitializedGitlink();
+    const { config, yaml } = workflowFixture([]);
+    const created = createRun(projectDir, config.name, yaml, ['writer']);
+    const state = readRunState(projectDir, created.runId);
+    state.maxRetries = 0;
+    writeRunState(projectDir, created.runId, state);
+    let invocationCount = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      invocationCount++;
+      writeFileSync(child, 'changed child content\n');
+      return {
+        output: 'changed nested content', exitCode: 0, duration_ms: 1,
+        writes: ['submodule-dir/tracked.txt'], writeAttribution: 'structured',
+      };
+    } };
+
+    const final = await runWorkflow(
+      config, yaml, projectDir, adapter, new Map(), undefined,
+      join(projectDir, 'config', 'agents'), created.runId, 'changed initialized gitlink replay', true, false,
+    );
+    expect(final.status).toBe('failed');
+    expect(invocationCount).toBe(1);
+    expect(readFileSync(child, 'utf-8')).toBe('changed child content\n');
+    const stagePath = join(created.runDirPath, 'stages', 'writer');
+    const incidentFiles = readdirSync(stagePath).filter((name) => name.startsWith('live_constraint_incidents_'));
+    expect(incidentFiles).toHaveLength(1);
+    const incident = JSON.parse(readFileSync(join(stagePath, incidentFiles[0]), 'utf-8').trim()) as Record<string, unknown>;
+    expect(incident).toMatchObject({
+      path: 'submodule-dir',
+      entryKind: 'gitlink',
+      comparisonOutcome: 'different',
+      changeObserved: true,
+      rollbackAttempted: true,
+      restored: false,
+      rollbackFailure: 'refused to replace unexpected directory at submodule-dir',
+    });
+  });
+
   it('catches a dropped watch event through the bounded fallback', async () => {
     const aborts: string[] = [];
     let dirty = false;
@@ -256,6 +367,56 @@ describe('portable live constraint guard', () => {
       trigger: 'fallback', path: 'config/defaults.yaml', restored: true,
     });
     expect(aborts).toContain('live_constraint_violation');
+  });
+
+  it('records an unavailable comparison without claiming a write or aborting the invocation', async () => {
+    const aborts: string[] = [];
+    let emitted = false;
+    const guard = new LiveConstraintGuard({
+      projectDir,
+      runDir: stateDir,
+      stageId: 'reader',
+      attemptIndex: 1,
+      effectiveScope: () => [],
+      fallbackScanMs: 1_000,
+      monitorDeadlineMs: 100,
+      watchProject: () => undefined,
+      scanAndRestore: () => {
+        if (emitted) return { scannedPaths: 1, violations: [] };
+        emitted = true;
+        return {
+          scannedPaths: 1,
+          violations: [{
+            path: 'submodule-dir',
+            reason: 'gitlink representation cannot be compared',
+            restored: false,
+            entryKind: 'gitlink',
+            comparisonOutcome: 'unavailable',
+            changeObserved: false,
+            rollbackAttempted: false,
+          }],
+        };
+      },
+      scopeRevisionInstruction: () => 'must not be requested for an unavailable comparison',
+    });
+
+    const monitor = guard.beginInvocation(1, (reason) => aborts.push(reason));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    const result = await monitor.finish();
+
+    expect(result.incidents).toEqual([]);
+    expect(aborts).toEqual([]);
+    const incidentPath = join(stateDir, 'stages', 'reader', 'live_constraint_incidents_attempt_1.jsonl');
+    const incident = JSON.parse(readFileSync(incidentPath, 'utf-8').trim()) as Record<string, unknown>;
+    expect(incident).toMatchObject({
+      path: 'submodule-dir',
+      entryKind: 'gitlink',
+      comparisonOutcome: 'unavailable',
+      changeObserved: false,
+      rollbackAttempted: false,
+      restored: false,
+    });
+    expect(incident).not.toHaveProperty('scopeRevisionInstruction');
   });
 
   it('fails closed on rollback failure and on a scan that exceeds the monitor deadline', async () => {

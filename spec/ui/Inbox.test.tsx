@@ -100,7 +100,7 @@ describe("operator Inbox", () => {
     vi.clearAllMocks();
   });
 
-  it("renders approval actions and omits permanent approval when ineligible", async () => {
+  it("renders approval actions, omits permanent approval, and preserves an ended obligation", async () => {
     loadOverview.mockResolvedValue(makeOverview({
       approvals: { status: "complete", items: [{ ...approval, risk: "write", standingRuleEligible: { ok: false, reason: "external only" } }] },
     }));
@@ -112,6 +112,31 @@ describe("operator Inbox", () => {
     expect(screen.queryByRole("button", { name: "Always allow" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve and resume" })).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-deferred")).not.toBeInTheDocument();
+
+    cleanup();
+    loadOverview.mockResolvedValue(makeOverview({
+      approvals: {
+        status: "complete",
+        items: [{
+          ...approval,
+          runStanding: {
+            kind: "ended",
+            live: false,
+            runId: approval.runId,
+            runStatus: "stopped",
+            completedAt: "2026-09-18T05:02:14.987Z",
+            reason: "originating run reached terminal status stopped",
+          },
+        }],
+      },
+    }));
+
+    view();
+
+    expect(await screen.findByText("Originating run: ended")).toBeInTheDocument();
+    expect(screen.getByText("originating run reached terminal status stopped")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve and resume" })).not.toBeInTheDocument();
   });
 
   it("shows a deferred task as waiting, including its reason and retry time", async () => {

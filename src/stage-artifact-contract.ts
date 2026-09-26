@@ -7,6 +7,7 @@ import {
   readLiveConstraintContentIdentity,
   type LiveConstraintContentIdentity,
 } from './live-constraint-guard.js';
+import { isGenericPathLexeme } from './path-lexeme.js';
 
 export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target';
 
@@ -112,7 +113,7 @@ function resolveMention(
   runDir: string,
 ): string | undefined {
   const cleaned = cleanedMention(mention);
-  if (!cleaned || /[*?{}[\]]/.test(cleaned) || !FILE_SUFFIX.test(cleaned)) return undefined;
+  if (!cleaned || !isGenericPathLexeme(cleaned) || /[*?{}[\]]/.test(cleaned) || !FILE_SUFFIX.test(cleaned)) return undefined;
   const absolute = isAbsolute(cleaned) ? resolve(cleaned) : resolve(projectDir, cleaned.replace(/^\.\//, ''));
   if (!within(projectDir, absolute) && !within(runDir, absolute)) return undefined;
   return absolute;

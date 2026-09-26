@@ -238,7 +238,10 @@ describe('partial failure evidence audit', () => {
     expect(testDelta(completeBaseline, completeCountIncrease)).toMatchObject({
       state: 'regression', reason: 'Known failure count increased',
     });
-    expect(testDelta(greenBaseline, partialCurrent)).toMatchObject({ state: 'regression' });
+    expect(testDelta(greenBaseline, partialCurrent)).toMatchObject({
+      state: 'unresolved',
+      reason: expect.stringContaining('partial'),
+    });
     expect(testDelta(partialBaseline, passed)).toMatchObject({ state: 'pass' });
   });
 

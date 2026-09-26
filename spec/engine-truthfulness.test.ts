@@ -22,7 +22,8 @@ import {
   writeRunState,
   writeStageStatus,
 } from '../src/store.js';
-import { Supervisor, type SupervisorAssessment } from '../src/supervisor.js';
+import { Supervisor, type DirectionEvidenceBinding, type SupervisorAssessment } from '../src/supervisor.js';
+import { readRunEvents, recordRunEvent } from '../src/run-events.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let projectDir: string;
@@ -360,11 +361,13 @@ describe('campaign cost honesty', () => {
     initial.supervise = false;
     writeRunState(projectDir, created.runId, initial);
     let planCalls = 0;
+    const planPrompts: string[] = [];
     const adapter: Adapter = {
-      async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return { output: '## What was done\n- completed after a re-plan', exitCode: 0, duration_ms: 1 };
         if (opts.stageId === 'plan') {
           planCalls++;
+          planPrompts.push(prompt);
           const suffix = planCalls === 1 ? 'one' : 'two';
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
             'stages:',
@@ -384,7 +387,26 @@ describe('campaign cost honesty', () => {
           ].join('\n'));
           return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 };
         }
-        if (opts.stageId === 'work_one') return { output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
+        if (opts.stageId === 'work_one') {
+          const signalDir = join(opts.runDir, 'signals');
+          mkdirSync(signalDir, { recursive: true });
+          const reason = 'recorded corpus text was mistaken for the stage direction';
+          const signalTimestamp = new Date().toISOString();
+          writeFileSync(join(signalDir, 'replan.json'), JSON.stringify({ reason, timestamp: signalTimestamp }));
+          writeFileSync(join(opts.runDir, 'supervisor_state.json'), JSON.stringify({ actions: [{
+            tick: 1,
+            timestamp: new Date(Date.parse(signalTimestamp) + 1).toISOString(),
+            verdict: 'REPLAN',
+            targetStage: 'work_one',
+            targetAttemptIndex: opts.attemptIndex,
+            directionEvidence: {
+              attemptIndex: opts.attemptIndex,
+              attemptStartedAt: opts.attemptStartedAt,
+            },
+            reason,
+          }] }));
+          return { output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
+        }
         if (opts.stageId === 'gate_one') {
           writeFileSync(join(opts.runDir, 'verdict_gate_one.json'), JSON.stringify({ pass: false, reason: 're-plan required' }));
           return { output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 };
@@ -400,10 +422,21 @@ describe('campaign cost honesty', () => {
 
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'coder', 'qa'), created.runId, 're-plan cost fixture', true);
     const cost = deriveRunTokenCost(final);
-    const observation = { status: final.status, stageIds: Object.keys(final.stages), planCalls, cost };
+    const replanEvents = readRunEvents(projectDir, created.runId).filter((event) => event.type === 'supervisor_replan');
+    const observation = { status: final.status, stageIds: Object.keys(final.stages), planCalls, cost, replanEvents };
     console.info(`[P6_COST_REPLAN] ${JSON.stringify(observation)}`);
     expect(final.status).toBe('complete');
     expect(planCalls).toBe(2);
+    expect(planPrompts[1]).not.toContain('PIVOT REQUIRED');
+    expect(replanEvents).toEqual([
+      expect.objectContaining({
+        type: 'supervisor_replan',
+        stageId: 'work_one',
+        assessmentId: expect.stringMatching(/^sa_[0-9a-f]{20}$/),
+        decision: 'discarded',
+      }),
+    ]);
+    expect(replanEvents[0]?.detail).toContain('target work_one execution 1 subsequently completed');
     expect(cost).toEqual({
       tokens: 407,
       supervisorTokens: 0,
@@ -699,6 +732,7 @@ type SupervisorActionFixture = {
   runningStages: string[];
   targetAttemptIndex: number;
   source: 'supervisor' | 'operator';
+  directionEvidence?: DirectionEvidenceBinding;
 };
 
 function runningSupervisorFixture(attemptIndex = 2) {
@@ -723,7 +757,13 @@ function runningSupervisorFixture(attemptIndex = 2) {
   const adapter: Adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
   const supervisor = new Supervisor(projectDir, created.runId, adapter, supervisorConfig, 'P6 supervisor fixture');
   const internals = supervisor as unknown as {
-    act(assessment: SupervisorAssessment): Promise<SupervisorAssessment>;
+    act(
+      assessment: SupervisorAssessment,
+      progressSinceMs?: number,
+      source?: 'supervisor' | 'operator',
+      observedDeliverables?: ReadonlyMap<string, never>,
+      observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+    ): Promise<SupervisorAssessment>;
     actions: SupervisorActionFixture[];
     stageLastProgressMs: Record<string, number>;
   };
@@ -774,11 +814,40 @@ describe('attempt- and source-scoped supervisor guidance', () => {
 
   it('still aborts after two supervisor corrections in the current attempt', async () => {
     const { created, internals } = runningSupervisorFixture(2);
-    internals.actions = [guideAction(1, 2, 'supervisor'), guideAction(2, 2, 'supervisor')];
+    const attempt = readRunState(projectDir, created.runId).stages.review_design.attempts!.at(-1)!;
+    const now = Date.now();
+    const directionKey = 'same_concrete_wrong_direction';
+    internals.actions = [1, 2].map((tick) => ({
+      ...guideAction(tick, 2, 'supervisor'),
+      timestamp: new Date(now - (tick === 1 ? 4_000 : 2_000)).toISOString(),
+      assessment: {
+        ...guideAction(tick, 2, 'supervisor').assessment,
+        directionKey,
+        guidanceId: `guide-${tick}`,
+        evidenceIds: [`ev_${(tick === 1 ? 'a' : 'b').repeat(20)}`],
+      },
+      directionEvidence: {
+        version: 1, stageId: 'review_design', attemptIndex: 2,
+        attemptStartedAt: attempt.startedAt, generation: (tick === 1 ? 'a' : 'b').repeat(64),
+      },
+    }));
+    for (const [offset, guidanceId, invocationIndex] of [[3_000, 'guide-1', 8], [1_000, 'guide-2', 9]] as const) {
+      recordRunEvent(projectDir, created.runId, {
+        type: 'guidance_delivery_checked', runId: created.runId,
+        timestamp: new Date(now - offset).toISOString(), stageId: 'review_design',
+        attemptIndex: 2, attemptStartedAt: attempt.startedAt,
+        boundary: 'adapter_invocation', invocationIndex,
+        guidanceIds: [guidanceId], delivered: true, source: 'worker',
+      });
+    }
     const result = await internals.act({
       verdict: 'ABORT', targetStage: 'review_design',
-      reason: 'the same wrong direction continues', guidance: null,
-    });
+      reason: 'the same wrong direction continues', guidance: null, directionKey,
+      evidenceIds: ['ev_cccccccccccccccccccc'], assessedAt: new Date(now).toISOString(),
+    }, Date.now() + 1_000, 'supervisor', undefined, new Map([['review_design', {
+      version: 1, stageId: 'review_design', attemptIndex: 2,
+      attemptStartedAt: attempt.startedAt, generation: 'c'.repeat(64),
+    }]]));
     const signalPath = join(created.runDirPath, 'signals', 'abort_review_design.json');
     const signal = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, 'utf-8')) as { attemptIndex?: number } : null;
     expect({ verdict: result.verdict, signalAttempt: signal?.attemptIndex }).toEqual({ verdict: 'ABORT', signalAttempt: 2 });

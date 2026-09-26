@@ -91,6 +91,7 @@ import {
   type InboxFilterState,
   type InboxItem,
 } from './inbox.js';
+import { inspectApprovalRunStanding } from './run-standing.js';
 import { readJsonlFile as readTolerantJsonlFile } from './jsonl.js';
 import { z } from "zod";
 import pino from "pino";
@@ -2029,6 +2030,7 @@ function dashboardInboxItem(item: InboxItem) {
   const state = readRunStateSafe(item.projectDir, item.runId);
   return {
     ...item,
+    runStanding: inspectApprovalRunStanding(item.projectDir, item.runId),
     standingRuleEligible: standingRuleEligible(item),
     ...(state?.campaignId || state?.campaignStorageKey
       ? { campaignId: state.campaignId ?? state.campaignStorageKey }

@@ -206,6 +206,26 @@ describe('8 — published replay commands are executed and measured', () => {
 });
 
 describe('19 — lexical suffixes are not promoted into replay paths', () => {
+  it('leaves escaped filename patterns as text while retaining a literal artifact path', () => {
+    const { projectDir, runDir } = fixture('regex-path-lexemes');
+    write(join(projectDir, 'reports/regexes.md'), '# Pattern examples\n');
+    const audit = inspectStageArtifactContract({
+      stageId: 'artifact-replay',
+      template: String.raw`Write reports/regexes.md after comparing \`input\.md\`, \`docs\/report\.md\`, \`scheduler\.ts\`, /stages\/[a-z]+\/input\.md/, and the literal docs/report.md.`,
+      projectDir,
+      runDir,
+      writes: ['reports/regexes.md'],
+    });
+
+    expect(audit.obligations.map((obligation) => obligation.mention)).toEqual([
+      'reports/regexes.md',
+      'docs/report.md',
+    ]);
+    expect(audit.violations).toEqual([
+      expect.objectContaining({ mention: 'docs/report.md', reason: expect.stringContaining('no readable file exists') }),
+    ]);
+  });
+
   it('leaves the recorded precise suite-count sentence as prose', () => {
     const { projectDir, runDir } = fixture('suffix-prose');
     const report = [
