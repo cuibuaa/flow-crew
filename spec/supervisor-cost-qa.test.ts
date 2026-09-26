@@ -237,6 +237,27 @@ describe('supervisor cost audit constructions', () => {
     expect(roleBefore).toBe(roleAfter);
   });
 
+  it('gives a project that omits min_delta_bytes the threshold the shipped configuration uses', () => {
+    // Configuration travels with a project's branch. On 2026-09-26 four of the
+    // recent runs used 4,096 because their project configuration predated the
+    // shipped 98,304 or omitted the key, and paid about three times the
+    // supervisor calls per hour of runs that had it.
+    const shipped = readFileSync(new URL('../config/defaults.yaml', import.meta.url), 'utf8');
+    const shippedValue = Number(/^  min_delta_bytes: (\d+)/m.exec(shipped)?.[1]);
+    expect(shippedValue).toBe(98_304);
+    for (const yaml of ['supervisor:\n  poll_interval_ms: 30000\n', 'adapter: auto\n']) {
+      const project = mkdtempSync(join(tmpdir(), 'flowcrew-supervisor-default-'));
+      try {
+        mkdirSync(join(project, 'config'));
+        writeFileSync(join(project, 'config', 'defaults.yaml'), yaml);
+        resetConfigCache();
+        expect(loadSupervisorConfig(project).minDeltaBytes).toBe(shippedValue);
+      } finally {
+        rmSync(project, { recursive: true, force: true });
+      }
+    }
+  });
+
   it.each([
     ['poll_interval_ms', 'pollIntervalMs', 10_000],
     ['routine_assessment_interval_ms', 'routineAssessmentIntervalMs', 60_000],

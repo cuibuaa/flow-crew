@@ -108,7 +108,12 @@ const DEFAULT_SUPERVISOR: SupervisorConfig = {
   // gets steady-state coverage; adaptive backoff handles quiet phases.
   maxAssessmentsPerIteration: 20,
   tailBytes: 16384,
-  minDeltaBytes: 4096,
+  // Accumulated stage output that triggers a content review. 4096 fired on
+  // nearly every 30 s heartbeat of a busy stage (each reads up to tailBytes);
+  // measured on 2026-09-26, runs at 98304 made about a quarter of the
+  // supervisor calls per hour and a third of the uncached input. Kept equal to
+  // config/defaults.yaml so a project that omits the key gets the same value.
+  minDeltaBytes: 98304,
   // 10-min idle threshold before supervisor is allowed to ABORT. Codex agents
   // often spend several minutes silently editing files via tool calls; the
   // older 5-min default produced false-positive aborts mid-implementation.
