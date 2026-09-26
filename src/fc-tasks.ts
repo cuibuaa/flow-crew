@@ -18,11 +18,14 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
 import {
   isActiveTaskStatus,
   isKnownTaskStatus,
-  isTerminalRunStatus,
+  resolveRunStatus,
+  TASK_STATUS,
+  type RunLifecycleBucket,
 } from './lifecycle-status.js';
 
 export const FC_TASK_FIELDS = [
@@ -184,6 +187,10 @@ export interface LedgerWriteOptions {
 
 export interface LedgerUpdateOptions extends LedgerWriteOptions {
   id: string;
+  /** Refuse unless the entry still resolves to this exact known-terminal run while locked. */
+  expectedRunId?: string;
+  /** Preserve the existing file when the requested logical value is already present. */
+  skipUnchanged?: boolean;
 }
 
 export class FcTasksRefusal extends Error {
@@ -217,6 +224,62 @@ export interface EngineTaskRunResolverOptions {
   engineRoot: string;
   /** Optional explicit archive root; defaults to <engineRoot>/runs. */
   runRoot?: string;
+}
+
+export type FcTaskEngineLifecycle =
+  | RunLifecycleBucket
+  | 'task_active'
+  | 'task_terminal'
+  | 'unknown'
+  | 'not_comparable';
+
+export type FcTaskComparison =
+  | 'aligned'
+  | 'wrap_up_required'
+  | 'ledger_closed_engine_active'
+  | 'not_comparable';
+
+export type FcTaskRecommendedAction =
+  | 'none'
+  | 'finish_wrap_up_then_complete_ledger'
+  | 'inspect_active_work_then_reopen_or_stop'
+  | 'link_entry_to_engine_task'
+  | 'repair_or_refresh_engine_evidence';
+
+export interface FcTaskReconciliation {
+  entryId: string;
+  ledgerStatus: FcTaskStatus;
+  engine: {
+    evidence: 'run' | 'task' | 'never_linked' | 'stale' | 'unavailable';
+    lifecycle: FcTaskEngineLifecycle;
+    running: boolean;
+    terminal: boolean;
+    taskId?: number;
+    runId?: string;
+    status?: string;
+    detail?: string;
+  };
+  comparison: FcTaskComparison;
+  authority: {
+    execution: 'engine';
+    wrapUp: 'ledger';
+    linkage: 'verified' | 'not_verified';
+  };
+  recommendedAction: FcTaskRecommendedAction;
+}
+
+export interface VerifyFcTaskRunBindingOptions {
+  storeRoot: string;
+  session: string;
+  id: string;
+  expectedRunId: string;
+  maxEntries?: number;
+  taskRunResolver?: FcTaskRunResolver;
+}
+
+export interface VerifiedFcTaskRunBinding {
+  entry: FcTaskEntry;
+  resolution: Extract<FcTaskRunResolution, { state: 'resolved' }>;
 }
 
 const DEFAULT_COLUMNS = 80;
@@ -361,7 +424,6 @@ export function validateFcTaskEntry(value: unknown, strictFields = false): FcTas
     }
     flowcrewTaskId = value.flowcrewTaskId as number;
   }
-
   return {
     id: value.id,
     subject,
@@ -956,6 +1018,69 @@ export function resolveFcTaskRuns(
   });
 }
 
+function requireExpectedTerminalRun(
+  entry: FcTaskEntry,
+  expectedRunId: string,
+  resolver?: FcTaskRunResolver,
+): Extract<FcTaskRunResolution, { state: 'resolved' }> {
+  if (!isSafePathSegment(expectedRunId)) {
+    throw new FcTasksRefusal('expected run id must be a non-empty safe path segment');
+  }
+  const [resolution] = resolveFcTaskRuns([entry], resolver);
+  if (resolution.state !== 'resolved') {
+    const detail = resolution.state === 'never_linked'
+      ? 'entry has no verified FlowCrew task link'
+      : resolution.detail;
+    throw new FcTasksRefusal(`cannot verify exact run ${expectedRunId}: ${detail}`);
+  }
+  if (resolution.runId !== expectedRunId) {
+    throw new FcTasksRefusal(
+      `linked engine task resolves to run ${resolution.runId ?? '(none)'}, not expected run ${expectedRunId}`,
+    );
+  }
+  if (resolution.runStatus === undefined) {
+    throw new FcTasksRefusal(`expected run ${expectedRunId} has no readable run status`);
+  }
+  const status = resolveRunStatus(resolution.runStatus);
+  if (status.kind === 'unknown') {
+    throw new FcTasksRefusal(`expected run ${expectedRunId} has unknown status ${status.display}`);
+  }
+  if (status.semantics.lifecycle !== 'terminal') {
+    throw new FcTasksRefusal(
+      `expected run ${expectedRunId} is ${status.status}, not terminal`,
+    );
+  }
+  return resolution;
+}
+
+/** Read-only preflight for an explicit operator request to close one exact run's entry. */
+export function verifyFcTaskRunBinding(
+  options: VerifyFcTaskRunBindingOptions,
+): VerifiedFcTaskRunBinding {
+  if (!isSafePathSegment(options.id)) {
+    throw new FcTasksRefusal('entry id must be a non-empty safe path segment');
+  }
+  const ledger = readTaskLedger(options.storeRoot, options.session, options.maxEntries);
+  if (ledger.state === 'no_ledger') {
+    throw new FcTasksRefusal(`session ${options.session} has no ledger`);
+  }
+  if (ledger.state === 'unavailable' || ledger.issues.length > 0) {
+    const issue = ledger.issues[0];
+    throw new FcTasksRefusal(`existing ledger is invalid: ${issue.code}: ${issue.detail}`);
+  }
+  const matches = ledger.entries.filter(({ id }) => id === options.id);
+  if (matches.length !== 1) {
+    throw new FcTasksRefusal(`completion requires exactly one existing id ${options.id}`);
+  }
+  const [{ sourceName: _sourceName, sourcePath: _sourcePath, sourceRecord: _sourceRecord, ...entry }] = matches;
+  const resolution = requireExpectedTerminalRun(
+    entry,
+    options.expectedRunId,
+    options.taskRunResolver,
+  );
+  return { entry, resolution };
+}
+
 function graphErrors(entries: readonly FcTaskEntry[]): string[] {
   const ids = new Set(entries.map(({ id }) => id));
   const errors: string[] = [];
@@ -1334,44 +1459,124 @@ function boundRows(header: string, detailRows: string[], lines: number, columns:
   ];
 }
 
-function resolvedTaskHasStopped(
-  resolution: Extract<FcTaskRunResolution, { state: 'resolved' }>,
-): boolean {
-  if (resolution.runStatus !== undefined) return isTerminalRunStatus(resolution.runStatus);
-  return isKnownTaskStatus(resolution.taskStatus)
-    && !isActiveTaskStatus(resolution.taskStatus);
-}
-
-function wrapUpIsOverdue(entry: FcTaskEntry, resolution: FcTaskRunResolution): boolean {
-  return entry.status !== FC_TASK_STATUS.COMPLETED
-    && resolution.state === 'resolved'
-    && resolvedTaskHasStopped(resolution);
-}
-
-function taskRunMarker(entry: FcTaskEntry, resolution: FcTaskRunResolution): string {
+function reconciliationEngine(
+  resolution: FcTaskRunResolution,
+): FcTaskReconciliation['engine'] {
   switch (resolution.state) {
     case 'never_linked':
-      return '';
-    case 'resolved': {
-      if (wrapUpIsOverdue(entry, resolution)) {
-        const terminal = resolution.runStatus === undefined
-          ? `task:${resolution.taskStatus}`
-          : `run:${resolution.runStatus}`;
-        return `wrap-up-overdue:${terminal}:#${resolution.taskId}`;
-      }
-      return resolution.runStatus === undefined
-        ? `task:${resolution.taskStatus}`
-        : `run:${resolution.runStatus}`;
-    }
+      return {
+        evidence: 'never_linked',
+        lifecycle: 'not_comparable',
+        running: false,
+        terminal: false,
+      };
     case 'stale':
-      return `stale:#${resolution.taskId}`;
+      return {
+        evidence: 'stale',
+        lifecycle: 'not_comparable',
+        running: false,
+        terminal: false,
+        taskId: resolution.taskId,
+        detail: resolution.detail,
+      };
     case 'unavailable':
-      return `link-unavailable:#${resolution.taskId}`;
+      return {
+        evidence: 'unavailable',
+        lifecycle: 'not_comparable',
+        running: false,
+        terminal: false,
+        taskId: resolution.taskId,
+        detail: resolution.detail,
+      };
+    case 'resolved': {
+      if (resolution.runStatus !== undefined) {
+        const status = resolveRunStatus(resolution.runStatus);
+        return {
+          evidence: 'run',
+          lifecycle: status.kind === 'known' ? status.semantics.lifecycle : 'unknown',
+          running: status.kind === 'known' && status.semantics.lifecycle === 'executing',
+          terminal: status.kind === 'known' && status.semantics.lifecycle === 'terminal',
+          taskId: resolution.taskId,
+          ...(resolution.runId === undefined ? {} : { runId: resolution.runId }),
+          status: resolution.runStatus,
+          ...(status.kind === 'unknown' ? { detail: status.reason } : {}),
+        };
+      }
+      const known = isKnownTaskStatus(resolution.taskStatus);
+      const active = known && isActiveTaskStatus(resolution.taskStatus);
+      return {
+        evidence: 'task',
+        lifecycle: !known ? 'unknown' : active ? 'task_active' : 'task_terminal',
+        running: known && resolution.taskStatus === TASK_STATUS.RUNNING,
+        terminal: known && !active,
+        taskId: resolution.taskId,
+        status: resolution.taskStatus,
+        ...(!known ? { detail: `Unrecognized engine task status ${JSON.stringify(resolution.taskStatus)}; lifecycle meaning was not inferred` } : {}),
+      };
+    }
     default: {
       const _exhaustive: never = resolution;
       return _exhaustive;
     }
   }
+}
+
+/** Compare the two accounts without letting either state machine mutate the other. */
+export function reconcileFcTask(
+  entry: FcTaskEntry,
+  resolution: FcTaskRunResolution,
+): FcTaskReconciliation {
+  const engine = reconciliationEngine(resolution);
+  const comparable = engine.lifecycle !== 'not_comparable' && engine.lifecycle !== 'unknown';
+  const comparison: FcTaskComparison = !comparable
+    ? 'not_comparable'
+    : engine.terminal && entry.status !== FC_TASK_STATUS.COMPLETED
+      ? 'wrap_up_required'
+      : !engine.terminal && entry.status === FC_TASK_STATUS.COMPLETED
+        ? 'ledger_closed_engine_active'
+        : 'aligned';
+  const recommendedAction: FcTaskRecommendedAction = comparison === 'wrap_up_required'
+    ? 'finish_wrap_up_then_complete_ledger'
+    : comparison === 'ledger_closed_engine_active'
+      ? 'inspect_active_work_then_reopen_or_stop'
+      : comparison === 'aligned'
+        ? 'none'
+        : engine.evidence === 'never_linked'
+          ? 'link_entry_to_engine_task'
+          : 'repair_or_refresh_engine_evidence';
+  return {
+    entryId: entry.id,
+    ledgerStatus: entry.status,
+    engine,
+    comparison,
+    authority: {
+      execution: 'engine',
+      wrapUp: 'ledger',
+      linkage: resolution.state === 'resolved' ? 'verified' : 'not_verified',
+    },
+    recommendedAction,
+  };
+}
+
+export function reconcileFcTasks(
+  entries: readonly FcTaskEntry[],
+  resolutions: readonly FcTaskRunResolution[],
+): FcTaskReconciliation[] {
+  if (entries.length !== resolutions.length) {
+    throw new FcTasksRefusal('entry and engine-resolution counts do not match');
+  }
+  return entries.map((entry, index) => reconcileFcTask(entry, resolutions[index]));
+}
+
+function taskRunMarker(projection: FcTaskReconciliation): string {
+  const { engine } = projection;
+  if (engine.evidence === 'never_linked') return '';
+  if (engine.evidence === 'stale') return `stale:#${engine.taskId}`;
+  if (engine.evidence === 'unavailable') return `link-unavailable:#${engine.taskId}`;
+  const lifecycle = `${engine.evidence}:${engine.status}`;
+  return projection.comparison === 'wrap_up_required'
+    ? `wrap-up-overdue:${lifecycle}:#${engine.taskId}`
+    : lifecycle;
 }
 
 export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResult {
@@ -1409,22 +1614,28 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
       };
     }
 
-    const running = ledger.entries.filter(({ status }) => status === FC_TASK_STATUS.IN_PROGRESS);
+    const inProgress = ledger.entries.filter(({ status }) => status === FC_TASK_STATUS.IN_PROGRESS);
     const pending = ledger.entries.filter(({ status }) => status === FC_TASK_STATUS.PENDING);
-    const done = ledger.entries.length - running.length - pending.length;
-    const open = [...running, ...pending].sort(lexicalIdOrder);
+    const done = ledger.entries.length - inProgress.length - pending.length;
+    const open = [...inProgress, ...pending].sort(lexicalIdOrder);
     const allRunResolutions = resolveFcTaskRuns(ledger.entries, options.taskRunResolver);
-    const runResolutionById = new Map(
-      ledger.entries.map((entry, index) => [entry.id, allRunResolutions[index]]),
+    const reconciliations = reconcileFcTasks(ledger.entries, allRunResolutions);
+    const reconciliationById = new Map(
+      reconciliations.map((projection) => [projection.entryId, projection]),
     );
-    const openWithRunState = open.map((entry, index) => ({
+    const openWithRunState = open.map((entry) => ({
       entry,
-      resolution: runResolutionById.get(entry.id) ?? allRunResolutions[index],
+      projection: reconciliationById.get(entry.id) as FcTaskReconciliation,
     }));
-    const overdueCount = openWithRunState
-      .filter(({ entry, resolution }) => wrapUpIsOverdue(entry, resolution))
-      .length;
-    const staleCount = allRunResolutions.filter((resolution) => resolution.state === 'stale').length;
+    const engineRunningCount = new Set(reconciliations.flatMap(({ entryId, engine }) => {
+      if (!engine.running) return [];
+      if (engine.runId) return [`run:${engine.runId}`];
+      if (engine.taskId !== undefined) return [`task:${engine.taskId}`];
+      return [`entry:${entryId}`];
+    })).size;
+    const overdueCount = reconciliations
+      .filter(({ comparison }) => comparison === 'wrap_up_required').length;
+    const staleCount = reconciliations.filter(({ engine }) => engine.evidence === 'stale').length;
     const unavailable = allRunResolutions
       .find((resolution): resolution is Extract<FcTaskRunResolution, { state: 'unavailable' }> => (
         resolution.state === 'unavailable'
@@ -1436,11 +1647,11 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
 
     let summary: string;
     if (ledger.entries.length === 0 && ledger.issues.length > 0) {
-      summary = 'no readable entries';
+      summary = `engine ${engineRunningCount} running · ledger no readable entries`;
     } else if (open.length === 0) {
-      summary = `idle · ${done} done`;
+      summary = `engine ${engineRunningCount} running · ledger idle, ${done} done`;
     } else {
-      summary = `${running.length} running · ${pending.length} pending · ${done} done`;
+      summary = `engine ${engineRunningCount} running · ledger ${inProgress.length} in progress, ${pending.length} pending, ${done} done`;
     }
     if (overdueCount > 0) summary = `${overdueCount} wrap-up overdue · ${summary}`;
     if (staleCount > 0) summary = `${staleCount} stale · ${summary}`;
@@ -1448,8 +1659,8 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
       ? `fc_tasks: degraded[${issueCodes.join(',')}] · ${summary}`
       : `fc_tasks: ${summary}`;
 
-    const detailRows = openWithRunState.map(({ entry, resolution }) => {
-      const marker = taskRunMarker(entry, resolution);
+    const detailRows = openWithRunState.map(({ entry, projection }) => {
+      const marker = taskRunMarker(projection);
       const prefix = marker ? `${marker} ` : '';
       if (entry.status === FC_TASK_STATUS.IN_PROGRESS) {
         return `▶ ${prefix}[${entry.id}] ${entry.activeForm || entry.subject}`;
@@ -1894,6 +2105,9 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
 export function updateTaskEntry(options: LedgerUpdateOptions): string {
   const limit = writableMaxEntries(options.maxEntries);
   if (!isSafePathSegment(options.id)) throw new FcTasksRefusal('update id must be a non-empty safe path segment');
+  if (options.expectedRunId !== undefined && !isSafePathSegment(options.expectedRunId)) {
+    throw new FcTasksRefusal('expected run id must be a non-empty safe path segment');
+  }
   const completeEntry = isCompleteFcTaskEntry(options.entry)
     ? validateFcTaskEntry(options.entry, true)
     : undefined;
@@ -1949,7 +2163,11 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
         && (sourceRecord.flowcrewTaskId as number) > 0) {
       entry = { ...entry, flowcrewTaskId: sourceRecord.flowcrewTaskId as number };
     }
-    verifyTaskLink(entry, options.taskRunResolver);
+    if (options.expectedRunId !== undefined) {
+      requireExpectedTerminalRun(entry, options.expectedRunId, options.taskRunResolver);
+    } else {
+      verifyTaskLink(entry, options.taskRunResolver);
+    }
 
     let serializedEntry: unknown = entry;
     if (completeEntry === undefined) {
@@ -1963,6 +2181,9 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
     if (proposed.issues.length > 0) {
       const issue = proposed.issues[0];
       throw new FcTasksRefusal(`proposed update leaves ledger invalid: ${issue.code}: ${issue.detail}`);
+    }
+    if (options.skipUnchanged && isDeepStrictEqual(serializedEntry, sourceRecord)) {
+      return target.sourcePath;
     }
     const serialized = serializeLedgerEntry(serializedEntry);
     const proposedBytes = scanned.totalBytes - target.sourceBytes + serialized.byteLength;

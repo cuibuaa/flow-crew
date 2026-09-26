@@ -1,6 +1,7 @@
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -140,6 +141,69 @@ function destructiveOperations(runner: ReturnType<typeof vi.fn<LandGitRunner>>):
   return runner.mock.calls
     .map(([request]) => request.operation)
     .filter((operation) => ['remove_worktree', 'prune_worktrees', 'delete_branch'].includes(operation));
+}
+
+interface FcTaskClosureFixture {
+  storeRoot: string;
+  session: string;
+  entryId: string;
+  entryPath: string;
+  taskId: number;
+}
+
+function seedFcTaskClosure(linkedRunId = fixture.runId): FcTaskClosureFixture {
+  const storeRoot = join(fixture.root, 'ledger');
+  const session = 'land-session';
+  const entryId = 'land-entry';
+  const taskId = 41;
+  const sessionRoot = join(storeRoot, session);
+  const entryPath = join(sessionRoot, `${entryId}.json`);
+  mkdirSync(sessionRoot, { recursive: true });
+  writeFileSync(entryPath, `${JSON.stringify({
+    id: entryId,
+    subject: 'Land the accepted task',
+    description: 'The operator has not completed wrap-up yet.',
+    activeForm: 'Landing the accepted task',
+    status: 'in_progress',
+    blocks: [],
+    blockedBy: [],
+    flowcrewTaskId: taskId,
+  }, null, 2)}\n`, 'utf-8');
+  writeFileSync(join(fixture.state, 'tasks.jsonl'), `${JSON.stringify({
+    id: taskId,
+    status: 'done',
+    projectDir: fixture.project,
+    run_id: linkedRunId,
+  })}\n`, 'utf-8');
+  return { storeRoot, session, entryId, entryPath, taskId };
+}
+
+function fcTaskClosureArgs(closure: FcTaskClosureFixture): string[] {
+  return [
+    'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    '--complete-fc-task', closure.entryId,
+    '--fc-task-session', closure.session,
+    '--fc-tasks-root', closure.storeRoot,
+  ];
+}
+
+function fcTaskStatus(closure: FcTaskClosureFixture): string {
+  return (JSON.parse(readFileSync(closure.entryPath, 'utf-8')) as { status: string }).status;
+}
+
+function writeAlternateTerminalRun(runId: string): void {
+  const runDirectory = join(fixture.state, 'runs', runId);
+  mkdirSync(runDirectory, { recursive: true });
+  writeFileSync(join(runDirectory, 'run.json'), JSON.stringify({
+    runId,
+    workflowName: 'fixture',
+    projectDir: fixture.project,
+    baseCommit: BASE,
+    status: 'complete',
+    stages: {},
+    startedAt: '2030-01-01T00:00:00.000Z',
+    completedAt: '2030-01-01T00:01:00.000Z',
+  }, null, 2), 'utf-8');
 }
 
 describe('flowcrew land inventory and refusal boundary', () => {
@@ -671,6 +735,90 @@ describe('flowcrew land inventory and refusal boundary', () => {
     expect(runner.mock.calls.map(([request]) => request.operation)).toEqual([
       'status', 'ignored', 'branch', 'unpushed', 'at_risk',
     ]);
+  });
+});
+
+describe('flowcrew land exact ledger completion boundary', () => {
+  it('completes the exact entry only after all three removal steps succeed', async () => {
+    const closure = seedFcTaskClosure();
+    const responses = cleanRemovalResponses();
+    const statusesDuringRemoval: string[] = [];
+    const runner = vi.fn<LandGitRunner>((request) => {
+      if (['remove_worktree', 'prune_worktrees', 'delete_branch'].includes(request.operation)) {
+        statusesDuringRemoval.push(fcTaskStatus(closure));
+      }
+      return responses[request.operation] ?? { exitCode: 0, stdout: '' };
+    });
+    const stdout = new Capture();
+    const stderr = new Capture();
+
+    const code = await cmdLandWithDeps([...fcTaskClosureArgs(closure), '--json'], {
+      git: runner,
+      stdout: stdout.writer,
+      stderr: stderr.writer,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.value).toBe('');
+    expect(statusesDuringRemoval).toEqual(['in_progress', 'in_progress', 'in_progress']);
+    expect(fcTaskStatus(closure)).toBe('completed');
+    expect(JSON.parse(stdout.value)).toMatchObject({
+      state: 'removed',
+      fcTaskCompletion: {
+        state: 'completed',
+        entryId: closure.entryId,
+        session: closure.session,
+        expectedRunId: fixture.runId,
+      },
+    });
+  });
+
+  it('keeps a terminal entry open when explicit closure identity is omitted', async () => {
+    const closure = seedFcTaskClosure();
+
+    const report = await runLand([
+      'land', '--run', fixture.runId, '--remove', '--acknowledge-regenerable=0',
+    ], { git: gitRunner(cleanRemovalResponses()) });
+
+    expect(report.state).toBe('removed');
+    expect(report.fcTaskCompletion).toBeUndefined();
+    expect(fcTaskStatus(closure)).toBe('in_progress');
+  });
+
+  it('refuses an entry linked to a different terminal run before removal', async () => {
+    const otherRunId = 'different-terminal-run';
+    writeAlternateTerminalRun(otherRunId);
+    const closure = seedFcTaskClosure(otherRunId);
+    const runner = gitRunner(cleanRemovalResponses());
+
+    const report = await runLand(fcTaskClosureArgs(closure), { git: runner });
+
+    expect(report.state).toBe('refused');
+    expect(report.fcTaskCompletion).toMatchObject({
+      state: 'preflight_failed',
+      expectedRunId: fixture.runId,
+      detail: expect.stringContaining(`run ${otherRunId}`),
+    });
+    expect(destructiveOperations(runner)).toEqual([]);
+    expect(fcTaskStatus(closure)).toBe('in_progress');
+  });
+
+  it.each([
+    'remove_worktree',
+    'prune_worktrees',
+    'delete_branch',
+  ] as const)('keeps the entry open when %s fails', async (operation) => {
+    const closure = seedFcTaskClosure();
+    const responses = cleanRemovalResponses();
+    responses[operation] = { exitCode: 1, stderr: `${operation} fixture failure` };
+    const runner = gitRunner(responses);
+
+    const report = await runLand(fcTaskClosureArgs(closure), { git: runner });
+
+    expect(report.state).toBe('removal_failed');
+    expect(report.fcTaskCompletion).toMatchObject({ state: 'verified' });
+    expect(destructiveOperations(runner).at(-1)).toBe(operation);
+    expect(fcTaskStatus(closure)).toBe('in_progress');
   });
 });
 

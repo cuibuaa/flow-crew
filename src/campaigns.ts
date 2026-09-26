@@ -6,6 +6,7 @@ import {
   type StoreState,
 } from './store.js';
 import { readRunIndexRecords, recordToPartialState } from './run-index.js';
+import { projectPersistenceIdentity } from './project-identity.js';
 
 export interface CampaignHistoryEntry {
   seq: number;
@@ -23,6 +24,7 @@ export interface CampaignHistoryEntry {
   campaignId?: string;
   campaignStorageKey?: string;
   campaignName?: string;
+  projectIdentity?: string;
   phase?: string;
   phaseComplete?: boolean;
   nextPhase?: string;
@@ -31,6 +33,7 @@ export interface CampaignHistoryEntry {
   reason?: string;
   workflowSatisfied?: boolean;
   terminalStudyComplete?: boolean;
+  modelPass?: boolean;
   modelSuccess?: boolean;
   /** Read-side delivery evidence; writers may persist either a tip or full chain. */
   completing_commit?: string;
@@ -174,7 +177,8 @@ function runBelongsToProject(projectDir: string, runId: string): boolean {
   try {
     const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
     const state = JSON.parse(raw) as Partial<StoreState>;
-    return state.projectDir === projectDir;
+    return typeof state.projectDir === 'string'
+      && projectPersistenceIdentity(state.projectDir) === projectPersistenceIdentity(projectDir);
   } catch { /* non-critical */
     return false;
   }
@@ -216,8 +220,9 @@ function projectHistoryStorageKeys(projectDir: string): Set<string> {
  * O(campaigns × all-history) blowup.
  */
 export function readAllCampaignEntries(projectDir: string): Map<string, CampaignHistoryEntry[]> {
-  const projectKeys = projectHistoryStorageKeys(projectDir);
   const globalRoot = globalCampaignsRoot();
+  const projectIdentity = projectPersistenceIdentity(projectDir);
+  const legacyProjectKeys = projectHistoryStorageKeys(projectDir);
   const belongsCache = new Map<string, boolean>();
   const belongs = (runId: string): boolean => {
     let v = belongsCache.get(runId);
@@ -247,7 +252,16 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
           const ref = normalizeEntryCampaign(fileStem, parsed);
           if (!ref) continue;
           if (typeof parsed.runId !== 'string') continue;
-          if (root === globalRoot && projectKeys.has(ref.storageKey) && !belongs(parsed.runId)) continue;
+          if (root === globalRoot) {
+            if (typeof parsed.projectIdentity === 'string') {
+              if (parsed.projectIdentity !== projectIdentity) continue;
+            } else if (legacyProjectKeys.has(ref.storageKey) && !belongs(parsed.runId)) {
+              // Pre-identity global envelopes were historically visible unless
+              // project-local history established that this slug belonged to
+              // another project. Preserve that compatibility boundary.
+              continue;
+            }
+          }
           const hasSeq = typeof parsed.seq === 'number';
           const kind = typeof parsed.kind === 'string' ? parsed.kind : undefined;
           const hasScore = typeof parsed.score === 'number'
@@ -275,6 +289,7 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
             campaignId: ref.id,
             campaignStorageKey: ref.storageKey,
             campaignName: ref.name,
+            projectIdentity: typeof parsed.projectIdentity === 'string' ? parsed.projectIdentity : undefined,
             phase: typeof parsed.phase === 'string' ? parsed.phase : undefined,
             phaseComplete: typeof parsed.phaseComplete === 'boolean' ? parsed.phaseComplete : undefined,
             nextPhase: typeof parsed.nextPhase === 'string' ? parsed.nextPhase : undefined,
@@ -283,6 +298,7 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
             reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
             workflowSatisfied: parsed.workflowSatisfied === true ? true : undefined,
             terminalStudyComplete: parsed.terminalStudyComplete === true ? true : undefined,
+            modelPass: typeof parsed.modelPass === 'boolean' ? parsed.modelPass : undefined,
             modelSuccess: typeof parsed.modelSuccess === 'boolean' ? parsed.modelSuccess : undefined,
             completing_commit: typeof parsed.completing_commit === 'string' ? parsed.completing_commit : undefined,
             commit_chain: Array.isArray(parsed.commit_chain)
@@ -371,31 +387,11 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
     upsert(campaign, state.runId, state.startedAt);
   }
 
-  for (const root of campaignHistoryRoots(projectDir)) {
-    let files: string[];
-    try {
-      files = readdirSync(root).filter((name) => name.endsWith('.jsonl'));
-    } catch { /* non-critical */
-      continue;
-    }
-    for (const file of files) {
-      const fileStem = file.replace(/\.jsonl$/, '');
-      let lines: string[];
-      try {
-        lines = readFileSync(join(root, file), 'utf-8').split('\n').filter(Boolean);
-      } catch { /* non-critical */
-        continue;
-      }
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry> & { ts?: unknown };
-          const campaign = normalizeEntryCampaign(fileStem, parsed);
-          if (!campaign || typeof parsed.runId !== 'string') continue;
-          upsert(campaign, parsed.runId, campaignEntryTimestamp(parsed), typeof parsed.score === 'number' ? parsed.score : undefined);
-        } catch { /* non-critical */
-          // Ignore malformed lines.
-        }
-      }
+  for (const [storageKey, entries] of readAllCampaignEntries(projectDir)) {
+    for (const entry of entries) {
+      const campaign = normalizeEntryCampaign(storageKey, entry);
+      if (!campaign) continue;
+      upsert(campaign, entry.runId, entry.timestamp, entry.score);
     }
   }
 
@@ -497,5 +493,5 @@ export function campaignExists(projectDir: string, campaignId: string): boolean 
   const storageKey = resolveCampaignStorageKey({ campaignId });
   if (!storageKey) return false;
   if (listCampaigns(projectDir).some((campaign) => campaign.storageKey === storageKey)) return true;
-  return campaignHistoryRoots(projectDir).some((root) => existsSync(join(root, `${storageKey}.jsonl`)));
+  return existsSync(join(campaignsRoot(projectDir), `${storageKey}.jsonl`));
 }

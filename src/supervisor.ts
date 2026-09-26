@@ -78,6 +78,17 @@ export interface SupervisorAssessment {
   targetStage: string | null;
   reason: string;
   guidance: string | null;
+  /** Stable identity for one concrete wrong direction. GUIDE and direction-
+   * ABORT assessments reuse this key; idle ABORT and all other verdicts omit it. */
+  directionKey?: string;
+}
+
+const DIRECTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/;
+
+function normalizeDirectionKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return DIRECTION_KEY_PATTERN.test(normalized) ? normalized : undefined;
 }
 
 export function summarizeSupervisorGuidanceHistory(
@@ -97,7 +108,7 @@ export function summarizeSupervisorGuidanceHistory(
     const guidance = byStage.get(stageId) ?? [];
     if (guidance.length === 0) return [];
     const recentReasons = guidance.slice(-3).map((assessment) =>
-      assessment.reason.replace(/\s+/g, ' ').trim().slice(0, 240) || '(reason unavailable)'
+      `${assessment.directionKey ? `[${assessment.directionKey}] ` : ''}${assessment.reason.replace(/\s+/g, ' ').trim().slice(0, 240) || '(reason unavailable)'}`
     );
     return [`- ${stageId}: ${guidance.length} cumulative GUIDE decisions; recent reasons: ${recentReasons.join(' | ')}`];
   }).join('\n');
@@ -114,6 +125,8 @@ interface SupervisorAction {
   targetAttemptIndex?: number;
   /** Operator additions remain guidance, but do not authorize direction ABORT. */
   source?: 'supervisor' | 'operator';
+  /** Exact attempt/progress generation visible to the assessment. */
+  directionEvidence?: DirectionEvidenceBinding;
 }
 
 function actionAttemptIndex(action: SupervisorAction, status: StageStatus | undefined): number | undefined {
@@ -143,11 +156,15 @@ export function parseSupervisorVerdict(output: string): SupervisorAssessment | n
     try {
       const parsed = JSON.parse(matches[i][0]);
       if (!valid.includes(parsed.verdict)) continue;
+      const directionKey = parsed.verdict === 'GUIDE' || parsed.verdict === 'ABORT'
+        ? normalizeDirectionKey(parsed.direction_key)
+        : undefined;
       return {
         verdict: parsed.verdict,
         targetStage: parsed.target_stage ?? null,
         reason: parsed.reason ?? '',
         guidance: parsed.guidance ?? null,
+        ...(directionKey ? { directionKey } : {}),
       };
     } catch { /* try the next earlier match */ }
   }
@@ -208,6 +225,7 @@ export interface StageExecutionFacts {
   outputObserved: boolean;
   handoffObserved: boolean;
   commitObserved: boolean;
+  liveProgressThisTick: boolean;
   artifactProgressThisTick: boolean;
   activeCommandCount: number;
   commandActivityValid: boolean;
@@ -220,9 +238,147 @@ interface ProjectCommitFact {
   committedAtMs: number;
 }
 
+/** Attempt-scoped progress generation that was visible when the supervisor
+ * made one semantic judgment. The generation is persisted with the action; it
+ * does not claim that output volume is correctness evidence. */
+export interface DirectionEvidenceBinding {
+  version: 1;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  generation: string;
+}
+
+export interface DirectionGuidanceFact {
+  timestamp: string;
+  assessment: SupervisorAssessment;
+  targetAttemptIndex?: number;
+  source?: 'supervisor' | 'operator';
+  directionEvidence?: DirectionEvidenceBinding;
+}
+
+export interface DirectionPersistenceResult {
+  verified: boolean;
+  guideCount: number;
+  matchingGuideCount: number;
+  mode: 'bound_progress_chain' | 'legacy_unchanged' | 'unverified';
+  generations: string[];
+  reason: string;
+}
+
+function canonicalDirectionText(value: string | null): string {
+  return (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** A count is not proof of persistence. The normal path requires the same
+ * explicit direction key over two GUIDE judgments and the proposed ABORT,
+ * with a different attempt-scoped progress generation at each judgment. The
+ * narrow legacy path exists for pre-binding in-memory callers only: it accepts
+ * two identical corrections solely when no newer durable worker evidence was
+ * observed after them. */
+export function verifyRepeatedWrongDirection(input: {
+  stageId: string;
+  attemptIndex: number | undefined;
+  assessment: SupervisorAssessment;
+  currentEvidence?: DirectionEvidenceBinding;
+  guidance: readonly DirectionGuidanceFact[];
+  durableProgressAfterLatestGuide: boolean;
+}): DirectionPersistenceResult {
+  const guides = input.guidance.filter((action) => (
+    action.assessment.verdict === 'GUIDE'
+    && action.assessment.targetStage === input.stageId
+    && (action.source ?? 'supervisor') === 'supervisor'
+    && action.targetAttemptIndex === input.attemptIndex
+  ));
+  const guideCount = guides.length;
+  const directionKey = normalizeDirectionKey(input.assessment.directionKey);
+  const currentEvidence = input.currentEvidence;
+  const currentEvidenceValid = currentEvidence?.version === 1
+    && currentEvidence.stageId === input.stageId
+    && currentEvidence.attemptIndex === input.attemptIndex
+    && Number.isFinite(Date.parse(currentEvidence.attemptStartedAt))
+    && /^[0-9a-f]{64}$/.test(currentEvidence.generation);
+  const boundToCurrentDirection = (guide: DirectionGuidanceFact): boolean => Boolean(
+        normalizeDirectionKey(guide.assessment.directionKey) === directionKey
+        && guide.directionEvidence?.version === 1
+        && guide.directionEvidence?.stageId === input.stageId
+        && guide.directionEvidence.attemptIndex === input.attemptIndex
+        && guide.directionEvidence.attemptStartedAt === currentEvidence!.attemptStartedAt
+        && /^[0-9a-f]{64}$/.test(guide.directionEvidence.generation)
+  );
+  const matching = directionKey && currentEvidenceValid
+    ? guides.filter(boundToCurrentDirection)
+    : [];
+  const latestGuides = guides.slice(-2);
+  const latestMatching = directionKey && currentEvidenceValid
+    ? latestGuides.filter(boundToCurrentDirection)
+    : [];
+  if (latestMatching.length === 2 && currentEvidenceValid) {
+    const generations = [
+      latestMatching[0].directionEvidence!.generation,
+      latestMatching[1].directionEvidence!.generation,
+      currentEvidence.generation,
+    ];
+    if (new Set(generations).size === generations.length) {
+      return {
+        verified: true,
+        guideCount,
+        matchingGuideCount: matching.length,
+        mode: 'bound_progress_chain',
+        generations,
+        reason: `direction ${directionKey} was judged on three advancing evidence generations`,
+      };
+    }
+  }
+  const legacySignatures = latestGuides.map((guide) => JSON.stringify([
+    canonicalDirectionText(guide.assessment.reason),
+    canonicalDirectionText(guide.assessment.guidance),
+  ]));
+  const isUnboundLegacy = !directionKey
+    && currentEvidence === undefined
+    && latestGuides.length === 2
+    && latestGuides.every((guide) => (
+      normalizeDirectionKey(guide.assessment.directionKey) === undefined
+      && guide.directionEvidence === undefined
+    ));
+  if (
+    isUnboundLegacy
+    && !input.durableProgressAfterLatestGuide
+    && legacySignatures[0] === legacySignatures[1]
+  ) {
+    return {
+      verified: true,
+      guideCount,
+      matchingGuideCount: 2,
+      mode: 'legacy_unchanged',
+      generations: [],
+      reason: 'two identical legacy corrections remain unchanged and no newer durable worker evidence was observed',
+    };
+  }
+
+  const reason = guideCount < 2
+    ? `only ${guideCount} prior GUIDE decision(s) were observed`
+    : input.durableProgressAfterLatestGuide && isUnboundLegacy
+      ? 'durable worker evidence changed after the latest unbound GUIDE decision'
+      : !directionKey
+        ? 'the ABORT supplied no stable wrong-direction key'
+        : matching.length < 2
+          ? `only ${matching.length} GUIDE decision(s) were bound to direction ${directionKey} and this attempt`
+          : 'the repeated judgments did not span three advancing evidence generations';
+  return {
+    verified: false,
+    guideCount,
+    matchingGuideCount: matching.length,
+    mode: 'unverified',
+    generations: latestMatching.flatMap((guide) => guide.directionEvidence?.generation ?? [])
+      .concat(currentEvidence?.generation ?? []),
+    reason,
+  };
+}
+
 type AbortBasis =
   | { kind: 'idle'; stalledMs: number }
-  | { kind: 'repeated_guidance'; guideCount: number };
+  | { kind: 'repeated_guidance'; persistence: DirectionPersistenceResult };
 
 interface VerifiedAbortResult {
   written: boolean;
@@ -373,6 +529,7 @@ export function inspectStageExecutionFacts(input: {
   };
 
   const stageRoot = join(input.runDir, 'stages', input.stageId);
+  const liveLogPath = join(stageRoot, 'live.log');
   const outputPath = join(stageRoot, 'output.md');
   const verdictPath = join(input.runDir, `verdict_${input.stageId}.json`);
   const handoffPath = join(input.runDir, `handoff_${input.stageId}.md`);
@@ -424,6 +581,7 @@ export function inspectStageExecutionFacts(input: {
     }
   };
   walk(stageRoot, 0);
+  const liveProgressThisTick = changedThisTick(liveLogPath);
   const artifactProgressThisTick = stageArtifactChanged
     || changedThisTick(verdictPath)
     || changedThisTick(handoffPath)
@@ -438,6 +596,7 @@ export function inspectStageExecutionFacts(input: {
     outputObserved,
     handoffObserved,
     commitObserved,
+    liveProgressThisTick,
     artifactProgressThisTick,
     activeCommandCount,
     commandActivityValid,
@@ -457,6 +616,7 @@ export function describeStageExecutionFacts(facts: StageExecutionFacts): string 
     facts.activeCommandCount > 0
       ? `${facts.activeCommandCount} active command${facts.activeCommandCount === 1 ? '' : 's'} observed`
       : facts.commandActivityValid ? 'no active command observed' : 'no valid command activity record',
+    facts.liveProgressThisTick ? 'live output changed during verification' : 'no live-output change during verification',
     facts.finalizing ? 'finalization window active' : 'finalization window inactive',
   ].join('; ');
 }
@@ -469,7 +629,7 @@ export function buildSupervisorSystemPrompt(stuckThresholdMs: number): string {
 Analyze the running stages below and respond with exactly ONE JSON object.
 Do NOT explain your reasoning — output ONLY the JSON.
 
-Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>"}
+Format: {"verdict":"${verdictUnion}","target_stage":"<stage_id or null>","reason":"<1 sentence>","guidance":"<instruction if GUIDE, else null>","direction_key":"<stable lower_snake_case key for one concrete wrong direction, else null>"}
 
 Verdicts:
 ${verdictList}
@@ -480,6 +640,7 @@ Rules:
 - REJECT only when an EMITTED deliverable contradicts its OWN declared work or acceptance criteria — e.g. a gate verdict says pass:true while the evidence/metric it cites shows fail, a stage claims it produced an artifact that is missing or empty, or a result codifies a smoke/error as success. Set "target_stage" to that stage; "reason" must name the specific contradiction (what was claimed vs what the evidence shows). REJECT forces the work to be re-done — it is NOT for slow progress (use WAIT) or a wrong overall approach (use REPLAN). CRITICAL GUARD: an HONEST NEGATIVE is a VALID deliverable, not a rejection — do NOT REJECT a result simply because the target metric was not beaten, the hypothesis failed, or the run found no improvement. Only REJECT when the deliverable itself is internally inconsistent or does not actually do the work it declares.
 - DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
 - ABORT only in either of these cases: (1) a stage has made no real progress for ${stuckMinutes}+ minutes and is truly stuck, or (2) the same concrete wrong direction continues after repeated GUIDE decisions. Active or high-volume output is not proof that the direction is correct and must not prevent case (2) from escalating to ABORT. Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT infer case (1) from stdout silence alone if you can see file/artifact activity in the snapshot.
+- For every GUIDE, set direction_key to a short lower_snake_case identity for the concrete wrong direction. For ABORT case (2), reuse that exact key only when the evidence produced after each correction still shows the same direction. Set direction_key to null for idle ABORT and every other verdict.
 - Treat the verified stage-facts line as authoritative. \`output.md\` is not a verdict: say a verdict exists only when the facts explicitly say "verdict observed". Never ABORT during a stated finalization window; the stage timeout remains the outer bound.
 - Do not ABORT slow but correct work, ordinary progress, or an honestly reported negative result.
 - Keep "reason" to one sentence. Keep "guidance" to 1-2 sentences max.`;
@@ -921,6 +1082,8 @@ export class Supervisor {
         targetStage: a.assessment.targetStage,
         reason: a.assessment.reason,
         guidance: a.assessment.guidance,
+        directionKey: a.assessment.directionKey,
+        directionEvidence: a.directionEvidence,
         targetAttemptIndex: a.targetAttemptIndex,
         source: a.source,
         trigger: a.trigger,
@@ -1064,6 +1227,66 @@ export class Supervisor {
       sinceMs,
       commitObserved,
     });
+  }
+
+  private bindDirectionEvidence(
+    stageId: string,
+    status: StageStatus,
+  ): DirectionEvidenceBinding | undefined {
+    const attempt = currentRunningAttempt(status);
+    if (!attempt) return undefined;
+    const generation = createHash('sha256').update(JSON.stringify({
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      liveEvidence: this.stageEvidenceDigests.get(stageId) ?? null,
+      lastProgressMs: this.stageLastProgressMs[stageId] ?? null,
+    })).digest('hex');
+    return {
+      version: 1,
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      generation,
+    };
+  }
+
+  /** Latest worker-owned bytes that can contradict an unbound legacy direction
+   * judgment. Supervisor guidance/status files are deliberately excluded. */
+  private latestDurableDirectionEvidenceMs(stageId: string, status: StageStatus): number | undefined {
+    const attempt = currentRunningAttempt(status);
+    if (!attempt) return undefined;
+    const attemptStartedMs = Date.parse(attempt.startedAt);
+    if (!Number.isFinite(attemptStartedMs)) return undefined;
+    let latest: number | undefined;
+    const consider = (path: string): void => {
+      try {
+        const stat = statSync(path);
+        if (!stat.isFile() || stat.size === 0 || stat.mtimeMs < attemptStartedMs) return;
+        latest = Math.max(latest ?? stat.mtimeMs, stat.mtimeMs);
+      } catch { /* a racing write cannot become abort authority */ }
+    };
+    const ignored = new Set([
+      'status.json', 'input.md', 'guidance.md', 'guidance_consumed.md',
+      'command_activity.json', 'attempt_generation.json',
+    ]);
+    const walk = (dir: string, depth: number): void => {
+      if (depth > 3) return;
+      let entries: import('node:fs').Dirent[];
+      try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return; }
+      for (const entry of entries) {
+        if (ignored.has(entry.name)
+          || /^attempt_deadline_execution_/.test(entry.name)
+          || /^constraint_audit_attempt_/.test(entry.name)) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path, depth + 1);
+        else if (entry.isFile()) consider(path);
+      }
+    };
+    walk(join(this.runDir(), 'stages', stageId), 0);
+    consider(join(this.runDir(), `verdict_${stageId}.json`));
+    consider(join(this.runDir(), `handoff_${stageId}.md`));
+    return latest;
   }
 
   private authoritativeStageStatus(stageId: string, fallback: StageStatus): StageStatus {
@@ -1571,11 +1794,19 @@ export class Supervisor {
     if (userInput) {
       extraContext += `\n\n# User Guidance (just received)\n${userInput}\nIncorporate this into your assessment.`;
     }
+    const assessmentEvidenceCapturedAt = Date.now();
     const assessmentTails = new Map(this.pendingTails);
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
+    const observedDirectionEvidence = new Map<string, DirectionEvidenceBinding>();
+    for (const stageId of runningStages) {
+      const binding = this.bindDirectionEvidence(
+        stageId,
+        this.authoritativeStageStatus(stageId, state.stages[stageId]),
+      );
+      if (binding) observedDirectionEvidence.set(stageId, binding);
+    }
     this.iterationAssessmentCount++;
     const prompt = this.buildAssessmentPrompt(assessmentTails, state, runningStages, assessmentArtifacts, stageFacts) + extraContext;
-    const assessmentStartedAt = Date.now();
     let assessment = await this.assess(prompt, triggeringEvent);
     this.accumulatedOutputBytes = 0;
     this.pendingTails.clear();
@@ -1621,9 +1852,10 @@ export class Supervisor {
     // becomes an action, log entry, dashboard state, or signal.
     const effectiveAssessment = await this.act(
       assessment,
-      assessmentStartedAt,
+      assessmentEvidenceCapturedAt,
       userInput ? 'operator' : 'supervisor',
       observedEvidenceBindings,
+      observedDirectionEvidence,
     );
     this.recordEffectiveAssessment(effectiveAssessment);
 
@@ -1648,6 +1880,10 @@ export class Supervisor {
           ))?.index
         : undefined,
       source: userInput ? 'operator' : 'supervisor',
+      ...(effectiveAssessment.targetStage
+        && observedDirectionEvidence.has(effectiveAssessment.targetStage)
+        ? { directionEvidence: observedDirectionEvidence.get(effectiveAssessment.targetStage) }
+        : {}),
     };
     this.actions.push(action);
 
@@ -1926,11 +2162,17 @@ export class Supervisor {
         reason: `Idle ABORT suppressed for ${stageId}: durable current-execution completion evidence exists; ${factSummary}.`,
       };
     }
-    if (basis.kind === 'idle' && facts.artifactProgressThisTick) {
+    if (basis.kind === 'idle' && (facts.liveProgressThisTick || facts.artifactProgressThisTick)) {
       this.stageLastProgressMs[stageId] = Date.now();
       return {
         written: false,
-        reason: `Idle ABORT suppressed for ${stageId}: durable artifact progress was observed during final verification; ${factSummary}.`,
+        reason: `Idle ABORT suppressed for ${stageId}: durable live or artifact progress was observed during final verification; ${factSummary}.`,
+      };
+    }
+    if (basis.kind === 'repeated_guidance' && (facts.liveProgressThisTick || facts.artifactProgressThisTick)) {
+      return {
+        written: false,
+        reason: `Direction ABORT suppressed for ${stageId}: durable progress changed after the assessed evidence snapshot; the same direction must be judged again from those bytes; ${factSummary}.`,
       };
     }
 
@@ -1946,13 +2188,13 @@ export class Supervisor {
       }
       verifiedBasis = `no verified live/artifact/transition progress for ${Math.round(verifiedIdleMs / 1000)}s (threshold ${Math.round(this.config.stuckThresholdMs / 1000)}s)`;
     } else {
-      if (basis.guideCount < 2) {
+      if (!basis.persistence.verified) {
         return {
           written: false,
-          reason: `Direction ABORT suppressed for ${stageId}: only ${basis.guideCount} prior GUIDE decision(s) observed; ${factSummary}.`,
+          reason: `Direction ABORT suppressed for ${stageId}: ${basis.persistence.reason}; ${factSummary}.`,
         };
       }
-      verifiedBasis = `${basis.guideCount} prior GUIDE decisions observed for the same running stage`;
+      verifiedBasis = `${basis.persistence.guideCount} prior GUIDE decisions observed for the same running stage; ${basis.persistence.reason}`;
     }
 
     const reason = `${source === 'watchdog' ? 'Watchdog' : 'Supervisor'} ABORT verified for ${stageId} attempt ${facts.attemptIndex}: ${verifiedBasis}; ${factSummary}.`;
@@ -1981,6 +2223,7 @@ export class Supervisor {
     progressSinceMs = Date.now(),
     source: 'supervisor' | 'operator' = 'supervisor',
     observedEvidenceBindings?: ReadonlyMap<string, SupervisorEvidenceBinding>,
+    observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
 
@@ -2026,25 +2269,47 @@ export class Supervisor {
               targetAttemptIndex = currentRunningAttempt(targetStatus)?.index;
             }
           } catch { /* writeVerifiedAbort performs the authoritative fail-closed check */ }
-          const guideCount = this.actions.filter((action) => (
-            action.assessment.verdict === 'GUIDE'
-            && action.assessment.targetStage === assessment.targetStage
-            && (action.source ?? 'supervisor') === 'supervisor'
-            && actionAttemptIndex(action, targetStatus) === targetAttemptIndex
-          )).length;
+          const guidance = this.actions.map((action): DirectionGuidanceFact => ({
+            timestamp: action.timestamp,
+            assessment: action.assessment,
+            targetAttemptIndex: actionAttemptIndex(action, targetStatus),
+            source: action.source,
+            directionEvidence: action.directionEvidence,
+          }));
           const lastProgressAt = this.stageLastProgressMs[assessment.targetStage];
           const idleMs = lastProgressAt === undefined ? -1 : Date.now() - lastProgressAt;
+          const latestGuideAt = guidance
+            .filter((action) => (
+              action.assessment.verdict === 'GUIDE'
+              && action.assessment.targetStage === assessment.targetStage
+              && (action.source ?? 'supervisor') === 'supervisor'
+              && action.targetAttemptIndex === targetAttemptIndex
+            ))
+            .reduce((latest, action) => Math.max(latest, Date.parse(action.timestamp) || 0), 0);
+          const latestDurableEvidenceAt = targetStatus
+            ? this.latestDurableDirectionEvidenceMs(assessment.targetStage, targetStatus)
+            : undefined;
+          const persistence = verifyRepeatedWrongDirection({
+            stageId: assessment.targetStage,
+            attemptIndex: targetAttemptIndex,
+            assessment,
+            currentEvidence: observedDirectionEvidence?.get(assessment.targetStage),
+            guidance,
+            durableProgressAfterLatestGuide: latestGuideAt > 0
+              && latestDurableEvidenceAt !== undefined
+              && latestDurableEvidenceAt >= latestGuideAt,
+          });
           const basis: AbortBasis = idleMs >= this.config.stuckThresholdMs
             ? { kind: 'idle', stalledMs: idleMs }
-            : { kind: 'repeated_guidance', guideCount };
+            : { kind: 'repeated_guidance', persistence };
           if (
             source === 'operator'
             && basis.kind === 'repeated_guidance'
-            && guideCount >= 2
+            && persistence.guideCount >= 2
           ) {
             return {
               verdict: 'WAIT', targetStage: assessment.targetStage, guidance: null,
-              reason: `Direction ABORT deferred for ${assessment.targetStage}: this assessment was triggered by newly supplied operator guidance; ${guideCount} prior supervisor GUIDE decision(s) remain available to a later supervisor-triggered assessment after the stage can act on that guidance.`,
+              reason: `Direction ABORT deferred for ${assessment.targetStage}: this assessment was triggered by newly supplied operator guidance; ${persistence.guideCount} prior supervisor GUIDE decision(s) remain available to a later supervisor-triggered assessment after the stage can act on that guidance.`,
             };
           }
           const abort = this.writeVerifiedAbort(
@@ -2145,6 +2410,12 @@ export class Supervisor {
       `Verdict: **${action.assessment.verdict}**${action.assessment.targetStage ? ` → ${action.assessment.targetStage}` : ''}`,
       `Reason: ${action.assessment.reason}`,
     ];
+    if (action.assessment.directionKey) {
+      entry.push(`Direction key: ${action.assessment.directionKey}`);
+    }
+    if (action.directionEvidence) {
+      entry.push(`Direction evidence: attempt ${action.directionEvidence.attemptIndex} · ${action.directionEvidence.generation}`);
+    }
     if (action.assessment.guidance) {
       entry.push(`Guidance: ${action.assessment.guidance}`);
     }

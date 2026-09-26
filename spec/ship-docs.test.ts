@@ -183,12 +183,27 @@ describe('ship skill semantic contract', () => {
       'real served path',
       'inspect the deciding code, query, formula, protocol, instrument setting',
       'Archive failed or invalid results unchanged',
-      'git -C <mainrepo> worktree remove <path>',
+      'flowcrew land --run <run-id>',
+      '--complete-fc-task <entry-id> --fc-task-session <session-id>',
+      'completes the entry only after worktree removal, prune, and non-force branch deletion all succeed',
       'Permanent machine-independent tests belong in the tracked specification suite',
       'operating-system temporary root or the run directory',
     ]) {
       expect(normalized, bar).toContain(bar);
     }
+  });
+
+  it('carries retained closure identity through accepted wrap-up without terminal auto-close', () => {
+    const wrapUp = compact(section(ship, '### 2.7 '));
+    expectInOrder(wrapUp, [
+      'Read and independently verify the result, archive unique output',
+      'flowcrew land --run <run-id>',
+      'Once the result is accepted, independent verification and archival are complete',
+      '--complete-fc-task <entry-id> --fc-task-session <session-id>',
+      'completes the entry only after worktree removal, prune, and non-force branch deletion all succeed',
+    ]);
+    expect(wrapUp).toContain('omit the closure identity and leave the entry open');
+    expect(wrapUp).toContain('not an automatic reaction to terminal run status');
   });
 
   it('resolves every section cross-reference it makes', () => {
@@ -213,7 +228,7 @@ describe('ship skill semantic contract', () => {
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
     // Update both values together when the guidance changes: the digest names the bytes the
     // stamp describes, so a mismatch means one of them was left behind.
-    expect({ revision: stamp, digest }).toEqual({ revision: '14', digest: 'cdb901096eef' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '15', digest: 'b15d83bfd7bd' });
   });
 
   it('contains no private measured case studies', () => {

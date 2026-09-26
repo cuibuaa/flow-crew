@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 export const DAEMON_METADATA_FILENAME = 'daemon.json';
 export const STALE_DAEMON_MESSAGE = 'STALE: dist is newer than the running daemon — its fixes are NOT loaded';
@@ -49,6 +49,7 @@ export interface DeployedDistConsumerOptions {
   procRoot?: string;
   processAlive?: (pid: number) => boolean;
   diskBuildHash?: string;
+  readProcessCwd?: (pid: number) => string | undefined;
 }
 
 /**
@@ -233,8 +234,82 @@ function argumentReferencesDist(argument: string, distDir: string): boolean {
   const normalized = distDir.endsWith(sep) ? distDir : `${distDir}${sep}`;
   return argument === distDir
     || argument.startsWith(normalized)
-    || argument.includes(`file://${normalized}`)
-    || argument.includes(normalized);
+    || argument === `file://${distDir}`
+    || argument.startsWith(`file://${normalized}`);
+}
+
+function executionPathReferencesDist(
+  argument: string,
+  distDir: string,
+  cwd: string | undefined,
+  bareRelativeIsPath: boolean,
+): boolean {
+  if (argumentReferencesDist(argument, distDir)) return true;
+  if (!cwd || argument.startsWith('file:')) return false;
+  const pathLike = bareRelativeIsPath
+    || argument.startsWith('./')
+    || argument.startsWith('../')
+    || argument.startsWith(`.${sep}`)
+    || argument.startsWith(`..${sep}`);
+  return pathLike && argumentReferencesDist(resolve(cwd, argument), distDir);
+}
+
+const MODULE_LOADING_OPTIONS = new Set([
+  '--experimental-loader',
+  '--import',
+  '--loader',
+  '--require',
+  '-r',
+]);
+
+function evaluatedSourceReferencesDist(source: string, distDir: string, cwd: string | undefined): boolean {
+  const moduleSpecifiers = [
+    ...source.matchAll(/\b(?:import|require)\s*\(\s*(["'])(.*?)\1\s*\)/g),
+    ...source.matchAll(/\b(?:import|export)\s+(?:[^"']*?\s+from\s+)?(["'])(.*?)\1/g),
+  ];
+  return moduleSpecifiers.some((match) => executionPathReferencesDist(match[2], distDir, cwd, false));
+}
+
+/** Inspect only argv positions that select executable code. A path carried as
+ * opaque application data (for example --output=<dist>/diagnostic.txt) does
+ * not make the process a consumer of that distribution. */
+function executionReferencesDist(
+  args: readonly string[],
+  distDir: string,
+  cwd: string | undefined,
+): boolean {
+  if (args.length === 0) return false;
+  const executable = basename(args[0]).toLowerCase();
+  const nodeLike = /^(?:node|nodejs)(?:\.exe)?$/.test(executable);
+  if (!nodeLike && executionPathReferencesDist(args[0], distDir, cwd, true)) return true;
+  if (!nodeLike) return false;
+
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--') {
+      return Boolean(args[index + 1]
+        && executionPathReferencesDist(args[index + 1], distDir, cwd, true));
+    }
+    const evaluatedAssignment = /^(?:--eval|--print)=(.*)$/.exec(argument);
+    if (evaluatedAssignment) return evaluatedSourceReferencesDist(evaluatedAssignment[1], distDir, cwd);
+    if (['--eval', '--print', '-e', '-p'].includes(argument)) {
+      return Boolean(args[index + 1] && evaluatedSourceReferencesDist(args[index + 1], distDir, cwd));
+    }
+    const optionAssignment = /^(--(?:experimental-loader|import|loader|require))=(.*)$/.exec(argument);
+    if (optionAssignment) {
+      if (executionPathReferencesDist(optionAssignment[2], distDir, cwd, false)) return true;
+      continue;
+    }
+    if (MODULE_LOADING_OPTIONS.has(argument)) {
+      const modulePath = args[index + 1];
+      if (modulePath && executionPathReferencesDist(modulePath, distDir, cwd, false)) return true;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('-')) continue;
+    return executionPathReferencesDist(argument, distDir, cwd, true);
+  }
+  return false;
 }
 
 /**
@@ -290,7 +365,13 @@ export function findDeployedDistConsumers(
     } catch {
       continue;
     }
-    if (!args.some((argument) => argumentReferencesDist(argument, root))) continue;
+    let cwd: string | undefined;
+    try {
+      cwd = options.readProcessCwd
+        ? options.readProcessCwd(pid)
+        : readlinkSync(join(procRoot, entry, 'cwd'));
+    } catch { /* cwd can disappear or be unreadable while procfs is scanned */ }
+    if (!executionReferencesDist(args, root, cwd)) continue;
     const runId = runIdFromArguments(args);
     const daemon = args.some((argument, index) => argument === 'daemon' && args[index + 1] === 'serve');
     consumers.set(pid, daemon

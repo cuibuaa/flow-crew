@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 14 -->
+<!-- flowcrew-skill-revision: 15 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -281,16 +281,17 @@ flowcrew fc_tasks create --session <session-id> --flowcrew-task-id <id> --entry 
 flowcrew fc_tasks update <entry-id> --session <session-id> --flowcrew-task-id <id> --entry '{}'
 ```
 
-Keep both `<session-id>` and `<entry-id>` with the launch record; wrap-up needs them. The entry must
+Keep both `<session-id>` and `<entry-id>` with the launch record, and retain the exact run id once
+the registered task binds one; wrap-up needs all three identities. The entry must
 record this exact sentence, replacing `<id>` with the registered task id:
 `FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`
 After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
 Record the exact brief digest and the governing baseline's failing identities beside it, so a later
 failure can be attributed without re-deriving them. Creating the entry is prompted by the launch;
-keeping it true is prompted by nothing, which is why an entry naming a cancelled id outlives the run
-it described. Close it when the wrap-up above is finished, not when the run reaches a terminal
-status — the run ending is what starts the work of accepting it. The verified explicit link is the
-normal path; the exact sentence remains required so legacy readers can recover the association.
+keeping it true is carried by the retained identities into the ordinary landing step below. Close
+it when the wrap-up above is finished, not when the run reaches a terminal status — the run ending
+is what starts the work of accepting it. The verified explicit link is the normal path; the exact
+sentence remains required so legacy readers can recover the association.
 
 A launch you deliberately hold back has no launch to prompt the entry. When rehearsal has produced a
 digest you intend to use later — because a prerequisite round must land first, or because data must
@@ -427,32 +428,31 @@ after a check reliably forces an operator error into the open, that failure belo
 ### 2.7 Archive, reclaim, and stop safely
 
 Read and independently verify the result, archive unique output, stop any watcher you started, then
-inspect committed, modified, untracked, and ignored state before removing a disposable worktree/branch:
+ask `land` for its complete read-only inventory before removing a disposable worktree/branch:
 
 ```bash
-git -C <worktree> status --short --untracked-files=all
-git -C <worktree> ls-files --others --ignored --exclude-standard
-git -C <mainrepo> log --oneline <main>..<branch>
-git -C <mainrepo> worktree remove <path>
-git -C <mainrepo> worktree prune
-git -C <mainrepo> branch -d <branch>
+flowcrew land --run <run-id>
 ```
 
-If non-force removal refuses, investigate. Archive failed or invalid results unchanged with an
-`INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
+Review every tracked, untracked, ignored, at-risk, and regenerable item it reports. Archive failed
+or invalid results unchanged with an `INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
+If the audit refuses or non-force removal would refuse, investigate; do not close the ledger.
 
-Once archive verification and the final successful reclaim commands are complete, the immediate
-next step is to close the retained session entry explicitly:
+Once the result is accepted, independent verification and archival are complete, pass the retained
+entry/session/run identity into the same explicit reclaim request:
 
 ```bash
-flowcrew fc_tasks update <entry-id> --session <session-id> --entry '{"status":"completed","description":"<existing description plus a closure note naming the accepted result, independent verification, archived output, reclaimed worktree, and branch disposition>"}'
+flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count> \
+  --complete-fc-task <entry-id> --fc-task-session <session-id>
 ```
 
-This is a human acceptance step, not an automatic reaction to terminal run status. If non-force
-cleanup refuses or any wrap-up item remains, leave the entry open. If this workflow wording is
-missed, the renderer is the mechanical backstop: each later status-line render keeps the terminal
-link visible as `wrap-up-overdue` until a human completes the entry; the CLI also verifies explicit
-links before persisting them.
+This is a human acceptance step, not an automatic reaction to terminal run status. `land` proves
+the exact entry/run/worktree binding before mutation and completes the entry only after worktree
+removal, prune, and non-force branch deletion all succeed. If any cleanup or wrap-up item remains,
+omit the closure identity and leave the entry open. A post-reclaim ledger failure exits nonzero and
+prints a guarded repair command; run it only after checking the reported exact identity. The durable
+`operator_wrap_up_required` event and the renderer's `wrap-up-overdue` row remain mechanical
+backstops, but neither has to be invoked or remembered for this normal path to keep the ledger true.
 
 Do not edit a project while its run is active; scope attribution can restore the edit as an unauthorized
 stage write. Permanent machine-independent tests belong in the tracked specification suite. One-off,

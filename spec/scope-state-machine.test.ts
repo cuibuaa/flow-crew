@@ -149,7 +149,7 @@ describe('eight-cell atomic scope state matrix', () => {
           decision,
           accepted: decision === 'accepted',
         });
-        if (prewriteCase) expect(policyDecision.rejectionReason).toContain('changed before scope approval');
+        if (prewriteCase) expect(policyDecision.rejectionReason).toContain('requested content changed before scope approval');
         writeFileSync(join(projectDir, requestedPath), 'requested raw write\n');
         writeFileSync(join(projectDir, outsidePath), 'outside raw write\n');
         if (gate) {
@@ -292,7 +292,7 @@ describe('scheduler-authoritative full-tree enforcement', () => {
       writeRoles('coder'), created.runId, 'M3 directory prewrite', true,
     );
     expect(decision).toMatchObject({ accepted: false, decision: 'rejected', authorizedPaths: [] });
-    expect(String(decision?.rejectionReason)).toContain(`changed before scope approval: ${prewrittenPath}`);
+    expect(String(decision?.rejectionReason)).toContain(`requested content changed before scope approval: ${prewrittenPath}`);
     const status = readStageStatus(projectDir, created.runId, 'subject');
     const audit = readJson(join(created.runDirPath, status.constraintAudit!.path));
     expect(audit).toMatchObject({

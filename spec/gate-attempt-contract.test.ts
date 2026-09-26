@@ -291,7 +291,7 @@ describe('per-attempt gate metric contract', () => {
     expect(result.final.failureReason).toContain('metric="quality"');
     expect(result.final.failureReason).toContain('threshold=10');
     expect(result.planCalls).toBe(1);
-    expect(result.gateCalls).toBe(1);
+    expect(result.gateCalls).toBe(4);
     expect(result.repairCalls).toBe(0);
   });
 });

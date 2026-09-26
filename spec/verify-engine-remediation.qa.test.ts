@@ -36,6 +36,7 @@ import {
 } from '../src/scheduler.js';
 import {
   createRun,
+  campaignsRoot,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -197,11 +198,23 @@ describe('independent engine-remediation verification', () => {
     const delta = JSON.parse(readFileSync(join(runDirectory, 'validation_delta_qa.json'), 'utf-8')) as {
       pass: boolean;
       delta: Array<{ state: string }>;
+      version: number;
+      attemptIndex: number;
+      executionId: string;
+      immutablePath: string;
     };
-    expect(delta).toMatchObject({ pass: false, delta: [{ state: 'regression' }] });
+    expect(delta).toMatchObject({
+      version: 2,
+      pass: false,
+      attemptIndex: 1,
+      executionId: expect.any(String),
+      immutablePath: expect.any(String),
+      delta: [{ state: 'regression' }],
+    });
+    expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
     expect(readGateVerdict(projectDir, 'qa', final.runId)).toMatchObject({
       pass: false,
-      reason: expect.stringContaining('regressed'),
+      reason: expect.stringContaining('recorded regressions'),
     });
     expect({
       producedByScheduler,
@@ -579,7 +592,7 @@ describe('independent engine-remediation verification', () => {
       pass: false,
     }));
     writeCampaignEntry(projectDir, state);
-    const campaignDir = join(projectDir, '.fc', 'campaigns');
+    const campaignDir = campaignsRoot();
     const files = readdirSync(campaignDir);
     expect(files).toHaveLength(1);
     const entry = JSON.parse(readFileSync(join(campaignDir, files[0]), 'utf-8')) as CampaignEntry;

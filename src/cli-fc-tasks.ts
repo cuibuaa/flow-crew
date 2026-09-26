@@ -8,11 +8,13 @@ import {
   defaultFcTasksRoot,
   publicTaskEntries,
   readTaskLedger,
+  reconcileFcTasks,
   renderFcTasks,
   resolveFcTaskRuns,
   resolveFcTasksSession,
   updateTaskEntry,
   type FcTaskRunResolver,
+  type FcTaskReconciliation,
 } from './fc-tasks.js';
 
 type Writer = { write(chunk: string): unknown };
@@ -55,6 +57,11 @@ const WRITE_VALUE_OPTIONS = new Set([
   '--flowcrew-task-id',
 ]);
 
+const UPDATE_VALUE_OPTIONS = new Set([
+  ...WRITE_VALUE_OPTIONS,
+  '--expected-run-id',
+]);
+
 const MAX_CLI_INPUT_BYTES = 1024 * 1024;
 const stdinWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
@@ -63,12 +70,62 @@ export function fcTasksUsage(): string {
     'Usage:',
     '  flowcrew fc_tasks render [--session <id>] [--session-key <key>] [--payload-arg <json>] [--store-root <dir>] [--engine-root <dir>]',
     '  flowcrew fc_tasks list --json [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
+    '  flowcrew fc_tasks reconcile [--json] [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
     '  flowcrew fc_tasks create --session <id> [--entry <json>] [--flowcrew-task-id <number>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks update <id> --session <id> [--entry <json>] [--flowcrew-task-id <number> | --clear-flowcrew-task-link] [--store-root <dir>] [--engine-root <dir>]',
+    '  flowcrew fc_tasks update <id> --session <id> [--entry <json>] [--flowcrew-task-id <number> | --clear-flowcrew-task-link] [--expected-run-id <id>] [--store-root <dir>] [--engine-root <dir>]',
     '',
     'Render reads a front-end JSON payload from stdin when no explicit selector or --payload-arg is present.',
     'Create and update read the entry JSON from stdin unless --entry is present.',
   ].join('\n');
+}
+
+function reconciliationEngineLabel(projection: FcTaskReconciliation): string {
+  const { engine } = projection;
+  if (engine.evidence === 'never_linked') return 'not-linked';
+  if (engine.evidence === 'stale' || engine.evidence === 'unavailable') {
+    return `${engine.evidence}:#${engine.taskId}`;
+  }
+  return `${engine.evidence}:${engine.status}${engine.runId ? `:${engine.runId}` : ''}`;
+}
+
+function reconciliationAction(projection: FcTaskReconciliation): string {
+  switch (projection.recommendedAction) {
+    case 'none':
+      return 'none';
+    case 'finish_wrap_up_then_complete_ledger':
+      return 'finish human wrap-up, then explicitly complete the ledger entry';
+    case 'inspect_active_work_then_reopen_or_stop':
+      return 'inspect active engine work, then deliberately reopen the ledger or stop the work';
+    case 'link_entry_to_engine_task':
+      return 'attach a verified FlowCrew task link before comparing the accounts';
+    case 'repair_or_refresh_engine_evidence':
+      return 'repair or refresh the engine link evidence before deciding';
+    default: {
+      const _exhaustive: never = projection.recommendedAction;
+      return _exhaustive;
+    }
+  }
+}
+
+function renderReconciliationHuman(
+  session: string,
+  projections: readonly FcTaskReconciliation[],
+): string {
+  const disagreements = projections.filter(({ comparison }) => (
+    comparison === 'wrap_up_required' || comparison === 'ledger_closed_engine_active'
+  )).length;
+  const notComparable = projections.filter(({ comparison }) => comparison === 'not_comparable').length;
+  const aligned = projections.length - disagreements - notComparable;
+  const rows = [
+    `fc_tasks reconcile: session ${session} · ${disagreements} disagreement${disagreements === 1 ? '' : 's'} · ${notComparable} not comparable · ${aligned} aligned`,
+    ...projections.map((projection) => (
+      `${projection.comparison.toUpperCase()} [${projection.entryId}] ledger=${projection.ledgerStatus}`
+      + ` · engine=${reconciliationEngineLabel(projection)}`
+      + ` · authority=engine:execution,ledger:wrap-up`
+      + ` · action=${reconciliationAction(projection)}`
+    )),
+  ];
+  return `${rows.join('\n')}\n`;
 }
 
 function parseArguments(
@@ -332,6 +389,51 @@ export function cmdFcTasks(
     }
   }
 
+  if (subcommand === 'reconcile') {
+    try {
+      const parsed = parseArguments(tokens, COMMON_VALUE_OPTIONS, new Set(['--json', '--help']));
+      if (parsed.flags.has('--help')) {
+        stdout.write(`${fcTasksUsage()}\n`);
+        return 0;
+      }
+      if (parsed.positionals.length > 0) throw new FcTasksRefusal('reconcile takes no positional arguments');
+      const session = resolveSessionForCommand(parsed, dependencies, true);
+      if (!session.ok) return writeRefusal(stderr, 'reconcile', `${session.code}: ${session.detail}`);
+      const ledger = readTaskLedger(storeRoot(parsed, dependencies), session.session, maxEntries(parsed));
+      const entries = publicTaskEntries(ledger);
+      const runLinks = resolveFcTaskRuns(entries, taskRunResolver(parsed, dependencies));
+      const projections = reconcileFcTasks(entries, runLinks);
+      if (parsed.flags.has('--json')) {
+        const disagreements = projections.filter(({ comparison }) => (
+          comparison === 'wrap_up_required' || comparison === 'ledger_closed_engine_active'
+        )).length;
+        const notComparable = projections.filter(({ comparison }) => comparison === 'not_comparable').length;
+        stdout.write(`${JSON.stringify({
+          version: 1,
+          state: ledger.state,
+          session: session.session,
+          counts: {
+            entries: projections.length,
+            disagreements,
+            notComparable,
+            aligned: projections.length - disagreements - notComparable,
+          },
+          entries: projections,
+          issues: ledger.issues,
+        }, null, 2)}\n`);
+      } else {
+        stdout.write(renderReconciliationHuman(session.session, projections));
+      }
+      return ledger.state === 'unavailable'
+        || ledger.issues.length > 0
+        || runLinks.some(({ state }) => state === 'unavailable')
+        ? 1
+        : 0;
+    } catch (error) {
+      return writeRefusal(stderr, 'reconcile', error);
+    }
+  }
+
   if (subcommand === 'create') {
     try {
       const parsed = parseArguments(tokens, WRITE_VALUE_OPTIONS, new Set(['--help']));
@@ -360,7 +462,7 @@ export function cmdFcTasks(
 
   if (subcommand === 'update') {
     try {
-      const parsed = parseArguments(tokens, WRITE_VALUE_OPTIONS, new Set(['--help', '--clear-flowcrew-task-link']));
+      const parsed = parseArguments(tokens, UPDATE_VALUE_OPTIONS, new Set(['--help', '--clear-flowcrew-task-link']));
       if (parsed.flags.has('--help')) {
         stdout.write(`${fcTasksUsage()}\n`);
         return 0;
@@ -377,6 +479,7 @@ export function cmdFcTasks(
         maxEntries: maxEntries(parsed),
         flowcrewTaskId: positiveInteger(parsed.values.get('--flowcrew-task-id'), '--flowcrew-task-id'),
         clearFlowcrewTaskLink: parsed.flags.has('--clear-flowcrew-task-link'),
+        expectedRunId: parsed.values.get('--expected-run-id'),
         taskRunResolver: taskRunResolver(parsed, dependencies),
       });
       stdout.write(`fc_tasks: updated ${sanitizeDiagnostic(`${session.session}/${parsed.positionals[0]}`)}\n`);

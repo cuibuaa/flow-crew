@@ -133,7 +133,7 @@ describe('fc_tasks CLI front-end adapters', () => {
     ], dependencies(capture));
 
     expect(code).toBe(0);
-    expect(capture.output).toBe('fc_tasks: idle · 0 done\n');
+    expect(capture.output).toBe('fc_tasks: engine 0 running · ledger idle, 0 done\n');
   });
 
   it('uses the observed Codex environment selector only when no payload was supplied', () => {
@@ -148,7 +148,7 @@ describe('fc_tasks CLI front-end adapters', () => {
     ], dependencies(capture, '', { CODEX_THREAD_ID: 'environment-thread' }));
 
     expect(code).toBe(0);
-    expect(capture.output).toContain('fc_tasks: idle');
+    expect(capture.output).toContain('ledger idle');
   });
 
   it('keeps renderer failures on stdout and returns zero so a status surface never blanks', () => {
@@ -481,6 +481,53 @@ describe('fc_tasks CLI detail and write paths', () => {
     expect(listed.entries[0]).not.toHaveProperty('flowcrewTaskId');
     expect(JSON.parse(readFileSync(join(root, 'legacy-cli', 'legacy-link.json'), 'utf-8')))
       .not.toHaveProperty('flowcrewTaskId');
+  });
+
+  it('guards an explicit completion update with the exact terminal run id', () => {
+    const engineRoot = join(root, 'engine');
+    const projectDir = join(root, 'target');
+    seed('guarded-update', { ...task('linked', 'in_progress'), flowcrewTaskId: 91 });
+    seedEngineTask(engineRoot, {
+      id: 91,
+      status: 'done',
+      projectDir,
+      run_id: 'terminal-run',
+    });
+    seedEngineRun(engineRoot, 'terminal-run', {
+      runId: 'terminal-run',
+      status: 'complete',
+      projectDir,
+    });
+    const mismatched = new Capture();
+
+    const mismatchedCode = cmdFcTasks([
+      'fc_tasks', 'update', 'linked',
+      '--session', 'guarded-update',
+      '--store-root', root,
+      '--engine-root', engineRoot,
+      '--expected-run-id', 'different-run',
+      '--entry', '{"status":"completed"}',
+    ], dependencies(mismatched));
+
+    expect(mismatchedCode).toBe(1);
+    expect(mismatched.error).toContain('not expected run different-run');
+    expect(JSON.parse(readFileSync(join(root, 'guarded-update', 'linked.json'), 'utf-8')))
+      .toMatchObject({ status: 'in_progress' });
+
+    const exact = new Capture();
+    const exactCode = cmdFcTasks([
+      'fc_tasks', 'update', 'linked',
+      '--session', 'guarded-update',
+      '--store-root', root,
+      '--engine-root', engineRoot,
+      '--expected-run-id', 'terminal-run',
+      '--entry', '{"status":"completed"}',
+    ], dependencies(exact));
+
+    expect(exactCode).toBe(0);
+    expect(exact.output).toContain('updated guarded-update/linked');
+    expect(JSON.parse(readFileSync(join(root, 'guarded-update', 'linked.json'), 'utf-8')))
+      .toMatchObject({ status: 'completed' });
   });
 
   it('refuses an engine task id that the explicit resolver root cannot verify', () => {

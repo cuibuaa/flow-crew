@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { RealityGateExit } from './types.js';
@@ -15,6 +16,8 @@ interface FailedExecution {
 export interface VersionedJsonShapeInspectionEvidence {
   classification: 'unbound-versioned-json-multi-shape-mismatch';
   artifactPath: string;
+  /** Exact preflight bytes. A later producer invalidates the advisory when this changes. */
+  artifactSha256: string;
   discriminator: {
     field: 'artifact';
     value: string;
@@ -78,6 +81,7 @@ export function classifyVersionedJsonShapeFailure(input: {
   args: readonly string[];
   projectDir: string;
   execution: FailedExecution;
+  preflightArtifactSha256?: string;
 }): VersionedJsonAdmission | undefined {
   const { execution } = input;
   if (execution.code !== 1
@@ -90,6 +94,13 @@ export function classifyVersionedJsonShapeFailure(input: {
 
   const inspection = inspectVersionedJsonShapeCheck(input);
   if (!inspection) return undefined;
+  // Preflight may demote a mismatch only for the bytes it actually inspected.
+  // Once an admitted producer replaces those bytes, the command's fresh result
+  // is authoritative and must retain its ordinary hard-check disposition.
+  if (input.preflightArtifactSha256 !== undefined
+      && inspection.evidence.artifactSha256 !== input.preflightArtifactSha256) {
+    return undefined;
+  }
   const matchedDiagnostic = inspection.failureDiagnostics.find((diagnostic) => (
     execution.stderr === `${diagnostic}\n` || execution.stderr === `${diagnostic}\r\n`
   ));
@@ -134,8 +145,10 @@ export function inspectVersionedJsonShapeCheck(input: {
   const resolved = resolveContainedJson(input.projectDir, load.artifactPath);
   if (!resolved) return undefined;
   let artifact: unknown;
+  let artifactBytes: Buffer;
   try {
-    artifact = JSON.parse(readFileSync(resolved, 'utf8')) as unknown;
+    artifactBytes = readFileSync(resolved);
+    artifact = JSON.parse(artifactBytes.toString('utf8')) as unknown;
   } catch {
     return undefined;
   }
@@ -166,6 +179,7 @@ export function inspectVersionedJsonShapeCheck(input: {
   const evidence: VersionedJsonShapeInspectionEvidence = {
     classification: 'unbound-versioned-json-multi-shape-mismatch',
     artifactPath: load.artifactPath,
+    artifactSha256: createHash('sha256').update(artifactBytes).digest('hex'),
     discriminator: { field: 'artifact', value: artifact.artifact },
     incompatiblePaths: incompatible.slice(0, 32),
     independentFailureGuards: guardsWithMismatch.size,

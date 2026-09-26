@@ -1190,12 +1190,17 @@ async function cmdQuick() {
   const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
   const { config, raw } = loadWorkflow(workflowPath);
   if (maxIterations) config.defaults.max_iterations = maxIterations;
+  const budgetDefaults = loadProjectDefaults(projectDir);
   const budgetAssessment = assessResearchIterationBudget(
     parsedBrief.research,
-    config.defaults.max_iterations ?? loadProjectDefaults(projectDir).max_iterations,
+    config.defaults.max_iterations ?? budgetDefaults.max_iterations,
+    {
+      attemptTimeoutMs: budgetDefaults.timeout_ms,
+      technicalRetries: budgetDefaults.stage_technical_retries,
+    },
   );
   if (!budgetAssessment.pass) {
-    console.error(`Launch refused: ${budgetAssessment.reason}. Raise default_max_iterations or lower max_rounds.`);
+    console.error(`Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`);
     process.exitCode = 2;
     return;
   }

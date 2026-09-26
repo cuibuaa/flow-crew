@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readJsonlFile } from './jsonl.js';
 import type { StageStatus, StoreState } from './store.js';
-import { atomicWrite, isSettledStageStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
+import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
   | 'attempt_started'
@@ -26,6 +26,7 @@ export type RunEventType =
   | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
+  | 'operator_wrap_up_required'
   | 'supervisor_reject_requested'
   | 'supervisor_reject_discarded'
   | 'stage_complete'
@@ -107,6 +108,8 @@ export interface RunEvent {
   evidenceGeneration?: string;
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';
   runStatus?: StoreState['status'];
+  /** Stable identity for retrying one cursor transition without duplicate events. */
+  observationId?: string;
 }
 
 export interface AttemptSummaryRefreshState {
@@ -147,6 +150,7 @@ function inferSummaryRefreshReasons(event: RunEvent): string[] {
     case 'iteration_completed':
     case 'run_completed':
     case 'run_status_changed':
+    case 'operator_wrap_up_required':
       reasons.add(event.type);
       break;
     default:
@@ -293,24 +297,56 @@ function buildArtifactEvents(runId: string, event: RunEvent): RunEvent[] {
   return artifactEvents;
 }
 
-function observeRunStatusChange(projectDir: string, runId: string): RunEvent | undefined {
+function observeRunStatusChange(projectDir: string, runId: string): RunEvent[] {
   const directory = runDir(projectDir, runId);
   const cursorPath = join(directory, 'run_event_status.json');
+  let committing = false;
   try {
     const status = (JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StoreState).status;
-    const prior = existsSync(cursorPath)
-      ? (JSON.parse(readFileSync(cursorPath, 'utf-8')) as { status?: StoreState['status'] }).status
+    const cursor = existsSync(cursorPath)
+      ? JSON.parse(readFileSync(cursorPath, 'utf-8')) as {
+        status?: StoreState['status'];
+        observedAt?: string;
+      }
       : undefined;
-    if (prior === status) return undefined;
-    const timestamp = new Date().toISOString();
-    atomicWrite(cursorPath, `${JSON.stringify({ version: 1, status, observedAt: timestamp }, null, 2)}\n`);
-    return {
+    const prior = cursor?.status;
+    if (prior === status) return [];
+    const observationId = `${cursor?.observedAt ?? 'initial'}:${String(prior ?? 'unobserved')}->${String(status)}`;
+    const recorded = readRunEvents(projectDir, runId);
+    const timestamp = recorded.find((event) => event.observationId === observationId)?.timestamp
+      ?? new Date().toISOString();
+    const events: RunEvent[] = [{
       type: 'run_status_changed', runId, timestamp, runStatus: status,
       detail: `run status ${prior === undefined ? 'initialized' : `changed from ${prior}`} to ${status}`,
       source: 'scheduler',
-    };
-  } catch {
-    return undefined;
+      observationId,
+    }];
+    if (isTerminalRunStatus(status) && !isTerminalRunStatus(prior)) {
+      events.push({
+        type: 'operator_wrap_up_required',
+        runId,
+        timestamp,
+        runStatus: status,
+        detail: `run reached terminal status ${status}; any linked open fc_tasks entry requires human wrap-up and explicit completion; terminal state is not acceptance`,
+        level: 'warning',
+        source: 'scheduler',
+        observationId,
+      });
+    }
+    const recordedTypes = new Set(recorded
+      .filter((event) => event.observationId === observationId)
+      .map((event) => event.type));
+    committing = true;
+    for (const event of events) {
+      if (!recordedTypes.has(event.type)) appendRunEvent(projectDir, runId, event);
+    }
+    // The cursor is a commit record for the complete event set. It advances
+    // only after every obligation it represents is durably appended.
+    atomicWrite(cursorPath, `${JSON.stringify({ version: 1, status, observedAt: timestamp }, null, 2)}\n`);
+    return events;
+  } catch (error) {
+    if (committing) throw error;
+    return [];
   }
 }
 
@@ -343,9 +379,8 @@ export function recordStageOutcome(
 
   const events = [stageEvent, ...buildArtifactEvents(runId, stageEvent)];
   for (const event of events) appendRunEvent(projectDir, runId, event);
-  const statusEvent = observeRunStatusChange(projectDir, runId);
-  if (statusEvent) {
-    appendRunEvent(projectDir, runId, statusEvent);
+  const statusEvents = observeRunStatusChange(projectDir, runId);
+  for (const statusEvent of statusEvents) {
     events.push(statusEvent);
   }
   requestAttemptSummaryRefresh(projectDir, runId, events, options);
@@ -360,9 +395,8 @@ export function recordRunEvent(
   appendRunEvent(projectDir, runId, event);
   const events = [event];
   if (event.type !== 'run_status_changed') {
-    const statusEvent = observeRunStatusChange(projectDir, runId);
-    if (statusEvent) {
-      appendRunEvent(projectDir, runId, statusEvent);
+    const statusEvents = observeRunStatusChange(projectDir, runId);
+    for (const statusEvent of statusEvents) {
       events.push(statusEvent);
     }
   }

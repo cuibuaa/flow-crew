@@ -78,7 +78,7 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
         i++;
         const file = join(projectDir, 'docs', 'research_round_result.json');
         mkdirSync(join(file, '..'), { recursive: true });
-        writeFileSync(file, JSON.stringify({ label, result }));
+        writeFileSync(file, JSON.stringify({ label, result, evidence: { independentMeasurement: i } }));
         return ok(`measured ${label}=${result}`);
       }
       return ok(`noop ${opts.stageId}`);

@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { routeLogsToFile } from './logging.js';
+import { assessResearchShipTarget } from './research-policy.js';
 import { extractBriefPathMentions, inspectBriefOutputs } from './ship-inputs.js';
 import { resolveRunStatus, RUN_STATUS, type RunStatus } from './store.js';
 
@@ -301,6 +302,14 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   const ts = fm.terminalStates;
 
   const hasFail = () => findings.some((f) => f.level === 'fail');
+  const mayDemonstrateUnreachableTarget = preflight.findings.some((finding) => (
+    finding.code === 'research_ship_target_unreachable'
+  ))
+    && !preflight.findings.some((finding) => (
+      finding.level === 'fail' && finding.code !== 'research_ship_target_unreachable'
+    ))
+    && !preflight.findings.some((finding) => finding.code === 'brief_criteria_missing')
+    && outputInventory.blocking.length === 0;
 
   // ---------- simulated run ----------
   let simulated = false;
@@ -311,7 +320,10 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   let noCandidateRunDir = '';
   let retainedArtifacts: IsolatedRehearsalResult['retainedArtifacts'];
   let retainedOutcomeArtifacts: IsolatedRehearsalResult['retainedOutcomeArtifacts'];
-  if (!staticOnly && rc && !hasFail()) {
+  // A provably unreachable target is itself a rehearsal result. Keep the
+  // isolated ceiling-path evidence available when that is the only blocker,
+  // while retaining the fail finding and non-zero final exit.
+  if (!staticOnly && rc && (!hasFail() || mayDemonstrateUnreachableTarget)) {
     simulated = true;
     tempFcHome = mkdtempSync(join(tmpdir(), 'fc-rehearse-home-'));
     tempProject = mkdtempSync(join(tmpdir(), 'fc-rehearse-proj-'));
@@ -330,80 +342,11 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const sign = hib ? 1 : -1;
       const base = rc.baseline;
       const beat = rc.stop?.beat;
-      const schemaProperties = rc.resultSchema && typeof rc.resultSchema === 'object'
-        && rc.resultSchema.properties && typeof rc.resultSchema.properties === 'object'
-        ? rc.resultSchema.properties as Record<string, unknown>
-        : {};
-      const resultProperty = schemaProperties.result;
-      const numericResultSchema = resultProperty && typeof resultProperty === 'object'
-        ? resultProperty as Record<string, unknown>
-        : {};
-      const requiredFields = rc.resultSchema && typeof rc.resultSchema === 'object'
-        && Array.isArray(rc.resultSchema.required)
-        ? rc.resultSchema.required.filter((field): field is string => typeof field === 'string')
-        : [];
-      const resultStdRequired = requiredFields.includes('result_std');
-      const resultStdProperty = schemaProperties.result_std;
-      const resultStdSchema = resultStdProperty && typeof resultStdProperty === 'object'
-        ? resultStdProperty as Record<string, unknown>
-        : {};
-      const resultStdType = resultStdSchema.type;
-      const resultStdAllowsNumber = resultStdType === undefined
-        || resultStdType === 'number'
-        || resultStdType === 'integer'
-        || (Array.isArray(resultStdType) && (
-          resultStdType.includes('number') || resultStdType.includes('integer')
-        ));
       const fieldFloors = rc.integrity?.fieldFloors ?? {};
-      const stdFloor = Math.max(
-        0,
-        typeof resultStdSchema.minimum === 'number' ? resultStdSchema.minimum : 0,
-        fieldFloors.result_std ?? 0,
-      );
-      const stdCeiling = typeof resultStdSchema.maximum === 'number'
-        ? resultStdSchema.maximum
-        : Infinity;
-      const integerStd = resultStdType === 'integer'
-        || (Array.isArray(resultStdType) && resultStdType.includes('integer') && !resultStdType.includes('number'));
-      const enumStdCandidates = Array.isArray(resultStdSchema.enum)
-        ? resultStdSchema.enum.filter((value): value is number => (
-          typeof value === 'number' && Number.isFinite(value) && value >= stdFloor && value <= stdCeiling
-        )).sort((left, right) => left - right)
-        : undefined;
-      const minimumStdCandidate = integerStd ? Math.ceil(stdFloor) : stdFloor;
-      const resultStd = !resultStdRequired
-        ? undefined
-        : !resultStdAllowsNumber
-          ? undefined
-          : enumStdCandidates
-            ? enumStdCandidates[0]
-            : minimumStdCandidate <= stdCeiling
-              ? minimumStdCandidate
-              : undefined;
-      const seMultiple = rc.stop?.improvementSEMultiple ?? 1;
-      const margin = Math.max(
-        rc.stop?.minImprovement ?? 0,
-        resultStd === undefined ? 0 : Math.abs(resultStd) * seMultiple,
-      );
-      const epsilon = Number.EPSILON * Math.max(1, Math.abs(base), Math.abs(beat ?? base)) * 8;
-      const crossing = beat === undefined
-        ? undefined
-        : hib
-          ? Math.max(beat, base + margin + epsilon)
-          : Math.min(beat, base - margin - epsilon);
-      const minimum = typeof numericResultSchema.minimum === 'number' ? numericResultSchema.minimum : -Infinity;
-      const maximum = typeof numericResultSchema.maximum === 'number' ? numericResultSchema.maximum : Infinity;
-      const outlierFactor = rc.integrity?.outlierFactor ?? 5;
-      const outlierSafe = crossing === undefined || Math.abs(base) <= 1e-9
-        || (hib ? crossing <= Math.abs(base) * outlierFactor : crossing >= -(Math.abs(base) * outlierFactor));
-      const maxStdRatio = rc.integrity?.maxStdRatio ?? 0.30;
-      const varianceSafe = crossing === undefined || resultStd === undefined || Math.abs(crossing) <= 1e-6
-        || Math.abs(resultStd) / Math.abs(crossing) <= maxStdRatio;
-      const rejectStd = (rc.integrity?.rejectIfPositive ?? []).includes('result_std')
-        && (resultStd ?? 0) > 0;
-      const uncertaintySafe = !resultStdRequired || (resultStd !== undefined && varianceSafe && !rejectStd);
-      const shipProbe = crossing !== undefined && crossing >= minimum && crossing <= maximum && outlierSafe && uncertaintySafe
-        ? crossing
+      const targetAssessment = assessResearchShipTarget(rc);
+      const resultStd = targetAssessment.resultStdCandidate;
+      const shipProbe = targetAssessment.status === 'reachable'
+        ? targetAssessment.probeResult
         : undefined;
       // Trajectory sized FROM the brief's own stop rules and ceiling floor so a
       // policy-owned ceiling is actually reachable: one mild keeper strictly
@@ -671,8 +614,12 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
           noCandidateScript.rehearsal_gate = script.rehearsal_gate;
         }
         noCandidateTurns.forEach((round, index) => {
-          noCandidateScript[`probe_${index + 1}`] = round.noCandidate
+          noCandidateScript[`probe_${index + 1}`] = 'result' in round
             ? {
+                projectFiles: { [resultRel]: roundPayload(round.label, round.result) },
+                output: `rehearsal measured ${round.label} = ${round.result}`,
+              }
+            : {
                 projectFiles: {
                   [`${resultRel}.no_candidate.json`]: JSON.stringify({
                     label: round.label,
@@ -681,10 +628,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
                   }),
                 },
                 output: 'rehearsal wrote the canonical no-candidate sidecar',
-              }
-            : {
-                projectFiles: { [resultRel]: roundPayload(round.label, round.result) },
-                output: `rehearsal measured ${round.label} = ${round.result}`,
               };
         });
         const noCandidateWorkflow = scheduler.loadWorkflow(

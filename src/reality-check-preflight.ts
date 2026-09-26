@@ -1174,7 +1174,28 @@ export function demoteRealityCheckAdvisories(
   for (const checkIndex of indexes) {
     const check = record(parsed.checks[checkIndex - 1]);
     if (!check || typeof check.name !== 'string' || typeof check.type !== 'string') continue;
-    document.setIn(['checks', checkIndex - 1, 'advisory'], true);
+    const checkFindings = findings.filter((item) => item.tier === 'advisory' && item.checkIndex === checkIndex);
+    const versionedShape = checkFindings.find((item) => item.code === 'versioned_json_shape_mismatch');
+    let reboundVersionedShape = false;
+    if (versionedShape?.evidence) {
+      try {
+        const evidence = JSON.parse(versionedShape.evidence) as { artifactSha256?: unknown };
+        if (typeof evidence.artifactSha256 === 'string' && /^[a-f0-9]{64}$/.test(evidence.artifactSha256)) {
+          document.setIn(
+            ['checks', checkIndex - 1, 'params', '__flowcrew_preflight_artifact_sha256'],
+            evidence.artifactSha256,
+          );
+          reboundVersionedShape = true;
+        }
+      } catch { /* malformed evidence cannot weaken a hard check */ }
+    }
+    // A versioned-shape finding is advisory only for the exact bytes seen at
+    // preflight. The runtime handler rechecks that binding, so do not make the
+    // declaration permanently advisory. Other advisory classes retain their
+    // established declaration-level demotion.
+    if (!reboundVersionedShape || checkFindings.some((item) => item.code !== 'versioned_json_shape_mismatch')) {
+      document.setIn(['checks', checkIndex - 1, 'advisory'], true);
+    }
     demotedCheckIndexes.push(checkIndex);
   }
   if (demotedCheckIndexes.length === 0) {

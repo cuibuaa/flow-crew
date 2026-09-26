@@ -220,10 +220,7 @@ describe('terminal final contract workflow behavior', () => {
     expect(planCalls).toBe(2);
     expect(calls.filter((stageId) => stageId !== '_summary')).toEqual(['plan', phaseGate, 'plan', finalGate]);
 
-    const campaignRows = readFileSync(join(projectDir, '.fc', 'campaigns', 'btc-training.jsonl'), 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
+    const campaignRows = readCampaignEntries(projectDir, 'btc-training');
     expect(campaignRows.some((row) => row.phase === 'phase3' && row.status === 'running')).toBe(true);
     expect(campaignRows.at(-1)).toMatchObject({
       pass: true,

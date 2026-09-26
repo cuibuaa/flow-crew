@@ -10,6 +10,12 @@ const AUXILIARY_NEGATED_REQUIREMENT = /\b(?:do\s+not|does\s+not|don't|must\s+not
 // filter: “cannot”, “without”, or “don't” often modifies a different clause.
 const PATH_MENTION_AUXILIARY_NEGATION = /\b(?:do not|does not|must not|should not|shall not|never)\b/i;
 
+const REQUIREMENT_CONTRAST_BOUNDARY = /(?:[.!?;；]+|\b(?:but|however|whereas)\b)/gi;
+const NEGATED_POSITIVE_REQUIREMENT_ACTION = /\b(?:(?:do|does|did|must|shall|should|may|can|could|will|need)\s+not\s+(?:be\s+)?(?:include[ds]?|contain(?:s|ed)?|carry|carries|carried|report(?:s|ed)?|record(?:s|ed)?|emit(?:s|ted)?|output(?:s|ted)?|return(?:s|ed)?|provide[ds]?|write[sn]?|written|show[sn]?|state[ds]?|present(?:s|ed)?)|never\s+(?:include|contain|carry|report|record|emit|output|return|provide|write|show|state|present)|without(?:\s+(?:including|containing|carrying|reporting|recording|emitting|outputting|returning|providing|writing|showing|stating|presenting))?)\b/i;
+const NEGATED_OMISSION_ACTION = /\b(?:do|does|did|must|shall|should|may|can|could|will|need)\s+not\s+(?:omit|exclude|forbid|prohibit|suppress|remove)\b/i;
+const OMISSION_ACTION = /\b(?:omit(?:s|ted)?|exclude[ds]?|forbid(?:s|den)?|prohibit(?:s|ed)?|suppress(?:es|ed)?|remove[ds]?)\b/i;
+const NEGATED_REQUIREMENT_AFTER_MENTION = /^(?:[\s,()[\]`'"*_A-Za-z0-9-]{0,120})\b(?:(?:must|shall|should|may|can|will)\s+not\s+be\s+(?:included|contained|carried|reported|recorded|emitted|output|returned|provided|written|shown|stated|presented)|(?:must|shall|should|may|will)\s+be\s+(?:omitted|excluded|forbidden|prohibited|suppressed|removed)|(?:is|are)\s+(?:not\s+required|optional|forbidden|prohibited|excluded))\b/i;
+
 /**
  * A narrow subject-position prohibition. `nothing` alone is not enough: it
  * must govern a location/path phrase, a modal, and a mutation/publication
@@ -24,6 +30,26 @@ export function isAuxiliaryNegatedRequirementLine(line: string): boolean {
 
 export function isNegatedRequirementLine(line: string): boolean {
   return isAuxiliaryNegatedRequirementLine(line) || SUBJECT_PATH_MUTATION_PROHIBITION.test(line);
+}
+
+/**
+ * Decide the polarity of one requirement token rather than inheriting the
+ * polarity of an unrelated sibling clause. For example, “report X, and the
+ * method must not be adjusted” requires X; “do not report X” does not.
+ */
+export function isNegatedRequirementMention(line: string, start: number, end: number): boolean {
+  let boundaryEnd = 0;
+  REQUIREMENT_CONTRAST_BOUNDARY.lastIndex = 0;
+  for (const boundary of line.slice(0, start).matchAll(REQUIREMENT_CONTRAST_BOUNDARY)) {
+    boundaryEnd = (boundary.index ?? 0) + boundary[0].length;
+  }
+  const prefix = line.slice(boundaryEnd, start);
+  const suffix = line.slice(end);
+  if (NEGATED_OMISSION_ACTION.test(prefix)) return false;
+  if (NEGATED_POSITIVE_REQUIREMENT_ACTION.test(prefix)) return true;
+  if (OMISSION_ACTION.test(prefix)) return true;
+  if (/\b(?:no|without)\s+(?:the\s+)?$/i.test(prefix)) return true;
+  return NEGATED_REQUIREMENT_AFTER_MENTION.test(suffix);
 }
 
 /** True only when this exact path token is governed by the subject-position prohibition. */

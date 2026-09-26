@@ -486,8 +486,8 @@ describe('gate retry loop entry', () => {
 
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(2);
-    expect(result.repairCalls).toBe(1);
-    expect(result.final.stages[REPAIR_ID]?.status).toBe('complete');
+    expect(result.repairCalls).toBe(0);
+    expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
     expect(JSON.parse(readFileSync(join(
       result.runDirPath,
       'gate_reevaluation',

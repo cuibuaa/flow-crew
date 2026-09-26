@@ -134,6 +134,7 @@ const ACTIONABLE_EVENT_TYPES = new Set([
   'supervisor_reject',
   'plan_dispatch_retry',
   'run_status_changed',
+  'operator_wrap_up_required',
   'approval_parked',
   'approval_resolved',
 ]);

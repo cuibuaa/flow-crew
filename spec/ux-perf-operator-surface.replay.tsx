@@ -496,12 +496,13 @@ describe('events, help, watch, and preflight', () => {
       ...dependencies,
       stdout: streamedOut.stream,
       stderr: streamedErr.stream,
-    })).toBe(0);
-    expect(runner).toHaveBeenCalledTimes(3);
-    expect(streamedErr.text().indexOf('shared by live FlowCrew run(s)')).toBeLessThan(streamedErr.text().indexOf('Validation baseline: START build'));
-    expect(streamedErr.text()).toContain('build streamed output');
-    expect(streamedErr.text()).toContain('Validation baseline: RUNNING build — 10s elapsed');
-    expect(streamedErr.text()).toContain('Validation baseline: FINISH lint — exit 0');
+    })).toBe(1);
+    expect(runner).not.toHaveBeenCalled();
+    expect(streamedErr.text()).toContain('shared by live FlowCrew run(s)');
+    expect(streamedErr.text()).toContain('Preflight will not launch validation commands while those runs are live');
+    expect(streamedErr.text()).toContain('No project command was launched');
+    expect(streamedErr.text()).toContain('pass --no-baseline');
+    expect(streamedErr.text()).not.toContain('Validation baseline: START');
   });
 
   it('unchanged-base seam: the production validation runner streams child output', async () => {

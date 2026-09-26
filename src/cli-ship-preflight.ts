@@ -20,8 +20,10 @@ import {
 } from './campaigns.js';
 import {
   computeBuildFingerprint,
+  findDeployedDistConsumers,
   findUnixSocketOwnerPid,
   readDaemonIdentity,
+  type DeployedDistConsumer,
 } from './daemon-identity.js';
 import {
   defaultSocketPath,
@@ -94,6 +96,7 @@ export interface ShipPreflightDependencies {
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
   inspectLiveRun?: (runId: string, runPath: string) => boolean;
+  findDistConsumers?: (distDir: string) => DeployedDistConsumer[];
 }
 
 interface ResolvedDependencies {
@@ -116,6 +119,7 @@ interface ResolvedDependencies {
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
   inspectLiveRun: (runId: string, runPath: string) => boolean;
+  findDistConsumers: (distDir: string) => DeployedDistConsumer[];
 }
 
 export interface PreviousRunEvidence {
@@ -185,6 +189,7 @@ export interface ShipPreflightReport {
     sourceToDist: SourceDistFreshnessReport;
     caveat: string;
   };
+  liveDistConsumers: DeployedDistConsumer[];
   briefInputs: {
     state: 'checked' | 'not_requested';
     briefPath?: string;
@@ -292,6 +297,10 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     runValidationCommand: overrides.runValidationCommand,
     inspectLiveRun: overrides.inspectLiveRun
       ?? ((runId, runPath) => inspectRunScheduler(runId, runPath).kind === 'live'),
+    findDistConsumers: overrides.findDistConsumers
+      ?? ((distDir) => findDeployedDistConsumers(distDir, {
+        fcHome: dirname((overrides.runsRoot ?? runsRoot)()),
+      })),
   };
 }
 
@@ -822,6 +831,11 @@ export async function collectShipPreflight(
   const previousRun = scanPreviousRun(canonicalProject.path, deps);
   const campaign = campaignHygiene(canonicalProject.path, parsed.campaign, deps);
   const distDir = join(deps.packageRoot, 'dist');
+  const liveDistConsumers = deps.findDistConsumers(distDir)
+    .filter((consumer) => consumer.pid !== process.pid)
+    .filter((consumer) => consumer.kind !== 'run'
+      || (typeof consumer.runId === 'string'
+        && deps.inspectLiveRun(consumer.runId, join(deps.runsRoot(), consumer.runId))));
   const [daemonToDist] = await Promise.all([deps.probeDaemon(distDir)]);
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
   const briefInputs = inspectBriefInputs(canonicalProject.path, parsed.brief, deps);
@@ -842,8 +856,31 @@ export async function collectShipPreflight(
       `WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. `
       + (parsed.noBaseline
         ? '--no-baseline is set, so preflight will not launch project commands.\n'
-        : 'The validation commands may change files those runs can observe.\n'),
+        : 'Preflight will not launch validation commands while those runs are live.\n'),
     );
+    if (!parsed.noBaseline) {
+      throw new Error(
+        `Validation baseline refused because verified live run(s) ${previousRun.liveMatchingRunIds!.join(', ')} `
+        + `share ${canonicalProject.path}. No project command was launched. Wait for the target to become idle, `
+        + 'use a different project directory, or pass --no-baseline to collect facts without executing build, test, or lint.',
+      );
+    }
+  }
+  if (liveDistConsumers.length > 0) {
+    const labels = liveDistConsumers.map(({ label }) => label).join(', ');
+    deps.stderr.write(
+      `WARNING: live process(es) ${labels} execute from this engine checkout's dist. `
+      + (parsed.noBaseline
+        ? '--no-baseline is set, so preflight will not launch project commands.\n'
+        : 'Preflight will not launch validation commands that could rebuild that dist while those consumers are live.\n'),
+    );
+    if (!parsed.noBaseline) {
+      throw new Error(
+        `Validation baseline refused because live process(es) ${labels} execute from ${distDir}. `
+        + 'No project command was launched. Wait for those consumers to stop, use an engine checkout they do not consume, '
+        + 'or pass --no-baseline to collect facts without executing build, test, or lint.',
+      );
+    }
   }
   const observer = validationProgressObserver(deps.stderr);
   if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED by --no-baseline; no project command was launched.\n');
@@ -867,6 +904,7 @@ export async function collectShipPreflight(
       previousRun,
       campaign,
       daemonFreshness: { daemonToDist, sourceToDist, caveat: DAEMON_CAVEAT },
+      liveDistConsumers,
       briefInputs,
       outputInventory,
       briefCriteria,
@@ -926,6 +964,9 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   if (source.reason) writer.write(` — ${source.reason}`);
   writer.write('\n');
   writer.write(`Freshness caveat: ${report.daemonFreshness.caveat}\n`);
+  if (report.liveDistConsumers.length > 0) {
+    writer.write(`Live engine-dist consumers: ${report.liveDistConsumers.map(({ label }) => label).join(', ')}\n`);
+  }
 
   if (report.briefInputs.state === 'not_requested') {
     writer.write('Brief inputs: not checked (pass --brief <path>)\n');

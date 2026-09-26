@@ -388,6 +388,30 @@ export interface DependencyInstallObservation {
   reason?: string;
 }
 
+export interface DeclaredInputSnapshotSummary {
+  location: 'source' | 'target';
+  path: string;
+  lexicalPath: string;
+  state: 'captured' | 'unavailable';
+  resolvedPath?: string;
+  digest?: string;
+  entryCount?: number;
+  reason?: string;
+}
+
+export interface DeclaredInputStabilityCheck {
+  phase: 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
+  state: 'stable' | 'changed' | 'unverified';
+  before: DeclaredInputSnapshotSummary[];
+  after?: DeclaredInputSnapshotSummary[];
+  changedInputs: Array<{
+    path: string;
+    before: DeclaredInputSnapshotSummary;
+    after: DeclaredInputSnapshotSummary;
+  }>;
+  reason?: string;
+}
+
 export interface ShipSetupBlocker {
   phase: 'source' | 'worktree' | 'target' | 'dependency' | 'validation' | 'record';
   reason: string;
@@ -418,6 +442,7 @@ interface ShipSetupFacts {
   targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
   dependencyInstall?: DependencyInstallObservation;
+  declaredInputStability: DeclaredInputStabilityCheck[];
   validationBaseline?: ProjectValidationBaseline;
   blockers: ShipSetupBlocker[];
 }
@@ -821,10 +846,199 @@ function setupFacts(
     worktreeReused: false,
     links: [],
     copies: [],
+    declaredInputStability: [],
     sourceVerification,
     sourceOutputInventory,
     proseInputWarnings,
   };
+}
+
+interface InputTreeRecord {
+  path: string;
+  kind: 'directory' | 'file' | 'symlink' | 'cycle' | 'other';
+  value?: string;
+}
+
+interface DeclaredInputSnapshotRoot {
+  location: DeclaredInputSnapshotSummary['location'];
+  verification: BriefInputVerification;
+  rootDir: string;
+}
+
+function fingerprintDeclaredInputTree(
+  rootPath: string,
+  fs: ShipSetupFileSystem,
+): { digest: string; entryCount: number } {
+  const records: InputTreeRecord[] = [];
+  const activeDirectories = new Set<string>();
+  const visit = (entryPath: string, displayPath: string): void => {
+    const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
+    const symbolicLink = lexicalStat.isSymbolicLink?.() === true;
+    if (symbolicLink) {
+      records.push({
+        path: displayPath,
+        kind: 'symlink',
+        value: fs.readlink ? fs.readlink(entryPath) : '(target unavailable)',
+      });
+    }
+    const followedStat = symbolicLink ? fs.stat(entryPath) : lexicalStat;
+    if (followedStat.isDirectory()) {
+      const canonicalDirectory = fs.realpath(entryPath);
+      records.push({ path: displayPath, kind: 'directory' });
+      if (activeDirectories.has(canonicalDirectory)) {
+        records.push({ path: displayPath, kind: 'cycle', value: canonicalDirectory });
+        return;
+      }
+      activeDirectories.add(canonicalDirectory);
+      try {
+        for (const name of [...fs.readDirectory(entryPath)].sort()) {
+          visit(join(entryPath, name), displayPath === '.' ? name : join(displayPath, name));
+        }
+      } finally {
+        activeDirectories.delete(canonicalDirectory);
+      }
+      return;
+    }
+    if (followedStat.isFile ? followedStat.isFile() : !followedStat.isDirectory()) {
+      const contentDigest = createHash('sha256').update(fs.readBytes(entryPath)).digest('hex');
+      records.push({ path: displayPath, kind: 'file', value: contentDigest });
+      return;
+    }
+    records.push({ path: displayPath, kind: 'other' });
+  };
+  visit(rootPath, '.');
+  return {
+    digest: createHash('sha256').update(JSON.stringify(records)).digest('hex'),
+    entryCount: records.length,
+  };
+}
+
+function captureDeclaredInputSnapshot(
+  roots: DeclaredInputSnapshotRoot[],
+  fs: ShipSetupFileSystem,
+): DeclaredInputSnapshotSummary[] {
+  const fingerprints = new Map<string, { digest: string; entryCount: number }>();
+  return roots.flatMap((root) => root.verification.inputs
+    .filter((input) => root.location !== 'source' || input.sourceExists !== false)
+    .map((input): DeclaredInputSnapshotSummary => {
+      const lexicalPath = resolve(root.rootDir, input.path);
+      try {
+        const resolvedPath = fs.realpath(lexicalPath);
+        let fingerprint = fingerprints.get(resolvedPath);
+        if (!fingerprint) {
+          fingerprint = fingerprintDeclaredInputTree(resolvedPath, fs);
+          fingerprints.set(resolvedPath, fingerprint);
+        }
+        return {
+          location: root.location,
+          path: input.path,
+          lexicalPath,
+          state: 'captured',
+          resolvedPath,
+          ...fingerprint,
+        };
+      } catch (error) {
+        return {
+          location: root.location,
+          path: input.path,
+          lexicalPath,
+          state: 'unavailable',
+          reason: errorMessage(error),
+        };
+      }
+    }));
+}
+
+function compareDeclaredInputSnapshots(
+  phase: DeclaredInputStabilityCheck['phase'],
+  before: DeclaredInputSnapshotSummary[],
+  after: DeclaredInputSnapshotSummary[],
+): DeclaredInputStabilityCheck {
+  const key = (snapshot: DeclaredInputSnapshotSummary): string => `${snapshot.location}\0${snapshot.path}`;
+  const afterByPath = new Map(after.map((snapshot) => [key(snapshot), snapshot]));
+  const changedInputs: DeclaredInputStabilityCheck['changedInputs'] = [];
+  for (const previous of before) {
+    const current = afterByPath.get(key(previous)) ?? {
+      location: previous.location,
+      path: previous.path,
+      lexicalPath: previous.lexicalPath,
+      state: 'unavailable' as const,
+      reason: 'declared input disappeared from the snapshot set',
+    };
+    if (previous.state !== current.state
+      || previous.resolvedPath !== current.resolvedPath
+      || previous.digest !== current.digest
+      || previous.entryCount !== current.entryCount) {
+      changedInputs.push({ path: previous.path, before: previous, after: current });
+    }
+  }
+  return {
+    phase,
+    state: changedInputs.length > 0 ? 'changed' : 'stable',
+    before,
+    after,
+    changedInputs,
+  };
+}
+
+function initialDeclaredInputSnapshotCheck(
+  phase: DeclaredInputStabilityCheck['phase'],
+  before: DeclaredInputSnapshotSummary[],
+): DeclaredInputStabilityCheck | undefined {
+  const unavailable = before.filter((snapshot) => snapshot.state === 'unavailable');
+  if (unavailable.length === 0) return undefined;
+  return {
+    phase,
+    state: 'unverified',
+    before,
+    changedInputs: [],
+    reason: unavailable
+      .map((snapshot) => `${snapshot.location}:${snapshot.path}: ${snapshot.reason ?? 'snapshot unavailable'}`)
+      .join('; '),
+  };
+}
+
+function declaredInputStabilityBlocker(
+  check: DeclaredInputStabilityCheck,
+): ShipSetupBlockerInput {
+  const phase = check.phase.replaceAll('_', ' ');
+  if (check.state === 'unverified') {
+    return {
+      phase: 'validation',
+      reason: `Cannot prove declared read-only inputs are stable before ${phase}: ${check.reason ?? 'snapshot unavailable'}. No test collection or validation baseline command was launched.`,
+      repair: 'Make every declared input tree readable and stable, then rerun ship-setup.',
+    };
+  }
+  const paths = [...new Set(check.changedInputs.map((input) => `${input.before.location}:${input.path}`))];
+  return {
+    phase: 'validation',
+    ...(paths.length > 0 ? { input: paths.join(', ') } : {}),
+    reason: `Declared read-only input changed during ${phase}: ${paths.join(', ') || '(unknown input)'}. The target is not ready.`,
+    repair: 'Restore the named input from its authoritative source and make collection/validation write only declared generated or output paths, then rerun ship-setup.',
+  };
+}
+
+type StableOperation<T> = {
+  outcome: { ok: true; value: T } | { ok: false; error: unknown };
+  after: DeclaredInputSnapshotSummary[];
+  check: DeclaredInputStabilityCheck;
+};
+
+async function observeDeclaredInputStability<T>(
+  phase: DeclaredInputStabilityCheck['phase'],
+  before: DeclaredInputSnapshotSummary[],
+  roots: DeclaredInputSnapshotRoot[],
+  fs: ShipSetupFileSystem,
+  operation: () => Promise<T>,
+): Promise<StableOperation<T>> {
+  let outcome: StableOperation<T>['outcome'];
+  try {
+    outcome = { ok: true, value: await operation() };
+  } catch (error) {
+    outcome = { ok: false, error };
+  }
+  const after = captureDeclaredInputSnapshot(roots, fs);
+  return { outcome, after, check: compareDeclaredInputSnapshots(phase, before, after) };
 }
 
 function worktreeFailureReason(response: GitWorktreeResponse): string {
@@ -964,7 +1178,7 @@ async function rollbackOwnedFailedWorktree(
   try {
     const inventory = await runner({
       command: 'git',
-      args: ['worktree', 'list', '--porcelain', '-z'],
+      args: ['worktree', 'list', '--porcelain'],
       cwd: request.projectDir,
     });
     if (inventory.exitCode === 0 && !inventory.error) {
@@ -1030,7 +1244,7 @@ async function verifyReusableWorktree(
   try {
     inventory = await runner({
       command: 'git',
-      args: ['worktree', 'list', '--porcelain', '-z'],
+      args: ['worktree', 'list', '--porcelain'],
       cwd: request.projectDir,
     });
   } catch (error) {
@@ -2154,13 +2368,46 @@ export async function runShipSetup(
     })));
   }
 
-  const populationComparison = await compareTestPopulations(
-    projectDir,
-    targetDir,
+  const sourceAndTargetInputRoots: DeclaredInputSnapshotRoot[] = [
+    { location: 'source', verification: sourceVerification, rootDir: projectDir },
+    { location: 'target', verification: targetVerification, rootDir: targetDir },
+  ];
+  const targetInputRoots: DeclaredInputSnapshotRoot[] = [
+    { location: 'target', verification: targetVerification, rootDir: targetDir },
+  ];
+  let stableInputSnapshot = captureDeclaredInputSnapshot(sourceAndTargetInputRoots, deps.fs);
+  const initialSnapshotCheck = initialDeclaredInputSnapshotCheck('test_collection', stableInputSnapshot);
+  if (initialSnapshotCheck) {
+    facts = {
+      ...facts,
+      declaredInputStability: [...facts.declaredInputStability, initialSnapshotCheck],
+    };
+    return refuse([declaredInputStabilityBlocker(initialSnapshotCheck)]);
+  }
+
+  const observedCollection = await observeDeclaredInputStability(
+    'test_collection',
+    stableInputSnapshot,
+    sourceAndTargetInputRoots,
     deps.fs,
-    deps.runTestCollectionCommand,
-    declaredValidation.commands,
+    () => compareTestPopulations(
+      projectDir,
+      targetDir,
+      deps.fs,
+      deps.runTestCollectionCommand,
+      declaredValidation.commands,
+    ),
   );
+  facts = {
+    ...facts,
+    declaredInputStability: [...facts.declaredInputStability, observedCollection.check],
+  };
+  if (observedCollection.check.state === 'changed') {
+    return refuse([declaredInputStabilityBlocker(observedCollection.check)]);
+  }
+  if (!observedCollection.outcome.ok) throw observedCollection.outcome.error;
+  const populationComparison = observedCollection.outcome.value;
+  stableInputSnapshot = observedCollection.after;
   let testPopulation = populationComparison.population;
   if (testPopulation) facts = { ...facts, testPopulation };
   if (testPopulation?.state === 'mismatched') {
@@ -2181,10 +2428,25 @@ export async function runShipSetup(
   const baselineRunner = deps.runValidationCommand ?? runValidationCommand;
   let sourceTestRun: ObservedValidationRun | undefined;
   if (needsOutputFallback && populationComparison.sourceDiscovery.testCommand) {
-    sourceTestRun = await observeValidationRun({
-      ...populationComparison.sourceDiscovery.testCommand,
-      cwd: projectDir,
-    }, baselineRunner);
+    const observedSourceFallback = await observeDeclaredInputStability(
+      'source_validation_fallback',
+      stableInputSnapshot,
+      sourceAndTargetInputRoots,
+      deps.fs,
+      () => observeValidationRun({
+        ...populationComparison.sourceDiscovery.testCommand!,
+        cwd: projectDir,
+      }, baselineRunner),
+    );
+    facts = {
+      ...facts,
+      declaredInputStability: [...facts.declaredInputStability, observedSourceFallback.check],
+    };
+    if (observedSourceFallback.check.state === 'changed') {
+      return refuse([declaredInputStabilityBlocker(observedSourceFallback.check)]);
+    }
+    if (!observedSourceFallback.outcome.ok) throw observedSourceFallback.outcome.error;
+    sourceTestRun = observedSourceFallback.outcome.value;
   }
   let targetTestRun: ObservedValidationRun | undefined;
   const observingBaselineRunner: ValidationCommandRunner = (request) => {
@@ -2194,13 +2456,40 @@ export async function runShipSetup(
       return observed.response;
     });
   };
-  const validationBaseline = await runProjectValidationBaseline(targetDir, {
-    fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-    ...(needsOutputFallback
-      ? { runCommand: observingBaselineRunner }
-      : deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-    declaredCommands: declaredValidation.commands,
-  });
+  stableInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
+  const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
+    'target_validation_baseline',
+    stableInputSnapshot,
+  );
+  if (initialBaselineSnapshotCheck) {
+    facts = {
+      ...facts,
+      declaredInputStability: [...facts.declaredInputStability, initialBaselineSnapshotCheck],
+    };
+    return refuse([declaredInputStabilityBlocker(initialBaselineSnapshotCheck)]);
+  }
+  const observedBaseline = await observeDeclaredInputStability(
+    'target_validation_baseline',
+    stableInputSnapshot,
+    targetInputRoots,
+    deps.fs,
+    () => runProjectValidationBaseline(targetDir, {
+      fs: { exists: deps.fs.exists, readText: deps.fs.readText },
+      ...(needsOutputFallback
+        ? { runCommand: observingBaselineRunner }
+        : deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+      declaredCommands: declaredValidation.commands,
+    }),
+  );
+  facts = {
+    ...facts,
+    declaredInputStability: [...facts.declaredInputStability, observedBaseline.check],
+  };
+  if (observedBaseline.check.state === 'changed') {
+    return refuse([declaredInputStabilityBlocker(observedBaseline.check)]);
+  }
+  if (!observedBaseline.outcome.ok) throw observedBaseline.outcome.error;
+  const validationBaseline = observedBaseline.outcome.value;
   facts = { ...facts, validationBaseline };
   if (needsOutputFallback && testPopulation) {
     testPopulation = derivePopulationFromBaselineOutput(

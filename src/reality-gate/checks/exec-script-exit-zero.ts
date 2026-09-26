@@ -12,6 +12,8 @@ interface Params {
   timeout_seconds?: number;
   archive_paths?: string[];
   archive_ref?: string;
+  /** Scheduler-authored binding for a preflight-only advisory. */
+  __flowcrew_preflight_artifact_sha256?: string;
 }
 
 interface Execution {
@@ -77,6 +79,9 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
       args,
       projectDir: context.projectDir,
       execution,
+      ...(typeof params.__flowcrew_preflight_artifact_sha256 === 'string'
+        ? { preflightArtifactSha256: params.__flowcrew_preflight_artifact_sha256 }
+        : {}),
     });
     if (versionedJsonAdmission) {
       return {

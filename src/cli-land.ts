@@ -2,6 +2,15 @@ import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
+  createEngineTaskRunResolver,
+  defaultFcTasksRoot,
+  publicTaskEntries,
+  readTaskLedger,
+  updateTaskEntry,
+  verifyFcTaskRunBinding,
+  type VerifiedFcTaskRunBinding,
+} from './fc-tasks.js';
+import {
   fcGlobalDir,
   isTerminalRunStatus,
   resolveRunStatus,
@@ -75,6 +84,9 @@ export interface ParsedLandArgs {
   remove: boolean;
   acknowledgeRegenerable?: number;
   run?: string;
+  completeFcTask?: string;
+  fcTaskSession?: string;
+  fcTasksRoot?: string;
 }
 
 export interface LandTerminalArtifact {
@@ -145,9 +157,32 @@ export interface LandRemovalStep {
   repair?: string;
 }
 
+export interface LandFcTaskCompletion {
+  entryId: string;
+  session: string;
+  storeRoot: string;
+  expectedRunId: string;
+  state:
+    | 'not_attempted'
+    | 'preflight_failed'
+    | 'verified'
+    | 'completed'
+    | 'already_completed'
+    | 'failed';
+  detail?: string;
+  repairCommand?: string;
+  ledgerStatusAfterFailure?: string;
+}
+
 export interface LandReport {
   version: 1;
-  state: 'audit' | 'refused' | 'removed' | 'removal_failed';
+  state:
+    | 'audit'
+    | 'refused'
+    | 'removed'
+    | 'removal_failed'
+    | 'removed_ledger_open'
+    | 'removed_ledger_unconfirmed';
   runId: string;
   runDir: string;
   projectDir: string;
@@ -164,6 +199,7 @@ export interface LandReport {
   branch?: string;
   primaryWorktree?: string;
   removalSteps?: LandRemovalStep[];
+  fcTaskCompletion?: LandFcTaskCompletion;
 }
 
 const nodeLandFileSystem: LandFileSystem = {
@@ -292,6 +328,9 @@ export function parseLandArgs(args: string[]): ParsedLandArgs {
   const parsed: ParsedLandArgs = { help: false, json: false, remove: false };
   let runSeen = false;
   let acknowledgementSeen = false;
+  let completeFcTaskSeen = false;
+  let fcTaskSessionSeen = false;
+  let fcTasksRootSeen = false;
   const start = args[0] === 'land' ? 1 : 0;
   for (let index = start; index < args.length;) {
     const argument = args[index];
@@ -333,17 +372,49 @@ export function parseLandArgs(args: string[]): ParsedLandArgs {
       index += value.consumed;
       continue;
     }
+    if (argument === '--complete-fc-task' || argument.startsWith('--complete-fc-task=')) {
+      if (completeFcTaskSeen) throw new Error('--complete-fc-task may be specified only once');
+      const value = optionValue(args, index, '--complete-fc-task');
+      parsed.completeFcTask = value.value;
+      completeFcTaskSeen = true;
+      index += value.consumed;
+      continue;
+    }
+    if (argument === '--fc-task-session' || argument.startsWith('--fc-task-session=')) {
+      if (fcTaskSessionSeen) throw new Error('--fc-task-session may be specified only once');
+      const value = optionValue(args, index, '--fc-task-session');
+      parsed.fcTaskSession = value.value;
+      fcTaskSessionSeen = true;
+      index += value.consumed;
+      continue;
+    }
+    if (argument === '--fc-tasks-root' || argument.startsWith('--fc-tasks-root=')) {
+      if (fcTasksRootSeen) throw new Error('--fc-tasks-root may be specified only once');
+      const value = optionValue(args, index, '--fc-tasks-root');
+      parsed.fcTasksRoot = value.value;
+      fcTasksRootSeen = true;
+      index += value.consumed;
+      continue;
+    }
     throw new Error(`unknown land option: ${argument}`);
   }
   if (!parsed.help && !parsed.run) throw new Error('--run is required');
+  const closureOptionPresent = completeFcTaskSeen || fcTaskSessionSeen || fcTasksRootSeen;
+  if (!parsed.help && closureOptionPresent && !parsed.remove) {
+    throw new Error('fc_tasks completion options require --remove');
+  }
+  if (!parsed.help && closureOptionPresent && (!parsed.completeFcTask || !parsed.fcTaskSession)) {
+    throw new Error('--complete-fc-task and --fc-task-session must be supplied together');
+  }
   return parsed;
 }
 
 export function landUsage(): string {
   return [
-    'Usage: flowcrew land --run <run-id> [--remove] [--json] [--acknowledge-regenerable=<count>]',
+    'Usage: flowcrew land --run <run-id> [--remove] [--json] [--acknowledge-regenerable=<count>] [--complete-fc-task <entry-id> --fc-task-session <session-id> [--fc-tasks-root <dir>]]',
     'Audits terminal artifacts and all unique worktree state; proven-regenerable paths are counted, everything else is named.',
     '--remove requires the exact audited regenerable count and stays fail-closed while any ungraded item remains.',
+    'fc_tasks completion is optional explicit intent; it is preflighted before removal and applied only after every removal step succeeds.',
   ].join('\n');
 }
 
@@ -1070,6 +1141,88 @@ function landRemovalStepRepair(operation: LandGitRequest['operation']): string {
   return 'Inspect the reported branch-deletion error and surviving refs; preserve the branch until Git can prove a safe non-force deletion.';
 }
 
+interface FcTaskClosureIntent {
+  entryId: string;
+  session: string;
+  storeRoot: string;
+  expectedRunId: string;
+}
+
+function fcTaskClosureIntent(parsed: ParsedLandArgs): FcTaskClosureIntent | undefined {
+  if (!parsed.completeFcTask || !parsed.fcTaskSession || !parsed.run) return undefined;
+  return {
+    entryId: parsed.completeFcTask,
+    session: parsed.fcTaskSession,
+    storeRoot: resolve(parsed.fcTasksRoot ?? process.env.FC_TASKS_ROOT ?? defaultFcTasksRoot()),
+    expectedRunId: parsed.run,
+  };
+}
+
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function fcTaskRepairCommand(intent: FcTaskClosureIntent, engineRoot: string): string {
+  return [
+    'flowcrew fc_tasks update',
+    shellArgument(intent.entryId),
+    '--session', shellArgument(intent.session),
+    '--entry', shellArgument('{"status":"completed"}'),
+    '--expected-run-id', shellArgument(intent.expectedRunId),
+    '--store-root', shellArgument(intent.storeRoot),
+    '--engine-root', shellArgument(engineRoot),
+  ].join(' ');
+}
+
+function landFcTaskCompletion(
+  intent: FcTaskClosureIntent,
+  state: LandFcTaskCompletion['state'],
+  detail?: string,
+  extra: Pick<LandFcTaskCompletion, 'repairCommand' | 'ledgerStatusAfterFailure'> = {},
+): LandFcTaskCompletion {
+  return {
+    entryId: intent.entryId,
+    session: intent.session,
+    storeRoot: intent.storeRoot,
+    expectedRunId: intent.expectedRunId,
+    state,
+    ...(detail ? { detail } : {}),
+    ...extra,
+  };
+}
+
+function fcTaskStatusAfterFailure(intent: FcTaskClosureIntent): string | undefined {
+  const ledger = readTaskLedger(intent.storeRoot, intent.session);
+  if (ledger.state !== 'ready' || ledger.issues.length > 0) return undefined;
+  const matches = publicTaskEntries(ledger).filter(({ id }) => id === intent.entryId);
+  return matches.length === 1 ? matches[0].status : undefined;
+}
+
+function verifyLandFcTaskCompletion(
+  intent: FcTaskClosureIntent,
+  engineRoot: string,
+  projectDir: string,
+  fs: LandFileSystem,
+): VerifiedFcTaskRunBinding {
+  const verified = verifyFcTaskRunBinding({
+    storeRoot: intent.storeRoot,
+    session: intent.session,
+    id: intent.entryId,
+    expectedRunId: intent.expectedRunId,
+    taskRunResolver: createEngineTaskRunResolver({ engineRoot }),
+  });
+  let linkedProject: string;
+  try {
+    linkedProject = fs.realpath(verified.resolution.projectDir);
+  } catch {
+    throw new Error('linked fc_tasks entry project directory is unavailable');
+  }
+  if (linkedProject !== projectDir) {
+    throw new Error('linked fc_tasks entry does not describe the worktree being removed');
+  }
+  return verified;
+}
+
 /**
  * Audit and optionally land one explicit run. Operational refusals are structured results;
  * no removal request is issued until every read-only precondition has passed.
@@ -1081,6 +1234,8 @@ export async function runLand(
   const parsed = parseLandArgs(args);
   if (parsed.help) throw new Error('help does not execute land');
   const deps = resolveDependencies(overrides);
+  const engineRoot = resolve(deps.globalDir());
+  const closureIntent = fcTaskClosureIntent(parsed);
   const runDir = runDirectory(deps.globalDir(), parsed.run as string);
   const state = readRunState(runDir, deps.fs);
   if (state.runId !== parsed.run) {
@@ -1133,6 +1288,15 @@ export async function runLand(
     refusalReasons: reasons,
     refusalRepairs: repairsForRefusals(reasons, removalAcknowledgement),
     ...(inspected.branch ? { branch: inspected.branch } : {}),
+    ...(closureIntent
+      ? {
+          fcTaskCompletion: landFcTaskCompletion(
+            closureIntent,
+            'not_attempted',
+            'ledger completion waits for every removal precondition and removal step',
+          ),
+        }
+      : {}),
   };
   if (!parsed.remove) return baseReport;
   if (reasons.length > 0) return { ...baseReport, state: 'refused' };
@@ -1156,6 +1320,39 @@ export async function runLand(
     return { ...contextual, state: 'refused' };
   }
 
+  let verifiedClosure: VerifiedFcTaskRunBinding | undefined;
+  if (closureIntent) {
+    try {
+      verifiedClosure = verifyLandFcTaskCompletion(
+        closureIntent,
+        engineRoot,
+        projectDir,
+        deps.fs,
+      );
+    } catch (error) {
+      const detail = errorMessage(error);
+      const preflightReason = `fc_tasks completion preflight failed: ${detail}`;
+      return {
+        ...contextual,
+        state: 'refused',
+        readyForRemoval: false,
+        refusalReasons: [preflightReason],
+        refusalRepairs: [
+          'Repair the exact entry/session/run link, then rerun the full land audit; no Git removal or ledger write was attempted.',
+        ],
+        fcTaskCompletion: landFcTaskCompletion(closureIntent, 'preflight_failed', detail),
+      };
+    }
+  }
+
+  const verifiedCompletion = closureIntent
+    ? landFcTaskCompletion(
+        closureIntent,
+        'verified',
+        'exact terminal run and target worktree verified; ledger remains unchanged until removal succeeds',
+      )
+    : undefined;
+
   const removalSteps: LandRemovalStep[] = [];
   const remove = await destructiveStep({
     command: 'git',
@@ -1164,13 +1361,27 @@ export async function runLand(
     operation: 'remove_worktree',
   }, deps.git);
   removalSteps.push(remove.step);
-  if (!remove.passed) return { ...contextual, state: 'removal_failed', removalSteps };
+  if (!remove.passed) {
+    return {
+      ...contextual,
+      state: 'removal_failed',
+      removalSteps,
+      ...(verifiedCompletion ? { fcTaskCompletion: verifiedCompletion } : {}),
+    };
+  }
 
   const prune = await destructiveStep({
     command: 'git', args: ['worktree', 'prune'], cwd: context.primaryWorktree, operation: 'prune_worktrees',
   }, deps.git);
   removalSteps.push(prune.step);
-  if (!prune.passed) return { ...contextual, state: 'removal_failed', removalSteps };
+  if (!prune.passed) {
+    return {
+      ...contextual,
+      state: 'removal_failed',
+      removalSteps,
+      ...(verifiedCompletion ? { fcTaskCompletion: verifiedCompletion } : {}),
+    };
+  }
 
   const branch = await destructiveStep({
     command: 'git',
@@ -1179,8 +1390,61 @@ export async function runLand(
     operation: 'delete_branch',
   }, deps.git);
   removalSteps.push(branch.step);
-  if (!branch.passed) return { ...contextual, state: 'removal_failed', removalSteps };
-  return { ...contextual, state: 'removed', removalSteps };
+  if (!branch.passed) {
+    return {
+      ...contextual,
+      state: 'removal_failed',
+      removalSteps,
+      ...(verifiedCompletion ? { fcTaskCompletion: verifiedCompletion } : {}),
+    };
+  }
+
+  if (!closureIntent || !verifiedClosure) {
+    return { ...contextual, state: 'removed', removalSteps };
+  }
+
+  try {
+    updateTaskEntry({
+      storeRoot: closureIntent.storeRoot,
+      session: closureIntent.session,
+      id: closureIntent.entryId,
+      entry: { status: 'completed' },
+      expectedRunId: closureIntent.expectedRunId,
+      taskRunResolver: createEngineTaskRunResolver({ engineRoot }),
+      skipUnchanged: true,
+    });
+    return {
+      ...contextual,
+      state: 'removed',
+      removalSteps,
+      fcTaskCompletion: landFcTaskCompletion(
+        closureIntent,
+        verifiedClosure.entry.status === 'completed' ? 'already_completed' : 'completed',
+        verifiedClosure.entry.status === 'completed'
+          ? 'entry was already completed; no ledger rewrite was needed'
+          : 'entry completed after worktree removal, prune, and non-force branch deletion succeeded',
+      ),
+    };
+  } catch (error) {
+    const detail = errorMessage(error);
+    const ledgerStatusAfterFailure = fcTaskStatusAfterFailure(closureIntent);
+    const ledgerIsConfirmedOpen = ledgerStatusAfterFailure !== undefined
+      && ledgerStatusAfterFailure !== 'completed';
+    return {
+      ...contextual,
+      state: ledgerIsConfirmedOpen ? 'removed_ledger_open' : 'removed_ledger_unconfirmed',
+      removalSteps,
+      fcTaskCompletion: landFcTaskCompletion(
+        closureIntent,
+        'failed',
+        `Git reclaim succeeded, but ledger completion failed: ${detail}`,
+        {
+          repairCommand: fcTaskRepairCommand(closureIntent, engineRoot),
+          ...(ledgerStatusAfterFailure === undefined ? {} : { ledgerStatusAfterFailure }),
+        },
+      ),
+    };
+  }
 }
 
 function displayPath(path: string): string {
@@ -1236,6 +1500,15 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
     writer.write(`  ${step.error ? 'FAILED' : 'DONE'} ${step.operation}${step.error ? `: ${step.error}` : ''}\n`);
     if (step.repair) writer.write(`    REPAIR [${step.operation}]: ${step.repair}\n`);
   }
+  if (report.fcTaskCompletion) {
+    const completion = report.fcTaskCompletion;
+    writer.write(`  FC_TASKS ${completion.state.toUpperCase()} ${completion.session}/${completion.entryId}`
+      + ` run=${completion.expectedRunId}${completion.detail ? `: ${completion.detail}` : ''}\n`);
+    if (completion.ledgerStatusAfterFailure) {
+      writer.write(`    LEDGER STATUS AFTER FAILURE: ${completion.ledgerStatusAfterFailure}\n`);
+    }
+    if (completion.repairCommand) writer.write(`    REPAIR: ${completion.repairCommand}\n`);
+  }
   if (!report.removalRequested) {
     writer.write(report.readyForRemoval
       ? `Audit complete: after independently judging the result, rerun with --remove --acknowledge-regenerable=${report.removalAcknowledgement.expectedRegenerableCount}.\n`
@@ -1259,7 +1532,10 @@ export async function cmdLandWithDeps(
     const writer = report.state === 'audit' || report.state === 'removed' ? deps.stdout : deps.stderr;
     if (parsed.json) writer.write(`${JSON.stringify(report, null, 2)}\n`);
     else renderLandHuman(report, writer);
-    if (report.state === 'refused' || report.state === 'removal_failed') return 1;
+    if (report.state === 'refused'
+        || report.state === 'removal_failed'
+        || report.state === 'removed_ledger_open'
+        || report.state === 'removed_ledger_unconfirmed') return 1;
     return report.inspectionIssues.length === 0 ? 0 : 1;
   } catch (error) {
     deps.stderr.write(`land: ${errorMessage(error)}\n`);

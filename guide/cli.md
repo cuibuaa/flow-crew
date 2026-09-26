@@ -208,6 +208,8 @@ Inspect one explicitly selected run before reclaiming its linked worktree:
 flowcrew land --run <run-id>
 flowcrew land --run <run-id> --json
 flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count>
+flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count> \
+  --complete-fc-task <entry-id> --fc-task-session <session-id> [--fc-tasks-root <dir>]
 ```
 
 The audit reports the run's recorded status and every artifact declared for that status. An
@@ -243,9 +245,23 @@ Each refusal has a position-matched repair in `refusalRepairs`, and human output
 prints it beside the reason. A failed removal step likewise records the failed
 Git operation and a repair that preserves unique data and surviving refs.
 
+The optional `--complete-fc-task` and `--fc-task-session` pair is explicit operator closure intent
+for the exact `--run`; `--fc-tasks-root` selects a non-default ledger root. The pair is valid only
+with `--remove`. Before any destructive Git call, `land` proves the selected ledger contains exactly
+one entry, that its verified engine link resolves to the selected known-terminal run, and that the
+run describes the worktree being removed. It does not infer acceptance from terminal state.
+
+The entry remains unchanged through the audit and all removal steps. Only after non-force worktree
+removal, prune, and branch deletion all succeed does `land` atomically patch that exact entry to
+`completed`, rechecking its exact run binding while holding the ledger lock. Omitting the pair is a
+deliberate-open request: even a successful reclaim leaves the ledger unchanged. If the final write
+fails after reclaim, the command exits nonzero, distinguishes a confirmed-open ledger from an
+unconfirmed persistence outcome, and emits a guarded `flowcrew fc_tasks update` repair command.
+
 `land` does not decide whether a terminal result is good or whether its evidence answers the
 right question. The operator reads and independently judges the result before requesting
-removal; the command enforces only the mechanical preservation boundary.
+removal and optional ledger closure; the command enforces the mechanical preservation and exact
+identity boundaries around that explicit decision.
 
 ## `flowcrew audit-report`
 

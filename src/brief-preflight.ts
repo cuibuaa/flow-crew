@@ -7,12 +7,13 @@ import {
   extractDeclaredBriefInputPaths,
   normalizeBriefInputPath,
 } from './ship-inputs.js';
-import { isNegatedRequirementLine } from './brief-negation.js';
+import { isNegatedRequirementLine, isNegatedRequirementMention } from './brief-negation.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import {
   evaluateResearchFeasibility,
   type ResearchFeasibilityEvaluation,
 } from './research-feasibility.js';
+import { assessResearchShipTarget } from './research-policy.js';
 
 export interface CriterionLintWarning {
   line: number;
@@ -383,8 +384,15 @@ function decisionRequirementLines(brief: string): string[] {
   return decisionLintLines(brief).map((line) => isNegatedRequirementLine(line) ? '' : line);
 }
 
-function decisionRequirementBody(brief: string): string {
-  return decisionRequirementLines(brief).join('\n');
+function hasPositiveDecisionFieldRequirement(brief: string, field: string): boolean {
+  const pattern = new RegExp(`\\b${field}\\b`, 'g');
+  return logicalProseUnits(decisionLintLines(brief)).some((unit) => {
+    for (const match of unit.text.matchAll(pattern)) {
+      const start = match.index ?? 0;
+      if (!isNegatedRequirementMention(unit.text, start, start + match[0].length)) return true;
+    }
+    return false;
+  });
 }
 
 function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; excerpt: string } | undefined {
@@ -839,10 +847,9 @@ export function inspectBrief(
   }
 
   const operatorFigure = operatorFigureEvidence(brief);
-  const requiredDecisionEvidence = decisionRequirementBody(brief);
   if (operatorFigure
-      && (!/\bwithin_expected_range\b/.test(requiredDecisionEvidence)
-        || !/\bmethod_was_not_adjusted_to_match_expectation\b/.test(requiredDecisionEvidence))) {
+      && (!hasPositiveDecisionFieldRequirement(brief, 'within_expected_range')
+        || !hasPositiveDecisionFieldRequirement(brief, 'method_was_not_adjusted_to_match_expectation'))) {
     add({
       code: 'operator_figure_anti_anchoring_missing',
       level: 'fail',
@@ -904,6 +911,26 @@ export function inspectBrief(
       message: `research: policy=${rc.policy} baseline=${rc.baseline} result_file=${rc.resultFile ?? '(default)'}`,
       acknowledgementRequired: false,
     });
+    const targetAssessment = assessResearchShipTarget(rc);
+    if (targetAssessment.status === 'already_crossed') {
+      add({
+        code: 'research_ship_target_already_crossed',
+        level: 'fail',
+        message: `The declared ship target is already crossed: ${targetAssessment.reason}.`,
+        acknowledgementRequired: true,
+        risk: 'The first later round that is kept becomes ship-eligible even though it did not establish the intended target gain.',
+        suggestion: `Choose a target strictly ${targetAssessment.bindings.higherIsBetter ? 'above' : 'below'} the baseline, or remove stop.beat for an explicit ceiling-only contract.`,
+      });
+    } else if (targetAssessment.status === 'unreachable') {
+      add({
+        code: 'research_ship_target_unreachable',
+        level: 'fail',
+        message: `The declared ship target cannot be exercised: ${targetAssessment.reason}.`,
+        acknowledgementRequired: true,
+        risk: 'Every schema-valid round is prevented from reaching ship, so the campaign can consume its full ceiling without a keepable shipping candidate.',
+        suggestion: 'Bring stop.beat inside the declared result_schema and integrity bounds, or remove stop.beat for an explicit ceiling-only contract.',
+      });
+    }
     if (!rc.confirm) {
       add({
         code: 'research_confirm_missing',

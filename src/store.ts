@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
+import { projectPersistenceIdentity } from './project-identity.js';
 import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
@@ -918,6 +919,8 @@ function emitCampaignEnvelopeEvents(projectDir: string, runId: string, state: St
   const now = new Date().toISOString();
   const baseEvent = {
     runId,
+    projectIdentity: projectPersistenceIdentity(projectDir),
+    seq: state.campaignSeq ?? 1,
     campaignId: state.campaignId ?? state.campaignName ?? campaignStorageKey,
     campaignStorageKey,
     campaignName: state.campaignName,

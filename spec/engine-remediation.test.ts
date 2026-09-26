@@ -82,6 +82,7 @@ import {
   RUN_RESERVATION_FILE,
   runDir,
   setFcGlobalDir,
+  writeStageStatus,
   writeRunState,
   type StoreState,
 } from '../src/store.js';
@@ -292,6 +293,15 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     mkdirSync(projectDir);
     setFcGlobalDir(join(root, 'fc-home'));
     const created = createRun(projectDir, 'fixture', 'name: fixture', ['qa']);
+    const attemptStartedAt = new Date(Date.now() - 10).toISOString();
+    const attemptCompletedAt = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', {
+      status: 'complete', retries: 0, startedAt: attemptStartedAt, completedAt: attemptCompletedAt,
+      attempts: [{
+        index: 1, status: 'complete', startedAt: attemptStartedAt, completedAt: attemptCompletedAt,
+        duration_ms: 10, exitCode: 0, tokenUsage: 'unknown',
+      }],
+    });
     const baseline = validationBaseline(projectDir);
     write(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
       version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline,
@@ -316,7 +326,10 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     expect(unchanged?.pass).toBe(true);
     expect(unchangedVerdict?.pass).toBe(true);
     expect(regressed?.pass).toBe(false);
-    expect(regressedVerdict).toMatchObject({ pass: false, reason: expect.stringContaining('regressed') });
+    expect(regressed?.immutablePath).not.toBe(unchanged?.immutablePath);
+    expect(existsSync(join(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
+    expect(existsSync(join(created.runDirPath, regressed!.immutablePath!))).toBe(true);
+    expect(regressedVerdict).toMatchObject({ pass: false, reason: expect.stringContaining('recorded regressions') });
     expect(noBaselineVerdict?.pass).toBe(true);
     recordAfter(1, 'changed', 'known-red setup snapshot replayed after an accepting QA verdict', {
       promptCarriesBaseline: true, unchangedDelta: unchanged?.delta, unchangedVerdict,
@@ -965,7 +978,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
       [producer, gate, repair], ['qa'],
       { qa: 'The report needs prose edits; no missing measurement remains.' }, research,
     );
-    expect(omitted.map((stage) => stage.id).sort()).toEqual(['measure', 'repair_report']);
+    expect(omitted.map((stage) => stage.id)).toEqual(['measure']);
     expect(quality.map((stage) => stage.id)).toEqual(['repair_report']);
     expect(negated.map((stage) => stage.id)).toEqual(['repair_report']);
     recordAfter(16, 'changed', 'gate rejection explicitly says the round measurement is absent', {
@@ -975,7 +988,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
       observed: quality.map((stage) => stage.id),
       differsBy: ['effective rejection category', 'producer rerun cannot address prose quality'],
     }, reach(3, { repairOnly: 3 }, {
-      missingOutcomeProducerAndRepair: 1, reportQualityRepairOnly: 1, negatedOmissionRepairOnly: 1,
+      missingOutcomeProducerOnly: 1, reportQualityRepairOnly: 1, negatedOmissionRepairOnly: 1,
     }),
     'Completed ordinary ancestors owning result/sidecar paths re-pend for missing-outcome rejection.',
     'Other gate rejection still spends repair cycles only on retry_to stages.');

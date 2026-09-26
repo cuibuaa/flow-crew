@@ -73,6 +73,33 @@ export interface ResearchEvaluation {
   reason: string;
 }
 
+export interface ResearchShipTargetBindings {
+  baseline: number;
+  target?: number;
+  higherIsBetter: boolean;
+  improvementMargin: number;
+  noOpTolerance: number;
+  resultMinimum?: number;
+  resultMaximum?: number;
+  resultEnum?: number[];
+  resultIntegerOnly: boolean;
+  resultFieldFloor?: number;
+  rejectPositiveResult: boolean;
+  outlierLimit?: number;
+  resultStdCandidate?: number;
+  maxStdRatio: number;
+}
+
+export interface ResearchShipTargetAssessment {
+  status: 'ceiling_only' | 'already_crossed' | 'reachable' | 'unreachable';
+  reason: string;
+  bindings: ResearchShipTargetBindings;
+  /** A concrete value that passes every locally decidable result/schema/integrity relation. */
+  probeResult?: number;
+  /** A schema-valid value for a required result_std field, when one is needed. */
+  resultStdCandidate?: number;
+}
+
 /** True if `a` beats `b` by more than `margin`, under the higher/lower-is-better convention.
  *  margin filters within-noise gains so they don't count as real improvements. */
 function isBetter(a: number, b: number, higherIsBetter: boolean, margin = 0): boolean {
@@ -83,6 +110,257 @@ function isBetter(a: number, b: number, higherIsBetter: boolean, margin = 0): bo
 function improvementMargin(r: ResearchRound, minImprovement: number, seMultiple: number): number {
   const se = (typeof r.resultStd === 'number' && Number.isFinite(r.resultStd)) ? Math.abs(r.resultStd) * seMultiple : 0;
   return Math.max(minImprovement, se);
+}
+
+interface NumericSchema {
+  type?: unknown;
+  enum?: unknown;
+  minimum?: unknown;
+  maximum?: unknown;
+}
+
+interface NumericTypeConstraint {
+  allowed: boolean;
+  integerOnly: boolean;
+}
+
+function numericPropertySchema(config: ResearchConfig, field: string): NumericSchema {
+  const properties = config.resultSchema?.properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
+  const property = (properties as Record<string, unknown>)[field];
+  return property && typeof property === 'object' && !Array.isArray(property)
+    ? property as NumericSchema
+    : {};
+}
+
+function numericTypeConstraint(type: unknown): NumericTypeConstraint {
+  if (type === undefined || (Array.isArray(type) && type.length === 0)) {
+    return { allowed: true, integerOnly: false };
+  }
+  const types = Array.isArray(type) ? type : [type];
+  const allowsNumber = types.includes('number');
+  const allowsInteger = types.includes('integer');
+  return {
+    allowed: allowsNumber || allowsInteger,
+    integerOnly: allowsInteger && !allowsNumber,
+  };
+}
+
+function schemaAllowsNumericValue(value: number, schema: NumericSchema, type: NumericTypeConstraint): boolean {
+  if (!Number.isFinite(value) || !type.allowed || (type.integerOnly && !Number.isInteger(value))) return false;
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) return false;
+  if (typeof schema.minimum === 'number' && value < schema.minimum) return false;
+  if (typeof schema.maximum === 'number' && value > schema.maximum) return false;
+  return true;
+}
+
+function adjacentFloat(value: number, direction: 1 | -1): number {
+  if (!Number.isFinite(value)) return value;
+  if (Object.is(value, 0) || Object.is(value, -0)) {
+    return direction === 1 ? Number.MIN_VALUE : -Number.MIN_VALUE;
+  }
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  let bits = view.getBigUint64(0);
+  bits += (value > 0) === (direction === 1) ? 1n : -1n;
+  view.setBigUint64(0, bits);
+  return view.getFloat64(0);
+}
+
+function numericEnum(schema: NumericSchema): number[] | undefined {
+  if (!Array.isArray(schema.enum)) return undefined;
+  return schema.enum.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+}
+
+function requiredResultStd(config: ResearchConfig): boolean {
+  return Array.isArray(config.resultSchema?.required)
+    && config.resultSchema.required.includes('result_std');
+}
+
+function chooseResultStdCandidate(config: ResearchConfig): number | undefined {
+  if (!requiredResultStd(config)) return undefined;
+  const schema = numericPropertySchema(config, 'result_std');
+  const type = numericTypeConstraint(schema.type);
+  if (!type.allowed) return undefined;
+  const floor = Math.max(
+    0,
+    typeof schema.minimum === 'number' ? schema.minimum : 0,
+    config.integrity?.fieldFloors?.result_std ?? 0,
+  );
+  const ceiling = Math.min(
+    typeof schema.maximum === 'number' ? schema.maximum : Number.MAX_VALUE,
+    (config.integrity?.rejectIfPositive ?? []).includes('result_std') ? 0 : Number.MAX_VALUE,
+  );
+  const declared = numericEnum(schema);
+  const candidates = declared ?? [
+    floor,
+    ...(type.integerOnly ? [Math.ceil(floor)] : []),
+    ceiling,
+  ];
+  return candidates
+    .filter((value) => value >= floor && value <= ceiling && schemaAllowsNumericValue(value, schema, type))
+    .sort((left, right) => Math.abs(left) - Math.abs(right) || left - right)[0];
+}
+
+function targetIsMet(value: number, target: number, higherIsBetter: boolean): boolean {
+  return higherIsBetter ? value >= target : value <= target;
+}
+
+/**
+ * Compare every ship-target binding available before launch. This deliberately
+ * does not guess an empirical performance ceiling: a target with no declared
+ * schema/integrity contradiction remains reachable even if prior campaigns did
+ * not attain it.
+ */
+export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTargetAssessment {
+  const higherIsBetter = config.higherIsBetter !== false;
+  const target = config.stop?.beat;
+  const resultSchema = numericPropertySchema(config, 'result');
+  const resultType = numericTypeConstraint(resultSchema.type);
+  const resultEnum = numericEnum(resultSchema);
+  const resultStdCandidate = chooseResultStdCandidate(config);
+  const resultStdNeeded = requiredResultStd(config);
+  const seMultiple = config.stop?.improvementSEMultiple ?? 1;
+  const margin = Math.max(
+    config.stop?.minImprovement ?? 0,
+    resultStdCandidate === undefined ? 0 : Math.abs(resultStdCandidate) * seMultiple,
+  );
+  const noOpTolerance = config.integrity?.noop === false
+    ? 0
+    : Math.max(1e-4, Math.abs(config.baseline) * 1e-5);
+  const resultMinimum = typeof resultSchema.minimum === 'number' ? resultSchema.minimum : undefined;
+  const resultMaximum = typeof resultSchema.maximum === 'number' ? resultSchema.maximum : undefined;
+  const resultFieldFloor = config.integrity?.fieldFloors?.result;
+  const rejectPositiveResult = (config.integrity?.rejectIfPositive ?? []).includes('result');
+  const outlierLimit = Math.abs(config.baseline) > 1e-9
+    ? Math.abs(config.baseline) * (config.integrity?.outlierFactor ?? 5)
+    : undefined;
+  const maxStdRatio = config.integrity?.maxStdRatio ?? 0.30;
+  const bindings: ResearchShipTargetBindings = {
+    baseline: config.baseline,
+    ...(target === undefined ? {} : { target }),
+    higherIsBetter,
+    improvementMargin: margin,
+    noOpTolerance,
+    ...(resultMinimum === undefined ? {} : { resultMinimum }),
+    ...(resultMaximum === undefined ? {} : { resultMaximum }),
+    ...(resultEnum === undefined ? {} : { resultEnum }),
+    resultIntegerOnly: resultType.integerOnly,
+    ...(resultFieldFloor === undefined ? {} : { resultFieldFloor }),
+    rejectPositiveResult,
+    ...(outlierLimit === undefined ? {} : { outlierLimit }),
+    ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+    maxStdRatio,
+  };
+
+  if (target === undefined) {
+    return {
+      status: 'ceiling_only',
+      reason: 'research.stop.beat is absent, so this contract deliberately has no ship target',
+      bindings,
+      ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+    };
+  }
+  if (targetIsMet(config.baseline, target, higherIsBetter)) {
+    return {
+      status: 'already_crossed',
+      reason: `baseline ${config.baseline} already satisfies the ${higherIsBetter ? '>=' : '<='} ${target} ship relation`,
+      bindings,
+      ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+    };
+  }
+  if (!resultType.allowed) {
+    return {
+      status: 'unreachable',
+      reason: 'research.result_schema.properties.result does not allow a numeric measured result',
+      bindings,
+      ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+    };
+  }
+  if (resultStdNeeded && resultStdCandidate === undefined) {
+    return {
+      status: 'unreachable',
+      reason: 'required result_std has no value accepted by its schema and the declared integrity gates',
+      bindings,
+    };
+  }
+
+  let lower = -Number.MAX_VALUE;
+  let upper = Number.MAX_VALUE;
+  if (resultMinimum !== undefined) lower = Math.max(lower, resultMinimum);
+  if (resultMaximum !== undefined) upper = Math.min(upper, resultMaximum);
+  if (resultFieldFloor !== undefined) lower = Math.max(lower, resultFieldFloor);
+  if (rejectPositiveResult) upper = Math.min(upper, 0);
+  if (outlierLimit !== undefined) {
+    if (higherIsBetter) upper = Math.min(upper, outlierLimit);
+    else lower = Math.max(lower, -outlierLimit);
+  }
+  if (higherIsBetter) lower = Math.max(lower, target);
+  else upper = Math.min(upper, target);
+
+  const improvementBoundary = higherIsBetter
+    ? config.baseline + Math.max(margin, noOpTolerance)
+    : config.baseline - Math.max(margin, noOpTolerance);
+  const boundaries = [
+    lower,
+    upper,
+    target,
+    improvementBoundary,
+    adjacentFloat(improvementBoundary, higherIsBetter ? 1 : -1),
+    config.baseline,
+    0,
+    1e-6,
+    -1e-6,
+  ];
+  if (resultStdCandidate !== undefined && maxStdRatio > 0) {
+    const ratioBoundary = Math.abs(resultStdCandidate) / maxStdRatio;
+    boundaries.push(ratioBoundary, -ratioBoundary);
+  }
+  const declaredCandidates = resultEnum;
+  const candidates = new Set<number>();
+  for (const boundary of declaredCandidates ?? boundaries) {
+    if (!Number.isFinite(boundary)) continue;
+    candidates.add(boundary);
+    candidates.add(adjacentFloat(boundary, 1));
+    candidates.add(adjacentFloat(boundary, -1));
+    if (resultType.integerOnly) {
+      candidates.add(Math.floor(boundary));
+      candidates.add(Math.ceil(boundary));
+    }
+  }
+
+  const candidatePasses = (value: number): boolean => {
+    if (value < lower || value > upper) return false;
+    if (!schemaAllowsNumericValue(value, resultSchema, resultType)) return false;
+    if (!isBetter(value, config.baseline, higherIsBetter, margin)) return false;
+    if (config.integrity?.noop !== false && Math.abs(value - config.baseline) <= noOpTolerance) return false;
+    if (!targetIsMet(value, target, higherIsBetter)) return false;
+    if (resultStdCandidate !== undefined && Math.abs(value) > 1e-6) {
+      const ratio = Math.abs(resultStdCandidate) / Math.abs(value);
+      if (ratio > maxStdRatio) return false;
+    }
+    return true;
+  };
+  const ordered = [...candidates]
+    .filter(candidatePasses)
+    .sort((left, right) => higherIsBetter ? left - right : right - left);
+  const probeResult = ordered[0];
+  if (probeResult === undefined) {
+    const direction = higherIsBetter ? 'at or above' : 'at or below';
+    return {
+      status: 'unreachable',
+      reason: `no finite numeric result can be ${direction} ${target}, improve on baseline ${config.baseline}, and pass the declared result schema and integrity bounds`,
+      bindings,
+      ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+    };
+  }
+  return {
+    status: 'reachable',
+    reason: `probe result ${probeResult} satisfies the target, strict-improvement, schema, and integrity relations`,
+    bindings,
+    probeResult,
+    ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
+  };
 }
 
 /**

@@ -112,7 +112,7 @@ describe('fc_tasks legacy ledger rendering', () => {
     const rows = result.text.trimEnd().split('\n');
 
     expect(result.state).toBe('active');
-    expect(rows[0]).toBe('fc_tasks: 1 running · 1 pending · 1 done');
+    expect(rows[0]).toBe('fc_tasks: engine 0 running · ledger 1 in progress, 1 pending, 1 done');
     expect(rows[1]).toContain('[a] 第一项');
     expect(rows[2]).toContain('[b] 正在处理第二项');
   });
@@ -122,8 +122,8 @@ describe('fc_tasks legacy ledger rendering', () => {
     writeEntry('completed-session', 'done.json', task('done', 'completed'));
 
     expect(render('empty-session')).toMatchObject({ state: 'idle', issueCodes: [] });
-    expect(render('empty-session').text).toBe('fc_tasks: idle · 0 done\n');
-    expect(render('completed-session').text).toBe('fc_tasks: idle · 1 done\n');
+    expect(render('empty-session').text).toBe('fc_tasks: engine 0 running · ledger idle, 0 done\n');
+    expect(render('completed-session').text).toBe('fc_tasks: engine 0 running · ledger idle, 1 done\n');
     expect(render('missing-session')).toMatchObject({ state: 'no_ledger', issueCodes: [] });
     expect(render('missing-session').text).toContain('fc_tasks: no ledger');
   });
@@ -175,7 +175,7 @@ describe('fc_tasks legacy ledger rendering', () => {
     const result = render('mixed-session');
     expect(result.state).toBe('degraded');
     expect(result.issueCodes).toEqual(['entry_not_json']);
-    expect(result.text).toContain('1 running');
+    expect(result.text).toContain('ledger 1 in progress');
     expect(result.text).toContain('⚠ entry_not_json: bad.json: invalid JSON');
     expect(result.text).toContain('[good]');
 
@@ -363,7 +363,7 @@ describe('fc_tasks legacy ledger rendering', () => {
     });
     const rows = result.text.trimEnd().split('\n');
 
-    expect(rows[0]).toBe('fc_tasks: 2 wrap-up overdue · 2 running · 0 pending · 0 done');
+    expect(rows[0]).toBe('fc_tasks: 2 wrap-up overdue · engine 0 running · ledger 2 in progress, 0 pending, 0 done');
     expect(rows[1]).toContain('wrap-up-overdue:run:escalated:#13 [explicit]');
     expect(rows[2]).toContain('wrap-up-overdue:run:complete:#12 [inferred]');
     expect(result.text).not.toContain('stale:#');
@@ -742,7 +742,7 @@ describe('fc_tasks validating atomic writes', () => {
     expect(updatedPath).toBe(path);
     expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual(completed);
     expect(readdirSync(join(root, 'update-session'))).toEqual(['hand-written.json']);
-    expect(render('update-session').text).toBe('fc_tasks: idle · 1 done\n');
+    expect(render('update-session').text).toBe('fc_tasks: engine 0 running · ledger idle, 1 done\n');
   });
 
   it('replaces one supplied field while preserving every omitted field value byte-for-byte', () => {

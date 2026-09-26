@@ -14,9 +14,15 @@ flowcrew fc_tasks render --store-root <directory> --engine-root <directory> --se
 # Show every validated field rather than the width-bounded status surface.
 flowcrew fc_tasks list --json --session <session-id>
 
+# Compare the operator ledger with verified engine lifecycle evidence without writing either.
+flowcrew fc_tasks reconcile --session <session-id>
+flowcrew fc_tasks reconcile --json --session <session-id>
+
 # Entry JSON may be supplied on stdin or with --entry.
 flowcrew fc_tasks create --session <session-id> < entry.json
 flowcrew fc_tasks update <id> --session <session-id> < entry.json
+flowcrew fc_tasks update <id> --session <session-id> --expected-run-id <run-id> \
+  --entry '{"status":"completed"}'
 
 # Link an entry to the exact engine task visible as "Task #123".
 flowcrew fc_tasks create --session <session-id> --flowcrew-task-id 123 < entry.json
@@ -40,10 +46,14 @@ task registry and run archive at a sandbox. It does not change the conversationa
 
 ## What the renderer prints
 
-For a healthy ledger, the first row is a count header. Each open task then gets one row, sorted by
-id: an in-progress row uses `activeForm`, and a pending row uses `subject`. Completed entries remain
-in the header count. When no task is open, the header says `idle`; when the session directory does
-not exist, it instead says `no ledger`. Those states are intentionally different.
+For a healthy ledger, the first row labels its two accounts. `engine N running` counts only linked
+runs whose authoritative lifecycle is executing. `ledger N in progress, N pending, N done` counts
+the operator's statuses. An open ledger entry attached to terminal engine evidence is counted
+separately as `wrap-up overdue`; it is not also presented as an engine-running task. Each open task
+then gets one row, sorted by id: an in-progress row uses `activeForm`, and a pending row uses
+`subject`. Completed entries remain in the ledger header count. When no ledger task is open, its
+part of the header says `ledger idle`; when the session directory does not exist, it instead says
+`no ledger`. Those states are intentionally different.
 
 Every emitted row is clipped to the terminal display width from `COLUMNS`. Clipping uses terminal
 column width, including double-width CJK text, rather than JavaScript string length. Control
@@ -65,6 +75,35 @@ The compact surface omits descriptions, dependency edges (`blocks` and `blockedB
 subjects, source filenames, full run ids, target directories, and brief digests. Run
 `flowcrew fc_tasks list --json` to retrieve every validated entry and its `runLinks` resolution,
 including the reason a mapping is stale or unavailable.
+
+## Reconciliation and authority
+
+`reconcile` uses the same structured projection as the renderer. Human output names every
+comparison and a bounded next action; `--json` exposes the ledger state, engine evidence,
+comparison, authority, and recommendation. It is read-only. A disagreement never silently reopens,
+stops, completes, or relinks work.
+
+| Question | Authoritative account | Meaning of disagreement |
+|---|---|---|
+| Is execution queued, running, paused, approval-blocked, or terminal? | Engine run lifecycle; task lifecycle before a run exists | A ledger label cannot override execution reality. |
+| Has the operator accepted the result and finished human wrap-up? | Ledger status and explicit closure intent | A terminal run cannot answer this question. |
+| Which engine work does this entry describe? | The explicit `flowcrewTaskId`, or the strict legacy sentence, resolved to exact task/run identity | Missing, stale, ambiguous, unknown, or unavailable evidence is not comparable. |
+| Is wrap-up required now? | Derived from verified terminal engine evidence plus an operator-open ledger entry | The accounts are at different phases; finish the human work before completion. |
+| Is a completed ledger entry attached to active work? | Derived from both accounts | Inspect; do not automatically reopen the entry or stop execution. |
+| Should the ledger be closed now? | Operator intent at the successful wrap-up boundary | Lifecycle transition alone never invents acceptance. |
+| What would make the accounts agree? | Derived recommendation | Terminal/open: finish wrap-up and close explicitly. Active/completed: inspect, then deliberately reopen or stop. |
+
+When the scheduler first observes a transition from nonterminal to terminal state, it appends one
+`operator_wrap_up_required` event. If the first durable observation is already terminal, it appends
+the same event so an unattended transition is not lost. Repeated observations and terminal-to-terminal
+rewrites do not duplicate it. The event appears in the ordinary event and operational task/status
+projection; it starts wrap-up and explicitly does not mean acceptance.
+
+The normal close path is an explicit `flowcrew land --remove` request carrying the exact entry,
+session, and run identities. `land` validates that binding before any Git mutation, performs its
+existing non-force removal sequence, and only after every step succeeds changes that one entry to
+`completed` under the ledger lock. Omitting closure identity deliberately leaves the entry open.
+No existing ledger is scanned, migrated, or rewritten merely because a run becomes terminal.
 
 ## Degraded output is still output
 
@@ -155,6 +194,13 @@ id. A field that is present is validated by the same rules as a complete entry. 
 explicit `null` is not deletion and is refused by the field's type rule. Supplying `blocks` or
 `blockedBy` replaces that whole array; the writer does not append, union, or merge array elements.
 Unknown patch fields are refused so misspellings cannot persist silently.
+
+`--expected-run-id <run-id>` adds an exact compare guard to an update. While holding the session
+lock, the writer re-resolves the entry and refuses unless it still names that exact known-terminal
+run. `land` uses this guard after reclaim, so a concurrent relink cannot complete different work.
+If Git reclaim succeeds but this final ledger write fails, `land` exits nonzero, reports whether a
+reread confirms the entry is still open or leaves persistence unconfirmed, and prints a pasteable
+guarded `fc_tasks update` repair command.
 
 This omission rule deliberately gives up one check that complete-record validation provided: the
 writer can no longer tell whether a caller meant to send a complete snapshot but accidentally left
@@ -323,8 +369,8 @@ and atomic writer.
 ## Names and collision boundary
 
 The introduced public namespace is `flowcrew fc_tasks`; its nested subcommands are `render`, `list`,
-`create`, and `update`. The optional Codex skill is `$fc_tasks`, and an operator may call its optional
+`reconcile`, `create`, and `update`. The optional Codex skill is `$fc_tasks`, and an operator may call its optional
 notification shim `fc_tasks_notify`. The link field is `flowcrewTaskId`, its writer options are
-`--flowcrew-task-id` and `--clear-flowcrew-task-link`, and the detail collection is `runLinks`.
+`--flowcrew-task-id`, `--clear-flowcrew-task-link`, and `--expected-run-id`, and the detail collection is `runLinks`.
 None uses or shadows either front end's native `Task*`, `/status`, `/statusline`, `/goal`, or other
 task-tool namespace. The engine deliberately provides no `task` alias.
