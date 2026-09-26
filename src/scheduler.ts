@@ -18,6 +18,7 @@ import {
   enforceRealityGateBeforeTerminal,
   atomicWrite,
   initializeReservedRun,
+  readOperationalRunState,
   readRunReservation,
   readRunState,
   requireRunArtifactDirectory,
@@ -169,6 +170,20 @@ import {
 import { recordBlockageOccurrence } from './blockage-ledger.js';
 import { inspectTemporalResearchTests } from './temporal-test-guard.js';
 import { validateGateControls } from './verdict-controls.js';
+import {
+  RollbackContentStore,
+  hashRollbackFileCooperatively,
+  hashRollbackFileSync,
+  rollbackStatIdentitiesEqual,
+  rollbackStatIdentity,
+  type RollbackStatIdentity,
+} from './rollback-content-store.js';
+import {
+  SCHEDULER_HEARTBEAT_FILE,
+  SCHEDULER_LOOP_STALL_FILE,
+  startSchedulerHeartbeat,
+  type SchedulerHeartbeatHandle,
+} from './scheduler-heartbeat.js';
 import {
   buildMonotonePlanRetryContext,
   planRetryPairDigest,
@@ -1124,7 +1139,24 @@ async function tryParkOnApprovalRequest(
 }
 
 /** Watch every active stage slot and park within one heartbeat of a request. */
-async function monitorApprovalRequests(input: {
+export async function inspectApprovalRequests(input: {
+  selected: readonly StageConfig[];
+  projectDir: string;
+  runId: string;
+  runDirPath: string;
+  iteration: number;
+}): Promise<StoreState | null> {
+  const state = readOperationalRunState(input.projectDir, input.runId);
+  return tryParkOnApprovalRequest(state, {
+    projectDir: input.projectDir,
+    runId: input.runId,
+    runDirPath: input.runDirPath,
+    iteration: input.iteration,
+    candidateStageIds: input.selected.map((stage) => stage.id),
+  });
+}
+
+export async function monitorApprovalRequests(input: {
   selected: readonly StageConfig[];
   projectDir: string;
   runId: string;
@@ -1136,14 +1168,7 @@ async function monitorApprovalRequests(input: {
   let wake: (() => void) | undefined;
   const inspect = async (): Promise<void> => {
     if (parked) return;
-    const state = readRunState(input.projectDir, input.runId);
-    parked = await tryParkOnApprovalRequest(state, {
-      projectDir: input.projectDir,
-      runId: input.runId,
-      runDirPath: input.runDirPath,
-      iteration: input.iteration,
-      candidateStageIds: input.selected.map((stage) => stage.id),
-    });
+    parked = await inspectApprovalRequests(input);
   };
   const watchers: import('node:fs').FSWatcher[] = [];
   try {
@@ -1152,7 +1177,12 @@ async function monitorApprovalRequests(input: {
       ...input.selected.map((stage) => join(input.runDirPath, 'stages', stage.id)),
     ]) {
       mkdirSync(directory, { recursive: true });
-      watchers.push(watch(directory, { persistent: false }, () => wake?.()));
+      watchers.push(watch(directory, { persistent: false }, (_event, fileName) => {
+        const name = fileName?.toString();
+        if (directory === input.runDirPath
+            && (name === SCHEDULER_HEARTBEAT_FILE || name === SCHEDULER_LOOP_STALL_FILE)) return;
+        wake?.();
+      }));
     }
   } catch { /* one-second heartbeat remains the portable fallback */ }
   try {
@@ -4670,6 +4700,12 @@ interface RepairFileImage {
   text?: string;
   /** In-memory rollback bytes; omitted from serialized audit artifacts. */
   bytes?: Buffer;
+  /** Scheduler-owned preimage outside the watched project; never serialized. */
+  backingPath?: string;
+  /** Trusted nomination metadata. Content equality still uses the hash. */
+  statIdentity?: RollbackStatIdentity;
+  /** Latest current identity whose bytes were verified equal to this preimage. */
+  verifiedStatIdentity?: RollbackStatIdentity;
   symlink?: boolean;
   type?: 'file' | 'symlink' | 'gitlink' | 'sparse_tree' | 'unmerged';
   /** The index kind stays explicit even when filesystem bytes are readable. */
@@ -4695,6 +4731,7 @@ interface RunRollbackBaseline {
   key: string;
   projectDir: string;
   runDirPath?: string;
+  contentStore: RollbackContentStore;
   images: Map<string, RepairFileImage>;
   fingerprints: Map<string, RepairFileFingerprint>;
   cleanTracked: Set<string>;
@@ -5132,6 +5169,7 @@ function readRepairFileImage(
   projectDir: string,
   relativePath: string,
   indexEntries?: readonly LiveConstraintGitIndexEntry[],
+  options: { contentStore?: RollbackContentStore } = {},
 ): RepairFileImage {
   const normalized = normalizedProjectPath(relativePath);
   if (!normalized) return { exists: false, provenance: 'unknown' };
@@ -5187,15 +5225,33 @@ function readRepairFileImage(
   }
   if (!stat.isFile()) return { exists: false, provenance: 'unknown', ...(kind ? { indexEntryKind: kind } : {}) };
   try {
-    const bytes = readFileSync(absolute);
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    let backingPath: string | undefined;
+    const captured = options.contentStore
+      ? (() => {
+          const result = options.contentStore!.capture(absolute, normalized);
+          backingPath = result.backingPath;
+          return result;
+        })()
+      : hashRollbackFileSync(absolute);
+    const { sha256, byteLength, statIdentity } = captured;
+    // Keep the existing human-readable audit detail for small files. Large
+    // rollback content remains only in scheduler-owned disk backing.
+    const bytes = byteLength <= 1024 * 1024 ? readFileSync(backingPath ?? absolute) : undefined;
     let text: string | undefined;
-    if (!bytes.includes(0)) {
+    if (bytes && !bytes.includes(0)) {
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* binary/non-UTF8 */ }
     }
     return text === undefined
-      ? { exists: true, sha256, byteLength: bytes.byteLength, binary: true, bytes, type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}) }
-      : { exists: true, sha256, byteLength: bytes.byteLength, binary: false, text, type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}) };
+      ? {
+          exists: true, sha256, byteLength, binary: true, ...(bytes ? { bytes } : {}),
+          ...(backingPath ? { backingPath } : {}), statIdentity,
+          type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}),
+        }
+      : {
+          exists: true, sha256, byteLength, binary: false, text,
+          ...(backingPath ? { backingPath } : {}), statIdentity,
+          type: 'file', mode: stat.mode & 0o7777, ...(kind ? { indexEntryKind: kind } : {}),
+        };
   } catch (error) {
     return {
       exists: true,
@@ -5209,6 +5265,7 @@ function readRepairFileImage(
 
 function repairFileImageBytes(image: RepairFileImage): number {
   if (!image.exists) return 0;
+  if (image.byteLength !== undefined) return image.byteLength;
   if (image.bytes) return image.bytes.byteLength;
   return Buffer.byteLength(image.text ?? '', 'utf-8');
 }
@@ -5252,6 +5309,7 @@ function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void 
 
 function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRollbackBaseline {
   const key = rollbackBaselineKey(projectDir, runDirPath);
+  const contentStore = new RollbackContentStore(runDirPath);
   const images = new Map<string, RepairFileImage>();
   const fingerprints = new Map<string, RepairFileFingerprint>();
   const cleanTracked = new Set<string>();
@@ -5284,7 +5342,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     filesEnumerated = tracked.size + [...dirty].filter((path) => !tracked.has(path)).length;
     for (const path of tracked) if (!dirty.has(path)) cleanTracked.add(path);
     for (const path of dirty) {
-      const image = readRepairFileImage(projectDir, path, indexEntries.get(path));
+      const image = readRepairFileImage(projectDir, path, indexEntries.get(path), { contentStore });
       images.set(path, image);
       const fingerprint = repairFileFingerprint(image);
       if (fingerprint) fingerprints.set(path, fingerprint);
@@ -5300,7 +5358,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     // now, before any stage can change a nested repository.
     for (const [path, entries] of trackedEntries) {
       if (stageZeroIndexEntry(entries)?.kind !== 'gitlink' || images.has(path)) continue;
-      const image = readRepairFileImage(projectDir, path, entries);
+      const image = readRepairFileImage(projectDir, path, entries, { contentStore });
       images.set(path, image);
       const fingerprint = repairFileFingerprint(image);
       if (fingerprint) fingerprints.set(path, fingerprint);
@@ -5316,7 +5374,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     gitRoot = undefined;
     for (const path of listProjectFiles(projectDir)) {
       filesEnumerated++;
-      const image = readRepairFileImage(projectDir, path);
+      const image = readRepairFileImage(projectDir, path, undefined, { contentStore });
       images.set(path, image);
       const fingerprint = repairFileFingerprint(image);
       if (fingerprint) fingerprints.set(path, fingerprint);
@@ -5329,7 +5387,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
   }
   const baseline: RunRollbackBaseline = {
-    key, projectDir, runDirPath, images, fingerprints, cleanTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
+    key, projectDir, runDirPath, contentStore, images, fingerprints, cleanTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
     journal: new Map(), journalSequence: 0, reliable: true,
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
@@ -5467,12 +5525,95 @@ function readRollbackCurrentImage(
   baseline: RunRollbackBaseline,
   projectDir: string,
   path: string,
+  before?: RepairFileImage,
 ): RepairFileImage {
+  const identity = rollbackStatIdentity(join(projectDir, path));
+  if (before?.type === 'file' && before.sha256 !== undefined
+      && rollbackStatIdentitiesEqual(before.verifiedStatIdentity ?? before.statIdentity, identity)) {
+    return {
+      exists: true,
+      type: 'file',
+      sha256: before.sha256,
+      byteLength: before.byteLength,
+      binary: before.binary,
+      mode: Number(BigInt(identity!.mode) & 0o7777n),
+      statIdentity: identity,
+      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
+    };
+  }
   return readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path));
 }
 
+async function readRollbackCurrentImageCooperatively(
+  baseline: RunRollbackBaseline,
+  projectDir: string,
+  path: string,
+  before: RepairFileImage,
+): Promise<RepairFileImage> {
+  const absolute = join(projectDir, path);
+  const identity = rollbackStatIdentity(absolute);
+  if (before.type === 'file' && before.sha256 !== undefined
+      && rollbackStatIdentitiesEqual(before.verifiedStatIdentity ?? before.statIdentity, identity)) {
+    return {
+      exists: true,
+      type: 'file',
+      sha256: before.sha256,
+      byteLength: before.byteLength,
+      binary: before.binary,
+      mode: Number(BigInt(identity!.mode) & 0o7777n),
+      statIdentity: identity,
+      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
+    };
+  }
+  if (identity?.type !== 'file') return readRollbackCurrentImage(baseline, projectDir, path, before);
+  try {
+    const hashed = await hashRollbackFileCooperatively(absolute);
+    if (hashed.sha256 === before.sha256 && hashed.byteLength === before.byteLength) {
+      // Promote only nomination metadata. The immutable preimage identity,
+      // mode and backing bytes must remain available for later rollback and
+      // attributed metadata-write judgment.
+      before.verifiedStatIdentity = hashed.statIdentity;
+    }
+    return {
+      exists: true,
+      type: 'file',
+      sha256: hashed.sha256,
+      byteLength: hashed.byteLength,
+      binary: true,
+      mode: Number(BigInt(hashed.statIdentity.mode) & 0o7777n),
+      statIdentity: hashed.statIdentity,
+      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
+    };
+  } catch (error) {
+    return {
+      exists: true,
+      type: 'file',
+      mode: before.mode,
+      statIdentity: identity,
+      inspectionFailure: `could not hash ${path} cooperatively: ${describeRepairError(error)}`,
+      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
+    };
+  }
+}
+
+function captureRollbackCurrentImage(
+  baseline: RunRollbackBaseline,
+  projectDir: string,
+  path: string,
+  before?: RepairFileImage,
+): RepairFileImage {
+  const identity = rollbackStatIdentity(join(projectDir, path));
+  if (before && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
+  return readRepairFileImage(
+    projectDir,
+    path,
+    baseline.gitIndexEntries.get(path),
+    { contentStore: baseline.contentStore },
+  );
+}
+
 function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
-  const image = readRollbackCurrentImage(baseline, projectDir, path);
+  const image = captureRollbackCurrentImage(baseline, projectDir, path, baseline.images.get(path));
   baseline.images.set(path, image);
   const fingerprint = repairFileFingerprint(image);
   if (fingerprint) baseline.fingerprints.set(path, fingerprint);
@@ -5491,6 +5632,7 @@ function closeRollbackBaseline(projectDir: string, runDirPath: string): void {
   const key = rollbackBaselineKey(projectDir, runDirPath);
   const baseline = rollbackBaselines.get(key);
   baseline?.watcher?.close();
+  baseline?.contentStore.cleanup();
   rollbackBaselines.delete(key);
 }
 
@@ -5571,9 +5713,45 @@ function changedProjectPathsSinceSnapshot(
   if (!baseline.reliable) snapshot.measurement.conservativeFallback = true;
   return [...candidates].sort().filter((path) => {
     const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
-    const after = readRollbackCurrentImage(baseline, projectDir, path);
+    const after = readRollbackCurrentImage(baseline, projectDir, path, before);
     return compareRepairFileContents(before, after) === 'different';
   });
+}
+
+export async function changedProjectPathsSinceSnapshotCooperatively(
+  snapshot: RepairRoundSnapshot,
+  projectDir: string,
+): Promise<string[]> {
+  const baseline = snapshot.rollbackBaseline;
+  const candidates = baseline.reliable
+    ? new Set([
+        ...snapshot.files.keys(),
+        ...[...baseline.journal.entries()]
+          .filter(([, sequence]) => sequence > snapshot.journalCursor)
+          .map(([path]) => path),
+      ])
+    : new Set([
+        ...listProjectFiles(projectDir, {
+          skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
+        }),
+        ...baseline.images.keys(),
+        ...snapshot.files.keys(),
+      ]);
+  if (!baseline.reliable) snapshot.measurement.conservativeFallback = true;
+  const changed: string[] = [];
+  for (const path of [...candidates].sort()) {
+    const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
+    const after = await readRollbackCurrentImageCooperatively(baseline, projectDir, path, before);
+    if (compareRepairFileContents(before, after) === 'different') changed.push(path);
+  }
+  return changed;
+}
+
+/** Explicit lifecycle hook for standalone repair-snapshot consumers and tests. */
+export function closeRepairRoundSnapshot(snapshot: RepairRoundSnapshot): void {
+  snapshot.rollbackBaseline.watcher?.close();
+  snapshot.rollbackBaseline.contentStore.cleanup();
+  rollbackBaselines.delete(snapshot.rollbackBaseline.key);
 }
 
 export function captureRepairRoundSnapshot(
@@ -5639,14 +5817,14 @@ export function captureRepairRoundSnapshot(
   }
   const files = new Map<string, RepairFileImage>();
   for (const path of scopedPaths) {
-    const image = readRollbackCurrentImage(baseline, projectDir, path);
+    const image = captureRollbackCurrentImage(baseline, projectDir, path, baselineImage(baseline, path));
     files.set(path, image);
   }
   // Exact paths need an explicit absent preimage so a newly-created file is
   // distinguishable from an out-of-scope write whose preimage was unavailable.
   for (const scope of parsedScopes) {
     if (scope.kind === 'exact' && !files.has(scope.value)) {
-      files.set(scope.value, readRollbackCurrentImage(baseline, projectDir, scope.value));
+      files.set(scope.value, captureRollbackCurrentImage(baseline, projectDir, scope.value));
     }
   }
   const scopedBytes = [...files.values()].reduce((total, image) => total + repairFileImageBytes(image), 0);
@@ -5724,7 +5902,7 @@ export function restoreProjectPath(
         : { restored: false, failure: `new path ${normalized} remained after removal` };
     }
     const bytes = repairFileMaterializedBytes(before);
-    if (bytes === undefined) {
+    if (bytes === undefined && before.backingPath === undefined) {
       return {
         restored: false,
         failure: before.materializationFailure
@@ -5739,8 +5917,13 @@ export function restoreProjectPath(
       .slice(0, 16);
     temporary = join(dirname(absolute), `.${basename(absolute)}.flowcrew-restore-${token}`);
     if (before.symlink) {
+      if (!bytes) throw new Error(`symbolic-link preimage bytes are unavailable for ${normalized}`);
       symlinkSync(bytes, temporary);
+    } else if (before.backingPath) {
+      copyFileSync(before.backingPath, temporary);
+      if (before.mode !== undefined) chmodSync(temporary, before.mode);
     } else {
+      if (!bytes) throw new Error(`regular-file preimage bytes are unavailable for ${normalized}`);
       writeFileSync(temporary, bytes, { flag: 'wx', mode: before.mode ?? 0o600 });
       if (before.mode !== undefined) chmodSync(temporary, before.mode);
     }
@@ -6066,7 +6249,7 @@ function serializableRepairFileImage(image: RepairFileImage): Record<string, unk
 function repairFilePreimageAvailable(image: RepairFileImage): boolean {
   if (image.inspectionFailure) return false;
   if (!image.exists) return true;
-  return repairFileMaterializedBytes(image) !== undefined;
+  return image.backingPath !== undefined || repairFileMaterializedBytes(image) !== undefined;
 }
 
 export function writeRepairRoundDiffArtifact(input: {
@@ -9964,7 +10147,16 @@ export async function runWorkflow(
   // Supervisor and pid cleanup cover every return after admission, including
   // brief/frontmatter validation failures before the iteration loop.
   let supervisor: Supervisor | undefined;
+  let schedulerHeartbeat: SchedulerHeartbeatHandle | undefined;
   try {
+  const heartbeatDefaults = loadDefaults(projectDir);
+  schedulerHeartbeat = startSchedulerHeartbeat({
+    runPath: runDirPath,
+    runId,
+    intervalMs: heartbeatDefaults.scheduler_heartbeat_interval_ms,
+    stallThresholdMs: heartbeatDefaults.scheduler_stall_threshold_ms,
+    observerPollMs: heartbeatDefaults.scheduler_stall_observer_poll_ms,
+  });
   log.info({ runId, workflow: workflow.name }, 'Run started');
 
   if (taskDescription || autoApprove || supervise || campaignId || briefAdmission) {
@@ -11706,6 +11898,7 @@ export async function runWorkflow(
   return finalState;
   } finally {
     closeRollbackBaseline(projectDir, runDirPath);
+    schedulerHeartbeat?.stop();
     if (supervisor) {
       try { supervisor.stop(); } catch (err) { log.warn({ err }, 'Supervisor stop failed'); }
     }
@@ -12214,23 +12407,18 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         gate: input.stage.is_gate === true,
         violatingPaths: paths,
       }),
-      scanAndRestore: (candidatePaths, trigger) => {
+      scanAndRestore: async (candidatePaths, trigger) => {
         const baseline = input.context.snapshot.rollbackBaseline;
         const candidates = new Set<string>();
+        const exemptCandidates = new Set<string>();
         const exemptedPaths = new Set<string>();
         const addCandidate = (rawPath: string, directlyObserved = false): void => {
           const observedPath = normalizedProjectPath(rawPath);
           if (!observedPath) return;
           const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
           if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)) {
-            const before = baselineImage(baseline, path);
-            const current = readRollbackCurrentImage(baseline, input.projectDir, path);
-            if (directlyObserved || compareRepairFileContents(before, current) === 'different') {
-              exemptedPaths.add(path);
-            }
-            if (compareRepairFileContents(before, current) === 'different') {
-              settleRollbackBaselinePath(baseline, input.projectDir, path);
-            }
+            if (directlyObserved) exemptedPaths.add(path);
+            exemptCandidates.add(path);
             return;
           }
           candidates.add(path);
@@ -12266,13 +12454,30 @@ function createSchedulerLiveConstraintGuardFactory(input: {
               if (known.startsWith(prefix)) addCandidate(known);
             }
           }
-          for (const path of changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir)) {
+          for (const path of await changedProjectPathsSinceSnapshotCooperatively(input.context.snapshot, input.projectDir)) {
             addCandidate(path);
           }
         }
+        for (const path of [...exemptCandidates].sort()) {
+          const before = baselineImage(baseline, path);
+          const current = await readRollbackCurrentImageCooperatively(
+            baseline,
+            input.projectDir,
+            path,
+            before,
+          );
+          if (compareRepairFileContents(before, current) !== 'different') continue;
+          exemptedPaths.add(path);
+          settleRollbackBaselinePath(baseline, input.projectDir, path);
+        }
         for (const path of [...candidates].sort()) {
           const before = baselineImage(baseline, path);
-          const current = readRollbackCurrentImage(baseline, input.projectDir, path);
+          const current = await readRollbackCurrentImageCooperatively(
+            baseline,
+            input.projectDir,
+            path,
+            before,
+          );
           const comparison = compareRepairFileContents(before, current);
           if (comparison === 'equal') continue;
           if (comparison === 'unavailable') {

@@ -1231,6 +1231,20 @@ function emptyRunHistories(): RunHistories {
   return { supervisorAttempts: [], retiredStageUsage: [], stageEvidence: [] };
 }
 
+/**
+ * Compare values as they exist in the JSON-backed store. Optional properties
+ * whose value is `undefined` are intentionally absent after persistence; a
+ * comparison against the pre-serialization object must not turn that harmless
+ * representation change into another history record on every write.
+ */
+function isJsonPersistedEqual(left: unknown, right: unknown): boolean {
+  const persisted = (value: unknown): unknown => {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? undefined : JSON.parse(encoded) as unknown;
+  };
+  return isDeepStrictEqual(persisted(left), persisted(right));
+}
+
 function historyRef(value: unknown): RunHistoryRef | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const format = value as Partial<RunStateFormat>;
@@ -1396,7 +1410,7 @@ function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | un
   if (!incoming) return current;
   const overlap = Math.min(current.length, incoming.length);
   for (let index = 0; index < overlap; index += 1) {
-    if (!isDeepStrictEqual(current[index], incoming[index])) {
+    if (!isJsonPersistedEqual(current[index], incoming[index])) {
       throw new Error(`Refusing to rewrite acknowledged append-only ${name}[${index}]`);
     }
   }
@@ -1511,7 +1525,7 @@ function appendHistoryDelta(
   const records: RunHistoryRecord[] = [];
   for (const kind of ['supervisorAttempts', 'retiredStageUsage', 'stageEvidence'] as const) {
     for (let index = 0; index < desired[kind].length; index += 1) {
-      if (index >= committed[kind].length || !isDeepStrictEqual(committed[kind][index], desired[kind][index])) {
+      if (index >= committed[kind].length || !isJsonPersistedEqual(committed[kind][index], desired[kind][index])) {
         records.push({ version: 1, kind, index, value: desired[kind][index] });
       }
     }
@@ -1639,7 +1653,7 @@ function persistRunStateUnlocked(
     }
   };
 
-  if (currentProjection && isDeepStrictEqual(currentProjection, comparable)) {
+  if (currentProjection && isJsonPersistedEqual(currentProjection, comparable)) {
     assertProjectionUnchanged();
     copyPersistedHistoryState(state, { ...merged, stateFormat: comparable.stateFormat });
     try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
@@ -1661,6 +1675,24 @@ export function readArchivedRunState(projectDir: string, runId: string): Archive
     readFileSync(join(path, 'run.json'), 'utf-8'),
   ) as ArchivedStoreState);
   return { state: parsed, status: resolveRunStatus(parsed?.status) };
+}
+
+/**
+ * Read only the compact operational projection in run.json. Timer/watch
+ * callbacks whose decisions use projected fields must use this path so their
+ * cost is independent of the append-only history size. The history reference
+ * is still validated fail-closed, but its acknowledged bytes are deliberately
+ * not read or hydrated.
+ */
+export function readOperationalRunState(projectDir: string, runId: string): StoreState {
+  const path = runDir(projectDir, runId);
+  const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as ArchivedStoreState;
+  requireKnownRunStatus(parsed.status, `read operational run state ${runId}`);
+  if (parsed.runId !== runId) {
+    throw new Error(`Run state id ${String(parsed.runId)} does not match target ${runId}`);
+  }
+  if (parsed.stateFormat) historyRef(parsed.stateFormat);
+  return parsed as StoreState;
 }
 
 /**

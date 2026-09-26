@@ -25,6 +25,8 @@ export type RunEventType =
   | 'live_constraint_comparison_unavailable'
   | 'live_constraint_exemptions'
   | 'live_constraint_monitor_failure'
+  | 'scheduler_loop_stalled'
+  | 'scheduler_loop_recovered'
   | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'

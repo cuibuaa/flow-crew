@@ -29,6 +29,12 @@ export interface ProjectDefaults {
   live_constraint_fallback_scan_ms: number;
   /** Longest interval without a completed live-constraint scan. */
   live_constraint_monitor_deadline_ms: number;
+  /** Scheduler-loop progress publication cadence. */
+  scheduler_heartbeat_interval_ms: number;
+  /** Nonadvancing duration before the independent observer warns. */
+  scheduler_stall_threshold_ms: number;
+  /** Independent observer polling cadence. */
+  scheduler_stall_observer_poll_ms: number;
   /** Dedicated bound for potentially large `git worktree add` checkouts. */
   git_worktree_add_timeout_ms: number;
   max_iterations: number;
@@ -293,6 +299,9 @@ export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults
     live_constraint_exempt_patterns: liveConstraintExemptPatternsValue(raw, template),
     live_constraint_fallback_scan_ms: positiveNumberValue(raw, template, 'live_constraint_fallback_scan_ms'),
     live_constraint_monitor_deadline_ms: positiveNumberValue(raw, template, 'live_constraint_monitor_deadline_ms'),
+    scheduler_heartbeat_interval_ms: positiveNumberValue(raw, template, 'scheduler_heartbeat_interval_ms'),
+    scheduler_stall_threshold_ms: positiveNumberValue(raw, template, 'scheduler_stall_threshold_ms'),
+    scheduler_stall_observer_poll_ms: positiveNumberValue(raw, template, 'scheduler_stall_observer_poll_ms'),
     git_worktree_add_timeout_ms: positiveNumberValue(raw, template, 'git_worktree_add_timeout_ms'),
     max_iterations: numberValue(raw, template, 'default_max_iterations'),
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
@@ -320,7 +329,9 @@ function compatibleCandidateDefaults(value: unknown): value is ProjectDefaults {
   const item = value as Partial<ProjectDefaults>;
   const positiveNumbers = [
     item.timeout_ms, item.validation_timeout_ms, item.live_constraint_fallback_scan_ms,
-    item.live_constraint_monitor_deadline_ms, item.git_worktree_add_timeout_ms,
+    item.live_constraint_monitor_deadline_ms, item.scheduler_heartbeat_interval_ms,
+    item.scheduler_stall_threshold_ms, item.scheduler_stall_observer_poll_ms,
+    item.git_worktree_add_timeout_ms,
   ];
   const nonnegativeNumbers = [
     item.max_iterations, item.gate_retry_loops, item.stage_technical_retries,

@@ -47,6 +47,7 @@ import type { AgentConfig, Adapter } from "./adapters/base.js";
 import { loadAdapterByName } from './adapters/loader.js';
 import { resolveAdapterChoice } from './adapters/availability.js';
 import { readAttemptSummaryRefreshState } from "./run-events.js";
+import { readActiveSchedulerLoopStall } from './scheduler-heartbeat.js';
 import {
   claimLaunchIntent,
   describeLiveRunOwner,
@@ -1131,6 +1132,12 @@ export function schedulerIsAliveForRun(projectDir: string, runId: string): boole
   }
 }
 
+export function schedulerLoopIsStalled(projectDir: string, runId: string): boolean {
+  if (!projectDir || !runId) return false;
+  try { return readActiveSchedulerLoopStall(runDir(projectDir, runId)) !== undefined; }
+  catch { return false; }
+}
+
 function campaignStorageAliases(id: string): Set<string> {
   const aliases = new Set<string>([id]);
   const normalized = id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -1485,12 +1492,16 @@ export function campaignSummary(id: string, dir: string): WorkspaceCampaign {
   // exited without writing terminal status (framework bug or crash).
   // Override to 'stale' so the dashboard stops showing it as RUNNING.
   if (status === CAMPAIGN_PRESENTATION_STATUS.RUNNING) {
+    const projectDir = getStringAt(state, ['projectDir']) ?? '';
+    if (latestRunId && schedulerLoopIsStalled(projectDir, latestRunId)) {
+      status = CAMPAIGN_PRESENTATION_STATUS.STALE;
+    }
     const STALE_MS = 30 * 60 * 1000;
     let lastMtime = 0;
     try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'state.json')).mtimeMs); } catch { /* ignore */ }
     try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'iteration_log.jsonl')).mtimeMs); } catch { /* ignore */ }
-    if (lastMtime > 0 && Date.now() - lastMtime > STALE_MS) {
-      const projectDir = getStringAt(state, ['projectDir']) ?? '';
+    if (status === CAMPAIGN_PRESENTATION_STATUS.RUNNING
+        && lastMtime > 0 && Date.now() - lastMtime > STALE_MS) {
       const underlying = latestRunId ? readRunStateSafe(projectDir, latestRunId) : null;
       status = underlying && (
         isTerminalRunStatus(underlying.status)
@@ -1680,7 +1691,9 @@ function campaignFromHistory(
     // Silence is not death — check the process before demoting. See
     // schedulerIsAliveForRun.
     const quietRunId = runs.find((run) => run.outcome === RUN_STATUS.RUNNING)?.id ?? latest?.runId;
-    if (
+    if (quietRunId && schedulerLoopIsStalled(projectDir, quietRunId)) {
+      rawStatus = CAMPAIGN_PRESENTATION_STATUS.STALE;
+    } else if (
       lastActivity > 0
       && Date.now() - lastActivity > STALE_MS
       && !(quietRunId && schedulerIsAliveForRun(projectDir, quietRunId))

@@ -26,6 +26,11 @@ live_constraint_exempt_patterns:
 # reconciliation scan and how long an attempt may go without a completed scan.
 live_constraint_fallback_scan_ms: 30000
 live_constraint_monitor_deadline_ms: 600000
+# Scheduler progress is published on its own loop; an independent process
+# warns when a live, identity-bound scheduler stops advancing it.
+scheduler_heartbeat_interval_ms: 2000
+scheduler_stall_threshold_ms: 120000
+scheduler_stall_observer_poll_ms: 5000
 # Large worktrees on slow filesystems need a checkout-specific bound. Ordinary
 # Git probes retain their smaller command-local bounds.
 git_worktree_add_timeout_ms: 1800000
