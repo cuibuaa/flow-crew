@@ -170,30 +170,41 @@ export class SupervisorEventCursor {
 
   offer(candidates: readonly SupervisorEventCandidate[]): void {
     for (const candidate of candidates) {
-      const event = createSupervisorEvent(candidate);
+      let event = createSupervisorEvent(candidate);
       if (this.seen.has(event.eventId)) continue;
       if (candidate.type === 'artifact_change') {
         // An artifact threshold is cumulative until assessed. Retain the most
-        // recent aggregate instead of queuing one stale prefix per heartbeat.
+        // recent aggregate instead of queuing one stale prefix per heartbeat,
+        // but keep the first threshold time for intervention-latency accounting.
+        let firstObservedAt = event.observedAt;
         for (const [eventId, pending] of this.pending) {
-          if (pending.type === 'artifact_change' && eventId !== event.eventId) this.pending.delete(eventId);
+          if (pending.type !== 'artifact_change') continue;
+          if (Date.parse(pending.observedAt) < Date.parse(firstObservedAt)) {
+            firstObservedAt = pending.observedAt;
+          }
+          if (eventId !== event.eventId) this.pending.delete(eventId);
         }
+        event = { ...event, observedAt: firstObservedAt };
       }
       if (this.pending.has(event.eventId)) continue;
       this.pending.set(event.eventId, event);
     }
   }
 
-  next(): SupervisorEvent | undefined {
+  peek(): SupervisorEvent | undefined {
     const time = (value: string): number => {
       const parsed = Date.parse(value);
       return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
     };
-    const selected = [...this.pending.values()].sort((left, right) => (
+    return [...this.pending.values()].sort((left, right) => (
       EVENT_PRIORITY[left.type] - EVENT_PRIORITY[right.type]
       || time(left.observedAt) - time(right.observedAt)
       || left.eventId.localeCompare(right.eventId)
     ))[0];
+  }
+
+  next(): SupervisorEvent | undefined {
+    const selected = this.peek();
     if (!selected) return undefined;
     const coalesced = [...this.pending.values()];
     for (const event of coalesced) {

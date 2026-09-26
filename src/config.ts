@@ -61,10 +61,11 @@ export interface SupervisorConfig {
   reasoningEffort: string;
   /** Cheap state/output heartbeat cadence. */
   pollIntervalMs: number;
-  /** Minimum cadence between ordinary semantic LLM assessments. */
+  /** Minimum gap after a successful WAIT on a concurrent-stage artifact event;
+   * all other deterministic events remain immediate. */
   routineAssessmentIntervalMs: number;
   cooldownAfterActionMs: number;
-  /** Budget: assessments per campaign iteration. Refills when state.currentIteration advances. */
+  /** Per-iteration assessment count shown in telemetry; not a call limit. */
   maxAssessmentsPerIteration: number;
   tailBytes: number;
   minDeltaBytes: number;

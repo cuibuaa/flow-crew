@@ -1,17 +1,21 @@
-import { readFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import ts from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildSupervisorSystemPrompt,
   detectSupervisorAnomalySignals,
   selectSupervisorAssessmentTrigger,
   summarizeSupervisorGuidanceHistory,
+  Supervisor,
   SUPERVISOR_VERDICTS,
 } from '../src/supervisor.js';
-import { loadSupervisorConfig } from '../src/config.js';
+import { loadSupervisorConfig, type SupervisorConfig } from '../src/config.js';
+import type { Adapter } from '../src/adapters/base.js';
 import type { StoreState } from '../src/store.js';
-import { createSupervisorEvent } from '../src/supervisor-events.js';
+import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createSupervisorEvent, SupervisorEventCursor } from '../src/supervisor-events.js';
 
 const eventQuantities = {
   iteration: 1,
@@ -225,6 +229,127 @@ describe('supervisor routine/anomaly scheduling', () => {
       'pending_approval_state:', 'user_input:',
     ]) {
       expect(signals.some((signal) => signal.startsWith(prefix)), prefix).toBe(true);
+    }
+  });
+
+  it('defers only repeated concurrent artifact events and leaves urgent or guided work immediate', () => {
+    const quantities = { ...eventQuantities, runningStageCount: 2, changedPathCount: 2, changedBytes: 8192 };
+    const artifact = createSupervisorEvent({
+      type: 'artifact_change', observedAt: '2026-09-25T00:01:00.000Z', source: 'test',
+      fingerprint: { version: 1 }, quantities,
+    });
+    const gate = createSupervisorEvent({
+      type: 'gate_verdict', observedAt: '2026-09-25T00:01:00.000Z', source: 'test',
+      fingerprint: { path: 'verdict.json' }, quantities,
+    });
+    const clock = { now: 60_000, lastRoutineAssessmentAt: 30_000,
+      routineAssessmentIntervalMs: 180_000, routineAssessmentsThisIteration: 20,
+      maxRoutineAssessmentsPerIteration: 20 };
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
+      ...clock, lastRoutineAssessmentAt: undefined })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact], ...clock })).toBe('none');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
+      ...clock, now: 210_000 })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
+      ...clock, hasGuidedActiveAttempt: true })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [{
+      ...artifact, quantities: { ...quantities, runningStageCount: 1, changedPathCount: 1 },
+    }], ...clock })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [gate], ...clock })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [], ...clock })).toBe('none');
+
+    const cursor = new SupervisorEventCursor();
+    cursor.offer([{ type: 'artifact_change', observedAt: artifact.observedAt, source: 'test',
+      fingerprint: { version: 1 }, quantities }]);
+    expect(cursor.peek()?.eventId).toBe(artifact.eventId);
+    expect(cursor.peek()?.eventId).toBe(artifact.eventId);
+    expect(cursor.pendingCount).toBe(1);
+    cursor.offer([{ type: 'artifact_change', observedAt: '2026-09-25T00:01:30.000Z', source: 'test',
+      fingerprint: { version: 2 }, quantities }]);
+    expect(cursor.pendingCount).toBe(1);
+    expect(cursor.peek()?.observedAt).toBe(artifact.observedAt);
+    cursor.offer([{ type: 'gate_verdict', observedAt: gate.observedAt, source: 'test',
+      fingerprint: { path: 'verdict.json' }, quantities }]);
+    expect(cursor.peek()?.type).toBe('gate_verdict');
+    expect(cursor.next()?.quantities.coalescedEventCount).toBe(2);
+    expect(cursor.pendingCount).toBe(0);
+  });
+
+  it('retains deferred evidence and reviews it after the interval', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'flowcrew-concurrent-cadence-'));
+    const priorFcHome = fcGlobalDir();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'));
+    setFcGlobalDir(join(root, 'fc-home'));
+    let supervisor: Supervisor | undefined;
+    try {
+      const project = join(root, 'project');
+      const yaml = 'name: cadence\nstages:\n  - id: left\n    role: coder\n  - id: right\n    role: coder\n';
+      const created = createRun(project, 'cadence', yaml, ['left', 'right']);
+      const state = readRunState(project, created.runId);
+      const startedAt = '2026-09-25T00:00:00.000Z';
+      for (const stageId of ['left', 'right']) {
+        state.stages[stageId] = { status: 'running', retries: 0, startedAt,
+          attempts: [{ index: 1, startedAt, status: 'running' }] };
+        const dir = join(runDir(project, created.runId), 'stages', stageId);
+        writeFileSync(join(dir, 'attempt_generation.json'), JSON.stringify({
+          version: 1, stageId, attemptIndex: 1, attemptStartedAt: startedAt, segmentStart: 0,
+        }));
+        writeFileSync(join(dir, 'live.log'), '');
+      }
+      writeRunState(project, created.runId, state);
+      const prompts: string[] = [];
+      const adapter: Adapter = { async run(prompt) {
+        prompts.push(prompt);
+        return { output: '{"verdict":"WAIT","target_stage":null,"reason":"progress","guidance":null}',
+          exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
+      } };
+      const config: SupervisorConfig = { enabled: true, adapter: 'mock', model: 'default',
+        reasoningEffort: 'low', pollIntervalMs: 30_000, routineAssessmentIntervalMs: 180_000,
+        cooldownAfterActionMs: 0, maxAssessmentsPerIteration: 1, tailBytes: 16_384,
+        minDeltaBytes: 4096, stuckThresholdMs: 600_000 };
+      supervisor = new Supervisor(project, created.runId, adapter, config, 'observe work');
+      supervisor.start();
+      const tick = () => (supervisor as unknown as { tick(): Promise<void> }).tick();
+      await tick();
+      const append = (label: string) => {
+        for (const stageId of ['left', 'right']) {
+          appendFileSync(join(runDir(project, created.runId), 'stages', stageId, 'live.log'),
+            JSON.stringify({ type: 'item.completed', item: { type: 'agent_message',
+              text: `${label} ${'x'.repeat(5000)}` } }) + '\n');
+        }
+      };
+      vi.setSystemTime(new Date('2026-09-25T00:00:30.000Z'));
+      append('first review');
+      await tick();
+      expect(prompts).toHaveLength(2);
+      vi.setSystemTime(new Date('2026-09-25T00:01:00.000Z'));
+      append('DEFERRED_ACTION_SENTINEL');
+      await tick();
+      expect(prompts).toHaveLength(2);
+      const pending = JSON.parse(readFileSync(join(runDir(project, created.runId),
+        'supervisor_state.json'), 'utf8')) as { eventCursor: { pendingEvents: unknown[] } };
+      expect(pending.eventCursor.pendingEvents).toHaveLength(1);
+      vi.setSystemTime(new Date('2026-09-25T00:03:31.000Z'));
+      await tick();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[2]).toContain('DEFERRED_ACTION_SENTINEL');
+      const nextIteration = readRunState(project, created.runId);
+      nextIteration.currentIteration = 2;
+      writeRunState(project, created.runId, nextIteration);
+      vi.setSystemTime(new Date('2026-09-25T00:04:01.000Z'));
+      append('new iteration');
+      await tick();
+      expect(prompts).toHaveLength(4);
+      expect(readRunState(project, created.runId).supervisor?.attempts.map((attempt) =>
+        attempt.trigger?.type)).toEqual([
+        'stage_transition', 'artifact_change', 'artifact_change', 'artifact_change',
+      ]);
+    } finally {
+      supervisor?.stop();
+      setFcGlobalDir(priorFcHome);
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

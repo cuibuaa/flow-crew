@@ -73,12 +73,15 @@ campaign_triggers:
   repeated_failure_after: 3
 
 supervisor:
-  # A 30s cheap heartbeat detects transitions/anomalies. Routine semantic LLM
-  # review fires when stage output accumulated since the last review reaches
-  # min_delta_bytes. Each heartbeat reads at most tail_bytes (16 KiB) per stage,
-  # so 98304 means at most one content-triggered review per ~3 minutes of busy
-  # output. routine_assessment_interval_ms and max_assessments_per_iteration are
-  # NOT enforced by the current trigger (event-mode only); do not rely on them.
+  # The nominal 30s heartbeat collects deterministic events. Stage output
+  # reaches a semantic review at min_delta_bytes changed bytes. After a
+  # successful WAIT on an artifact event involving at least two running stages
+  # and two changed paths, routine_assessment_interval_ms defers further such
+  # events; the pending event is reviewed when the interval expires. A first
+  # artifact review, single-stage output, previously guided active attempts,
+  # and non-artifact events remain immediate. Several stages or artifact files
+  # can reach 98304 bytes in less than three minutes. The per-iteration maximum
+  # is telemetry only and does not suppress supervisor calls.
   poll_interval_ms: 30000
   routine_assessment_interval_ms: 180000
   min_delta_bytes: 98304

@@ -48,7 +48,7 @@ describe('ignored-content rollback reconciliation', () => {
       writeFileSync(target, Buffer.alloc(original.byteLength, 0x42));
       expect(await changedProjectPathsSinceSnapshotCooperatively(snapshot, projectDir)).toContain('model.bin');
       expect(restoreProjectPath(projectDir, 'model.bin', before)).toEqual({ restored: true });
-      expect(readFileSync(target)).toEqual(original);
+      expect(readFileSync(target).equals(original)).toBe(true);
     } finally {
       closeRepairRoundSnapshot(snapshot);
     }
