@@ -27,6 +27,7 @@ import {
   Supervisor,
   type DirectionEvidenceBinding,
   type SupervisorAssessment,
+  type SupervisorStageEvidence,
 } from '../src/supervisor.js';
 import { recordRunEvent } from '../src/run-events.js';
 import { readTraceEvents } from '../src/trace.js';
@@ -414,6 +415,8 @@ describe('factual supervisor stall decisions', () => {
         source?: 'supervisor' | 'operator',
         observedDeliverables?: ReadonlyMap<string, never>,
         observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+        observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
+        comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
       ): Promise<SupervisorAssessment>;
       actions: Array<{
         timestamp: string;
@@ -467,6 +470,28 @@ describe('factual supervisor stall decisions', () => {
     }, Date.now() + 1_000, 'supervisor', undefined, new Map([[stageId, {
       version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
       generation: 'c'.repeat(64),
+    }]]), undefined, new Map([[stageId, {
+      version: 1,
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      rows: [{
+        id: 'ev_cccccccccccccccccccc',
+        kind: 'command_invocation',
+        authority: 'action',
+        text: 'continue the same implementation path',
+      }],
+    }], ['unaccused', {
+      version: 1,
+      stageId: 'unaccused',
+      attemptIndex: 1,
+      attemptStartedAt: attempt.startedAt,
+      rows: [{
+        id: 'ev_dddddddddddddddddddd',
+        kind: 'command_invocation',
+        authority: 'action',
+        text: 'npm test completed',
+      }],
     }]]));
 
     expect(result.verdict).toBe('ABORT');

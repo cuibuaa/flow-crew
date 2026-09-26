@@ -688,7 +688,8 @@ describe('bounded timeout negotiation', () => {
           'switch to the isolated retry reproduction',
           'utf-8',
         );
-        return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
+        return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
+          adapterError: true, adapterFailureKind: 'service_unavailable' };
       }
       return { output: 'recovered', exitCode: 0, duration_ms: 1 };
     } };
@@ -1029,7 +1030,8 @@ describe('bounded timeout negotiation', () => {
       adapterBudgets.push(opts.timeout_ms);
       if (primaryCalls === 1) setImmediate(() => clock.advance(5));
       if (primaryCalls === 2) setImmediate(() => clock.advance(7));
-      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
+      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
+        adapterError: true, adapterFailureKind: 'service_unavailable' };
     } };
     const fallback: Adapter = { async run(_prompt, _agent, opts) {
       fallbackCalls++;
@@ -1088,7 +1090,8 @@ describe('bounded timeout negotiation', () => {
       'adapter: fallback', 'model: default', 'reasoning_effort: default',
     ].join('\n'));
     const primary: Adapter = { async run() {
-      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1 };
+      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
+        adapterError: true, adapterFailureKind: 'service_unavailable' };
     } };
     const clock = new ManualAttemptDeadlineClock();
     const result = await runStage(primary, {

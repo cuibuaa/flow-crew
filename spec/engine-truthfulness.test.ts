@@ -22,7 +22,7 @@ import {
   writeRunState,
   writeStageStatus,
 } from '../src/store.js';
-import { Supervisor, type DirectionEvidenceBinding, type SupervisorAssessment } from '../src/supervisor.js';
+import { Supervisor, type DirectionEvidenceBinding, type SupervisorAssessment, type SupervisorStageEvidence } from '../src/supervisor.js';
 import { readRunEvents, recordRunEvent } from '../src/run-events.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
@@ -763,6 +763,8 @@ function runningSupervisorFixture(attemptIndex = 2) {
       source?: 'supervisor' | 'operator',
       observedDeliverables?: ReadonlyMap<string, never>,
       observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+      observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
+      comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
     ): Promise<SupervisorAssessment>;
     actions: SupervisorActionFixture[];
     stageLastProgressMs: Record<string, number>;
@@ -847,6 +849,28 @@ describe('attempt- and source-scoped supervisor guidance', () => {
     }, Date.now() + 1_000, 'supervisor', undefined, new Map([['review_design', {
       version: 1, stageId: 'review_design', attemptIndex: 2,
       attemptStartedAt: attempt.startedAt, generation: 'c'.repeat(64),
+    }]]), undefined, new Map([['review_design', {
+      version: 1,
+      stageId: 'review_design',
+      attemptIndex: 2,
+      attemptStartedAt: attempt.startedAt,
+      rows: [{
+        id: 'ev_cccccccccccccccccccc',
+        kind: 'command_invocation',
+        authority: 'action',
+        text: 'continue the same concrete direction',
+      }],
+    }], ['unaccused', {
+      version: 1,
+      stageId: 'unaccused',
+      attemptIndex: 1,
+      attemptStartedAt: attempt.startedAt,
+      rows: [{
+        id: 'ev_dddddddddddddddddddd',
+        kind: 'command_invocation',
+        authority: 'action',
+        text: 'npm test completed',
+      }],
     }]]));
     const signalPath = join(created.runDirPath, 'signals', 'abort_review_design.json');
     const signal = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, 'utf-8')) as { attemptIndex?: number } : null;

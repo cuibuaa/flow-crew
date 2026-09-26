@@ -285,13 +285,13 @@ prompt: |
   Example A — tiny bug fix, single stage:
   - id: fix_hash_mismatch
     role: coder
-    scope: [scripts/foo.py, spec/qa_foo.test.py]
+    scope: [<implementation path>, <configured-collector test path>]
     depends_on: []
     dependency_reasons: {}
     prompt_template: |
       Align the feature schema hash in {project}/scripts/foo.py with the assertion in
-      {project}/spec/qa_foo.test.py. Add a shared helper compute_schema_hash() that both
-      call. Re-run spec/qa_foo.test.py and verify exit 0.
+      the project test path that its configured collector actually lists. Add a shared helper
+      that both call. Re-run that exact collected test with the configured test command and verify exit 0.
 
   Example B — implement + verify:
   - id: implement_thing

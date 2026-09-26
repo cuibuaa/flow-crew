@@ -220,7 +220,9 @@ describe('literal reality-check path extraction', () => {
         terminalStates: subject.context.terminalStates,
         research: subject.context.research,
       });
-      expect(afterErrors).toEqual([]);
+      expect(afterErrors).toEqual(name === 'research'
+        ? [expect.stringContaining('references post-consumption framework manifest')]
+        : []);
     },
   );
 

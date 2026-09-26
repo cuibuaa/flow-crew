@@ -55,6 +55,7 @@ interface SupervisorInternals {
     observedDeliverables?: ReadonlyMap<string, never>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
     observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
+    comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment>;
 }
 
@@ -121,6 +122,37 @@ function evidence(generation: string): DirectionEvidenceBinding {
     attemptIndex: attempt.index,
     attemptStartedAt: attempt.startedAt,
     generation,
+  };
+}
+
+function unrelatedComparisonEvidence(): ReadonlyMap<string, SupervisorStageEvidence> {
+  return new Map([['unaccused', {
+    version: 1,
+    stageId: 'unaccused',
+    attemptIndex: 1,
+    attemptStartedAt: '2026-09-22T17:00:00.000Z',
+    rows: [{
+      id: 'ev_dddddddddddddddddddd',
+      kind: 'command_invocation',
+      authority: 'action',
+      text: 'npm test completed',
+    }],
+  }]]);
+}
+
+function accusedComparisonEvidence(): SupervisorStageEvidence {
+  const binding = evidence('c'.repeat(64));
+  return {
+    version: 1,
+    stageId,
+    attemptIndex: binding.attemptIndex,
+    attemptStartedAt: binding.attemptStartedAt,
+    rows: [{
+      id: 'ev_cccccccccccccccccccc',
+      kind: 'command_invocation',
+      authority: 'action',
+      text: 'replacing the required evidence source with another input',
+    }],
   };
 }
 
@@ -350,6 +382,9 @@ describe('repeated wrong-direction abort evidence', () => {
       assessedAt: new Date(now).toISOString(),
     }, Date.now() + 1_000, 'supervisor', undefined, new Map([
       [stageId, evidence('c'.repeat(64))],
+    ]), undefined, new Map([
+      [stageId, accusedComparisonEvidence()],
+      ...unrelatedComparisonEvidence(),
     ]));
 
     expect(result.verdict).toBe('ABORT');
@@ -578,6 +613,8 @@ describe('repeated wrong-direction abort evidence', () => {
         guidance: candidate.guidance,
         deliveryEvents: candidate.deliveryEvents,
         assessmentTimestamp: new Date(now).toISOString(),
+        accusedEvidence: accusedComparisonEvidence(),
+        siblingEvidence: [...unrelatedComparisonEvidence().values()],
       }).verified,
       expected: candidate.expected,
     }));
@@ -589,6 +626,16 @@ describe('repeated wrong-direction abort evidence', () => {
     })));
     expect(observed.filter((candidate) => candidate.verified)).toHaveLength(1);
     expect(observed.filter((candidate) => !candidate.verified)).toHaveLength(8);
+    expect(verifyRepeatedWrongDirection({
+      stageId,
+      attemptIndex: 2,
+      assessment: assessment(directionKey),
+      currentEvidence: evidence('c'.repeat(64)),
+      guidance: boundGuides,
+      deliveryEvents: distinctDeliveries,
+      assessmentTimestamp: new Date(now).toISOString(),
+      siblingEvidence: [...unrelatedComparisonEvidence().values()],
+    }).verified).toBe(false);
   });
 
   it('publishes and parses the stable direction identity without changing other verdicts', () => {

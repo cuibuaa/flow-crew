@@ -273,6 +273,77 @@ describe("public specification purity", () => {
     expect(scanSource(portable, "portable.ts")).toEqual([]);
   });
 
+  it("resolves constructed filesystem paths by lexical binding identity", () => {
+    const moduleName = ["node", ":", "fs"].join("");
+    const unsafeParts = ["/", "ho", "me", "/alice", "/.fc", "/runs", "/fixture.json"];
+    const unsafeExpression = unsafeParts.map((part) => JSON.stringify(part)).join(" + ");
+    const safeExpression = ["spec", "/fixtures", "/local.json"]
+      .map((part) => JSON.stringify(part)).join(" + ");
+    const shadowedUnsafe = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `const evidencePath = ${safeExpression};`,
+      "function readNested() {",
+      `  const evidencePath = ${unsafeExpression};`,
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(shadowedUnsafe, "spec/shadowed-binding.test.ts")).toContainEqual(
+      expect.objectContaining({ line: 5, rule: "absolute-home" }),
+    );
+
+    const shadowedSafe = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `const evidencePath = ${unsafeExpression};`,
+      "function readNested() {",
+      `  const evidencePath = ${safeExpression};`,
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(shadowedSafe, "spec/inverse-shadowed-binding.test.ts")
+      .filter(({ rule }) => rule === "absolute-home")).toEqual([]);
+
+    const parameterShadow = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `const evidencePath = ${unsafeExpression};`,
+      "function readNested(evidencePath: string) {",
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(parameterShadow, "spec/parameter-shadow.test.ts")
+      .filter(({ rule }) => rule === "absolute-home")).toEqual([]);
+
+    const destructuredParameterShadow = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `const evidencePath = ${unsafeExpression};`,
+      "function readNested({ evidencePath }: { evidencePath: string }) {",
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(destructuredParameterShadow, "spec/destructured-parameter-shadow.test.ts")
+      .filter(({ rule }) => rule === "absolute-home")).toEqual([]);
+
+    const mutableShadow = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `const evidencePath = ${unsafeExpression};`,
+      "function readNested() {",
+      "  let evidencePath = 'spec/fixtures/local.json';",
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(mutableShadow, "spec/mutable-shadow.test.ts")
+      .filter(({ rule }) => rule === "absolute-home")).toEqual([]);
+
+    const unsafeDefaultParameter = [
+      `import { readFileSync } from ${JSON.stringify(moduleName)};`,
+      `function readNested(evidencePath = ${unsafeExpression}) {`,
+      "  return readFileSync(evidencePath, 'utf8');",
+      "}",
+    ].join("\n");
+    expect(scanSource(unsafeDefaultParameter, "spec/parameter-default.test.ts")).toContainEqual(
+      expect.objectContaining({ line: 3, rule: "absolute-home" }),
+    );
+  });
+
   it("scans source files recursively", () => {
     const root = mkdtempSync(join(tmpdir(), "flowcrew-purity-"));
     try {

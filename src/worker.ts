@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdir
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
+export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { buildStagePrompt } from './handoff.js';
 import { loadProjectDefaults } from './config.js';
@@ -106,7 +107,6 @@ export interface StageOpts {
   liveConstraintGuardFactory?: LiveConstraintGuardFactory;
 }
 
-const ADAPTER_ERROR_PATTERNS = ['403 Forbidden', 'connection refused', 'ECONNREFUSED', 'ECONNRESET', 'rate limit', 'ETIMEDOUT', '429 Too Many', '502 Bad Gateway', '503 Service Unavailable', 'overloaded'];
 const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
 export type TimeoutExtensionTimingBasis = 'requested_at' | 'legacy_consumption';
@@ -165,16 +165,6 @@ export function evaluateTimeoutExtensionRequest(
     adjudicatedAttemptElapsedMs,
     ...(requestedAtAttemptElapsedMs === undefined ? {} : { requestedAtAttemptElapsedMs }),
   };
-}
-
-function isAdapterError(output: string): boolean {
-  // Scan only the TAIL: an adapter's real connection/rate-limit error surfaces at
-  // the end. Scanning the whole output false-matches when the agent's prompt or a
-  // prior-stage transcript merely mentions "rate limit"/"overloaded" (codex echoes
-  // the full prompt), which would mislabel a real task failure as transient and
-  // trigger needless backoff + cross-adapter fallback.
-  const tail = output.length > 2048 ? output.slice(-2048) : output;
-  return ADAPTER_ERROR_PATTERNS.some(p => tail.includes(p));
 }
 
 function inferAdapterName(adapter: Adapter): string | undefined {
@@ -980,8 +970,12 @@ async function runStageWithWriterLease(
     activeInvocationAbortController = invocationAbortController;
     activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
+    const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
+      if (!invocationAbortController.signal.aborted) invocationAbortController.abort(reason);
+    });
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
       if (event.phase === 'started') {
+        liveMonitor?.commandStarted(event.id, event.command);
         activeCommands.set(event.id, event);
         recordRunEvent(opts.projectDir, opts.runId, {
           type: 'stage_command_started',
@@ -1086,6 +1080,7 @@ async function runStageWithWriterLease(
 
       const started = activeCommands.get(event.id);
       activeCommands.delete(event.id);
+      liveMonitor?.commandCompleted(event.id);
       const completed = started
         ? { ...event, ...(started.command ? { command: started.command } : {}) }
         : event;
@@ -1114,9 +1109,6 @@ async function runStageWithWriterLease(
         }
       }
     };
-    const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
-      if (!invocationAbortController.signal.aborted) invocationAbortController.abort(reason);
-    });
     latestLiveConstraintResult = undefined;
     const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
       let settled = false;
@@ -1197,6 +1189,10 @@ async function runStageWithWriterLease(
   const mergeInvocationTelemetry = (prior: RunResult | undefined, next: RunResult): RunResult => {
     if (!prior) return next;
     const writes = [...new Set([...(prior.writes ?? []), ...(next.writes ?? [])])];
+    const validationGeneratedWrites = [...new Set([
+      ...(prior.validationGeneratedWrites ?? []),
+      ...(next.validationGeneratedWrites ?? []),
+    ])];
     const structured = prior.writeAttribution === 'structured' && next.writeAttribution === 'structured';
     return {
       ...next,
@@ -1210,6 +1206,7 @@ async function runStageWithWriterLease(
         : (prior.tokens_out ?? 0) + (next.tokens_out ?? 0),
       ...(writes.length > 0 ? { writes } : {}),
       ...(writes.length > 0 ? { writeAttribution: structured ? 'structured' : 'unknown' } : {}),
+      ...(validationGeneratedWrites.length > 0 ? { validationGeneratedWrites } : {}),
     };
   };
 
@@ -1264,6 +1261,12 @@ async function runStageWithWriterLease(
         continue;
       }
       const live = latestLiveConstraintResult;
+      if (live?.validationGeneratedPaths.length) {
+        combined.validationGeneratedWrites = [...new Set([
+          ...(combined.validationGeneratedWrites ?? []),
+          ...live.validationGeneratedPaths,
+        ])];
+      }
       if (live?.monitorFailure) {
         return {
           ...combined,
@@ -1322,7 +1325,7 @@ async function runStageWithWriterLease(
     result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
-    if (result.exitCode !== 0 && isAdapterError(result.output)) {
+    if (result.exitCode !== 0 && result.adapterError === true) {
       for (let attempt = 0; attempt < adapterRetryDelays.length; attempt++) {
         if (aggregateAbortSignal.aborted) break;
         const retryDelayMs = Math.max(0, adapterRetryDelays[attempt]);
@@ -1334,12 +1337,12 @@ async function runStageWithWriterLease(
           break;
         }
         result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, false);
-        if (result.exitCode === 0 || !isAdapterError(result.output)) break;
+        if (result.exitCode === 0 || result.adapterError !== true) break;
       }
 
       // Final escape hatch: a different configured adapter may run once, but
       // loading and execution consume the same immutable attempt deadline.
-      if (!aggregateAbortSignal.aborted && result.exitCode !== 0 && isAdapterError(result.output)) {
+      if (!aggregateAbortSignal.aborted && result.exitCode !== 0 && result.adapterError === true) {
         try {
           const projectDefaults = loadProjectDefaults(opts.projectDir);
           const primaryName = opts.role.adapter ?? inferAdapterName(adapter) ?? projectDefaults.adapter;
@@ -1368,7 +1371,8 @@ async function runStageWithWriterLease(
         }
       }
 
-      if (result.exitCode !== 0 && isAdapterError(result.output)) result.adapterError = true;
+      // The adapter classifies its own diagnostic channel. Worker output is an
+      // agent message and may quote an error string without any adapter failure.
     }
   } catch (error) {
     observeAdapterSettlement();
@@ -1408,6 +1412,7 @@ async function runStageWithWriterLease(
         result.exitCode = 1;
         result.timedOut = false;
         result.adapterError = false;
+        result.adapterFailureKind = undefined;
         result.friendlyError = `artifact contract violation: ${detail}`;
         result.output = `${result.output}${result.output ? '\n\n' : ''}Artifact contract refused completion: ${detail}`;
         recordRunEvent(opts.projectDir, opts.runId, {
@@ -1427,6 +1432,7 @@ async function runStageWithWriterLease(
       result.exitCode = 1;
       result.timedOut = false;
       result.adapterError = false;
+      result.adapterFailureKind = undefined;
       result.friendlyError = `artifact contract could not be checked: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
@@ -1507,7 +1513,7 @@ async function runStageWithWriterLease(
       ? (
         supervisorAborted
           ? (abortReason ? `aborted by supervisor: ${abortReason}` : 'aborted by supervisor')
-          : result.adapterError ? 'adapter connection failed'
+          : result.adapterError ? `upstream adapter failure (${result.adapterFailureKind ?? 'unclassified'})`
           : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
           // instead of leaving the operator with a bare exit code.
@@ -1517,9 +1523,11 @@ async function runStageWithWriterLease(
       : undefined,
     tokens_in: result.tokens_in,
     tokens_out: result.tokens_out,
+    adapterFailureKind: result.adapterFailureKind,
     kgChanged: artifacts.some(a => a.endsWith('knowledge_graph.json')),
     writes,
     writeAttribution,
+    validationGeneratedWrites: result.validationGeneratedWrites,
     timeout: timeoutSummary,
   });
   if (approvalSuspended) {
@@ -1535,6 +1543,7 @@ async function runStageWithWriterLease(
     status: final.status,
     exitCode: result.exitCode,
     adapterFailure: result.adapterError === true,
+    ...(result.adapterFailureKind ? { adapterFailureKind: result.adapterFailureKind } : {}),
     ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
     ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
     detail: approvalSuspended

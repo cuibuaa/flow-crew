@@ -5,7 +5,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { processStartToken } from './run-lock.js';
 import {
   SUPERVISION_PROTOCOL_VERSION,
+  FLOWCREW_LAUNCH_RESULT_PATH_ENV,
   atomicWriteJson,
+  readLaunchRefusal,
   readSupervisionLaunch,
   type SupervisionExitRecord,
   type SupervisionRunningRecord,
@@ -15,6 +17,7 @@ const controlDir = process.argv[2];
 const launchPath = controlDir ? join(controlDir, 'launch.json') : '';
 const runningPath = controlDir ? join(controlDir, 'running.json') : '';
 const exitPath = controlDir ? join(controlDir, 'exit.json') : '';
+const launchResultPath = controlDir ? join(controlDir, 'launch-result.json') : '';
 const logPath = controlDir ? join(controlDir, 'out.log') : '';
 
 // A just-forked pid can be absent from the process table for a few
@@ -86,6 +89,7 @@ function finalize(
   if (settleTimer) clearTimeout(settleTimer);
   const normalized = normalizedOverride ?? normalizedExit(code, signal);
   const endedAt = new Date().toISOString();
+  const launchRefusal = normalized === 2 ? readLaunchRefusal(launchResultPath) : undefined;
   const exit: SupervisionExitRecord = {
     version: SUPERVISION_PROTOCOL_VERSION,
     exitCode: code,
@@ -93,6 +97,7 @@ function finalize(
     normalized,
     endedAt,
     ...(reason ? { reason } : {}),
+    ...(launchRefusal ? { launchRefusal } : {}),
   };
   updateLegacyRecord({
     ...(running ? {
@@ -226,6 +231,7 @@ function main(): void {
       cwd: launch.workingDirectory,
       detached: true,
       stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, [FLOWCREW_LAUNCH_RESULT_PATH_ENV]: launchResultPath },
     });
   } catch (error) {
     failBeforeAgent(`fallback spawn failed: ${error instanceof Error ? error.message : String(error)}`);

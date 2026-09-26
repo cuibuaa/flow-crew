@@ -597,7 +597,7 @@ describe('UX/performance engine-loop evidence replays', () => {
       },
     });
     expect(errors.join('\n')).toContain('writes only its sidecar docs/happymj_explore7/round_result.json.no_candidate.json');
-    expect(errors.join('\n')).toContain('framework manifest docs/happymj_explore7/run_manifest.json');
+    expect(errors.join('\n')).not.toContain('framework manifest docs/happymj_explore7/run_manifest.json');
   });
 
   it('unchanged-base seam item 4: the first research-stage call receives the resolved universal rule', async () => {

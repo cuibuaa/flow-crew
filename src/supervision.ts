@@ -22,7 +22,7 @@ import {
 export type UnitStatus =
   | { kind: 'active' }
   | { kind: 'deactivating' }
-  | { kind: 'terminal'; exitCode: number; signal?: string }
+  | { kind: 'terminal'; exitCode: number; signal?: string; launchRefusal?: LaunchRefusalRecord }
   | { kind: 'terminal-unknown'; reason: string }
   | { kind: 'absent' }
   | { kind: 'unobservable'; reason: string };
@@ -66,6 +66,7 @@ export interface SupervisorBackend {
 }
 
 export const SUPERVISION_PROTOCOL_VERSION = 1 as const;
+export const FLOWCREW_LAUNCH_RESULT_PATH_ENV = 'FLOWCREW_LAUNCH_RESULT_PATH';
 export const DEFAULT_SUPERVISION_STARTUP_GRACE_MS = 5_000;
 export const DEFAULT_SUPERVISION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
@@ -111,6 +112,14 @@ export interface SupervisionExitRecord {
   normalized: number;
   endedAt: string;
   reason?: string;
+  launchRefusal?: LaunchRefusalRecord;
+}
+
+export interface LaunchRefusalRecord {
+  version: typeof SUPERVISION_PROTOCOL_VERSION;
+  kind: 'launch_refused';
+  message: string;
+  refusedAt: string;
 }
 
 export interface SupervisionPaths {
@@ -119,6 +128,7 @@ export interface SupervisionPaths {
   launch: string;
   running: string;
   exit: string;
+  launchResult: string;
   log: string;
 }
 
@@ -143,6 +153,7 @@ export function supervisionPaths(baseDir: string, unit: string): SupervisionPath
     launch: join(unitDir, 'launch.json'),
     running: join(unitDir, 'running.json'),
     exit: join(unitDir, 'exit.json'),
+    launchResult: join(unitDir, 'launch-result.json'),
     log: join(unitDir, 'out.log'),
   };
 }
@@ -223,8 +234,36 @@ export function readSupervisionExit(path: string): SupervisionExitRecord | undef
     || Number(value.normalized) < 0
     || typeof value.endedAt !== 'string'
     || (value.signal !== undefined && typeof value.signal !== 'string')
-    || (value.reason !== undefined && typeof value.reason !== 'string')) return undefined;
+    || (value.reason !== undefined && typeof value.reason !== 'string')
+    || (value.launchRefusal !== undefined && !isLaunchRefusalRecord(value.launchRefusal))) return undefined;
   return value as unknown as SupervisionExitRecord;
+}
+
+function isLaunchRefusalRecord(value: unknown): value is LaunchRefusalRecord {
+  return isRecord(value)
+    && value.version === SUPERVISION_PROTOCOL_VERSION
+    && value.kind === 'launch_refused'
+    && typeof value.message === 'string'
+    && value.message.startsWith('Launch refused:')
+    && typeof value.refusedAt === 'string'
+    && Number.isFinite(Date.parse(value.refusedAt));
+}
+
+export function readLaunchRefusal(path: string): LaunchRefusalRecord | undefined {
+  const value = readJson(path);
+  return isLaunchRefusalRecord(value) ? value : undefined;
+}
+
+/** Called by the supervised CLI before returning from a pre-launch refusal. */
+export function recordLaunchRefusal(message: string): void {
+  const path = process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
+  if (!path || !message.startsWith('Launch refused:')) return;
+  atomicWriteJson(path, {
+    version: SUPERVISION_PROTOCOL_VERSION,
+    kind: 'launch_refused',
+    message,
+    refusedAt: new Date().toISOString(),
+  } satisfies LaunchRefusalRecord);
 }
 
 export function runningRecordBindsShim(record: SupervisionRunningRecord): boolean {
@@ -265,6 +304,7 @@ export function observePortableUnit(
         kind: 'terminal',
         exitCode: exit.normalized,
         ...(exit.signal ? { signal: exit.signal } : {}),
+        ...(exit.launchRefusal ? { launchRefusal: exit.launchRefusal } : {}),
       },
       exit,
     };
@@ -355,7 +395,8 @@ export function isUnitStatus(value: unknown): value is UnitStatus {
     case 'terminal':
       return Number.isSafeInteger(value.exitCode)
         && Number(value.exitCode) >= 0
-        && (value.signal === undefined || typeof value.signal === 'string');
+        && (value.signal === undefined || typeof value.signal === 'string')
+        && (value.launchRefusal === undefined || isLaunchRefusalRecord(value.launchRefusal));
     case 'terminal-unknown':
     case 'unobservable':
       return typeof value.reason === 'string';

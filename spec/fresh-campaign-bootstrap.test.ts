@@ -188,7 +188,7 @@ describe('quarantined attempt-2 replay', () => {
     });
   });
 
-  it('admits the unchanged dispatch with repaired manifest-only checks in a fresh project', () => {
+  it('refuses manifest-only confirmation checks before the first round is consumed', () => {
     const archived = archivedAdmission();
     const stages = stagesFromFixture();
     const topology = inspectDispatchAdmission({
@@ -209,7 +209,10 @@ describe('quarantined attempt-2 replay', () => {
       stages,
       terminalStates,
       research,
-    })).toEqual([]);
+    })).toEqual([
+      expect.stringContaining('references post-consumption framework manifest'),
+      expect.stringContaining('references post-consumption framework manifest'),
+    ]);
   });
 
   it('still refuses the recorded wildcard, the optional result, and a never-written sibling', () => {
@@ -310,7 +313,7 @@ describe('single resolved framework output contract', () => {
       projectDir: temporaryRoot(),
       stages: [],
       research: explicit,
-    })).toEqual([]);
+    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: onePathCheck('inferred path loses when explicit wins', 'docs/fresh-campaign/run_manifest.json'),
       projectDir: temporaryRoot(),
@@ -342,7 +345,7 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research,
-    })).toEqual([]);
+    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: novel,
       projectDir,
@@ -381,7 +384,7 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research: rootResearch,
-    })).toEqual([]);
+    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: novel,
       projectDir,
@@ -422,7 +425,7 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research: explicitRoot,
-    })).toEqual([]);
+    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: inferred,
       projectDir,

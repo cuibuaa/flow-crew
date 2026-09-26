@@ -109,6 +109,37 @@ describe('durable portable supervision shim', () => {
     await expect(backend.isActive(unit)).resolves.toEqual({ kind: 'terminal', exitCode: 3 });
   });
 
+  it('carries an exact pre-launch refusal through the shim exit record', async () => {
+    const unit = 'launch-refusal.service';
+    const refusal = 'Launch refused: research.stop.max_rounds (8 rounds) exceeds the engine limit (5 iterations).';
+    const supervisionModule = pathToFileURL(join(repositoryRoot, 'dist', 'supervision.js')).href;
+    const source = [
+      `import(${JSON.stringify(supervisionModule)}).then(({ recordLaunchRefusal }) => {`,
+      `  recordLaunchRefusal(${JSON.stringify(refusal)});`,
+      '  process.exit(2);',
+      '});',
+    ].join('\n');
+    const backend = new NodeSystemd(root, { shellPath: '/bin/sh' });
+    await backend.runUnit({
+      unit,
+      workingDirectory: root,
+      command: shellJoin([process.execPath, '-e', source]),
+    });
+
+    const terminal = await waitForStatus(backend, unit, (status) => status.kind === 'terminal');
+    const exit = readSupervisionExit(supervisionPaths(root, unit).exit);
+
+    expect(terminal).toMatchObject({
+      kind: 'terminal',
+      exitCode: 2,
+      launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
+    });
+    expect(exit).toMatchObject({
+      normalized: 2,
+      launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
+    });
+  });
+
   it('lets a live systemd unit veto stale running evidence when exit.json is absent', async () => {
     const unit = 'systemd-veto.service';
     seedStaleRunning(unit, '2026-08-06T00:00:00.000Z');

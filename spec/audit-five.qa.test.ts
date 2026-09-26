@@ -196,7 +196,7 @@ describe.sequential('five-instrument independent QA', () => {
         directionEvidence: evidence('a'),
         assessment: {
           verdict: 'GUIDE', targetStage: 'work', reason: 'same direction', guidance: 'correct it',
-          directionKey: 'same_direction', guidanceId: 'guide-one', evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
+          directionKey: 'same_wrong_action', guidanceId: 'guide-one', evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
         },
       },
       {
@@ -206,13 +206,13 @@ describe.sequential('five-instrument independent QA', () => {
         directionEvidence: evidence('b'),
         assessment: {
           verdict: 'GUIDE', targetStage: 'work', reason: 'same direction', guidance: 'correct it',
-          directionKey: 'same_direction', guidanceId: 'guide-two', evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'],
+          directionKey: 'same_wrong_action', guidanceId: 'guide-two', evidenceIds: ['ev_bbbbbbbbbbbbbbbbbbbb'],
         },
       },
     ];
     const assessment: SupervisorAssessment = {
       verdict: 'ABORT', targetStage: 'work', reason: 'same direction persists', guidance: null,
-      directionKey: 'same_direction', evidenceIds: ['ev_cccccccccccccccccccc'],
+      directionKey: 'same_wrong_action', evidenceIds: ['ev_cccccccccccccccccccc'],
     };
     const event = (timestamp: string, invocationIndex: number, guidanceIds: string[]): RunEvent => ({
       type: 'guidance_delivery_checked', runId: 'run', timestamp, stageId: 'work',
@@ -222,6 +222,17 @@ describe.sequential('five-instrument independent QA', () => {
     const verify = (deliveryEvents: RunEvent[]) => verifyRepeatedWrongDirection({
       stageId: 'work', attemptIndex: 1, assessment, currentEvidence: evidence('c'), guides,
       guidance: guides, deliveryEvents, assessmentTimestamp: at(35),
+      accusedEvidence: {
+        version: 1, stageId: 'work', attemptIndex: 1, attemptStartedAt: startedAt,
+        rows: [{
+          id: 'ev_cccccccccccccccccccc', kind: 'command_invocation', authority: 'action',
+          text: 'continue the same wrong action',
+        }],
+      },
+      siblingEvidence: [{
+        version: 1, stageId: 'unaccused', attemptIndex: 1, attemptStartedAt: startedAt,
+        rows: [{ id: 'ev_dddddddddddddddddddd', kind: 'command_invocation', authority: 'action', text: 'npm test completed' }],
+      }],
     } as Parameters<typeof verifyRepeatedWrongDirection>[0]);
 
     expect(verify([event(at(34), 8, ['guide-one', 'guide-two'])]).verified).toBe(false);

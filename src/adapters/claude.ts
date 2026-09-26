@@ -2,6 +2,7 @@ import { mkdirSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 import { execWithTimeout, execWithStdin } from './base.js';
+import { classifyAdapterFailure } from './failure.js';
 import { CommandActivityTracker } from '../command-activity.js';
 
 /** Parse token usage from claude output */
@@ -71,6 +72,7 @@ export class ClaudeAdapter implements Adapter {
     // grace period so the stage doesn't hang for the full stage timeout.
     let resultReceived = false;
     let resultIsSuccess = false;
+    let adapterDiagnostic: string | undefined;
     let childKill: (() => void) | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     const POST_RESULT_GRACE_MS = 5000;
@@ -133,11 +135,20 @@ export class ClaudeAdapter implements Adapter {
             if (parsed.type === 'result' && !resultReceived) {
               resultReceived = true;
               resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
+              if (resultIsSuccess) adapterDiagnostic = undefined;
+              else adapterDiagnostic = typeof parsed.error?.message === 'string'
+                ? parsed.error.message
+                : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
               if (!killTimer) {
                 killTimer = setTimeout(() => {
                   if (childKill) childKill();
                 }, POST_RESULT_GRACE_MS);
               }
+            }
+            if (parsed.type === 'error') {
+              adapterDiagnostic = typeof parsed.message === 'string'
+                ? parsed.message
+                : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
             }
             if (text) {
               extractedText += text;
@@ -159,10 +170,16 @@ export class ClaudeAdapter implements Adapter {
     // had to force-kill its hung process to recover. The actual work succeeded;
     // the non-zero code is just a stdio-cleanup artifact upstream.
     const overrideExitCode = result.exitCode !== 0 && resultReceived && resultIsSuccess;
+    const finalExitCode = overrideExitCode ? 0 : result.exitCode;
+    const adapterFailureKind = finalExitCode !== 0 && finalExitCode !== 124 && finalExitCode !== 137
+      ? classifyAdapterFailure(adapterDiagnostic ?? (!extractedText && !resultReceived ? result.output : ''))
+      : undefined;
     return {
       ...result,
       output: finalOutput,
-      exitCode: overrideExitCode ? 0 : result.exitCode,
+      exitCode: finalExitCode,
+      adapterError: adapterFailureKind !== undefined,
+      adapterFailureKind,
       tokens_in: tokens.tokens_in,
       tokens_out: tokens.tokens_out,
     };

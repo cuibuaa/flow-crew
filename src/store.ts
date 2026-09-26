@@ -28,6 +28,7 @@ import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './rea
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
+import type { AdapterFailureKind } from './adapters/base.js';
 import type { SupervisorEvent } from './supervisor-events.js';
 import {
   UnknownRunStatusError,
@@ -103,6 +104,7 @@ export interface StageConstraintAuditSummary {
   unverifiedCount: number;
   rawWriteCount?: number;
   appliedWriteCount?: number;
+  exemptedWriteCount?: number;
   rolledBackWriteCount?: number;
   rejectedDigestCount?: number;
   liveViolationCount?: number;
@@ -123,8 +125,11 @@ export interface StageAttempt {
   /** Persisted evidence: both counters are known, or this settled attempt is explicitly unknown. */
   tokenUsage?: AttemptTokenUsage;
   error?: string;
+  adapterFailureKind?: AdapterFailureKind;
   writes?: string[];
   writeAttribution?: WriteAttribution;
+  /** Exact generated paths proven by adapter command lifecycle evidence. */
+  validationGeneratedWrites?: string[];
   /** Small summary plus path to the immutable attempt-level constraint audit. */
   constraintAudit?: StageConstraintAuditSummary;
   /** Attempt-local immutable deadline evidence. */
@@ -150,6 +155,7 @@ export interface StageStatus {
   /** Union of files attributed to this stage across its attempts. */
   writes?: string[];
   writeAttribution?: WriteAttribution;
+  validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
 }
@@ -1809,11 +1815,13 @@ export interface CompleteStageAttemptInput {
   completedAt?: string;
   artifacts?: string[];
   error?: string;
+  adapterFailureKind?: AdapterFailureKind;
   tokens_in?: number;
   tokens_out?: number;
   kgChanged?: boolean;
   writes?: string[];
   writeAttribution?: WriteAttribution;
+  validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
 }
@@ -1853,8 +1861,10 @@ export function completeStageAttempt(
     tokens_out: tokensOut,
     tokenUsage: tokensIn !== undefined && tokensOut !== undefined ? 'known' : 'unknown',
     error: completion.error,
+    adapterFailureKind: completion.adapterFailureKind,
     writes: completion.writes,
     writeAttribution: completion.writeAttribution,
+    validationGeneratedWrites: completion.validationGeneratedWrites,
     constraintAudit: completion.constraintAudit,
     timeout: completion.timeout,
   };
@@ -1875,6 +1885,10 @@ export function completeStageAttempt(
     reruns: Math.max(0, attempts.length - 1),
     writes,
     writeAttribution: completion.writeAttribution ?? previous?.writeAttribution,
+    validationGeneratedWrites: uniqueStrings(
+      previous?.validationGeneratedWrites,
+      completion.validationGeneratedWrites,
+    ),
     constraintAudit: completion.constraintAudit ?? previous?.constraintAudit,
     timeout: completion.timeout ?? previous?.timeout,
   };

@@ -16,6 +16,13 @@ export interface StageAbortSignal {
   requestingStageId?: string;
   /** The model's text is retained for audit only; consumers must use `reason`. */
   unverifiedAssessmentReason?: string;
+  /** Population-level evidence used only for direction-based supervisor aborts. */
+  directionComparison?: {
+    populationStageIds: string[];
+    matchingStageIds: string[];
+    denominator: number;
+    matchingCount: number;
+  };
 }
 
 export type ParsedStageAbortSignal =
@@ -72,6 +79,41 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
   ) {
     return invalid('invalid unverified assessment reason');
   }
+  const directionComparison = candidate.directionComparison;
+  if (directionComparison !== undefined && (
+    !directionComparison
+    || typeof directionComparison !== 'object'
+    || Array.isArray(directionComparison)
+  )) {
+    return invalid('invalid direction comparison');
+  }
+  let parsedDirectionComparison: StageAbortSignal['directionComparison'];
+  if (directionComparison !== undefined) {
+    const comparison = directionComparison as Record<string, unknown>;
+    const populationStageIds = comparison.populationStageIds;
+    const matchingStageIds = comparison.matchingStageIds;
+    if (!Array.isArray(populationStageIds)
+      || !populationStageIds.every((entry) => typeof entry === 'string')
+      || !Array.isArray(matchingStageIds)
+      || !matchingStageIds.every((entry) => typeof entry === 'string')
+      || !Number.isSafeInteger(comparison.denominator)
+      || Number(comparison.denominator) < 0
+      || !Number.isSafeInteger(comparison.matchingCount)
+      || Number(comparison.matchingCount) < 0
+      || new Set(populationStageIds).size !== populationStageIds.length
+      || new Set(matchingStageIds).size !== matchingStageIds.length
+      || Number(comparison.denominator) !== populationStageIds.length
+      || Number(comparison.matchingCount) !== matchingStageIds.length
+      || matchingStageIds.some((stageId) => !populationStageIds.includes(stageId))) {
+      return invalid('invalid direction comparison');
+    }
+    parsedDirectionComparison = {
+      populationStageIds,
+      matchingStageIds,
+      denominator: Number(comparison.denominator),
+      matchingCount: Number(comparison.matchingCount),
+    };
+  }
   return {
     ok: true,
     signal: {
@@ -86,6 +128,7 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
         ? { requestingStageId: candidate.requestingStageId }
         : {}),
       unverifiedAssessmentReason: candidate.unverifiedAssessmentReason,
+      ...(parsedDirectionComparison ? { directionComparison: parsedDirectionComparison } : {}),
     },
   };
 }

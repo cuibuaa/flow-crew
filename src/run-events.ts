@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { appendTextRecord } from './append-boundary.js';
 import { readJsonlFile } from './jsonl.js';
 import type { StageStatus, StoreState } from './store.js';
+import type { AdapterFailureKind } from './adapters/base.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
@@ -80,6 +81,7 @@ export interface RunEvent {
   attemptStartedAt?: string;
   exitCode?: number;
   adapterFailure?: boolean;
+  adapterFailureKind?: AdapterFailureKind;
   requestId?: string;
   ruleId?: string;
   blockedByStageId?: string;

@@ -61,6 +61,7 @@ const [
   cliEventsModule,
   guidanceModule,
   commandInterruptModule,
+  supervisionModule,
 ] = await Promise.all([
   import('node:fs'),
   import('node:path'),
@@ -82,6 +83,7 @@ const [
   import('./cli-events.js'),
   import('./guidance.js'),
   import('./command-interrupt.js'),
+  import('./supervision.js'),
 ]);
 
 const {
@@ -142,6 +144,7 @@ const {
 } = cliEventsModule;
 const { appendGuidanceEnvelope, readGuidanceDeliveryStatus } = guidanceModule;
 const { requestStageCommandInterrupt } = commandInterruptModule;
+const { recordLaunchRefusal } = supervisionModule;
 
 const args = bootstrapArgs;
 const command = args[0];
@@ -1038,7 +1041,9 @@ async function cmdQuick() {
   }
 
   if (preflight.findings.some((finding) => finding.code === 'brief_criteria_missing')) {
-    console.error('Launch refused: the exact brief has no structurally extractable criterion. This is not an acknowledgeable warning.');
+    const refusal = 'Launch refused: the exact brief has no structurally extractable criterion. This is not an acknowledgeable warning.';
+    recordLaunchRefusal(refusal);
+    console.error(refusal);
     process.exitCode = 2;
     return;
   }
@@ -1123,7 +1128,9 @@ async function cmdQuick() {
         : setup.state === 'refused'
           ? `ship-setup refused this exact target and brief: ${setup.reason}`
           : `the exact setup record is invalid: ${setup.reason}`;
-      console.error(`Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`);
+      const refusal = `Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`;
+      recordLaunchRefusal(refusal);
+      console.error(refusal);
       process.exitCode = 2;
       return;
     }
@@ -1239,7 +1246,9 @@ async function cmdQuick() {
     },
   );
   if (!budgetAssessment.pass) {
-    console.error(`Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`);
+    const refusal = `Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`;
+    recordLaunchRefusal(refusal);
+    console.error(refusal);
     process.exitCode = 2;
     return;
   }

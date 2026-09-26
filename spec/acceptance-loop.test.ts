@@ -332,7 +332,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gatePrompts[1]).toContain('full mechanical regression suites');
   });
 
-  it('keeps round-one evidence distinct and iteration-local across two outer iterations', { timeout: 20_000 }, async () => {
+  it('keeps round evidence distinct while carrying same-gate rejection history across outer iterations', { timeout: 20_000 }, async () => {
     const result = await runScenario({ twoIterations: true });
     expect(result.finalStatus).toBe('complete');
     expect(result.finalIteration).toBe(2);
@@ -373,11 +373,18 @@ describe('compressed acceptance loop', () => {
         expect(prompt).toContain(join(roundDir, `rejected_verdict_${GATE_ID}.json`));
         expect(prompt).toContain(join(roundDir, `previous_output_${GATE_ID}.md`));
         expect(prompt).toContain(evaluatedInputPath);
-        expect(prompt).not.toContain(join(archiveRoot, `iteration_${iteration === 1 ? 2 : 1}`));
         expect(prompt).not.toContain(join(archiveRoot, 'round_1'));
       }
       expect(reevaluationPrompt).toContain(join(roundDir, 'repair_diff.json'));
+      if (iteration === 1) {
+        expect(reevaluationPrompt).not.toContain(join(archiveRoot, 'iteration_2'));
+      } else {
+        expect(reevaluationPrompt).toContain(join(roundDirs[0], `previous_output_${GATE_ID}.md`));
+      }
     }
+
+    expect(result.gatePrompts[2]).toContain('RE-EVALUATION');
+    expect(result.gatePrompts[2]).toContain(join(roundDirs[0], `rejected_verdict_${GATE_ID}.json`));
 
     expect(existsSync(join(archiveRoot, 'round_1'))).toBe(false);
   });
@@ -411,7 +418,7 @@ describe('compressed acceptance loop', () => {
     expect(readdirSync(join(legacyRunDir, 'gate_reevaluation'))).toEqual(['round_1']);
   });
 
-  it('fails closed instead of reading legacy evidence when any other iteration namespace exists', () => {
+  it('retains a same-gate legacy rejection when another gate created a canonical namespace', () => {
     const mixedRunDir = join(root, 'mixed-run');
     const mixedLegacyRound = join(mixedRunDir, 'gate_reevaluation', 'round_1');
     const otherIterationRound = join(mixedRunDir, 'gate_reevaluation', 'iteration_1', 'round_9');
@@ -435,12 +442,11 @@ describe('compressed acceptance loop', () => {
       roundDiffPath: join(requestedCanonicalRound, 'repair_diff.json'),
     });
 
-    expect(mixedPreamble).toContain('INTERRUPTED EVALUATION (round 2)');
-    expect(mixedPreamble).toContain('No rejected verdict was recorded');
+    expect(mixedPreamble).toContain('RE-EVALUATION (round 2)');
+    expect(mixedPreamble).toContain(`Rejected verdict: ${staleLegacyVerdict}`);
+    expect(mixedPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${staleLegacyOutput}`);
     expect(mixedPreamble).not.toContain(canonicalVerdict);
     expect(mixedPreamble).not.toContain(canonicalOutput);
-    expect(mixedPreamble).not.toContain(staleLegacyVerdict);
-    expect(mixedPreamble).not.toContain(staleLegacyOutput);
     expect(mixedPreamble).not.toContain(otherIterationRound);
     expect(existsSync(join(mixedRunDir, 'gate_reevaluation', 'iteration_2'))).toBe(false);
   });

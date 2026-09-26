@@ -387,6 +387,8 @@ export interface LiveConstraintScanResult {
   violations: LiveConstraintViolationDetection[];
   /** Unique untracked generated paths observed by this scan. */
   exemptedPaths?: string[];
+  /** Subset whose exemption was activated by a configured command lifecycle. */
+  validationGeneratedPaths?: string[];
 }
 
 export interface LiveConstraintIncident {
@@ -426,6 +428,10 @@ export interface LiveConstraintMonitorFailure {
 export interface LiveConstraintInvocationResult {
   incidents: LiveConstraintIncident[];
   exemptedCount: number;
+  /** Exact paths covered by either baseline or configured-command exemptions. */
+  exemptedPaths: string[];
+  /** Exact paths covered specifically by adapter-recorded validation provenance. */
+  validationGeneratedPaths: string[];
   monitorFailure?: LiveConstraintMonitorFailure;
 }
 
@@ -445,7 +451,10 @@ export interface LiveConstraintGuardOptions {
   scanAndRestore: (
     candidatePaths: readonly string[],
     trigger: LiveConstraintScanTrigger,
+    validationCommandActive: boolean,
   ) => LiveConstraintScanResult | Promise<LiveConstraintScanResult>;
+  /** Adapter command lifecycle evidence, not prompt prose, activates generated-output policy. */
+  isValidationCommand?: (command: string) => boolean;
   scopeRevisionInstruction: (paths: readonly string[]) => string;
   onExemptions?: (summary: LiveConstraintExemptionSummary) => void;
   onMonitorFailure?: (failure: LiveConstraintMonitorFailure) => void;
@@ -472,6 +481,8 @@ export interface LiveConstraintGuardFactory {
 export interface LiveConstraintInvocationMonitor {
   /** Structured adapter attribution closes watcher gaps without changing enforcement authority. */
   observePaths(paths: readonly string[]): void;
+  commandStarted(id: string, command: string | undefined): void;
+  commandCompleted(id: string): void;
   finish(): Promise<LiveConstraintInvocationResult>;
 }
 
@@ -490,6 +501,9 @@ interface ActiveInvocation {
   lastScanDurationMs: number;
   lastScanFileCount: number;
   exemptedPaths: Set<string>;
+  validationGeneratedPaths: Set<string>;
+  validationCommandIds: Set<string>;
+  completingValidationCommandIds: Set<string>;
   monitorFailure?: LiveConstraintMonitorFailure;
   summaryReported: boolean;
   finished: boolean;
@@ -612,6 +626,9 @@ export class LiveConstraintGuard {
       lastScanDurationMs: 0,
       lastScanFileCount: 0,
       exemptedPaths: new Set(),
+      validationGeneratedPaths: new Set(),
+      validationCommandIds: new Set(),
+      completingValidationCommandIds: new Set(),
       summaryReported: false,
       finished: false,
     };
@@ -673,6 +690,17 @@ export class LiveConstraintGuard {
         }
         if (paths.length > 0) this.queueScan(active, 'watch');
       },
+      commandStarted: (id, command) => {
+        if (!command || !this.options.isValidationCommand?.(command)) return;
+        active.validationCommandIds.add(id);
+      },
+      commandCompleted: (id) => {
+        if (!active.validationCommandIds.has(id)) return;
+        // Keep provenance active through a forced boundary scan. Filesystem
+        // notifications can arrive after the child reports completion.
+        active.completingValidationCommandIds.add(id);
+        this.queueScan(active, 'phase_boundary');
+      },
       finish: () => this.finishInvocation(active),
     };
   }
@@ -697,7 +725,11 @@ export class LiveConstraintGuard {
               settled = true;
               rejectPromise(new Error(`scan exceeded ${this.monitorDeadlineMs}ms monitor deadline`));
             }, this.monitorDeadlineMs);
-            Promise.resolve(this.options.scanAndRestore(paths, nextTrigger)).then(
+            Promise.resolve(this.options.scanAndRestore(
+              paths,
+              nextTrigger,
+              active.validationCommandIds.size > 0,
+            )).then(
               (value) => {
                 if (settled) return;
                 settled = true;
@@ -731,6 +763,11 @@ export class LiveConstraintGuard {
         active.lastScanDurationMs = Math.max(0, scanCompletedAt - scanStartedAt);
         active.lastScanFileCount = Math.max(0, Math.floor(result.scannedPaths));
         for (const path of result.exemptedPaths ?? []) active.exemptedPaths.add(path);
+        for (const path of result.validationGeneratedPaths ?? []) active.validationGeneratedPaths.add(path);
+        if (nextTrigger === 'phase_boundary' && active.completingValidationCommandIds.size > 0) {
+          for (const id of active.completingValidationCommandIds) active.validationCommandIds.delete(id);
+          active.completingValidationCommandIds.clear();
+        }
         if (result.violations.length === 0) continue;
         const writeViolations = result.violations.filter((violation) => violation.changeObserved !== false);
         const pathsForInstruction = [...new Set(writeViolations.map((violation) => violation.path))].sort();
@@ -806,6 +843,8 @@ export class LiveConstraintGuard {
     if (active.finished) return {
       incidents: [...active.incidents],
       exemptedCount: active.exemptedPaths.size,
+      exemptedPaths: [...active.exemptedPaths].sort(),
+      validationGeneratedPaths: [...active.validationGeneratedPaths].sort(),
       ...(active.monitorFailure ? { monitorFailure: active.monitorFailure } : {}),
     };
     active.watcher?.close();
@@ -838,6 +877,8 @@ export class LiveConstraintGuard {
     return {
       incidents: [...active.incidents],
       exemptedCount: active.exemptedPaths.size,
+      exemptedPaths: [...active.exemptedPaths].sort(),
+      validationGeneratedPaths: [...active.validationGeneratedPaths].sort(),
       ...(active.monitorFailure ? { monitorFailure: active.monitorFailure } : {}),
     };
   }

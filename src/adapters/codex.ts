@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
+import type { Adapter, AdapterFailureKind, AgentConfig, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
+import { classifyAdapterFailure } from './failure.js';
 import { findExecutableOnPath } from './availability.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
@@ -102,6 +103,9 @@ function collectFileChangePaths(value: unknown, out: Set<string>, workDir?: stri
 export interface ParsedCodexJsonl {
   eventCount: number;
   output: string;
+  /** Diagnostic from a terminal CLI event, separate from agent-authored text. */
+  terminalError?: string;
+  adapterFailureKind?: AdapterFailureKind;
   sessionId?: string;
   tokens_in?: number;
   tokens_out?: number;
@@ -117,6 +121,7 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
   let sawTokensIn = false;
   let sawTokensOut = false;
   const messages: string[] = [];
+  let terminalError: string | undefined;
   const writes = new Set<string>();
 
   for (const line of output.split(/\r?\n/)) {
@@ -133,6 +138,19 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
     if (type === 'message' && event.role === 'assistant' && typeof event.content === 'string' && event.content.trim()) messages.push(event.content.trim());
     if (itemType === 'file_change' || type === 'file_change') collectFileChangePaths(item ?? event, writes, workDir);
 
+    if (type === 'turn.completed') terminalError = undefined;
+    if (type === 'error' || type === 'turn.failed' || itemType === 'error') {
+      const nestedError = event.error && typeof event.error === 'object'
+        ? event.error as Record<string, unknown>
+        : undefined;
+      const message = typeof event.message === 'string' ? event.message
+        : typeof event.error === 'string' ? event.error
+          : typeof nestedError?.message === 'string' ? nestedError.message
+            : typeof item?.message === 'string' ? item.message
+              : undefined;
+      if (message?.trim()) terminalError = message.trim();
+    }
+
     const usage = event.usage && typeof event.usage === 'object' ? event.usage as Record<string, unknown> : undefined;
     const input = numericUsage(usage?.input_tokens ?? usage?.inputTokens);
     const outputTokens = numericUsage(usage?.output_tokens ?? usage?.outputTokens);
@@ -140,9 +158,15 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
     if (outputTokens !== undefined) { tokensOut += outputTokens; sawTokensOut = true; }
   }
 
+  const finalMessage = messages.at(-1) ?? '';
+  const adapterFailureKind = terminalError ? classifyAdapterFailure(terminalError) : undefined;
   return {
     eventCount,
-    output: messages.at(-1) ?? '',
+    output: terminalError && terminalError !== finalMessage
+      ? [finalMessage, terminalError].filter(Boolean).join('\n')
+      : (terminalError ?? finalMessage),
+    ...(terminalError ? { terminalError } : {}),
+    ...(adapterFailureKind ? { adapterFailureKind } : {}),
     sessionId,
     tokens_in: sawTokensIn ? tokensIn : undefined,
     tokens_out: sawTokensOut ? tokensOut : undefined,
@@ -537,12 +561,20 @@ export class CodexAdapter implements Adapter {
       } else {
         result.writeAttribution = 'unknown';
       }
-      // Return ONLY the agent's final message. `codex exec` echoes the entire
-      // session (banner + full prompt + prior-stage transcripts + token footer);
-      // returning that raw polluted output.md, downstream handoff context, and run
-      // summaries. The raw transcript is preserved in live.log for debugging.
+      // Return the agent's final message plus a structured terminal error, if
+      // present. `codex exec` echoes the entire session (banner + full prompt +
+      // prior-stage transcripts + token footer). Returning that raw stream
+      // would pollute output.md, downstream handoff context, and run summaries. The raw
+      // transcript is preserved in live.log for debugging.
       // (Parse tokens above FIRST — cleaning strips the "tokens used" footer.)
       result.output = parsed.output || extractFinalMessage(rawOutput);
+      if (result.exitCode !== 0 && result.exitCode !== 124 && result.exitCode !== 137) {
+        const kind = parsed.eventCount > 0
+          ? parsed.adapterFailureKind
+          : classifyAdapterFailure(rawOutput);
+        result.adapterError = kind !== undefined;
+        result.adapterFailureKind = kind;
+      }
       return result;
     } finally {
       // Preserve a successful owner home only when the scheduler proved there

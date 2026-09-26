@@ -6,9 +6,9 @@
  *   Scenario A (research loop): confirm-fail must EXCLUDE the candidate and
  *   CONTINUE (fix 1a), a premature ceiling must be DEFERRED by the declared
  *   floor (fix 1b), the engine-initiated terminal must write the declared
- *   artifact path (fix 2), a planner-authored reality check may rely on the
- *   framework-owned run manifest, and the engine-consumed round_result.json
- *   must still be restored at terminal time (fix 4).
+ *   artifact path (fix 2), a planner-authored reality check may rely on a
+ *   pre-gate stage artifact, and the engine-consumed round_result.json must
+ *   still be restored at terminal time (fix 4).
  *
  *   Scenario B (unified terminal gate): an agent writing ship_report.md
  *   directly must be REJECTED by the confirm gate (hole 5), the run must end
@@ -190,12 +190,12 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
               '## Reality checks',
               '```yaml',
               'checks:',
-              '  - name: run_manifest_present',
+              '  - name: confirmation_input_present',
               '    type: exec-script-exit-zero',
               '    params:',
               '      timeout_seconds: 30',
               '      script: |',
-              '        test -f research/val/run_manifest.json',
+              '        test -f research/val/confirm_flag',
               '```',
             ].join('\n'),
           } },

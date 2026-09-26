@@ -144,6 +144,7 @@ import {
   validationPathImpacts,
   type ProjectValidationBaseline,
   type ProjectValidationDependencies,
+  type ValidationCommand,
   type ValidationDeltaResult,
 } from './project-validation.js';
 import {
@@ -1384,11 +1385,14 @@ export function appendResearchTemporalPathContract(
   return `${prompt}\n\n# Resolved research temporal paths (scheduler-owned)\n`
     + `- mutable latest measured result: ${paths.resultFile}\n`
     + `- mutable no-candidate alternative: ${paths.resultFile}.no_candidate.json\n`
-    + `- always-emitted framework manifest: ${paths.manifestFile}\n`
+    + `- post-consumption framework manifest: ${paths.manifestFile}\n`
     + `- terminal outputs: ${terminalPaths.length > 0 ? terminalPaths.join(', ') : 'none declared'}\n`
     + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. `
     + `When no safe acting candidate exists, write exactly {"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"} to ${paths.resultFile}.no_candidate.json; the discriminator field is outcome, not status. `
-    + `Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. Use ${paths.manifestFile} or scheduler-consumed immutable round evidence. This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path.`;
+    + `Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. `
+    + `${paths.manifestFile} is written only after the scheduler consumes an accepted round, so it is unavailable to that round's confirmation gates. `
+    + `Those gates must use the scheduler-injected immutable round evidence; the manifest is valid only for already-consumed rounds and terminal reporting. `
+    + `This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path; a check that requires the absent ${paths.manifestFile} before the first accepted round is rejected as a temporal cycle.`;
 }
 
 function appendPlannerAdmissionContract(
@@ -6783,7 +6787,7 @@ function packageScriptDirectories(packageRoot: string, manifest: Record<string, 
 
 /** Derive the generated-output capability set from target-owned tool
  * configuration, never from capabilities a submitted plan happened to claim. */
-function discoverConfiguredCommandScopes(projectDir: string): string[] {
+export function discoverConfiguredCommandScopes(projectDir: string): string[] {
   const projectRoot = resolve(projectDir);
   const packageRoots: string[] = [projectRoot];
   const visited = new Set<string>();
@@ -6870,6 +6874,126 @@ function commandAliases(display: string): string[] {
   const packageScript = /^(pnpm|yarn|bun) run (\S+)$/.exec(display);
   if (packageScript) aliases.push(`${packageScript[1]} ${packageScript[2]}`);
   return aliases;
+}
+
+function unquotedShellWord(raw: string): { value: string; length: number } | undefined {
+  if (raw.startsWith("'")) {
+    const end = raw.indexOf("'", 1);
+    return end < 0 ? undefined : { value: raw.slice(1, end), length: end + 1 };
+  }
+  if (raw.startsWith('"')) {
+    const end = raw.indexOf('"', 1);
+    if (end < 0) return undefined;
+    const value = raw.slice(1, end);
+    // Expansion makes the destination unknowable without interpreting shell.
+    return /[$`\\]/.test(value) ? undefined : { value, length: end + 1 };
+  }
+  const word = /^[^\s;&|<>()]+/.exec(raw)?.[0];
+  if (!word || /[$`\\*?[\]{}]/.test(word)) return undefined;
+  return { value: word, length: word.length };
+}
+
+function projectContainsResolvedPath(projectDir: string, rawPath: string): boolean {
+  const projectRoot = resolve(projectDir);
+  const target = isAbsolute(rawPath) ? resolve(rawPath) : resolve(projectRoot, rawPath);
+  const contains = (root: string, candidate: string): boolean => {
+    const rel = relative(root, candidate);
+    return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`));
+  };
+  if (contains(projectRoot, target)) return true;
+
+  const canonicalPotentialPath = (
+    rawTarget: string,
+    seenLinks = new Set<string>(),
+  ): string | undefined => {
+    let current = resolve(rawTarget);
+    const suffix: string[] = [];
+    for (;;) {
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(current);
+      } catch {
+        const parent = dirname(current);
+        if (parent === current) return undefined;
+        suffix.unshift(basename(current));
+        current = parent;
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        if (seenLinks.has(current)) return undefined;
+        seenLinks.add(current);
+        let linked: string;
+        try { linked = readlinkSync(current); } catch { return undefined; }
+        const destination = isAbsolute(linked)
+          ? resolve(linked)
+          : resolve(dirname(current), linked);
+        return canonicalPotentialPath(resolve(destination, ...suffix), seenLinks);
+      }
+      try { return resolve(realpathSync(current), ...suffix); } catch { return undefined; }
+    }
+  };
+
+  const physicalRoot = canonicalPotentialPath(projectRoot);
+  const physicalTarget = canonicalPotentialPath(target);
+  // Unresolvable aliases do not earn configured-generator provenance.
+  return !physicalRoot || !physicalTarget || contains(physicalRoot, physicalTarget);
+}
+
+/** A shell may redirect diagnostic output outside the project without changing
+ * who owns repository writes. A project-relative/inside-project destination is
+ * itself authored by the shell and therefore invalidates generator provenance.
+ * Every other suffix fails closed instead of being treated as command flags. */
+function hasOnlyExternalOutputRedirections(raw: string, projectDir: string): boolean {
+  let suffix = raw.trim();
+  if (!suffix) return true;
+  while (suffix) {
+    const operator = /^(?:\d+|&)?(?:>>?|>\|)\s*/.exec(suffix);
+    if (!operator) return false;
+    suffix = suffix.slice(operator[0].length);
+    const descriptor = /^&(?:\d+|-)(?=\s|$)/.exec(suffix);
+    if (descriptor) {
+      suffix = suffix.slice(descriptor[0].length).trimStart();
+      continue;
+    }
+    const target = unquotedShellWord(suffix);
+    if (!target || projectContainsResolvedPath(projectDir, target.value)) return false;
+    suffix = suffix.slice(target.length).trimStart();
+  }
+  return true;
+}
+
+/** Match only a stand-alone configured validation execution. Compound shell
+ * commands are deliberately refused: their other clauses can author files in
+ * a generated-looking tree and therefore do not carry generator provenance. */
+export function configuredValidationCommandRole(
+  rawCommand: string,
+  commands: readonly ValidationCommand[],
+  projectDir = process.cwd(),
+): ValidationCommand['role'] | undefined {
+  let command = rawCommand.trim();
+  const shellWrapper = /^(?:\/bin\/)?(?:ba|da|z)?sh\s+-lc\s+(['"])([\s\S]*)\1$/.exec(command);
+  if (shellWrapper) command = shellWrapper[2];
+  if (/\r|\n|;|&&|\|\||[`]|\$\(/.test(command) || /(^|[^<>])\|([^|]|$)/.test(command)) return undefined;
+  const grouped = /^\(\s*([\s\S]*?)\s*\)$/.exec(command);
+  if (grouped) command = grouped[1];
+  else if (/[()]/.test(command)) return undefined;
+  // Permit the bounded wrappers emitted by stage instructions without
+  // interpreting a general shell program.
+  command = command.replace(/^(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)*/, '');
+  command = command.replace(/^(?:\/usr\/bin\/)?timeout(?:\s+--?[A-Za-z-]+(?:=\S+|\s+\S+)?)?\s+\d+(?:\.\d+)?(?:ms|s|m|h|d)?\s+/, '');
+  command = command.replace(/^command\s+/, '');
+  const lower = command.toLowerCase();
+  for (const configured of commands) {
+    for (const alias of commandAliases(configured.display)) {
+      const normalized = alias.trim().toLowerCase();
+      if (lower === normalized) return configured.role;
+      if (lower.startsWith(`${normalized} `)
+        && hasOnlyExternalOutputRedirections(command.slice(alias.trim().length), projectDir)) {
+        return configured.role;
+      }
+    }
+  }
+  return undefined;
 }
 
 /** Infer only direct imperative execution clauses. Fenced examples, block
@@ -7172,15 +7296,6 @@ export function inspectDispatchAdmission(input: {
       const roles = configuredCommandRolesForStage(stage, configuredCommands);
       if (roles.length === 0) continue;
       configuredCommandStageRoles.set(stage.id, roles);
-      const priorScopes = (stage.scope ?? []).map(parseDeclaredScope);
-      const missing = configuredCommandScopes.filter((scope) => (
-        !scopeRequestAlreadyAuthorized(parseDeclaredScope(scope), priorScopes)
-      ));
-      if (missing.length > 0) {
-        errors.push(
-          `${stage.id}.scope: configured-command intent (${roles.join(', ')}) lacks generated output capabilities ${missing.join(', ')}; attach every generated output scope at planning time before this stage can execute`,
-        );
-      }
     }
   }
 
@@ -7770,14 +7885,13 @@ export function inspectRealityCheckReachability(input: {
   terminalStates?: TerminalStatesConfig;
   research?: ResearchConfig;
 }): string[] {
-  const allowedFrameworkPaths = new Set<string>();
   const researchPaths = input.research ? resolveResearchPaths(input.research) : undefined;
   const optionalResearchResultPath = researchPaths
     ? normalizedProjectPath(researchPaths.resultFile)
     : undefined;
-  if (researchPaths) {
-    allowedFrameworkPaths.add(normalizedProjectPath(researchPaths.manifestFile) ?? '');
-  }
+  const postConsumptionManifestPath = researchPaths
+    ? normalizedProjectPath(researchPaths.manifestFile)
+    : undefined;
   const terminalPaths = new Set(
     Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths)
       .map((path) => normalizedProjectPath(path))
@@ -7795,15 +7909,19 @@ export function inspectRealityCheckReachability(input: {
     realityCheckLiteralPaths(check.params, paths);
     for (const path of paths) {
       const producers = input.stages.filter((stage) => stageScopeOwnsPath(stage, path));
+      if (postConsumptionManifestPath === path && !existsSync(join(input.projectDir, path))) {
+        errors.push(`reality check ${JSON.stringify(check.name)} references post-consumption framework manifest ${path}; the scheduler writes it only after the current round's confirmation gates settle. Use scheduler-injected immutable round evidence for current-round confirmation`);
+        continue;
+      }
       if (optionalResearchResultPath === path) {
         // Stage reachability cannot make this artifact mandatory: the admitted
         // research protocol lets the same stage emit only the no-candidate
-        // sidecar. Hard checks must target the framework's always-emitted
-        // manifest instead of assuming which branch the stage will take.
-        errors.push(`reality check ${JSON.stringify(check.name)} references mutable optional result path ${path}; a valid no-candidate round writes only its sidecar ${path}.no_candidate.json instead and never writes ${path}. Use the always-emitted framework manifest ${researchPaths!.manifestFile}, or declare an unconditional producer for a different artifact`);
+        // sidecar. Hard checks must use the immutable evidence injected by the
+        // scheduler instead of assuming which mutable branch the stage took.
+        errors.push(`reality check ${JSON.stringify(check.name)} references mutable optional result path ${path}; a valid no-candidate round writes only its sidecar ${path}.no_candidate.json instead and never writes ${path}. Use scheduler-injected immutable round evidence, or declare an unconditional producer for a different artifact`);
         continue;
       }
-      if (allowedFrameworkPaths.has(path) || existsSync(join(input.projectDir, path))) continue;
+      if (existsSync(join(input.projectDir, path))) continue;
       if (producers.length === 0) {
         errors.push(`reality check ${JSON.stringify(check.name)} references absent ${path}, but no admitted stage or framework emitter owns it`);
         continue;
@@ -12217,6 +12335,7 @@ interface ScopeWriteEnforcement {
   rawWrites: string[];
   contentChangedWrites: string[];
   appliedWrites: string[];
+  exemptedWrites: string[];
   rolledBackWrites: string[];
   rollbackFailures: string[];
   rollbackFailureReasons: Record<string, string>;
@@ -12263,6 +12382,9 @@ function enforceStageScopeWrites(input: {
   snapshot: RepairRoundSnapshot;
   preimages?: ReadonlyMap<string, RepairFileImage>;
   effectiveScope: string[] | null;
+  exemptPatterns?: readonly string[];
+  configuredGeneratedPatterns?: readonly string[];
+  validationGeneratedWrites?: readonly string[];
   rawWrites: string[];
   definiteWrites: ReadonlySet<string>;
   preserveUnverifiedPath: (path: string) => boolean;
@@ -12271,10 +12393,12 @@ function enforceStageScopeWrites(input: {
   const rawWrites = [...new Set(input.rawWrites)];
   const contentChangedWrites: string[] = [];
   const appliedWrites: string[] = [];
+  const exemptedWrites: string[] = [];
   const rolledBackWrites: string[] = [];
   const rollbackFailures: string[] = [];
   const rollbackFailureReasons: Record<string, string> = {};
   const durableWrites: string[] = [];
+  const validationGeneratedWrites = new Set(input.validationGeneratedWrites ?? []);
   for (const rawPath of rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
     const definitelyAttributed = input.definiteWrites.has(normalized ?? rawPath);
@@ -12290,6 +12414,27 @@ function enforceStageScopeWrites(input: {
       ?? baselineImage(input.snapshot.rollbackBaseline, normalized);
     const current = readRollbackCurrentImage(input.snapshot.rollbackBaseline, input.projectDir, normalized);
     const contentChanged = compareRepairFileContents(before, current) === 'different';
+    // Apply the same configured-command provenance rule at the post-attempt
+    // boundary as at the live boundary. Without this, a generated file that
+    // existed before the stage was exempted live and then rolled back here,
+    // while a newly created sibling survived.
+    const defaultExemption = isLiveConstraintExemptPath(
+      normalized,
+      input.exemptPatterns ?? [],
+      input.snapshot.rollbackBaseline.trackedPaths,
+    );
+    const provenValidationOutput = validationGeneratedWrites.has(normalized)
+      && isLiveConstraintExemptPath(
+        normalized,
+        input.configuredGeneratedPatterns ?? [],
+        input.snapshot.rollbackBaseline.trackedPaths,
+      );
+    if (contentChanged && (defaultExemption || provenValidationOutput)) {
+      exemptedWrites.push(normalized);
+      durableWrites.push(normalized);
+      settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      continue;
+    }
     if (contentChanged) contentChangedWrites.push(normalized);
     // Preserve the established rollback of an explicitly attributed
     // executable-bit mutation, but do not promote metadata into content truth.
@@ -12336,6 +12481,7 @@ function enforceStageScopeWrites(input: {
     rawWrites,
     contentChangedWrites,
     appliedWrites,
+    exemptedWrites,
     rolledBackWrites,
     rollbackFailures,
     rollbackFailureReasons,
@@ -12356,7 +12502,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
   if (!input.stage.scope) return undefined;
   const runDirPath = runDir(input.projectDir, input.runId);
   const projectDefaults = loadProjectDefaults(input.projectDir);
-  const exemptPatterns = projectDefaults.live_constraint_exempt_patterns;
+  const defaultExemptPatterns = projectDefaults.live_constraint_exempt_patterns;
+  const configuredGeneratedPatterns = discoverConfiguredCommandScopes(input.projectDir);
+  const configuredCommands = discoverProjectValidation(input.projectDir).commands;
   const factory: LiveConstraintGuardFactory = ({ attemptIndex }) => {
     const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attemptIndex);
     const currentAttemptKey = scopeAttemptKey(input.stage.id, attemptIndex);
@@ -12368,6 +12516,11 @@ function createSchedulerLiveConstraintGuardFactory(input: {
       fallbackScanMs: projectDefaults.live_constraint_fallback_scan_ms,
       monitorDeadlineMs: projectDefaults.live_constraint_monitor_deadline_ms,
       effectiveScope: () => attemptContext.effectiveScope,
+      isValidationCommand: (command) => configuredValidationCommandRole(
+        command,
+        configuredCommands,
+        input.projectDir,
+      ) !== undefined,
       onExemptions: (summary) => {
         recordRunEvent(input.projectDir, input.runId, {
           type: 'live_constraint_exemptions',
@@ -12407,18 +12560,34 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         gate: input.stage.is_gate === true,
         violatingPaths: paths,
       }),
-      scanAndRestore: async (candidatePaths, trigger) => {
+      scanAndRestore: async (candidatePaths, trigger, validationCommandActive) => {
         const baseline = input.context.snapshot.rollbackBaseline;
+        const exemptPatterns = validationCommandActive
+          ? [...defaultExemptPatterns, ...configuredGeneratedPatterns]
+          : defaultExemptPatterns;
         const candidates = new Set<string>();
         const exemptCandidates = new Set<string>();
         const exemptedPaths = new Set<string>();
+        const validationGeneratedPaths = new Set<string>();
+        const validationGeneratedCandidates = new Set<string>();
         const addCandidate = (rawPath: string, directlyObserved = false): void => {
           const observedPath = normalizedProjectPath(rawPath);
           if (!observedPath) return;
           const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
-          if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)) {
+          const defaultExemption = isLiveConstraintExemptPath(
+            path,
+            defaultExemptPatterns,
+            baseline.trackedPaths,
+          );
+          const configuredValidationExemption = validationCommandActive && isLiveConstraintExemptPath(
+            path,
+            configuredGeneratedPatterns,
+            baseline.trackedPaths,
+          );
+          if (defaultExemption || configuredValidationExemption) {
             if (directlyObserved) exemptedPaths.add(path);
             exemptCandidates.add(path);
+            if (configuredValidationExemption) validationGeneratedCandidates.add(path);
             return;
           }
           candidates.add(path);
@@ -12468,6 +12637,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
           );
           if (compareRepairFileContents(before, current) !== 'different') continue;
           exemptedPaths.add(path);
+          if (validationGeneratedCandidates.has(path)) validationGeneratedPaths.add(path);
           settleRollbackBaselinePath(baseline, input.projectDir, path);
         }
         for (const path of [...candidates].sort()) {
@@ -12578,7 +12748,12 @@ function createSchedulerLiveConstraintGuardFactory(input: {
             level: violation.changeObserved === false ? 'info' : 'warning',
           });
         }
-        return { scannedPaths: candidates.size, violations, exemptedPaths: [...exemptedPaths].sort() };
+        return {
+          scannedPaths: candidates.size,
+          violations,
+          exemptedPaths: [...exemptedPaths].sort(),
+          validationGeneratedPaths: [...validationGeneratedPaths].sort(),
+        };
       },
     };
     return new LiveConstraintGuard(options);
@@ -12839,6 +13014,11 @@ function reconcileStageScope(input: {
     // writer's own post-attempt audit can still restore a cross-scope write.
     preimages: input.context.liveWritePreimages,
     effectiveScope: governedScope,
+    exemptPatterns: [
+      ...loadProjectDefaults(input.projectDir).live_constraint_exempt_patterns,
+    ],
+    configuredGeneratedPatterns: discoverConfiguredCommandScopes(input.projectDir),
+    validationGeneratedWrites: attempt.validationGeneratedWrites,
     rawWrites,
     definiteWrites,
     preserveUnverifiedPath: (path) => peerScopeContainsPath(input.context, input.stage.id, path),
@@ -12986,6 +13166,7 @@ function reconcileStageScope(input: {
     decisions: decisionRecords,
     rawWrites: enforcement.rawWrites,
     appliedWrites: enforcement.appliedWrites,
+    exemptedWrites: enforcement.exemptedWrites,
     rolledBackWrites: allRolledBackWrites,
     rollbackFailures: enforcement.rollbackFailures,
     rollbackFailureReasons: enforcement.rollbackFailureReasons,
@@ -13016,6 +13197,7 @@ function reconcileStageScope(input: {
     unverifiedCount: unverified.length,
     rawWriteCount: enforcement.rawWrites.length,
     appliedWriteCount: enforcement.appliedWrites.length,
+    exemptedWriteCount: enforcement.exemptedWrites.length,
     rolledBackWriteCount: allRolledBackWrites.length,
     rejectedDigestCount: planningDigests.length,
   };
@@ -13409,14 +13591,6 @@ function archivedGateEffectiveVerdictWritePath(
   return canonicalGateArchiveArtifactPath(runDirPath, coordinate, `engine_verdict_${gateId}.json`);
 }
 
-function archivedGateEffectiveVerdictReadPath(
-  runDirPath: string,
-  coordinate: GateArchiveCoordinate,
-  gateId: string,
-): string {
-  return compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, `engine_verdict_${gateId}.json`);
-}
-
 function archivedGateMetricWritePath(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
@@ -13537,6 +13711,148 @@ function readWrittenVerdictPass(verdictPath: string): boolean | null {
   }
 }
 
+interface ArchivedGateRejection {
+  iteration: number;
+  round: number;
+  verdictPath: string;
+  outputPath: string;
+  inputPath: string;
+  metricPath: string;
+  effectiveVerdictPath: string;
+}
+
+/** Enumerate the durable archive by gate identity, not by the dispatch route
+ * that happens to be asking. Replans, restart recovery, supervisor rework and
+ * bounded repair therefore all receive the same framing decision. */
+export function archivedGateRejections(runDirPath: string, gateId: string): ArchivedGateRejection[] {
+  const root = gateReevaluationArchiveRoot(runDirPath);
+  const legacyCoordinates: Array<{ iteration: number; round: number; directory: string }> = [];
+  const canonicalCoordinates: Array<{ iteration: number; round: number; directory: string }> = [];
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const legacy = /^round_(\d+)$/.exec(entry.name);
+      if (legacy) {
+        legacyCoordinates.push({ iteration: 0, round: Number(legacy[1]), directory: join(root, entry.name) });
+        continue;
+      }
+      const iteration = /^iteration_(\d+)$/.exec(entry.name);
+      if (!iteration) continue;
+      const iterationDir = join(root, entry.name);
+      for (const roundEntry of readdirSync(iterationDir, { withFileTypes: true })) {
+        const round = roundEntry.isDirectory() ? /^round_(\d+)$/.exec(roundEntry.name) : null;
+        if (round) {
+          canonicalCoordinates.push({
+            iteration: Number(iteration[1]),
+            round: Number(round[1]),
+            directory: join(iterationDir, roundEntry.name),
+          });
+        }
+      }
+    }
+  } catch { return []; }
+
+  const rejectionsFor = (
+    coordinates: Array<{ iteration: number; round: number; directory: string }>,
+  ): ArchivedGateRejection[] => coordinates.flatMap(({ iteration, round, directory }) => {
+    const verdictPath = join(directory, `rejected_verdict_${gateId}.json`);
+    const effectiveVerdictPath = join(directory, `engine_verdict_${gateId}.json`);
+    // The scheduler owns this basename and writes it only for a rejected gate.
+    // Its preserved bytes may be pass:true when the engine rejected a metric
+    // contradiction, and legacy archives may not be parseable JSON.
+    const rejected = existsSync(verdictPath);
+    if (!rejected) return [];
+    return [{
+      iteration,
+      round,
+      verdictPath,
+      outputPath: join(directory, `previous_output_${gateId}.md`),
+      inputPath: join(directory, `evaluated_input_${gateId}.md`),
+      metricPath: join(directory, `metric_${gateId}.json`),
+      effectiveVerdictPath,
+    }];
+  });
+  const canonicalRejections = rejectionsFor(canonicalCoordinates);
+  const legacyRejections = rejectionsFor(legacyCoordinates);
+  // Precedence is per gate identity. An unrelated canonical namespace cannot
+  // erase a durable rejection for this gate, while a canonical rejection for
+  // this gate supersedes its legacy compatibility copy.
+  return (canonicalRejections.length > 0 ? canonicalRejections : legacyRejections)
+    .sort((left, right) => left.iteration - right.iteration || left.round - right.round);
+}
+
+export function buildGateDispatchPreamble(input: {
+  runDirPath: string;
+  gateId: string;
+  evaluationRound: number;
+  priorAttemptCount: number;
+  fixStageIds?: string[];
+  roundDiffPath?: string;
+  interruptedInputPath?: string;
+  interruptedOutputPath?: string;
+}): string {
+  const rejections = archivedGateRejections(input.runDirPath, input.gateId);
+  const latest = rejections.at(-1);
+  const fixOutputs = (input.fixStageIds ?? [])
+    .map((id) => `- ${join(input.runDirPath, 'stages', id, 'output.md')}`).join('\n');
+  if (!latest) {
+    const liveVerdictPass = readWrittenVerdictPass(join(input.runDirPath, `verdict_${input.gateId}.json`));
+    if (liveVerdictPass === true) {
+      return [
+        `INITIAL EVALUATION (round ${input.evaluationRound}): A prior passing verdict exists for gate ${input.gateId}, but no durable rejected verdict exists.`,
+        'Run a complete initial evaluation; a passing decision is not a rejected decision to reproduce or repair.',
+      ].join('\n');
+    }
+    if (input.priorAttemptCount > 0) {
+      return [
+        `INTERRUPTED EVALUATION (round ${input.evaluationRound}): A prior execution ended without a durable rejected verdict; run the gate as an initial evaluation, not as a re-evaluation of a rejection.`,
+        '',
+        'Evidence retained from the interrupted attempt:',
+        ...(input.interruptedInputPath && existsSync(input.interruptedInputPath)
+          ? [`- Exact input seen by the interrupted gate: ${input.interruptedInputPath}`]
+          : ['- Exact input seen by the interrupted gate: unavailable']),
+        ...(input.interruptedOutputPath && existsSync(input.interruptedOutputPath)
+          ? [`- Partial prior gate output: ${input.interruptedOutputPath}`]
+          : []),
+        'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
+        'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a new validator-owned Coverage Map.',
+      ].join('\n');
+    }
+    return [
+      `FIRST EVALUATION (round ${input.evaluationRound}): No prior execution or durable rejected verdict exists for gate ${input.gateId}.`,
+      'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a validator-owned Coverage Map.',
+    ].join('\n');
+  }
+
+  const firstCoverageOutput = rejections.find((entry) => existsSync(entry.outputPath))?.outputPath
+    ?? latest.outputPath;
+  return [
+    `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a durable rejection.`,
+    '',
+    'Evidence you must read:',
+    `- Rejected verdict: ${latest.verdictPath}`,
+    ...(existsSync(latest.inputPath)
+      ? [`- Exact input evaluated by the rejected gate: ${latest.inputPath}`]
+      : ['- Exact input evaluated by the rejected gate: unavailable (this round predates input archiving or did not retain an input)']),
+    `- The engine's own conclusion and rejection reason: ${latest.effectiveVerdictPath}`,
+    '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
+    '  verdict file is not the defect — engine_rejection_reason names what the engine',
+    '  objected to, and that is what must change.',
+    `- Metric artifact actually evaluated: ${latest.metricPath}`,
+    `- Original first-pass validator-owned Coverage Map: ${firstCoverageOutput}`,
+    ...(existsSync(latest.outputPath) && latest.outputPath !== firstCoverageOutput
+      ? [`- Immediately previous gate output: ${latest.outputPath}`]
+      : []),
+    ...(input.roundDiffPath
+      ? [`- Complete, untruncated repair-round diff: ${input.roundDiffPath}`]
+      : ['- Complete repair-round diff: unavailable on this dispatch route; inspect the archived input/output and current repository diff.']),
+    ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
+    '',
+    'Reproduce every rejected finding, run the full mechanical regression suites, read the complete repair diff, and re-run every check from the prior Coverage Map touched by it.',
+    'Do not treat a repair summary or the existence of changed code as proof.',
+  ].join('\n');
+}
+
 export function buildGateReevaluationPreamble(input: {
   evaluationRound: number;
   iteration: number;
@@ -13546,54 +13862,17 @@ export function buildGateReevaluationPreamble(input: {
   fixStageIds: string[];
   roundDiffPath: string;
 }): string {
-  const fixOutputs = input.fixStageIds.map((id) => `- ${join(input.runDirPath, 'stages', id, 'output.md')}`).join('\n');
   const coordinate = gateArchiveCoordinate(input.iteration, input.repairRound);
-  const firstCoverageCoordinate = gateArchiveCoordinate(input.iteration, 1);
-  const firstCoverageOutput = archivedGateOutputReadPath(input.runDirPath, firstCoverageCoordinate, input.gateId);
-  const previousOutput = archivedGateOutputReadPath(input.runDirPath, coordinate, input.gateId);
-  const evaluatedInput = archivedGateInputReadPath(input.runDirPath, coordinate, input.gateId);
-  const rejectedVerdict = archivedGateVerdictReadPath(input.runDirPath, coordinate, input.gateId);
-  if (!existsSync(rejectedVerdict)) {
-    return [
-      `INTERRUPTED EVALUATION (round ${input.evaluationRound}): The prior gate attempt ended without a durable verdict; run the gate as an initial evaluation, not as a re-evaluation of a rejection.`,
-      '',
-      'Evidence retained from the interrupted attempt:',
-      ...(existsSync(evaluatedInput)
-        ? [`- Exact input seen by the interrupted gate: ${evaluatedInput}`]
-        : ['- Exact input seen by the interrupted gate: unavailable']),
-      ...(existsSync(previousOutput) ? [`- Partial prior gate output: ${previousOutput}`] : []),
-      ...(existsSync(input.roundDiffPath) ? [`- Complete round diff available at dispatch: ${input.roundDiffPath}`] : []),
-      ...(fixOutputs ? ['- Intervening stage output(s):', fixOutputs] : []),
-      '',
-      'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
-      'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a new validator-owned Coverage Map.',
-    ].join('\n');
-  }
-  return [
-    `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a repair.`,
-    '',
-    'Evidence you must read:',
-    `- Rejected verdict: ${rejectedVerdict}`,
-    ...(existsSync(evaluatedInput)
-      ? [`- Exact input evaluated by the rejected gate: ${evaluatedInput}`]
-      : ['- Exact input evaluated by the rejected gate: unavailable (this round predates input archiving or did not retain an input)']),
-    `- The engine's own conclusion and rejection reason: ${archivedGateEffectiveVerdictReadPath(input.runDirPath, coordinate, input.gateId)}`,
-    `- Metric artifact actually evaluated: ${archivedGateMetricReadPath(input.runDirPath, coordinate, input.gateId)}`,
-    '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
-    '  verdict file is not the defect — engine_rejection_reason names what the engine',
-    '  objected to, and that is what must change.',
-    `- Original first-pass validator-owned Coverage Map: ${firstCoverageOutput}`,
-    ...(input.repairRound > 1 ? [`- Immediately previous gate output: ${previousOutput}`] : []),
-    `- Complete, untruncated repair-round diff: ${input.roundDiffPath}`,
-    ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
-    '',
-    'This re-evaluation has exactly three responsibilities:',
-    '1. Reproduce every rejected finding and verify it is actually fixed with reproducible evidence; a repair summary or claim that code changed is not proof.',
-    '2. Run the full mechanical regression suites required by the task and project, not a targeted subset.',
-    '3. Read the complete repair diff and re-run every check from the prior Coverage Map that any changed path or hunk touches. A prior passing conclusion may not substitute for re-execution.',
-    '',
-    'Do not expand into unrelated audit dimensions or invent unrelated probes during re-evaluation. The first evaluation owned exhaustive discovery; this round owns rejected-item proof, full regression, and diff-touched revalidation.',
-  ].join('\n');
+  return buildGateDispatchPreamble({
+    runDirPath: input.runDirPath,
+    gateId: input.gateId,
+    evaluationRound: input.evaluationRound,
+    priorAttemptCount: Math.max(1, input.evaluationRound - 1),
+    fixStageIds: input.fixStageIds,
+    roundDiffPath: input.roundDiffPath,
+    interruptedInputPath: archivedGateInputReadPath(input.runDirPath, coordinate, input.gateId),
+    interruptedOutputPath: archivedGateOutputReadPath(input.runDirPath, coordinate, input.gateId),
+  });
 }
 
 function buildGateFixCorrectionContract(
@@ -13675,7 +13954,7 @@ function prepareSchedulerTechnicalAttempt(chain: TechnicalRetryBudgetState): {
 
 export function recordSchedulerTechnicalAttemptResult(
   chain: TechnicalRetryBudgetState,
-  result: Pick<RunResult, 'effectiveTimeoutMs' | 'timedOut' | 'timeoutTerminationCause'>,
+  result: Pick<RunResult, 'effectiveTimeoutMs' | 'timedOut' | 'timeoutTerminationCause' | 'adapterFailureKind'>,
   preparedBudgetMs: number,
 ): boolean {
   const effectiveBudgetMs = result.effectiveTimeoutMs ?? preparedBudgetMs;
@@ -13684,7 +13963,7 @@ export function recordSchedulerTechnicalAttemptResult(
   transitionTechnicalRetryBudget(chain, retryableTimeout
     ? { type: 'attempt_timed_out', effectiveBudgetMs }
     : { type: 'attempt_finished', effectiveBudgetMs });
-  return retryableTimeout;
+  return retryableTimeout || result.adapterFailureKind !== undefined;
 }
 
 async function executeSingleStage(
@@ -13729,18 +14008,7 @@ async function executeSingleStage(
     const activeRetryGateIds = (stage.retry_to ?? []).filter((gateId) =>
       existsSync(archivedGateOutputReadPath(runDirPath, archiveCoordinate, gateId)),
     );
-    if (stage.is_gate) {
-      if (!roundDiffPath) throw new Error(`Gate ${stage.id} re-evaluation is missing its complete repair diff`);
-      resolvedPrompt = `${buildGateReevaluationPreamble({
-        evaluationRound: innerRetry + 2,
-        iteration: archiveCoordinate.iteration,
-        repairRound: innerRetry + 1,
-        runDirPath,
-        gateId: stage.id,
-        fixStageIds: fixStageIds ?? [],
-        roundDiffPath,
-      })}\n\n${resolvedPrompt}`;
-    } else if (innerRetry > 0) {
+    if (!stage.is_gate && innerRetry > 0) {
       // Build references to the gate verdicts and outputs that triggered this retry
       const gateRefs = activeRetryGateIds.map(gid =>
         `- Verdict: ${archivedGateVerdictReadPath(runDirPath, archiveCoordinate, gid)}\n- QA output: ${archivedGateOutputReadPath(runDirPath, archiveCoordinate, gid)}`
@@ -13771,6 +14039,16 @@ async function executeSingleStage(
   resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
 
   if (stage.is_gate) {
+    let priorAttemptCount = 0;
+    try { priorAttemptCount = readStageStatus(projectDir, runId, stage.id).attempts?.length ?? 0; } catch { /* first dispatch */ }
+    resolvedPrompt = `${buildGateDispatchPreamble({
+      runDirPath,
+      gateId: stage.id,
+      evaluationRound: priorAttemptCount + 1,
+      priorAttemptCount,
+      fixStageIds,
+      roundDiffPath,
+    })}\n\n${resolvedPrompt}`;
     resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id, currentGateAttempt!);
   }
 
@@ -13837,17 +14115,42 @@ async function executeSingleStage(
       liveConstraintGuardFactory,
     });
 
-    const retryableTimeout = recordSchedulerTechnicalAttemptResult(
+    const retryableTechnicalFailure = recordSchedulerTechnicalAttemptResult(
       technicalRetry,
       result,
       prepared.budgetMs,
     );
 
-    if (retryableTimeout) {
+    if (retryableTechnicalFailure) {
       if (retries < maxTechnicalRetries) {
         retries++;
-        log.warn({ stage: stage.id, retry: retries }, 'Retrying timed-out stage (inner loop)');
+        log.warn(
+          { stage: stage.id, retry: retries, adapterFailureKind: result.adapterFailureKind },
+          result.adapterFailureKind
+            ? 'Retrying adapter-failed stage (inner loop)'
+            : 'Retrying timed-out stage (inner loop)',
+        );
         continue;
+      }
+      if (result.adapterFailureKind) {
+        const detail = `Upstream adapter failure exhausted technical recovery for ${stage.id}: ${result.adapterFailureKind}`;
+        try { state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id); } catch { /* runStage normally wrote it */ }
+        state.status = RUN_STATUS.FAILED;
+        state.failureReason = detail;
+        state.completedAt = new Date().toISOString();
+        markLeftoverStagesSkipped(state, detail);
+        writeRunState(projectDir, runId, state);
+        recordRunEvent(projectDir, runId, {
+          type: 'run_completed',
+          runId,
+          timestamp: state.completedAt,
+          iteration: state.currentIteration ?? 1,
+          stageId: stage.id,
+          detail,
+          source: 'scheduler',
+          level: 'warning',
+        });
+        return;
       }
       transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
     }
@@ -14513,6 +14816,14 @@ async function executeIteration(
       resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, sorted, readRunState(projectDir, runId), runDirPath);
 
       if (stage.is_gate) {
+        let priorAttemptCount = 0;
+        try { priorAttemptCount = readStageStatus(projectDir, runId, stage.id).attempts?.length ?? 0; } catch { /* first dispatch */ }
+        resolvedPrompt = `${buildGateDispatchPreamble({
+          runDirPath,
+          gateId: stage.id,
+          evaluationRound: priorAttemptCount + 1,
+          priorAttemptCount,
+        })}\n\n${resolvedPrompt}`;
         resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id, currentGateAttempt!);
       }
 
@@ -14660,6 +14971,10 @@ async function executeIteration(
 
     state = readRunState(projectDir, runId);
     let failed = false;
+    let exhaustedAdapterFailure: {
+      stageId: string;
+      kind: NonNullable<RunResult['adapterFailureKind']>;
+    } | undefined;
 
     for (const { stage, result, currentRetries } of results) {
       if (result.suspended) {
@@ -14673,22 +14988,35 @@ async function executeIteration(
       )));
       const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
       const isAttemptTimeout = result.timedOut && result.timeoutTerminationCause === 'attempt_timeout';
+      const isAdapterFailure = result.adapterFailureKind !== undefined;
 
-      if (isAttemptTimeout && currentRetries < maxTechnicalRetries) {
+      if ((isAttemptTimeout || isAdapterFailure) && currentRetries < maxTechnicalRetries) {
         const nextRetry = currentRetries + 1;
-        const retryStatus = rependStageStatus(readStageStatus(projectDir, runId, stage.id), nextRetry);
+        const failedStatus = readStageStatus(projectDir, runId, stage.id);
+        const retryStatus = rependStageStatus(failedStatus, nextRetry, failedStatus.error);
         writeStageStatus(projectDir, runId, stage.id, retryStatus);
         state.stages[stage.id] = retryStatus;
-        log.warn({ stage: stage.id, retry: nextRetry }, 'Retrying timed-out stage');
+        log.warn(
+          { stage: stage.id, retry: nextRetry, adapterFailureKind: result.adapterFailureKind },
+          isAdapterFailure ? 'Retrying adapter-failed stage' : 'Retrying timed-out stage',
+        );
         continue;
       }
 
-      if (isAttemptTimeout) {
+      if (isAttemptTimeout || isAdapterFailure) {
         const technicalRetry = technicalRetries.get(stage.id);
-        if (technicalRetry) transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
+        // Timeout budget exhaustion is a terminal transition in the timeout
+        // state machine. Adapter failures share the scheduler's retry count,
+        // but deliberately do not masquerade as timeout terminal decisions.
+        if (technicalRetry && isAttemptTimeout) {
+          transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
+        }
+        if (isAdapterFailure) {
+          exhaustedAdapterFailure = { stageId: stage.id, kind: result.adapterFailureKind! };
+        }
       }
 
-      if (!isAttemptTimeout && result.exitCode !== 0 && currentRetries < maxFailureRetries) {
+      if (!isAttemptTimeout && !isAdapterFailure && result.exitCode !== 0 && currentRetries < maxFailureRetries) {
         // Preserve the failed attempt's `error`: buildRetryPreamble reads it to
         // tell the next attempt WHY the previous one died. Writing the pending
         // status without it left that branch dead, so EVERY non-timeout failure
@@ -14704,6 +15032,14 @@ async function executeIteration(
 
       if (result.exitCode !== 0) {
         technicalRetries.delete(stage.id);
+        if (isAdapterFailure) {
+          // The failed attempt remains in the append-only attempt ledger with
+          // its adapter kind. Do not additionally emit a semantic
+          // stage_failed outcome: technical exhaustion below owns the run
+          // disposition and no worker outcome was observed.
+          state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+          continue;
+        }
         log.error({ stage: stage.id }, 'Stage failed');
         failed = true;
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
@@ -14749,6 +15085,25 @@ async function executeIteration(
     writeRunState(projectDir, runId, state);
     for (const event of stageEvents) {
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
+    }
+    if (exhaustedAdapterFailure) {
+      const detail = `Upstream adapter failure exhausted technical recovery for ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
+      state.status = RUN_STATUS.FAILED;
+      state.failureReason = detail;
+      state.completedAt = new Date().toISOString();
+      markLeftoverStagesSkipped(state, detail);
+      writeRunState(projectDir, runId, state);
+      recordRunEvent(projectDir, runId, {
+        type: 'run_completed',
+        runId,
+        timestamp: state.completedAt,
+        iteration: state.currentIteration ?? 1,
+        stageId: exhaustedAdapterFailure.stageId,
+        detail,
+        source: 'scheduler',
+        level: 'warning',
+      });
+      return state;
     }
     if (parkedDuringExecution || isPausedRunStatus(state.status)) return state;
 

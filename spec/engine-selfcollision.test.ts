@@ -524,7 +524,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('6 — refuses the observed allocation before execution and accepts complete per-runner scopes', () => {
+  it('6 — records configured-command intent without turning validation by-products into stage scope', () => {
     const root = temporaryRoot('item-6');
     const projectDir = join(root, 'project');
     mkdirSync(projectDir, { recursive: true });
@@ -565,11 +565,11 @@ describe('engine self-collision after-state replays and controls', () => {
       stage({ id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
       stage({ id: 'repair', prompt_template: 'Repair the gate and rerun npm test.', scope: generatedScopes }),
     ];
-    const rejected = inspectDispatchAdmission({
+    const zeroScope = inspectDispatchAdmission({
       dispatched: wrong, baseStages: [], dispatchStageId: 'plan', projectDir,
     });
-    expect(rejected.pass).toBe(false);
-    expect(rejected.errors.filter((error) => error.includes('lacks generated output capabilities'))).toHaveLength(6);
+    expect(zeroScope.pass, zeroScope.errors.join('\n')).toBe(true);
+    expect(zeroScope.errors.filter((error) => error.includes('lacks generated output capabilities'))).toEqual([]);
 
     const corrected = wrong.map((candidate) => candidate.id === 'write_report'
       ? { ...candidate, scope: [] }
@@ -624,19 +624,19 @@ describe('engine self-collision after-state replays and controls', () => {
       dispatchStageId: 'plan',
       projectDir,
     });
-    expect(absent.pass).toBe(false);
+    expect(absent.pass, absent.errors.join('\n')).toBe(true);
     expect(absent.configuredCommandScopes).toEqual([...generatedScopes].sort());
-    expect(partial.pass).toBe(false);
-    expect(partial.errors.join('\n')).toContain('dist/**');
-    expect(ordinaryImperative.pass).toBe(false);
+    expect(partial.pass, partial.errors.join('\n')).toBe(true);
+    expect(partial.errors.join('\n')).not.toContain('dist/**');
+    expect(ordinaryImperative.pass, ordinaryImperative.errors.join('\n')).toBe(true);
     expect(ordinaryImperative.configuredCommandStageRoles).toEqual({ runner: ['test'] });
 
-    recordAfter(6, 'admit the observed wrong allocation, zero-scope and partial-scope runners, then the complete allocation and imperative/negated/quoted grammar controls', {
-      wrongAllocation: {
-        pass: rejected.pass,
-        errors: rejected.errors,
-        configuredCommandScopes: rejected.configuredCommandScopes,
-        configuredCommandStageRoles: rejected.configuredCommandStageRoles,
+    recordAfter(6, 'admit zero-scope and partial-scope validation runners while retaining generated-path and command-intent telemetry', {
+      zeroScopeAllocation: {
+        pass: zeroScope.pass,
+        errors: zeroScope.errors,
+        configuredCommandScopes: zeroScope.configuredCommandScopes,
+        configuredCommandStageRoles: zeroScope.configuredCommandStageRoles,
       },
       correctedAllocation: {
         pass: accepted.pass,

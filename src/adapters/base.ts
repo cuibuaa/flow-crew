@@ -4,12 +4,25 @@ import { dirname } from 'node:path';
 
 export type { ChildProcess } from 'node:child_process';
 
+export type AdapterFailureKind =
+  | 'forbidden'
+  | 'connection_refused'
+  | 'connection_reset'
+  | 'rate_limited'
+  | 'transport_timeout'
+  | 'bad_gateway'
+  | 'service_unavailable'
+  | 'overloaded'
+  | 'capacity';
+
 export interface RunResult {
   output: string;
   exitCode: number;
   duration_ms: number;
   timedOut?: boolean;
   adapterError?: boolean;
+  /** Closed adapter-level classification; absent means the stage itself failed. */
+  adapterFailureKind?: AdapterFailureKind;
   /** One actionable sentence explaining a diagnosed failure (see adapters/diagnose.ts). */
   friendlyError?: string;
   tokens_in?: number;
@@ -17,6 +30,8 @@ export interface RunResult {
   /** Structured adapter attribution for files written during this invocation. */
   writes?: string[];
   writeAttribution?: 'structured' | 'snapshot' | 'unknown';
+  /** Generated writes observed only while configured validation commands ran. */
+  validationGeneratedWrites?: string[];
   /** Exact conversation UUID captured from adapter event output. */
   sessionId?: string;
   /** Immutable budget assigned to this scheduler attempt. */

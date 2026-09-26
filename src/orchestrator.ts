@@ -620,6 +620,24 @@ export class Orchestrator {
         await this.handleInactive(task);
         return;
       case 'terminal': {
+        if (state.launchRefusal) {
+          const completed = this.now().toISOString();
+          this.registry.update(task.id, {
+            status: TASK_STATUS.FAILED,
+            completed_at: completed,
+            notes: state.launchRefusal.message,
+            not_before: undefined,
+            defer_reason: undefined,
+            defer_kind: undefined,
+          });
+          this.registry.appendTick(task.id, {
+            ts: completed,
+            status: TASK_STATUS.FAILED,
+            message: state.launchRefusal.message,
+          });
+          if (task.run_id) releaseLaunchIntent(task.projectDir, task.run_id);
+          return;
+        }
         if (state.exitCode === 0) {
           await this.handleInactive(task);
           return;

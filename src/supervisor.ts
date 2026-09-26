@@ -330,6 +330,33 @@ function supervisorEvidenceSupportsAssessment(
   return { supported: sharedTerms.length > 0, sharedTerms };
 }
 
+/** Comparison is deliberately stricter than citation validation. A citation
+ * needs one concrete lexical anchor; declaring an unaccused stage to be on the
+ * same direction requires one command/tool invocation to satisfy the whole
+ * stable direction-key predicate. Structural path features make a home run
+ * store read comparable without treating generic words such as "marker" or
+ * "population" as the behavior itself. */
+function supervisorDirectionEvidenceSupportsAssessment(
+  assessment: SupervisorAssessment,
+  rows: readonly SupervisorEvidenceRow[],
+): boolean | undefined {
+  const directionKey = normalizeDirectionKey(assessment.directionKey);
+  if (!directionKey) return undefined;
+  const predicateTerms = supervisorClaimTerms(directionKey);
+  // One open-vocabulary word has no independently checkable conjunction. It
+  // cannot safely turn sibling activity into either a match or a negative.
+  if (predicateTerms.size < 2) return undefined;
+
+  return rows.some((row) => {
+    const actionTerms = supervisorClaimTerms(row.text);
+    const referencesHomeRunStore = /(?:~|\$\{?HOME\}?|\/home\/[^/\s"'`]+)\/\.fc\/runs(?:\/|\b)/i.test(row.text);
+    if (referencesHomeRunStore) {
+      for (const feature of ['using', 'home', 'run', 'store', 'input']) actionTerms.add(feature);
+    }
+    return [...predicateTerms].every((term) => actionTerms.has(term));
+  });
+}
+
 function boundedEvidenceText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const text = value.replace(/\r\n/g, '\n').trim();
@@ -668,10 +695,51 @@ export interface DirectionPersistenceResult {
   verified: boolean;
   guideCount: number;
   matchingGuideCount: number;
-  mode: 'delivered_opportunities' | 'unverified';
+  mode: 'delivered_opportunities' | 'non_discriminating' | 'unverified';
   generations: string[];
   opportunities: string[];
+  siblingComparison: SupervisorDirectionComparison;
   reason: string;
+}
+
+export interface SupervisorDirectionComparison {
+  populationStageIds: string[];
+  matchingStageIds: string[];
+  denominator: number;
+  matchingCount: number;
+}
+
+/** Apply the same assessment predicate to the unaccused execution population.
+ * Command/tool-use rows include read-only inputs as well as writes, but exclude
+ * prompt/output prose that can merely repeat the supervisor's accusation. */
+export function compareSupervisorDirectionAcrossStages(input: {
+  accusedStageId: string;
+  assessment: SupervisorAssessment;
+  stageEvidence: readonly SupervisorStageEvidence[];
+}): SupervisorDirectionComparison {
+  const candidates = input.stageEvidence.filter((projection) => (
+    projection.stageId !== input.accusedStageId
+  ));
+  const evaluated = candidates.map((projection) => ({
+    projection,
+    matches: supervisorDirectionEvidenceSupportsAssessment(
+      input.assessment,
+      projection.rows.filter((row) => row.kind === 'command_invocation'),
+    ),
+  })).filter((entry): entry is typeof entry & { matches: boolean } => entry.matches !== undefined);
+  const matchingStageIds = evaluated
+    .filter((entry) => entry.matches)
+    .map((entry) => entry.projection.stageId)
+    .sort();
+  const populationStageIds = evaluated
+    .map((entry) => entry.projection.stageId)
+    .sort();
+  return {
+    populationStageIds,
+    matchingStageIds,
+    denominator: populationStageIds.length,
+    matchingCount: matchingStageIds.length,
+  };
 }
 
 /** A count or advancing file hash is not proof that a correction was declined.
@@ -683,9 +751,11 @@ export function verifyRepeatedWrongDirection(input: {
   attemptIndex: number | undefined;
   assessment: SupervisorAssessment;
   currentEvidence?: DirectionEvidenceBinding;
+  accusedEvidence?: SupervisorStageEvidence;
   guidance: readonly DirectionGuidanceFact[];
   deliveryEvents?: readonly RunEvent[];
   assessmentTimestamp?: string;
+  siblingEvidence: readonly SupervisorStageEvidence[];
 }): DirectionPersistenceResult {
   const guides = input.guidance.filter((action) => (
     action.assessment.verdict === 'GUIDE'
@@ -719,6 +789,27 @@ export function verifyRepeatedWrongDirection(input: {
     ? latestGuides.filter(boundToCurrentDirection)
     : [];
   const deliveryEvents = input.deliveryEvents ?? [];
+  const siblingComparison = compareSupervisorDirectionAcrossStages({
+    accusedStageId: input.stageId,
+    assessment: input.assessment,
+    stageEvidence: input.siblingEvidence,
+  });
+  const accusedProjection = input.accusedEvidence;
+  const accusedProjectionBound = Boolean(
+    accusedProjection
+      && accusedProjection.stageId === input.stageId
+      && accusedProjection.attemptIndex === input.attemptIndex
+      && accusedProjection.attemptStartedAt === currentEvidence?.attemptStartedAt
+  );
+  const citedEvidenceIds = new Set(input.assessment.evidenceIds ?? []);
+  const accusedPredicate = accusedProjectionBound
+    ? supervisorDirectionEvidenceSupportsAssessment(
+        input.assessment,
+        accusedProjection!.rows.filter((row) => (
+          row.kind === 'command_invocation' && citedEvidenceIds.has(row.id)
+        )),
+      )
+    : undefined;
   const opportunityFor = (guide: DirectionGuidanceFact): { key: string; timestamp: string } | undefined => {
     const guidanceId = guide.assessment.guidanceId;
     if (!guidanceId) return undefined;
@@ -790,6 +881,44 @@ export function verifyRepeatedWrongDirection(input: {
       && new Set(opportunityKeys).size === opportunityKeys.length
       && eachOpportunityPrecedesNewActionEvidence
     ) {
+      if (accusedPredicate !== true) {
+        return {
+          verified: false,
+          guideCount,
+          matchingGuideCount: matching.length,
+          mode: 'unverified',
+          generations,
+          opportunities: opportunityKeys,
+          siblingComparison,
+          reason: accusedPredicate === false
+            ? `direction ${directionKey} did not hold for the accused stage's cited command evidence`
+            : `direction ${directionKey} could not be applied to current cited command evidence for the accused stage`,
+        };
+      }
+      if (siblingComparison.denominator === 0) {
+        return {
+          verified: false,
+          guideCount,
+          matchingGuideCount: matching.length,
+          mode: 'unverified',
+          generations,
+          opportunities: opportunityKeys,
+          siblingComparison,
+          reason: `direction ${directionKey} persisted, but no unaccused stage evidence was available for a discriminating comparison`,
+        };
+      }
+      if (siblingComparison.matchingCount > 0) {
+        return {
+          verified: false,
+          guideCount,
+          matchingGuideCount: matching.length,
+          mode: 'non_discriminating',
+          generations,
+          opportunities: opportunityKeys,
+          siblingComparison,
+          reason: `direction ${directionKey} also held for ${siblingComparison.matchingCount}/${siblingComparison.denominator} unaccused stages (${siblingComparison.matchingStageIds.join(', ')})`,
+        };
+      }
       return {
         verified: true,
         guideCount,
@@ -797,7 +926,8 @@ export function verifyRepeatedWrongDirection(input: {
         mode: 'delivered_opportunities',
         generations,
         opportunities: opportunityKeys,
-        reason: `direction ${directionKey} persisted after two separately delivered corrections and two distinct worker invocation opportunities`,
+        siblingComparison,
+        reason: `direction ${directionKey} persisted after two separately delivered corrections and two distinct worker invocation opportunities and held for 0/${siblingComparison.denominator} unaccused stages`,
       };
     }
   }
@@ -821,6 +951,7 @@ export function verifyRepeatedWrongDirection(input: {
     generations: latestMatching.flatMap((guide) => guide.directionEvidence?.generation ?? [])
       .concat(currentEvidence?.generation ?? []),
     opportunities,
+    siblingComparison,
     reason,
   };
 }
@@ -879,6 +1010,43 @@ function readAttemptGeneration(runDirectory: string, stageId: string): AttemptGe
     return parsed;
   } catch {
     return undefined;
+  }
+}
+
+function projectLatestAttemptEvidence(
+  runDirectory: string,
+  stageId: string,
+  status: StageStatus,
+): SupervisorStageEvidence | undefined {
+  const attempt = [...(status.attempts ?? [])].reverse().find((candidate) => (
+    candidate.status === STAGE_STATUS.RUNNING
+      || candidate.status === STAGE_STATUS.COMPLETE
+      || candidate.status === STAGE_STATUS.FAILED
+  ));
+  if (!attempt) return undefined;
+  const generation = readAttemptGeneration(runDirectory, stageId);
+  if (!generation
+    || generation.attemptIndex !== attempt.index
+    || generation.attemptStartedAt !== attempt.startedAt) return undefined;
+  try {
+    const bytes = readFileSync(join(runDirectory, 'stages', stageId, 'live.log'));
+    const segment = bytes.subarray(Math.min(bytes.length, generation.segmentStart));
+    return projectSupervisorStageEvidence({
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      // Comparison is a census of the engine-held current attempt, not model
+      // prompt context. Truncating to the supervisor prompt tail would make a
+      // common early input read disappear for longer sibling stages.
+      raw: segment.toString('utf-8'),
+    });
+  } catch {
+    return projectSupervisorStageEvidence({
+      stageId,
+      attemptIndex: attempt.index,
+      attemptStartedAt: attempt.startedAt,
+      raw: '',
+    });
   }
 }
 
@@ -2217,6 +2385,7 @@ export class Supervisor {
     const assessmentArtifacts = [...this.pendingArtifacts.values()];
     const observedDirectionEvidence = new Map<string, DirectionEvidenceBinding>();
     const observedStageEvidence = new Map<string, SupervisorStageEvidence>();
+    const comparisonStageEvidence = new Map<string, SupervisorStageEvidence>();
     for (const stageId of runningStages) {
       const authoritative = this.authoritativeStageStatus(stageId, state.stages[stageId]);
       const binding = this.bindDirectionEvidence(stageId, authoritative);
@@ -2230,6 +2399,14 @@ export class Supervisor {
           raw: assessmentTails.get(stageId) ?? '',
         }));
       }
+    }
+    for (const [stageId, status] of Object.entries(state.stages)) {
+      const projection = projectLatestAttemptEvidence(
+        this.runDir(),
+        stageId,
+        this.authoritativeStageStatus(stageId, status),
+      );
+      if (projection) comparisonStageEvidence.set(stageId, projection);
     }
     this.iterationAssessmentCount++;
     const prompt = this.buildAssessmentPrompt(
@@ -2290,6 +2467,7 @@ export class Supervisor {
       observedEvidenceBindings,
       observedDirectionEvidence,
       observedStageEvidence,
+      comparisonStageEvidence,
     );
     this.recordEffectiveAssessment(effectiveAssessment);
 
@@ -2677,6 +2855,9 @@ export class Supervisor {
       reason,
       timestamp: new Date().toISOString(),
       source,
+      ...(basis.kind === 'repeated_guidance'
+        ? { directionComparison: basis.persistence.siblingComparison }
+        : {}),
       ...(unverifiedAssessmentReason
         ? { unverifiedAssessmentReason: unverifiedAssessmentReason.slice(0, 500) }
         : {}),
@@ -2697,6 +2878,7 @@ export class Supervisor {
     observedEvidenceBindings?: ReadonlyMap<string, SupervisorEvidenceBinding>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
     observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
+    comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment> {
     const signalDir = this.signalDir();
     const citedActionEvidence = (): {
@@ -2842,6 +3024,10 @@ export class Supervisor {
             guidance,
             deliveryEvents: readRunEvents(this.projectDir, this.runId),
             assessmentTimestamp: assessment.assessedAt ?? new Date().toISOString(),
+            accusedEvidence: comparisonStageEvidence?.get(assessment.targetStage),
+            siblingEvidence: [...(comparisonStageEvidence?.values() ?? [])].filter((projection) => (
+              projection.stageId !== assessment.targetStage
+            )),
           });
           const basis: AbortBasis = idleMs >= this.config.stuckThresholdMs
             ? { kind: 'idle', stalledMs: idleMs }

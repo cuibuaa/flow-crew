@@ -239,7 +239,7 @@ describe('after-change historical replay', () => {
     expect(replayAdmission('owner-criterion', merged.pair.dispatch, 2)).toMatchObject({ pass: true, errors: [] });
   });
 
-  it('starts from exact attempt 1 and admits once its sole check defect is repaired', () => {
+  it('starts from exact attempt 1 and rejects a repair that substitutes the post-consumption manifest', () => {
     const firstDispatch = dispatch('owner-criterion', 1);
     const first = admission('owner-criterion', 1);
     const repaired = mergePlanRetryPair(
@@ -258,13 +258,15 @@ describe('after-change historical replay', () => {
         stages: parsedStages(repaired.pair.dispatch),
         terminalStates: fixtureConfig['owner-criterion'].terminalStates,
         research: fixtureConfig['owner-criterion'].research,
-      })).toEqual([]);
+      })).toEqual([
+        expect.stringContaining('references post-consumption framework manifest'),
+      ]);
     } finally {
       rmSync(reachabilityRoot, { recursive: true, force: true });
     }
   });
 
-  it('starts from the second exact attempt-1 proposal, repairs the check, and locks its bytes thereafter', () => {
+  it('starts from the second exact attempt-1 proposal, rejects the manifest substitution, and locks its bytes thereafter', () => {
     const firstDispatch = dispatch('check-escape', 1);
     const first = admission('check-escape', 1);
     const correctedChecks = realityChecks('check-escape', 2);
@@ -284,7 +286,9 @@ describe('after-change historical replay', () => {
         stages,
         terminalStates: fixtureConfig['check-escape'].terminalStates,
         research: fixtureConfig['check-escape'].research,
-      })).toEqual([]);
+      })).toEqual([
+        expect.stringContaining('references post-consumption framework manifest'),
+      ]);
     } finally {
       rmSync(reachabilityRoot, { recursive: true, force: true });
     }
@@ -700,7 +704,7 @@ describe('scheduler integration', () => {
   }, 60_000);
 
   for (const fixture of ['owner-criterion', 'check-escape']) {
-    it(`replays ${fixture} exact proposal/check snapshots through the scheduler and admits within the bound`, async () => {
+    it(`replays ${fixture} exact proposal/check snapshots and refuses every temporally invalid candidate`, async () => {
       projectDir = mkdtempSync(join(tmpdir(), `fc-retry-archive-${fixture}-${randomBytes(4).toString('hex')}-`));
       const agentsDir = join(projectDir, 'config', 'agents');
       mkdirSync(agentsDir, { recursive: true });
@@ -791,25 +795,26 @@ describe('scheduler integration', () => {
       expect(planCalls).toBeGreaterThan(1);
       expect(planCalls).toBeLessThanOrEqual(3);
       expect(calls.slice(0, planCalls)).toEqual(Array(planCalls).fill('plan'));
-      // The replay intentionally produces no research result; its terminal
-      // condition is the admitted dispatch, after which the outer campaign is
-      // expected to remain incomplete in this isolated harness.
-      expect(final.status).toBe('incomplete');
+      // The archived sequence repairs a mutable-result check by substituting a
+      // framework manifest that is also unavailable until after confirmation.
+      // None of the three exact proposals is therefore admissible.
+      expect(final.status).toBe('failed');
       expect(planPrompts[1]).toContain('MONOTONE PLAN-RETRY INCUMBENT');
       const runRoot = runDir(projectDir, final.runId);
       const state = readMonotonePlanRetryState(runRoot, 'plan', 1);
-      expect(state?.terminal?.disposition).toBe('admitted');
+      expect(state?.terminal?.disposition).toBe(
+        fixture === 'owner-criterion' ? 'identical_refusal' : 'attempts_exhausted',
+      );
       const historicalError = admission(fixture, 1).errors[0];
       const currentErrors = state?.attempts[0].unsatisfied.map((requirement) => requirement.detail) ?? [];
       expect(currentErrors).toHaveLength(1);
       expect(currentErrors[0]).toContain(historicalError.split(';')[0]);
       expect(currentErrors[0]).toContain('.no_candidate.json');
       expect(currentErrors[0]).toContain('never writes');
-      expect(currentErrors[0]).toContain('always-emitted framework manifest');
       expect(currentErrors[0]).toContain('unconditional producer');
       expect(JSON.parse(readFileSync(join(runRoot, 'dispatch_admission.json'), 'utf8'))).toMatchObject({
-        pass: true,
-        errors: [],
+        pass: false,
+        errors: [expect.stringContaining('references post-consumption framework manifest')],
       });
       expect(state?.attempts).toHaveLength(planCalls);
       for (let index = 0; index < planCalls; index += 1) {

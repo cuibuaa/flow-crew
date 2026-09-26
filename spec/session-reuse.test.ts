@@ -11,6 +11,7 @@ import {
 } from '../src/scheduler.js';
 import type { StageStatus } from '../src/store.js';
 import { isSessionReuseEnabled } from '../src/config.js';
+import { classifyAdapterFailure } from '../src/worker.js';
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
 
@@ -79,6 +80,41 @@ describe('UUID-only Codex sessions', () => {
     ].join('\n'), '/project');
     expect(parsed).toMatchObject({ sessionId: UUID, output: 'done', tokens_in: 120, tokens_out: 45 });
     expect(parsed.writes).toEqual(['src/a.ts']);
+  });
+
+  it.each([
+    ['403 Forbidden', 'forbidden'],
+    ['connection refused', 'connection_refused'],
+    ['ECONNRESET', 'connection_reset'],
+    ['429 Too Many Requests', 'rate_limited'],
+    ['ETIMEDOUT', 'transport_timeout'],
+    ['502 Bad Gateway', 'bad_gateway'],
+    ['503 Service Unavailable', 'service_unavailable'],
+    ['service overloaded', 'overloaded'],
+    ['Selected model is at capacity. Please try a different model.', 'capacity'],
+  ] as const)('retains terminal adapter error %s after a mid-work agent message', (message, kind) => {
+    const parsed = parseCodexJsonl([
+      JSON.stringify({ type: 'thread.started', thread_id: UUID }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage was already mid-work' } }),
+      JSON.stringify({ type: 'error', message }),
+      JSON.stringify({ type: 'turn.failed', error: { message } }),
+    ].join('\n'));
+
+    expect(parsed.output).toContain('stage was already mid-work');
+    expect(classifyAdapterFailure(parsed.output)).toBe(kind);
+    expect(parsed.adapterFailureKind).toBe(kind);
+  });
+
+  it('does not preserve a recovered error past a completed turn', () => {
+    const parsed = parseCodexJsonl([
+      JSON.stringify({ type: 'error', message: 'Selected model is at capacity.' }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'recovered result' } }),
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+    ].join('\n'));
+
+    expect(parsed.output).toBe('recovered result');
+    expect(classifyAdapterFailure(parsed.output)).toBeUndefined();
+    expect(parsed.adapterFailureKind).toBeUndefined();
   });
 
   it('resumes only one successful non-validation dependency edge', () => {

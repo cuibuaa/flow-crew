@@ -73,11 +73,15 @@ campaign_triggers:
   repeated_failure_after: 3
 
 supervisor:
-  # A 30s cheap heartbeat detects transitions/anomalies. Ordinary semantic LLM
-  # review is throttled to 180s and 20 calls/iteration; anomalies bypass both.
+  # A 30s cheap heartbeat detects transitions/anomalies. Routine semantic LLM
+  # review fires when stage output accumulated since the last review reaches
+  # min_delta_bytes. Each heartbeat reads at most tail_bytes (16 KiB) per stage,
+  # so 98304 means at most one content-triggered review per ~3 minutes of busy
+  # output. routine_assessment_interval_ms and max_assessments_per_iteration are
+  # NOT enforced by the current trigger (event-mode only); do not rely on them.
   poll_interval_ms: 30000
   routine_assessment_interval_ms: 180000
-  min_delta_bytes: 4096
+  min_delta_bytes: 98304
   max_assessments_per_iteration: 20
   # Minimum idle duration (ms) before the supervisor may abort a stage as stuck.
   # Override this per project when a workload has predictably long quiet phases.

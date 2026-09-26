@@ -794,6 +794,247 @@ function semanticPathViolations(sourceFile: ts.SourceFile, file: string): Purity
   return violations;
 }
 
+type StaticPathValue = string | string[];
+
+const FILESYSTEM_PATH_READS = new Set([
+  "access", "accessSync", "createReadStream", "existsSync", "lstat", "lstatSync",
+  "open", "openSync", "readFile", "readFileSync", "readdir", "readdirSync", "realpath",
+  "realpathSync", "stat", "statSync",
+]);
+
+interface StaticPathEvaluator {
+  evaluate(expression: ts.Expression): StaticPathValue | undefined;
+}
+
+interface StaticPathBinding {
+  initializer?: ts.Expression;
+}
+
+function lexicalPathScope(node: ts.Node): ts.Node {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (ts.isSourceFile(current)
+      || ts.isBlock(current)
+      || ts.isCaseBlock(current)
+      || ts.isModuleBlock(current)
+      || ts.isForStatement(current)
+      || ts.isForInStatement(current)
+      || ts.isForOfStatement(current)) return current;
+    current = current.parent;
+  }
+  return node.getSourceFile();
+}
+
+/** Resolve const values by declaration identity and lexical scope. Identifier
+ * spelling alone is insufficient: an inner binding must shadow an outer one in
+ * both directions, including when the inner initializer is not foldable. */
+function staticPathEvaluator(sourceFile: ts.SourceFile): StaticPathEvaluator {
+  const declarations = new Map<ts.Node, Map<string, StaticPathBinding>>();
+  const values = new Map<StaticPathBinding, StaticPathValue | undefined>();
+  const evaluated = new Set<StaticPathBinding>();
+  const evaluating = new Set<StaticPathBinding>();
+  const register = (scope: ts.Node, name: string, binding: StaticPathBinding): void => {
+    const scoped = declarations.get(scope) ?? new Map<string, StaticPathBinding>();
+    // Duplicate lexical declarations are invalid TypeScript. Retaining the
+    // first keeps malformed input fail-closed without inventing a binding.
+    if (!scoped.has(name)) scoped.set(name, binding);
+    declarations.set(scope, scoped);
+  };
+  const registerBindingName = (
+    scope: ts.Node,
+    name: ts.BindingName,
+    initializer?: ts.Expression,
+    allowNestedInitializers = true,
+  ): void => {
+    if (ts.isIdentifier(name)) {
+      register(scope, name.text, { initializer });
+      return;
+    }
+    for (const element of name.elements) {
+      if (ts.isOmittedExpression(element)) continue;
+      registerBindingName(
+        scope,
+        element.name,
+        allowNestedInitializers ? element.initializer : undefined,
+        allowNestedInitializers,
+      );
+    }
+  };
+  const mutableVariableScope = (node: ts.VariableDeclaration): ts.Node => {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (ts.isFunctionLike(current) || ts.isSourceFile(current)) return current;
+      current = current.parent;
+    }
+    return sourceFile;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isVariableDeclarationList(node.parent)) {
+      const immutable = (node.parent.flags & ts.NodeFlags.Const) !== 0;
+      const blockScoped = (node.parent.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let)) !== 0;
+      registerBindingName(
+        blockScoped ? lexicalPathScope(node) : mutableVariableScope(node),
+        node.name,
+        immutable && ts.isIdentifier(node.name) ? node.initializer : undefined,
+        immutable,
+      );
+    }
+    if (ts.isParameter(node)) {
+      // Parameters live on the function-like node, which is encountered while
+      // walking outward from both its body and its default initializers. An
+      // initializer is optional: an unknown parameter still shadows an outer
+      // foldable constant, while a default remains statically evaluable.
+      registerBindingName(node.parent, node.name, node.initializer);
+    }
+    if (ts.isCatchClause(node) && node.variableDeclaration) {
+      registerBindingName(node.block, node.variableDeclaration.name, undefined, false);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  const declarationFor = (identifier: ts.Identifier): StaticPathBinding | undefined => {
+    let current: ts.Node | undefined = identifier;
+    while (current) {
+      const declaration = declarations.get(current)?.get(identifier.text);
+      if (declaration) return declaration;
+      current = current.parent;
+    }
+    return undefined;
+  };
+
+  const evaluateDeclaration = (binding: StaticPathBinding): StaticPathValue | undefined => {
+    if (evaluated.has(binding)) return values.get(binding);
+    if (evaluating.has(binding)) return undefined;
+    if (!binding.initializer) {
+      evaluated.add(binding);
+      values.set(binding, undefined);
+      return undefined;
+    }
+    evaluating.add(binding);
+    const value = evaluate(binding.initializer);
+    evaluating.delete(binding);
+    evaluated.add(binding);
+    values.set(binding, value);
+    return value;
+  };
+
+  const evaluate = (raw: ts.Expression): StaticPathValue | undefined => {
+    const node = unwrapExpression(raw);
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+    if (ts.isIdentifier(node)) {
+      const declaration = declarationFor(node);
+      return declaration ? evaluateDeclaration(declaration) : undefined;
+    }
+    if (ts.isTemplateExpression(node)) {
+      let result = node.head.text;
+      for (const span of node.templateSpans) {
+        const value = evaluate(span.expression);
+        if (typeof value !== "string") return undefined;
+        result += value + span.literal.text;
+      }
+      return result;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      const items = node.elements.map((element) => (
+        ts.isSpreadElement(element) ? undefined : evaluate(element as ts.Expression)
+      ));
+      return items.every((item): item is string => typeof item === "string") ? items : undefined;
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = evaluate(node.left);
+      const right = evaluate(node.right);
+      return typeof left === "string" && typeof right === "string" ? left + right : undefined;
+    }
+    if (ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "join") {
+      const receiver = evaluate(node.expression.expression);
+      const separator = node.arguments[0] ? evaluate(node.arguments[0]) : ",";
+      return Array.isArray(receiver) && typeof separator === "string"
+        ? receiver.join(separator)
+        : undefined;
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = ts.isIdentifier(node.expression)
+        ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression)
+          ? node.expression.name.text
+          : undefined;
+      if (callee !== "join" && callee !== "resolve") return undefined;
+      const parts = node.arguments.map((argument) => evaluate(argument));
+      if (!parts.every((part): part is string => typeof part === "string")) return undefined;
+      if (callee === "join") return posix.join(...parts.map((part) => part.replaceAll("\\", "/")));
+      const firstAbsolute = parts.findIndex((part) => part.startsWith("/"));
+      return firstAbsolute >= 0
+        ? posix.resolve(...parts.slice(firstAbsolute).map((part) => part.replaceAll("\\", "/")))
+        : undefined;
+    }
+    return undefined;
+  };
+  return { evaluate };
+}
+
+function semanticConstructedFilesystemPathViolations(
+  sourceFile: ts.SourceFile,
+  file: string,
+): PurityViolation[] {
+  const staticPaths = staticPathEvaluator(sourceFile);
+  const fsBindings = new Map<string, string>();
+  const fsNamespaces = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteralLike(statement.moduleSpecifier)
+      || !["node:fs", "fs", "node:fs/promises", "fs/promises"].includes(statement.moduleSpecifier.text)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings) continue;
+    if (ts.isNamespaceImport(bindings)) fsNamespaces.add(bindings.name.text);
+    else for (const element of bindings.elements) {
+      fsBindings.set(element.name.text, element.propertyName?.text ?? element.name.text);
+    }
+  }
+
+  const evaluate = (raw: ts.Expression): string | undefined => {
+    const node = unwrapExpression(raw);
+    const value = staticPaths.evaluate(node);
+    return typeof value === "string" ? value : undefined;
+  };
+  const violations: PurityViolation[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.arguments[0]) {
+      const importedName = ts.isIdentifier(node.expression)
+        ? fsBindings.get(node.expression.text)
+        : ts.isPropertyAccessExpression(node.expression)
+          && ts.isIdentifier(node.expression.expression)
+          && fsNamespaces.has(node.expression.expression.text)
+          ? node.expression.name.text
+          : undefined;
+      if (importedName && FILESYSTEM_PATH_READS.has(importedName)) {
+        const candidate = evaluate(node.arguments[0]);
+        if (candidate !== undefined && !ts.isStringLiteralLike(unwrapExpression(node.arguments[0]))) {
+          for (const rule of RULES) {
+            if (!rule.patterns.some((pattern) => {
+              pattern.lastIndex = 0;
+              return pattern.test(candidate);
+            })) continue;
+            violations.push({ file, line: lineFor(sourceFile, node.arguments[0]), rule: rule.id, description: rule.description });
+          }
+          if (candidate.startsWith("../")) {
+            const target = posix.normalize(posix.join(posix.dirname(normalizedFile(file)), candidate));
+            if (target === ".." || target.startsWith("../")) {
+              violations.push({ file, line: lineFor(sourceFile, node.arguments[0]), rule: "parent-traversal", description: "relative path escapes the repository" });
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return violations;
+}
+
 function propertyInitializer(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
   for (const property of object.properties) {
     if (!ts.isPropertyAssignment(property)) continue;
@@ -975,6 +1216,7 @@ export function scanSource(
   const sourceFile = sourceFileFor(source, normalized);
   violations.push(
     ...semanticPathViolations(sourceFile, normalized),
+    ...semanticConstructedFilesystemPathViolations(sourceFile, normalized),
     ...semanticEnvironmentViolations(sourceFile, normalized, options.testOwnedEnvKeys ?? new Set()),
     ...semanticChildProcessViolations(sourceFile, normalized),
   );
@@ -1015,9 +1257,25 @@ export function scanProjectTests(
   projectRoot: string,
   options: ProjectScanOptions = {},
 ): PurityViolation[] {
-  return sourceFiles(join(projectRoot, "spec")).flatMap((file) => (
+  const specRoot = join(projectRoot, "spec");
+  const unsupportedChecks = (root: string): PurityViolation[] => {
+    if (!existsSync(root)) return [];
+    return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) return entry.name === "__pycache__" ? [] : unsupportedChecks(path);
+      const testLike = /(?:^test_.*|\.(?:test|spec))\.[^.]+$/i.test(entry.name);
+      if (!entry.isFile() || !testLike || SOURCE_EXTENSIONS.has(extname(entry.name))) return [];
+      return [{
+        file: normalizedFile(relative(projectRoot, path)),
+        line: 1,
+        rule: "uncollected-check",
+        description: "test-shaped file is not supported by the configured TypeScript collector",
+      }];
+    });
+  };
+  return sourceFiles(specRoot).flatMap((file) => (
     scanSource(readFileSync(file, "utf-8"), relative(projectRoot, file), options)
-  ));
+  )).concat(unsupportedChecks(specRoot));
 }
 
 export function formatViolations(violations: PurityViolation[]): string {

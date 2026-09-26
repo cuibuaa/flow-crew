@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { parseYaml, stringifyYaml } from '../src/yaml-util.js';
 import { findAllReady, parseDispatchBlock, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
@@ -17,7 +18,7 @@ import type { StoreState, StageStatus } from '../src/store.js';
  * and resume behavior. Agent execution is mocked — focus is on orchestration stability.
  */
 
-const TEST_DIR = join(process.cwd(), '.test-fm-campaign');
+let TEST_DIR = '';
 const CAMPAIGN_ID = 'fm-anomaly-detection';
 
 function setupProjectDir() {
@@ -72,7 +73,10 @@ Phase 2: Benchmark & Fine-tune
 - Target: beat SOTA on at least 3/5 ADBench categories`;
 
 describe('FM Anomaly Detection Campaign — Multi-Phase Orchestration', () => {
-  beforeAll(() => setupProjectDir());
+  beforeAll(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'flowcrew-fm-campaign-'));
+    setupProjectDir();
+  });
   afterAll(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
   describe('Phase 1: First iteration — planner should dispatch only research', () => {

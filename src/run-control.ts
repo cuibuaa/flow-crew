@@ -265,6 +265,18 @@ export class RunCancellationCoordinator {
     const target: CancellationTarget = { task, run, runBinding: run.binding, unit };
     const observation = await this.observe(target);
     const current = this.readRunTarget(run.binding) ?? run;
+    const runAlreadyTerminal = isTerminalRunStatus(current.state.status);
+    if (runAlreadyTerminal) {
+      return {
+        ok: true,
+        status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
+        runId,
+        ...(task ? { taskId: task.id } : {}),
+        observation,
+        preservedRunStatus: current.state.status,
+        message: 'Execution was already terminal; terminal state was preserved.',
+      };
+    }
     if (observation.unitState.kind === 'terminal-unknown') {
       return { ok: false, status: 'outcome-unknown', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation outcome remains unknown', observation) };
     }
@@ -307,13 +319,13 @@ export class RunCancellationCoordinator {
     this.throwIfObservationLimitReached(target);
     const targetRunId = run?.runId ?? (task ? this.taskRunId(task) : undefined);
     const before = await this.observe(target);
-    if (before.unitState.kind === 'terminal-unknown') {
-      return this.outcomeUnknown(target, before);
-    }
     const taskAlreadyTerminal = task ? !isActiveTaskStatus(task.status) : true;
     const runAlreadyTerminal = run
       ? isTerminalRunStatus(run.state.status)
       : !runBinding;
+    const lifecycleAlreadyTerminal = run
+      ? runAlreadyTerminal
+      : !runBinding && taskAlreadyTerminal;
     // Registry terminal metadata is evidence, not scratch space for the stop
     // protocol. Even if its bound run is unreadable or still needs stopping,
     // cancellation must never erase the task's terminal status/completed_at.
@@ -321,6 +333,24 @@ export class RunCancellationCoordinator {
     const preservedTaskResultStatus = task?.status === TASK_STATUS.CANCELLED
       ? 'cancelled' as const
       : 'already-terminal' as const;
+    // The run/task lifecycle is the authority for an already-finished
+    // execution. A missing shim exit record describes an observation race; it
+    // must not replace a durable terminal outcome with "outcome unknown".
+    if (lifecycleAlreadyTerminal) {
+      this.clearObservationBudget(target);
+      return {
+        ok: true,
+        status: preservedTaskResultStatus,
+        ...(task ? { taskId: task.id } : {}),
+        ...(targetRunId ? { runId: targetRunId } : {}),
+        ...(run ? { preservedRunStatus: run.state.status } : {}),
+        observation: before,
+        message: 'Execution was already terminal; terminal state was preserved.',
+      };
+    }
+    if (before.unitState.kind === 'terminal-unknown') {
+      return this.outcomeUnknown(target, before);
+    }
     if (this.isStopped(before) && taskAlreadyTerminal && runAlreadyTerminal) {
       this.clearObservationBudget(target);
       return {
