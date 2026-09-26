@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.2] - 2026-09-26
+
+### Changed — supervisor review threshold defaults to the shipped value
+
+`supervisor.min_delta_bytes` now defaults to 98304 in the engine, the same value
+`config/defaults.yaml` ships. A project's configuration travels with its branch,
+so a project that omitted the key, or whose branch predated 0.9.1's value, still
+reviewed at the former engine default of 4096. Measured over the runs of
+2026-09-24 to 2026-09-26, FlowCrew's own runs at 98304 made about a quarter of
+the supervisor calls per run hour and about a third of the uncached supervisor
+input of its runs at 4096; runs in two other projects made about a third of the
+calls and half the uncached input. These are observational comparisons across
+different tasks. A project that sets the key explicitly is unaffected.
+
 ## [0.9.1] - 2026-09-26
 
 ### Fixed — places where the engine said one thing would happen and did another
