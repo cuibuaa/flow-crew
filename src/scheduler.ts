@@ -6720,6 +6720,20 @@ export function findDownstream(stageId: string, stages: StageConfig[]): string[]
   return [...collectTransitiveDependents(stageId, stages)];
 }
 
+/** A copy of a schema-invalid stage without the top-level fields its issues name, if that parses. */
+function shadowStageWithoutInvalidFields(item: Record<string, unknown>, error: unknown): StageConfig | undefined {
+  if (!(error instanceof z.ZodError)) return undefined;
+  const fields = new Set(error.issues.map((issue) => issue.path[0]).filter((key): key is string => typeof key === 'string'));
+  if (fields.size === 0 || fields.has('id') || fields.has('role')) return undefined;
+  const shadow = { ...item };
+  for (const field of fields) delete shadow[field];
+  try {
+    return parseDispatchedStageConfig(shadow);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Preserve bounded Zod paths and a repair action in planner-facing schema refusals. */
 export function formatDispatchStageSchemaFailure(error: unknown): string {
   const issues = error instanceof z.ZodError
@@ -8140,6 +8154,7 @@ function injectDispatchedStages(
 
   const dispatched: StageConfig[] = [];
   const skippedReasons: string[] = [];
+  const schemaReasons: string[] = [];
   const seenIds = new Set<string>(sorted.map(s => s.id));
   for (let i = 0; i < itemList.length; i++) {
     const item = itemList[i] as Record<string, unknown> | null;
@@ -8167,8 +8182,19 @@ function injectDispatchedStages(
       seenIds.add(item.id as string);
     } catch (error) {
       const diagnostic = formatDispatchStageSchemaFailure(error);
-      skippedReasons.push(`${item.id}: ${diagnostic}`);
       log.warn({ id: item.id, diagnostic }, 'Invalid stage in dispatch.yaml; refusing the whole proposal');
+      // Still admit a shadow of the stage with the offending top-level fields
+      // removed, so the same refusal also reports coverage and topology
+      // problems. Otherwise each attempt surfaced one class of defect and a
+      // three-defect plan exhausted its bounded retries (#2267/#2268).
+      const shadow = shadowStageWithoutInvalidFields(item, error);
+      if (shadow) {
+        dispatched.push(shadow);
+        seenIds.add(item.id as string);
+        schemaReasons.push(`${item.id}: ${diagnostic}`);
+      } else {
+        skippedReasons.push(`${item.id}: ${diagnostic}`);
+      }
     }
   }
   if (dispatched.length === 0 || skippedReasons.length > 0) {
@@ -8242,6 +8268,10 @@ function injectDispatchedStages(
         admission.errors.push(...reachabilityErrors);
       }
     }
+  }
+  if (schemaReasons.length > 0) {
+    admission.pass = false;
+    admission.errors.unshift(...schemaReasons);
   }
   writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(admission, null, 2)}\n`, 'utf-8');
   if (!admission.pass) {

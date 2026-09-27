@@ -703,6 +703,60 @@ describe('scheduler integration', () => {
     ]);
   }, 60_000);
 
+  it('reports a schema-invalid field together with coverage defects in the same refusal', async () => {
+    projectDir = mkdtempSync(join(tmpdir(), `fc-retry-schema-${randomBytes(4).toString('hex')}-`));
+    const agentsDir = join(projectDir, 'config', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    for (const role of ['planner', 'coder', 'qa']) {
+      writeFileSync(join(agentsDir, `${role}.yaml`), [
+        `name: ${role}`, 'description: schema retry role', 'model: default',
+        'reasoning_effort: default', 'tools: []', 'prompt: test role',
+      ].join('\n'), 'utf8');
+    }
+    const brief = [
+      '# Schema retry', '', '## What the report must show', '',
+      '1. The work is covered.',
+    ].join('\n');
+    const workflow: WorkflowConfig = {
+      name: 'schema-retry-integration',
+      defaults: { max_iterations: 1 },
+      stages: [{
+        id: 'plan', role: 'planner', depends_on: [], prompt_template: 'plan the work',
+        dynamic_dispatch: true, is_gate: false, skills: [], criterion_refs: [],
+      }],
+    };
+    let planCalls = 0;
+    let firstRefusal: { errors: string[] } | undefined;
+    const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
+    const adapter = {
+      async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
+        if (opts.stageId !== 'plan') return ok(`completed ${opts.stageId}`);
+        planCalls += 1;
+        if (planCalls === 2) {
+          firstRefusal = JSON.parse(readFileSync(join(opts.runDir, 'dispatch_admission.json'), 'utf8')) as { errors: string[] };
+        }
+        const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as BriefCriteriaArtifact;
+        const refs = artifact.criteria.map((criterion) => criterion.id);
+        // Attempt 1 carries both a removed field and no gate for its criterion.
+        const work = {
+          id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
+          criterion_refs: refs, prompt_template: 'write the work', timeout_ms: 900000,
+        };
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages: [work] }), 'utf8');
+        return ok(`plan attempt ${planCalls}`);
+      },
+      async discuss(): Promise<RunResult> { return ok(''); },
+      spawnDiscuss() { throw new Error('unused'); },
+      async spawnInteractive() { throw new Error('unused'); },
+    } as unknown as Adapter;
+
+    await runWorkflow(workflow, stringifyYaml(workflow), projectDir, adapter, new Map(), undefined, agentsDir, undefined, brief, true);
+
+    const errors = (firstRefusal?.errors ?? []).join('\n');
+    expect(errors).toContain('work: invalid schema at timeout_ms');
+    expect(errors).toContain('not assigned to a gate');
+  }, 60_000);
+
   for (const fixture of ['owner-criterion', 'check-escape']) {
     it(`replays ${fixture} exact proposal/check snapshots and refuses every temporally invalid candidate`, async () => {
       projectDir = mkdtempSync(join(tmpdir(), `fc-retry-archive-${fixture}-${randomBytes(4).toString('hex')}-`));
