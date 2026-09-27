@@ -4288,7 +4288,7 @@ export function findAllReady(stages: StageConfig[], state: StoreState): StageCon
         `verdict_${d}.json`,
       ));
       const verdict = hasRunLocation && (dependency?.is_gate === true || hasSpecificVerdict)
-        ? readGateVerdict(state.projectDir, d, state.runId, contract, false)
+        ? readGateVerdict(state.projectDir, d, state.runId, contract, false, dependency?.is_gate === true)
         : undefined;
       // A negative verdict is authoritative even if an older/static workflow
       // forgot to mark the producing stage as a gate. Stage status describes
@@ -9204,6 +9204,7 @@ export function readGateVerdict(
   runId?: string,
   contract?: GateContract | null,
   allowSharedFallback = true,
+  requireValidationDelta = true,
 ): { pass: boolean; reason?: string } | null {
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   let v: Record<string, unknown> | null = null;
@@ -9233,7 +9234,11 @@ export function readGateVerdict(
       return { pass: false, reason: `Research round outcome is ${candidate.kind}: ${candidate.reason ?? 'no usable evidence'}` };
     }
   }
-  if (runId && v.pass === true) {
+  // The validation delta is recorded only when a declared gate completes, so it
+  // can bind only a declared gate. A non-gate stage that merely wrote a verdict
+  // file (a qa baseline capture) would otherwise read as failed forever and
+  // strand every dependent, ending the iteration early (#2260, #2269).
+  if (runId && v.pass === true && requireValidationDelta) {
     const baselinePath = join(base, RUN_VALIDATION_BASELINE_FILE);
     if (existsSync(baselinePath)) {
       let delta: GateValidationDeltaArtifact | undefined;

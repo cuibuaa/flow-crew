@@ -171,6 +171,41 @@ describe('engine boundary audit probes', () => {
     }
   });
 
+  it('lets a non-gate qa stage with a passing verdict release its dependents without a validation delta', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-audit-b-nongate-'));
+    const previousHome = fcGlobalDir();
+    try {
+      setFcGlobalDir(join(root, 'home'));
+      const projectDir = join(root, 'project');
+      mkdirSync(projectDir, { recursive: true });
+      const runId = 'nongate-verdict-fixture';
+      const dir = runDir(projectDir, runId);
+      mkdirSync(dir, { recursive: true });
+      // A run-local validation baseline exists, but no delta: deltas are recorded
+      // only when a declared gate completes.
+      writeFileSync(join(dir, 'validation_baseline.json'), '{"version":1}\n');
+      writeFileSync(join(dir, 'verdict_baseline.json'), '{"pass":true,"reason":"baseline captured"}\n');
+      const stage = (id: string, extra: Record<string, unknown>) => ({
+        id, role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], criterion_refs: [],
+        skills: [], prompt_template: id, is_gate: false, ...extra,
+      });
+      const work = stage('work', { depends_on: ['baseline'], dependency_reasons: { baseline: 'needs the baseline' } });
+      const state = {
+        projectDir, runId,
+        stages: { baseline: { status: 'complete' }, work: { status: 'pending' } },
+      };
+      const asStages = (items: unknown[]) => items as Parameters<typeof findAllReady>[0];
+      const nonGate = asStages([stage('baseline', { role: 'qa' }), work]);
+      expect(findAllReady(nonGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).toContain('work');
+      // Control: a declared gate with the same verdict still needs its bound delta.
+      const declaredGate = asStages([stage('baseline', { role: 'qa', is_gate: true }), work]);
+      expect(findAllReady(declaredGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).not.toContain('work');
+    } finally {
+      setFcGlobalDir(previousHome);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('waits to run the report gate until its report writer completes', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-audit-b-order-'));
     const previousHome = fcGlobalDir();
