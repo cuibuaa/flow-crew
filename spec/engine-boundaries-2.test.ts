@@ -181,6 +181,16 @@ describe('engine boundary promises', () => {
     });
   });
 
+  it('lets a retry remove a schema-invalid field named by an admission refusal', () => {
+    const incumbent = { dispatch: 'stages:\n  - id: build\n    role: coder\n    scope: [src/a.ts]\n    timeout_ms: 900000\n  - id: audit\n    role: qa\n    scope: [docs/audit.md]\n' };
+    const proposed = { dispatch: 'stages:\n  - id: build\n    role: coder\n    scope: [src/a.ts]\n  - id: audit\n    role: qa\n    scope: [docs/changed.md]\n' };
+    const refusal = { id: 'admission:41bd10b94451a1ce', source: 'admission' as const,
+      detail: 'build: invalid schema at timeout_ms: Stage timeout overrides were removed; edit config/defaults.yaml::default_timeout_ms instead.; fix the named fields and regenerate dispatch.yaml' };
+    const repaired = stages(mergePlanRetryPair(incumbent, proposed, [refusal]).pair.dispatch);
+    expect(repaired[0]).not.toHaveProperty('timeout_ms');
+    expect(repaired[1].scope).toEqual(['docs/audit.md']);
+  });
+
   it('unlocks only an exact conditional producer for its own absent hard-check input', () => {
     const incumbent = { dispatch: 'stages:\n  - id: write_report\n    role: coder\n    scope: [docs/report.md]\n    condition: audit_cache.pass == true\n  - id: audit_cache\n    role: qa\n    scope: [docs/cache.json]\n' };
     const proposed = { dispatch: 'stages:\n  - id: write_report\n    role: coder\n    scope: [docs/report.md]\n  - id: audit_cache\n    role: qa\n    scope: [docs/changed.json]\n' };

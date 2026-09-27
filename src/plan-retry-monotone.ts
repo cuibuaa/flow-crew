@@ -360,6 +360,16 @@ function implicatedStageFields(requirements: readonly PlanRetryRequirement[]): {
       }
     }
     if (/ancestor|dependency|depends_on|DAG sink/i.test(requirement.detail)) dependencyRepair = true;
+    // Admission refusals arrive as `admission:<digest>` with the stage and field
+    // only in the detail ("<stage>: invalid schema at <field>: ..."). Without
+    // this, no field was unlocked, every retry reproduced the incumbent and the
+    // run stopped as an identical refusal even when the planner removed the field.
+    const schemaField = /^([a-z][a-z0-9_]*): invalid schema at ([A-Za-z_][A-Za-z0-9_]*)/i.exec(requirement.detail);
+    if (requirement.id.startsWith('admission:') && schemaField) {
+      const current = fields.get(boundedSlug(schemaField[1])) ?? new Set<string>();
+      current.add(schemaField[2]);
+      fields.set(boundedSlug(schemaField[1]), current);
+    }
     const match = /^stage:([^:]+)(?::([^:]+))?$/.exec(requirement.id);
     if (!match) continue;
     const current = fields.get(match[1]) ?? new Set<string>();
