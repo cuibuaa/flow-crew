@@ -72,6 +72,7 @@ const previousUserProfile = process.env.USERPROFILE;
 const previousFcHome = process.env.FC_HOME;
 const previousIsolationRoot = process.env.FLOWCREW_VITEST_ROOT;
 const isolation = createVitestFileIsolation();
+const isolatedDaemonSocket = join(isolation.root, "unavailable-daemon.sock");
 
 // setupFiles run before the test module graph. HOME covers modules that call
 // homedir() directly; the setter covers store.ts's process-level override.
@@ -79,6 +80,7 @@ process.env.HOME = isolation.home;
 process.env.USERPROFILE = isolation.home;
 delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
+process.env.FLOWCREW_DAEMON_SOCKET = isolatedDaemonSocket;
 
 const store = await import("./src/store.js");
 const runEvents = await import("./src/run-events.js");
@@ -97,6 +99,7 @@ afterAll(() => {
   // sleeping in every spec file. The process registry remains the final
   // fallback for unrelated callbacks that outlive teardown.
   store.setFcGlobalDir(isolation.fcHome);
+  process.env.FLOWCREW_DAEMON_SOCKET = isolatedDaemonSocket;
   runEvents.clearAttemptSummaryRefreshDebounce();
   isolation.cleanup();
   restoreEnv("HOME", previousHome);

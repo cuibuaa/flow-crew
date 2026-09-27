@@ -110,6 +110,13 @@ describe('root-suite file isolation', () => {
     expectInside(fcGlobalDir(), explicitRoot);
   });
 
+  it('keeps an inherited daemon socket inside the disposable test root', () => {
+    const root = process.env.FLOWCREW_VITEST_ROOT!;
+    const socket = process.env.FLOWCREW_DAEMON_SOCKET!;
+    expectInside(socket, root);
+    expect(existsSync(socket)).toBe(false);
+  });
+
   it('keeps file isolation and three-worker concurrency without suite retry', () => {
     expect(vitestConfig.test?.pool).toBe(readyAwareForkPool);
     expect(vitestConfig.test?.fileParallelism).toBe(true);
