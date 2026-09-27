@@ -1090,6 +1090,11 @@ export function evaluateValidationDelta(
         newFailureIdentifiers: next.failureIdentifiers,
       };
     }
+    if (prior.state === 'not_configured' && next.state === 'not_configured') {
+      // Nothing was ever measured for this role, so nothing can regress; treating it as
+      // unresolved made every gate on a build-less/lint-less project unpassable.
+      return { role: prior.role, state: 'pass', reason: 'Role is not configured in the baseline or now', newFailureIdentifiers: [] };
+    }
     if (prior.state !== FAILED_VALIDATION_STATE) {
       return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
     }

@@ -361,6 +361,30 @@ describe('configuration-driven project validation baseline', () => {
     });
   });
 
+  it('treats a role unconfigured in both baseline and current as a pass, not unresolved', () => {
+    const unconfigured = (role: 'build' | 'lint'): ValidationCommandResult => ({
+      role, state: 'not_configured', durationMs: 0, output: '',
+      failureIdentifiers: [], failureIdentity: 'none',
+    });
+    const red: ValidationCommandResult = {
+      role: 'test', state: 'failed', exitCode: 2, durationMs: 1, output: '',
+      failureIdentifiers: ['tests/old.py::t'], failureIdentity: 'known', failureCount: 1,
+    };
+    const baseline = {
+      version: 1,
+      projectDir: root,
+      discovery: { state: 'configured', configPath: `${root}/Makefile`, commands: [], missingRoles: ['build', 'lint'] },
+      results: [unconfigured('build'), red, unconfigured('lint')],
+      gateCriteria: [],
+    } satisfies ProjectValidationBaseline;
+
+    const unchanged = evaluateValidationDelta(baseline, [unconfigured('build'), red, unconfigured('lint')]);
+    expect(unchanged.map((entry) => entry.state)).toEqual(['pass', 'pass', 'pass']);
+
+    const launchError = evaluateValidationDelta(baseline, [{ ...unconfigured('build'), state: 'launch_error' }, red, unconfigured('lint')]);
+    expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
+  });
+
   it('evaluates green and known-red baselines as deltas in both directions', () => {
     const result = (
       role: 'build' | 'test' | 'lint',

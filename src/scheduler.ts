@@ -9241,9 +9241,19 @@ export function readGateVerdict(
         };
       }
       if (delta.pass !== true) {
+        const regressions = delta.delta.filter((entry) => entry.state === 'regression');
+        if (regressions.length > 0) {
+          const named = regressions.map((entry) => `${entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
+          return {
+            pass: false,
+            reason: `Validation baseline delta for gate ${stageId} recorded regressions for current execution ${currentExecution.executionId} (${named}); repair the named failures, then rerun the gate and configured validation`,
+          };
+        }
+        const unresolved = delta.delta.filter((entry) => entry.state !== 'pass')
+          .map((entry) => `${entry.role}: ${entry.reason}`).join('; ');
         return {
           pass: false,
-          reason: `Validation baseline delta for gate ${stageId} recorded regressions for current execution ${currentExecution.executionId}; repair the named failures, then rerun the gate and configured validation`,
+          reason: `Validation baseline delta for gate ${stageId} recorded no regression but could not be resolved for current execution ${currentExecution.executionId} (${unresolved}); this is not a code failure to repair`,
         };
       }
     }
