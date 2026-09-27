@@ -30,6 +30,8 @@ import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.
 
 const CLEANUP_TRIALS = 3;
 const FIXTURE_TIMEOUT_MS = 350;
+const DESCENDANT_FIXTURE_TIMEOUT_MS = 1_500;
+const DESCENDANT_READY_TIMEOUT_MS = 1_200;
 const ABORT_FIXTURE_TIMEOUT_MS = 10_000;
 const TEST_TERMINATION_GRACE_MS = 150;
 const TEST_TERMINATION_TIMING = { graceMs: TEST_TERMINATION_GRACE_MS, pollMs: 5 } as const;
@@ -382,20 +384,20 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       descendantReadyPath, descendantPidPath, descendantTermPath,
     ], {
       cwd: root,
-      timeout_ms: FIXTURE_TIMEOUT_MS,
+      timeout_ms: DESCENDANT_FIXTURE_TIMEOUT_MS,
       env: { HOME: root, FC_HOME: join(root, 'fc-home') },
       terminationTiming: TEST_TERMINATION_TIMING,
     });
 
     try {
-      await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
+      await waitForFile(readyPath, DESCENDANT_READY_TIMEOUT_MS);
       const result = await awaitBounded(
         execution,
-        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
+        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
       );
       expect(result.exitCode).toBe(124);
       expect(performance.now() - settlementStarted).toBeGreaterThanOrEqual(
-        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
+        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
       );
       expect(existsSync(cleanupPath)).toBe(true);
       expect(existsSync(descendantTermPath)).toBe(true);

@@ -1,6 +1,6 @@
-import { readFileSync, readlinkSync, realpathSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch, type Stats } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch, openSync, closeSync, type Stats } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -3095,6 +3095,14 @@ export function buildRetryPreamble(
         : `Replace the structurally invalid dispatch.yaml at ${runDirPath}/dispatch.yaml with at least one schema-valid stage that uses a known role.`,
     ].join('\n\n'));
   }
+  if (prevError?.startsWith('Temporal test contract rejected')) {
+    return withMonotoneContext([
+      `RETRY FIX (attempt ${retries + 1}): the previous execution completed, but the temporal test contract rejected a generated test.`,
+      `Specific finding(s): ${prevError}`,
+      `Read ${join(runDirPath, 'stages', stageId, 'temporal_test_guard.json')} and the rejected test file before editing. Replace the invalid temporal assertion, then run the corrected test. A file with the same invalid assertion will be rejected again.`,
+      `Read the prior output at ${partialPath} for context; this is a test correction, not a timeout continuation.`,
+    ].join('\n\n'));
+  }
   let cause: string;
   if (prevError && prevError.startsWith('aborted by supervisor')) {
     cause = `Previous execution was ${prevError}. The supervisor judged that execution stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this execution, and START making file edits within a few minutes; do NOT spend the whole execution only inspecting code.`;
@@ -3486,6 +3494,16 @@ function writeRejectCounts(runDirPath: string, counts: Record<string, number>): 
   } catch { /* non-critical */ }
 }
 
+function rawGateVerdict(path: string): { pass: boolean; reason: string } | undefined {
+  try {
+    const verdict = JSON.parse(readFileSync(path, 'utf8')) as { pass?: unknown; reason?: unknown };
+    if (typeof verdict.pass === 'boolean') return {
+      pass: verdict.pass, reason: typeof verdict.reason === 'string' ? verdict.reason : '',
+    };
+  } catch { /* missing or malformed verdict */ }
+  return undefined;
+}
+
 /**
  * Consume a pending supervisor REJECT before a deliverable is accepted as
  * terminal (FIX 2). If a REJECT signal targets a stage that completed this
@@ -3561,6 +3579,10 @@ export function consumeSupervisorReject(
   const targetConfig = decision.targetStage
     ? sorted.find((stage) => stage.id === decision.targetStage)
     : undefined;
+  // A gate verdict identifies a gate attempt, while a supervisor signal binds
+  // to a producer attempt. Neither carries a shared defect ID. Even identical
+  // free-text reasons can describe separate failures, so retain the REJECT's
+  // bounded rework/escalation path instead of discarding it as gate-covered.
   const rejectedEvidencePath = decision.targetStage
     ? targetConfig?.is_gate
       ? join(ctx.runDirPath, `verdict_${decision.targetStage}.json`)
@@ -3650,12 +3672,16 @@ export function consumeSupervisorReject(
       reason: decision.reason,
       rejectedAt: new Date().toISOString(),
     }, null, 2)}\n`, 'utf-8');
-    writeFileSync(verdictPath, `${JSON.stringify({
-      pass: false,
-      outcome: 'repair-required',
-      reason: `Supervisor REJECT: ${decision.reason}`,
-      source: 'supervisor_reject',
-    }, null, 2)}\n`, 'utf-8');
+    const existingNegative = rawGateVerdict(verdictPath)?.pass === false;
+    const statusOnlyObjection = /complete.*(?:rejecting|negative|pass:false).*verdict|completion contradicts its own verdict/i.test(decision.reason);
+    if (!(existingNegative && statusOnlyObjection)) {
+      writeFileSync(verdictPath, `${JSON.stringify({
+        pass: false,
+        outcome: 'repair-required',
+        reason: `Supervisor REJECT: ${decision.reason}`,
+        source: 'supervisor_reject',
+      }, null, 2)}\n`, 'utf-8');
+    }
     for (const repair of repairStages) {
       state.stages[repair.id] = rependStageStatus(state.stages[repair.id], 0);
       appendSchedulerGuidanceOnce(
@@ -4740,6 +4766,7 @@ interface RunRollbackBaseline {
   images: Map<string, RepairFileImage>;
   fingerprints: Map<string, RepairFileFingerprint>;
   cleanTracked: Set<string>;
+  lazyGitTracked: Map<string, RollbackStatIdentity>;
   /** Immutable Git-index membership. Unlike cleanTracked, authorized writes never remove this proof. */
   trackedPaths: Set<string>;
   gitIndexEntries: Map<string, LiveConstraintGitIndexEntry[]>;
@@ -5318,6 +5345,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   const images = new Map<string, RepairFileImage>();
   const fingerprints = new Map<string, RepairFileFingerprint>();
   const cleanTracked = new Set<string>();
+  const lazyGitTracked = new Map<string, RollbackStatIdentity>();
   const trackedPaths = new Set<string>();
   const indexEntries = new Map<string, LiveConstraintGitIndexEntry[]>();
   let filesEnumerated = 0;
@@ -5338,6 +5366,13 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
       // directory. Preserve a dirty run-start preimage instead of restoring
       // such a path to the index blob.
       ...nulPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', 'HEAD', '--', '.'])),
+      // Git deliberately hides assume-unchanged and skip-worktree paths from
+      // ordinary diff. Snapshot their live bytes even if the index object is
+      // unchanged, since the worktree can still contain an operator preimage.
+      ...gitOutput(projectDir, ['ls-files', '-v', '-z', '--cached', '--', '.'])
+        .split('\0')
+        .filter((entry) => entry.length > 2 && entry[1] === ' ' && entry[0] !== 'H')
+        .map((entry) => entry.slice(2).replace(/\\/g, '/')),
       ...rollbackListedPaths(gitOutput(projectDir, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.'])),
       // Ignored files are still pre-existing operator data. Image them once so
       // an out-of-scope write restores their run-start bytes rather than
@@ -5346,6 +5381,33 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     ]);
     filesEnumerated = tracked.size + [...dirty].filter((path) => !tracked.has(path)).length;
     for (const path of tracked) if (!dirty.has(path)) cleanTracked.add(path);
+    // A Git object is an exact worktree preimage only when checkout attributes
+    // cannot transform its bytes. Query attributes in one process rather than
+    // launching a subprocess per tracked file.
+    const autocrlf = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.autocrlf']).trim(); } catch { return ''; } })();
+    const eol = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.eol']).trim(); } catch { return ''; } })();
+    if (autocrlf !== 'true' && eol !== 'crlf' && cleanTracked.size > 0) {
+      const paths = [...cleanTracked].filter((path) => {
+        const kind = stageZeroIndexEntry(indexEntries.get(path))?.kind;
+        return kind === 'regular' || kind === 'executable';
+      });
+      const checked = spawnSync('git', ['check-attr', '-z', '--stdin', 'filter', 'ident', 'text', 'eol', 'working-tree-encoding'], {
+        cwd: projectDir, input: Buffer.from(`${paths.join('\0')}\0`), encoding: 'buffer',
+        stdio: ['pipe', 'pipe', 'ignore'], timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+      });
+      if (checked.status === 0 && checked.stdout) {
+        const values = checked.stdout.toString('utf8').split('\0');
+        const transformed = new Set<string>();
+        for (let index = 0; index + 2 < values.length; index += 3) {
+          if (values[index + 2] !== 'unspecified') transformed.add(values[index]);
+        }
+        for (const path of paths) {
+          if (transformed.has(path)) continue;
+          const identity = rollbackStatIdentity(join(projectDir, path));
+          if (identity?.type === 'file') lazyGitTracked.set(path, identity);
+        }
+      }
+    }
     for (const path of dirty) {
       const image = readRepairFileImage(projectDir, path, indexEntries.get(path), { contentStore });
       images.set(path, image);
@@ -5392,7 +5454,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
   }
   const baseline: RunRollbackBaseline = {
-    key, projectDir, runDirPath, contentStore, images, fingerprints, cleanTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
+    key, projectDir, runDirPath, contentStore, images, fingerprints, cleanTracked, lazyGitTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
     journal: new Map(), journalSequence: 0, reliable: true,
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
@@ -5474,6 +5536,19 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
   }
   const rawMode = Number.parseInt(entry.mode, 8);
   const symlink = entry.kind === 'symlink';
+  if (!symlink) {
+    const statIdentity = baseline.lazyGitTracked.get(path);
+    if (statIdentity) {
+      const image: RepairFileImage = {
+        exists: true, type: 'file', indexEntryKind: entry.kind,
+        gitObjectId: entry.objectId, byteLength: Number(statIdentity.size),
+        statIdentity,
+        mode: Number.isFinite(rawMode) && (rawMode & 0o111) ? 0o755 : 0o644,
+      };
+      baseline.images.set(path, image);
+      return image;
+    }
+  }
   try {
     const bytes = execFileSync('git', ['cat-file', 'blob', entry.objectId], {
       cwd: baseline.projectDir, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'],
@@ -5533,12 +5608,13 @@ function readRollbackCurrentImage(
   before?: RepairFileImage,
 ): RepairFileImage {
   const identity = rollbackStatIdentity(join(projectDir, path));
-  if (before?.type === 'file' && before.sha256 !== undefined
+  if (before?.type === 'file' && (before.sha256 !== undefined || before.gitObjectId !== undefined)
       && rollbackStatIdentitiesEqual(before.verifiedStatIdentity ?? before.statIdentity, identity)) {
     return {
       exists: true,
       type: 'file',
       sha256: before.sha256,
+      gitObjectId: before.gitObjectId,
       byteLength: before.byteLength,
       binary: before.binary,
       mode: Number(BigInt(identity!.mode) & 0o7777n),
@@ -5546,7 +5622,9 @@ function readRollbackCurrentImage(
       ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
     };
   }
-  return readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path));
+  const image = readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path));
+  if (before?.gitObjectId && image.type === 'file') image.gitObjectId = gitObjectIdForPath(projectDir, join(projectDir, path));
+  return image;
 }
 
 async function readRollbackCurrentImageCooperatively(
@@ -5557,12 +5635,13 @@ async function readRollbackCurrentImageCooperatively(
 ): Promise<RepairFileImage> {
   const absolute = join(projectDir, path);
   const identity = rollbackStatIdentity(absolute);
-  if (before.type === 'file' && before.sha256 !== undefined
+  if (before.type === 'file' && (before.sha256 !== undefined || before.gitObjectId !== undefined)
       && rollbackStatIdentitiesEqual(before.verifiedStatIdentity ?? before.statIdentity, identity)) {
     return {
       exists: true,
       type: 'file',
       sha256: before.sha256,
+      gitObjectId: before.gitObjectId,
       byteLength: before.byteLength,
       binary: before.binary,
       mode: Number(BigInt(identity!.mode) & 0o7777n),
@@ -5583,6 +5662,7 @@ async function readRollbackCurrentImageCooperatively(
       exists: true,
       type: 'file',
       sha256: hashed.sha256,
+      ...(before.gitObjectId ? { gitObjectId: gitObjectIdForPath(projectDir, absolute) } : {}),
       byteLength: hashed.byteLength,
       binary: true,
       mode: Number(BigInt(hashed.statIdentity.mode) & 0o7777n),
@@ -5664,6 +5744,14 @@ function gitBlobObjectId(bytes: Buffer, expectedObjectId: string): string | unde
     .update(`blob ${bytes.byteLength}\0`)
     .update(bytes)
     .digest('hex');
+}
+
+function gitObjectIdForPath(projectDir: string, path: string): string | undefined {
+  try {
+    return execFileSync('git', ['hash-object', '--no-filters', path], {
+      cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+    }).trim();
+  } catch { return undefined; }
 }
 
 function compareRepairFileContents(
@@ -5821,8 +5909,21 @@ export function captureRepairRoundSnapshot(
     }
   }
   const files = new Map<string, RepairFileImage>();
+  let scopedFilesRead = 0;
+  let scopedFilesHashed = 0;
+  let scopedBytesRead = 0;
+  let scopedBytesHashed = 0;
   for (const path of scopedPaths) {
-    const image = captureRollbackCurrentImage(baseline, projectDir, path, baselineImage(baseline, path));
+    const before = baselineImage(baseline, path);
+    const image = captureRollbackCurrentImage(baseline, projectDir, path, before);
+    if (image !== before) {
+      scopedFilesRead++;
+      scopedBytesRead += repairFileImageBytes(image);
+      if (image.exists && image.sha256 !== undefined) {
+        scopedFilesHashed++;
+        scopedBytesHashed += repairFileImageBytes(image);
+      }
+    }
     files.set(path, image);
   }
   // Exact paths need an explicit absent preimage so a newly-created file is
@@ -5851,11 +5952,11 @@ export function captureRepairRoundSnapshot(
       baselineBytesRead: ensured.initialized ? baseline.initialization.bytesRead : 0,
       baselineBytesHashed: ensured.initialized ? baseline.initialization.bytesHashed : 0,
       scopedFilesVisited: scopedPaths.size,
-      scopedFilesRead: scopedPaths.size,
-      scopedFilesHashed: [...files.values()].filter((image) => image.exists).length,
+      scopedFilesRead,
+      scopedFilesHashed,
       scopedBytesVisited: scopedBytes,
-      scopedBytesRead: scopedBytes,
-      scopedBytesHashed: scopedBytes,
+      scopedBytesRead,
+      scopedBytesHashed,
       outsideScopeFilesVisited: 0,
       outsideScopeFilesRead: 0,
       outsideScopeFilesHashed: 0,
@@ -5907,7 +6008,9 @@ export function restoreProjectPath(
         : { restored: false, failure: `new path ${normalized} remained after removal` };
     }
     const bytes = repairFileMaterializedBytes(before);
-    if (bytes === undefined && before.backingPath === undefined) {
+    const gitBlob = before.type === 'file' && before.gitObjectId && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(before.gitObjectId)
+      ? before.gitObjectId : undefined;
+    if (bytes === undefined && before.backingPath === undefined && !gitBlob) {
       return {
         restored: false,
         failure: before.materializationFailure
@@ -5927,17 +6030,33 @@ export function restoreProjectPath(
     } else if (before.backingPath) {
       copyFileSync(before.backingPath, temporary);
       if (before.mode !== undefined) chmodSync(temporary, before.mode);
+    } else if (gitBlob) {
+      const descriptor = openSync(temporary, 'wx', before.mode ?? 0o600);
+      let result: ReturnType<typeof spawnSync>;
+      try {
+        result = spawnSync('git', ['cat-file', 'blob', gitBlob], {
+          cwd: projectDir, stdio: ['ignore', descriptor, 'pipe'], timeout: 15_000,
+          maxBuffer: 1_048_576,
+        });
+      } finally { closeSync(descriptor); }
+      if (result.status !== 0 || result.error) throw new Error(`Git preimage ${gitBlob} could not be read`);
+      if (before.mode !== undefined) chmodSync(temporary, before.mode);
     } else {
       if (!bytes) throw new Error(`regular-file preimage bytes are unavailable for ${normalized}`);
       writeFileSync(temporary, bytes, { flag: 'wx', mode: before.mode ?? 0o600 });
       if (before.mode !== undefined) chmodSync(temporary, before.mode);
     }
-    if (compareRepairFileContents(before, readRepairFileImage(projectDir, relative(projectDir, temporary))) !== 'equal') {
+    const stagedMatches = gitBlob
+      ? gitObjectIdForPath(projectDir, temporary) === gitBlob
+      : compareRepairFileContents(before, readRepairFileImage(projectDir, relative(projectDir, temporary))) === 'equal';
+    if (!stagedMatches) {
       return { restored: false, failure: `staged preimage verification failed for ${normalized}` };
     }
     renameSync(temporary, absolute);
     temporary = undefined;
-    return compareRepairFileContents(before, readRepairFileImage(projectDir, normalized)) === 'equal'
+    return (gitBlob
+      ? gitObjectIdForPath(projectDir, absolute) === gitBlob
+      : compareRepairFileContents(before, readRepairFileImage(projectDir, normalized)) === 'equal')
       ? { restored: true }
       : { restored: false, failure: `restored content verification failed for ${normalized}` };
   } catch (error) {
@@ -6254,7 +6373,8 @@ function serializableRepairFileImage(image: RepairFileImage): Record<string, unk
 function repairFilePreimageAvailable(image: RepairFileImage): boolean {
   if (image.inspectionFailure) return false;
   if (!image.exists) return true;
-  return image.backingPath !== undefined || repairFileMaterializedBytes(image) !== undefined;
+  return image.backingPath !== undefined || repairFileMaterializedBytes(image) !== undefined
+    || (image.type === 'file' && image.gitObjectId !== undefined && !image.materializationFailure);
 }
 
 export function writeRepairRoundDiffArtifact(input: {
@@ -6287,9 +6407,9 @@ export function writeRepairRoundDiffArtifact(input: {
   const files: Record<string, unknown>[] = [];
   for (const path of [...allPaths].sort()) {
     const before = snapshot.files.get(path);
-    const after = readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path);
-    const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
     const baselineBefore = before ?? baselineImage(snapshot.rollbackBaseline, path);
+    const after = readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path, baselineBefore);
+    const authoritativeOwners = [...(writeOwners.get(path) ?? [])].sort();
     const comparison = compareRepairFileContents(baselineBefore, after);
     const beforeExisted = baselineBefore.exists;
     // Mode remains useful descriptive audit evidence, but it is not content

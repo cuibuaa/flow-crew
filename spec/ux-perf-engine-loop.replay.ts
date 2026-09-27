@@ -724,8 +724,8 @@ describe('UX/performance engine-loop evidence replays', () => {
       baselineFilesRead: 0, baselineFilesHashed: 0, baselineBytesRead: 0, baselineBytesHashed: 0,
     });
     expect(warm.measurement).toMatchObject({
-      baselineInitialized: false, scopedFilesVisited: 1, scopedFilesRead: 1, scopedFilesHashed: 1,
-      scopedBytesVisited: 6, scopedBytesRead: 6, scopedBytesHashed: 6,
+      baselineInitialized: false, scopedFilesVisited: 1, scopedFilesRead: 0, scopedFilesHashed: 0,
+      scopedBytesVisited: 6, scopedBytesRead: 0, scopedBytesHashed: 0,
       outsideScopeFilesVisited: 0, outsideScopeFilesRead: 0, outsideScopeFilesHashed: 0,
       outsideScopeBytesVisited: 0, outsideScopeBytesRead: 0, outsideScopeBytesHashed: 0,
       conservativeFallback: false,

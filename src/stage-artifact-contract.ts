@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   compareLiveConstraintContentIdentities,
@@ -8,6 +9,7 @@ import {
   type LiveConstraintContentIdentity,
 } from './live-constraint-guard.js';
 import { isGenericPathLexeme } from './path-lexeme.js';
+import { discoverProjectValidation } from './project-validation.js';
 
 export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target';
 
@@ -37,7 +39,7 @@ export interface StageArtifactContractAudit {
 export interface StageArtifactReplayExecution {
   command: string;
   sourcePath: string;
-  runner: 'node_test' | 'vitest' | 'unsupported';
+  runner: 'node_test' | 'vitest' | 'pytest' | 'unsupported';
   targetPaths: string[];
   status: 'passed' | 'failed' | 'not_run';
   exitCode: number | null;
@@ -90,6 +92,7 @@ interface ReplayCommandCandidate {
   runner: StageArtifactReplayExecution['runner'];
   targets: ReplayTarget[];
   testNamePattern?: string;
+  pythonExecutable?: 'python' | 'python3';
   parseError?: string;
 }
 
@@ -279,6 +282,38 @@ function packageTestCommand(projectDir: string): string[] | undefined {
   }
 }
 
+function projectConfiguresPytest(projectDir: string): boolean {
+  const test = discoverProjectValidation(projectDir).commands.find((command) => command.role === 'test');
+  if (!test) return false;
+  if (test.command === 'python' && test.args[0] === '-m' && test.args[1] === 'pytest') return true;
+  if (test.command !== 'make' || test.args[0] !== 'test') return false;
+  try {
+    const lines = readFileSync(join(projectDir, 'Makefile'), 'utf-8').split(/\r?\n/);
+    const start = lines.findIndex((line) => /^test\s*:(?!=)/.test(line));
+    if (start < 0) return false;
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() && !line.startsWith('\t')) break;
+      if (/^\t\s*(?:(?:\$\((?:PYTHON|PY)\)|python(?:3(?:\.\d+)?)?)\s+-m\s+pytest|pytest)(?:\s|$)/.test(line)) return true;
+    }
+  } catch { /* unreadable configuration is not authorization */ }
+  return false;
+}
+
+function parsePytestArguments(args: readonly string[], projectDir: string): Pick<ReplayCommandCandidate, 'targets' | 'parseError'> {
+  const targets: ReplayTarget[] = [];
+  for (const argument of args) {
+    if (['-q', '-qq', '--quiet', '-v', '--verbose'].includes(argument)) continue;
+    const target = resolveReplayTarget(argument, projectDir);
+    if (!target || !/(?:^test_.+|.+_test)\.py$/i.test(target.path.split(/[\\/]/).at(-1) ?? '')) {
+      return { targets, parseError: `argument ${JSON.stringify(argument)} is outside the bounded pytest replay grammar` };
+    }
+    if (!targets.some((entry) => entry.path === target.path)) targets.push(target);
+  }
+  if (targets.length === 0) return { targets, parseError: 'no exact project-contained Python test file was named' };
+  if (targets.length > REPLAY_TARGET_LIMIT) return { targets, parseError: `more than ${REPLAY_TARGET_LIMIT} test files were named` };
+  return { targets };
+}
+
 function parseReplayCommand(
   command: string,
   source: StageArtifactObligation['source'],
@@ -302,9 +337,19 @@ function parseReplayCommand(
     return unsupported('shell operators are not accepted');
   }
 
+  const executable = words[0]?.toLowerCase();
+  if ((executable === 'python' || executable === 'python3') && words[1] === '-m' && words[2] === 'pytest') {
+    if (!projectConfiguresPytest(projectDir)) return unsupported('pytest is not the configured project test runner');
+    const parsed = parsePytestArguments(words.slice(3), projectDir);
+    return {
+      command, source, ...(sourcePath ? { sourcePath } : {}),
+      runner: 'pytest', pythonExecutable: executable,
+      targets: parsed.targets, ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+    };
+  }
+
   let runner: 'node_test' | 'vitest';
   let args: string[];
-  const executable = words[0]?.toLowerCase();
   if (executable === 'node' && words[1] === '--test') {
     runner = 'node_test';
     args = words.slice(1);
@@ -350,7 +395,7 @@ function parseReplayCommand(
       ...(sourcePath ? { sourcePath } : {}),
     };
   } else {
-    return unsupported('only node --test and project-local vitest commands are executable');
+    return unsupported('only node --test, project-local vitest, and configured python -m pytest commands are executable');
   }
 
   const parsed = parseRunnerArguments(runner, args, projectDir);
@@ -446,6 +491,7 @@ interface ReplayProcessResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  pytestCounts?: { passed: number; failed: number; skipped: number };
 }
 
 function runNodeProcess(args: readonly string[], projectDir: string): ReplayProcessResult {
@@ -470,6 +516,54 @@ function runNodeProcess(args: readonly string[], projectDir: string): ReplayProc
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? result.error?.message ?? '',
   };
+}
+
+function pytestJunitCounts(xml: string): ReplayProcessResult['pytestCounts'] {
+  const suites = [...xml.matchAll(/<testsuite\s+([^>]+)>/g)];
+  if (suites.length !== 1) return undefined;
+  const count = (name: string): number | undefined => {
+    const raw = suites[0][1].match(new RegExp(`(?:^|\\s)${name}="(\\d+)"`))?.[1];
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) ? value : undefined;
+  };
+  const tests = count('tests');
+  const failures = count('failures');
+  const errors = count('errors');
+  const skipped = count('skipped');
+  if (tests === undefined || failures === undefined || errors === undefined || skipped === undefined
+      || tests < failures + errors + skipped) return undefined;
+  return { passed: tests - failures - errors - skipped, failed: failures + errors, skipped };
+}
+
+function runPytestProcess(candidate: ReplayCommandCandidate, target: ReplayTarget, projectDir: string): ReplayProcessResult {
+  const auditDir = mkdtempSync(join(tmpdir(), 'flowcrew-pytest-replay-'));
+  const junitPath = join(auditDir, 'results.xml');
+  try {
+    const result = spawnSync(candidate.pythonExecutable ?? 'python', [
+      '-m', 'pytest', target.path, '-q', '-p', 'no:cacheprovider', `--junitxml=${junitPath}`,
+    ], {
+      cwd: projectDir,
+      encoding: 'utf-8',
+      env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', PYTHONDONTWRITEBYTECODE: '1' },
+      timeout: REPLAY_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: 1_048_576,
+      windowsHide: true,
+    });
+    let pytestCounts: ReplayProcessResult['pytestCounts'];
+    try { pytestCounts = pytestJunitCounts(readFileSync(junitPath, 'utf8')); } catch { /* no trustworthy execution record */ }
+    return {
+      exitCode: result.status,
+      signal: result.signal,
+      timedOut: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? result.error?.message ?? '',
+      ...(pytestCounts ? { pytestCounts } : {}),
+    };
+  } finally {
+    rmSync(auditDir, { recursive: true, force: true });
+  }
 }
 
 function resolveVitestCli(projectDir: string): string | undefined {
@@ -644,6 +738,52 @@ function executeVitestReplay(candidate: ReplayCommandCandidate, projectDir: stri
   };
 }
 
+function executePytestReplay(candidate: ReplayCommandCandidate, projectDir: string): StageArtifactReplayExecution {
+  let exitCode: number | null = 0;
+  let signal: NodeJS.Signals | null = null;
+  let timedOut = false;
+  let stdout = '';
+  let stderr = '';
+  let passedTests = 0;
+  let failedTests = 0;
+  let skippedTests = 0;
+  let unexercisedTarget: string | undefined;
+  let unverifiedTarget: string | undefined;
+  for (const target of candidate.targets) {
+    const result = runPytestProcess(candidate, target, projectDir);
+    exitCode = exitCode === 0 ? result.exitCode : exitCode;
+    signal ??= result.signal;
+    timedOut ||= result.timedOut;
+    stdout += `${stdout ? '\n' : ''}${result.stdout}`;
+    stderr += `${stderr ? '\n' : ''}${result.stderr}`;
+    const { passed = 0, failed = 0, skipped = 0 } = result.pytestCounts ?? {};
+    if (!result.pytestCounts) unverifiedTarget ??= target.mention;
+    passedTests += passed;
+    failedTests += failed;
+    skippedTests += skipped;
+    if (passed + failed === 0) unexercisedTarget ??= target.mention;
+    if (result.exitCode !== 0 || result.timedOut) break;
+  }
+  const executedTests = passedTests + failedTests;
+  const collectedTests = executedTests + skippedTests;
+  let reason = 'the configured pytest replay exited zero and exercised a collected test in every named file';
+  if (timedOut) reason = `the replay exceeded the ${REPLAY_TIMEOUT_MS}ms audit timeout`;
+  else if (exitCode !== 0) reason = `the replay returned direct exit ${exitCode ?? 'null'}`;
+  else if (unverifiedTarget) reason = `pytest did not produce a valid JUnit execution record for ${unverifiedTarget}`;
+  else if (unexercisedTarget) reason = `the replay did not exercise a collected test from ${unexercisedTarget}`;
+  const passed = !timedOut && exitCode === 0 && !unverifiedTarget && !unexercisedTarget && executedTests > 0;
+  return {
+    command: candidate.command,
+    sourcePath: candidate.sourcePath ?? '',
+    runner: candidate.runner,
+    targetPaths: candidate.targets.map((target) => target.path),
+    status: passed ? 'passed' : 'failed',
+    exitCode, signal, timedOut,
+    collectedTests, executedTests, passedTests, failedTests, skippedTests,
+    stdout: boundedOutput(stdout), stderr: boundedOutput(stderr), reason,
+  };
+}
+
 function executeReplayCommand(candidate: ReplayCommandCandidate, projectDir: string): StageArtifactReplayExecution {
   if (candidate.parseError) return failedReplay(candidate, candidate.parseError);
   const missing = candidate.targets.filter((target) => {
@@ -662,6 +802,8 @@ function executeReplayCommand(candidate: ReplayCommandCandidate, projectDir: str
     ? executeNodeReplay(candidate, projectDir)
     : candidate.runner === 'vitest'
       ? executeVitestReplay(candidate, projectDir)
+      : candidate.runner === 'pytest'
+        ? executePytestReplay(candidate, projectDir)
       : failedReplay(candidate, 'the command is outside the bounded replay grammar');
 }
 

@@ -53,6 +53,9 @@ async function runBackgroundSubmit(brief: string): Promise<{ code: number | null
         HOME: join(fixtureRoot, 'home'),
         FC_HOME: fcHome,
         TMPDIR: join(fixtureRoot, 'tmp'),
+        // Keep background registration inside this fixture when the caller is a FlowCrew stage.
+        FLOWCREW_DAEMON_SOCKET: join(fcHome, 'daemon.sock'),
+        FLOWCREW_LAUNCH_RESULT_PATH: undefined,
         NO_COLOR: '1',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
