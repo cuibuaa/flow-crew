@@ -73,7 +73,7 @@ export interface StageArtifactContractInput {
 const PATH_TOKEN = /`([^`\s]+)`|((?:\/|\.\.?\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)|(?:^|[\s("'])(([A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]+))(?=$|[\s"',.;:)])/g;
 const FILE_SUFFIX = /\.(?:md|json|ya?ml|toml|txt|csv|ts|tsx|js|jsx|mjs|cjs|py|sh|html|xml)$/i;
 const NON_OBLIGATING = /\b(?:optional|illustrative|example|for example|if needed|if applicable|may write|might write)\b/i;
-const COMMAND_START = /^(?:node\s+(?:--test\b|(?:\.\/)?node_modules\/vitest\/vitest\.mjs\b)|vitest\b|npx\s+vitest\b|npm\s+(?:(?:exec\s+)?vitest|test)\b|pnpm\s+(?:(?:exec\s+)?vitest|test)\b|yarn\s+(?:vitest|test)\b|(?:python(?:3)?\s+-m\s+)?pytest\b)/i;
+const COMMAND_START = /^(?:node\s+(?:--test\b|(?:\.\/)?node_modules\/vitest\/vitest\.mjs\b)|vitest(?=\s|$)|npx\s+vitest(?=\s|$)|npm\s+(?:(?:exec\s+)?vitest|test)\b|pnpm\s+(?:(?:exec\s+)?vitest|test)\b|yarn\s+(?:vitest|test)\b|(?:python(?:3)?\s+-m\s+)?pytest\b)/i;
 const REPLAY_TIMEOUT_MS = 15_000;
 const REPLAY_OUTPUT_LIMIT = 16_384;
 const REPLAY_COMMAND_LIMIT = 4;
@@ -143,12 +143,12 @@ function commandText(value: string): string {
 
 function replayCommandTexts(text: string): string[] {
   const commands: string[] = [];
-  const add = (value: string, commandContext: boolean): void => {
+  const add = (value: string, commandContext: boolean, explicitlyPublished = false): void => {
     const candidate = commandText(value);
-    const ambiguousBareVitest = /^vitest\b/i.test(candidate) && !/^vitest\s+(?:run|--run)\b/i.test(candidate);
+    const ambiguousBareVitest = /^vitest(?=\s|$)/i.test(candidate) && !/^vitest\s+(?:run|--run)\b/i.test(candidate);
     if (candidate
-      && COMMAND_START.test(candidate)
-      && (commandContext || !ambiguousBareVitest)
+      && (explicitlyPublished || COMMAND_START.test(candidate))
+      && (explicitlyPublished || commandContext || !ambiguousBareVitest)
       && !commands.includes(candidate)) {
       commands.push(candidate);
     }
@@ -161,7 +161,7 @@ function replayCommandTexts(text: string): string[] {
     }
     if (NON_OBLIGATING.test(line)) continue;
     const explicit = line.match(/replay command\s*:\s*(.+)$/i)?.[1];
-    if (explicit) add(explicit, true);
+    if (explicit) add(explicit, true, true);
     for (const inline of line.matchAll(/`([^`\r\n]+)`/g)) add(inline[1] ?? '', true);
     const plain = line.trim().replace(/^[-*]\s+/, '');
     add(plain, inCodeFence);

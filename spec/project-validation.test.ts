@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   discoverProjectValidation,
   evaluateValidationDelta,
@@ -383,6 +385,51 @@ describe('configuration-driven project validation baseline', () => {
 
     const launchError = evaluateValidationDelta(baseline, [{ ...unconfigured('build'), state: 'launch_error' }, red, unconfigured('lint')]);
     expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
+  });
+
+  it('passes each validation role absent on both sides and keeps a configured command launch error unresolved', async () => {
+    const roles = ['build', 'test', 'lint'] as const;
+    const absent = (role: typeof roles[number]): ValidationCommandResult => ({
+      role, state: 'not_configured', durationMs: 0, output: '',
+      failureIdentifiers: [], failureIdentity: 'none',
+    });
+    const baseline = {
+      version: 1,
+      projectDir: root,
+      discovery: { state: 'partial', configPath: 'fixture', commands: [], missingRoles: [...roles] },
+      results: roles.map(absent),
+      gateCriteria: [],
+    } satisfies ProjectValidationBaseline;
+    expect(evaluateValidationDelta(baseline, roles.map(absent)).map((entry) => entry.state))
+      .toEqual(['pass', 'pass', 'pass']);
+    const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-validation-control-'));
+    try {
+      writeFileSync(join(projectDir, 'package-lock.json'), '{}');
+      for (const role of roles) {
+        const configure = (script: string) => writeFileSync(
+          join(projectDir, 'package.json'),
+          JSON.stringify({ scripts: { [role]: script } }),
+        );
+        configure(`${JSON.stringify(process.execPath)} -e "process.exit(0)"`);
+        const configuredBaseline = await runProjectValidationBaseline(projectDir);
+        configure(JSON.stringify(join(projectDir, `missing-${role}`)));
+        const current = await runProjectValidationBaseline(projectDir);
+        expect(configuredBaseline.discovery.commands).toEqual([
+          expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
+        ]);
+        expect(current.discovery.commands).toEqual([
+          expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
+        ]);
+        expect(configuredBaseline.results.find((result) => result.role === role))
+          .toMatchObject({ state: 'passed', exitCode: 0 });
+        expect(current.results.find((result) => result.role === role))
+          .toMatchObject({ state: 'launch_error', exitCode: 127 });
+        expect(evaluateValidationDelta(configuredBaseline, current.results).map((entry) => entry.state))
+          .toEqual(roles.map((candidate) => candidate === role ? 'unresolved' : 'pass'));
+      }
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it('evaluates green and known-red baselines as deltas in both directions', () => {

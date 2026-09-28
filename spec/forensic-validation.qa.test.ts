@@ -384,8 +384,8 @@ describe('engine-discrimination post-change constructions and controls', () => {
     const prompt = appendResearchTemporalPathContract('confirm the round', research, undefined);
     console.log(`POST_ITEM_7=${JSON.stringify({ refused, ordinary, promptLine: prompt.split('\n').find((line) => line.includes('manifest:')) })}`);
     expect(refused.join('\n')).toContain('writes it only after the current round');
-    expect(prompt).toContain('post-consumption framework manifest: docs/run_manifest.json');
-    expect(prompt).toContain("unavailable to that round's confirmation gates");
+    expect(prompt).toContain('framework round manifest (written before confirmation): docs/run_manifest.json');
+    expect(prompt).toContain("Its evidence locator may be used by confirmation");
     expect(ordinary).toEqual([]);
   });
 

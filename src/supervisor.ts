@@ -1266,7 +1266,12 @@ Rules:
 }
 
 export function buildSupervisorRolePrompt(stuckThresholdMs: number, taskDescription: string): string {
-  return `${buildSupervisorSystemPrompt(stuckThresholdMs)}\n\n# Original Goal\n${taskDescription}`;
+  return `${buildSupervisorSystemPrompt(stuckThresholdMs)}\n\n# Run-directory path interpretation\n`
+    + `A stage may write authorized plan, evidence, and handoff artifacts inside its own run directory. `
+    + `A brief prohibition on modifying ~/.fc/ history applies to other runs and shared registry or ledger files; `
+    + `do not treat a stage's authorized own run directory write as a violation of that prohibition. `
+    + `Check the current run ID and the path's actual target before issuing GUIDE or ABORT about a .fc path.\n\n`
+    + `# Original Goal\n${taskDescription}`;
 }
 
 export type SupervisorAssessmentTrigger = 'event' | 'none';

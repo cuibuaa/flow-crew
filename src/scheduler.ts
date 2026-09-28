@@ -141,11 +141,14 @@ import { readShipSetupReadyValidationBaseline } from './ship-setup-record.js';
 import {
   evaluateValidationDelta,
   discoverProjectValidation,
+  outwardProjectSymlink,
   runProjectValidationBaseline,
+  runValidationCommand,
   validationPathImpacts,
   type ProjectValidationBaseline,
   type ProjectValidationDependencies,
   type ValidationCommand,
+  type ValidationCommandRunner,
   type ValidationDeltaResult,
 } from './project-validation.js';
 import {
@@ -1386,13 +1389,13 @@ export function appendResearchTemporalPathContract(
   return `${prompt}\n\n# Resolved research temporal paths (scheduler-owned)\n`
     + `- mutable latest measured result: ${paths.resultFile}\n`
     + `- mutable no-candidate alternative: ${paths.resultFile}.no_candidate.json\n`
-    + `- post-consumption framework manifest: ${paths.manifestFile}\n`
+    + `- framework round manifest (written before confirmation): ${paths.manifestFile}\n`
     + `- terminal outputs: ${terminalPaths.length > 0 ? terminalPaths.join(', ') : 'none declared'}\n`
     + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. `
     + `When no safe acting candidate exists, write exactly {"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"} to ${paths.resultFile}.no_candidate.json; the discriminator field is outcome, not status. `
     + `Every hard check and every test, regardless of author role or round, must avoid loading them, asserting either slot's existence/absence, or pinning its current label. `
-    + `${paths.manifestFile} is written only after the scheduler consumes an accepted round, so it is unavailable to that round's confirmation gates. `
-    + `Those gates must use the scheduler-injected immutable round evidence; the manifest is valid only for already-consumed rounds and terminal reporting. `
+    + `${paths.manifestFile} is written after the scheduler accepts a round and before that round's confirmation gate. `
+    + `Its evidence locator may be used by confirmation, but tests must use scheduler-injected immutable round evidence rather than mutable latest-result slots. `
     + `This is mechanically checked after every research stage that writes a test. A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path; a check that requires the absent ${paths.manifestFile} before the first accepted round is rejected as a temporal cycle.`;
 }
 
@@ -2232,6 +2235,46 @@ export function normalizedResearchEvidenceDigest(round: Record<string, unknown>)
   return createHash('sha256').update(canonicalResearchEvidence(normalized), 'utf8').digest('hex');
 }
 
+/** Locate one fresh project-authored evidence document for a result schema
+ * that intentionally contains only label/result. Ambiguity leaves the link
+ * absent, so the independent confirm command still decides ship eligibility. */
+function researchRoundEvidenceLink(
+  projectDir: string,
+  reportDir: string,
+  round: { label?: string; result?: number; evidence?: unknown },
+  startedMs: number,
+): string | undefined {
+  if (typeof round.evidence === 'string' && round.evidence.trim()) return round.evidence.trim();
+  if (!round.label || typeof round.result !== 'number') return undefined;
+  const expectedLabel = round.label;
+  const expectedResult = round.result;
+  const candidates = listProjectFilesAt(projectDir, reportDir).filter((path) => basename(path) === 'evidence.json');
+  const matches = candidates.filter((path) => {
+    try {
+      const absolute = join(projectDir, path);
+      const stat = lstatSync(absolute);
+      if (!stat.isFile() || stat.size > 4 * 1024 * 1024 || stat.mtimeMs < startedMs) return false;
+      const pending: unknown[] = [JSON.parse(readFileSync(absolute, 'utf-8'))];
+      let sawLabel = false;
+      let sawResult = false;
+      let visited = 0;
+      while (pending.length > 0 && visited++ < 100_000) {
+        const value = pending.pop();
+        if (value === expectedLabel) sawLabel = true;
+        if (value === expectedResult) sawResult = true;
+        if (sawLabel && sawResult) return true;
+        if (Array.isArray(value)) {
+          for (const item of value) pending.push(item);
+        } else if (value && typeof value === 'object') {
+          for (const item of Object.values(value)) pending.push(item);
+        }
+      }
+      return false;
+    } catch { return false; }
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export async function tryAdvanceResearch(
   state: StoreState,
   ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number; adapter: Adapter },
@@ -2348,6 +2391,9 @@ export async function tryAdvanceResearch(
   }
   const measuredResult = noCandidate ? undefined : round.result;
   const sourceEvidenceDigest = digestSources([sourceAbs]);
+  const roundEvidenceLink = noCandidate
+    ? undefined
+    : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, startedMs);
 
   // Journal lives in the run dir (framework-owned, agent-unreachable).
   const journalPath = join(ctx.runDirPath, 'research_journal.json');
@@ -2580,7 +2626,7 @@ export async function tryAdvanceResearch(
     outcome: noCandidate ? 'no_candidate' : 'measured',
     ...(noCandidate
       ? { reason: round.reason!.trim(), ...(round.evidence === undefined ? {} : { evidence: round.evidence }) }
-      : { result: measuredResult! }),
+      : { result: measuredResult!, ...(roundEvidenceLink === undefined ? {} : { evidence: roundEvidenceLink }) }),
     resultStd: (round as { result_std?: number }).result_std,
     wallHoursCumulative: (Date.now() - startedMs) / 3600000,
   });
@@ -2610,12 +2656,14 @@ export async function tryAdvanceResearch(
   const evalResult = evaluateResearch(rc, journal.rounds);
   try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
 
-  // Consume the round result so the next iteration doesn't re-process it.
+  // Keep an immutable consumed copy immediately. A shipping round's mutable
+  // result stays readable only through its confirm command; the journal label
+  // already prevents a crash in this interval from counting the round twice.
+  const consumedPath = join(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`);
+  const confirmNeedsResult = evalResult.decision === 'ship' && Boolean(rc.confirm) && !noCandidate;
   try {
-    renameSync(
-      sourceAbs,
-      join(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`),
-    );
+    if (confirmNeedsResult) copyFileSync(sourceAbs, consumedPath);
+    else renameSync(sourceAbs, consumedPath);
   } catch { /* non-critical */ }
 
   log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
@@ -2666,6 +2714,9 @@ export async function tryAdvanceResearch(
     } catch (err) {
       confirmReport = { pass: false, results: [{ details: `confirm command threw: ${err instanceof Error ? err.message : String(err)}` }] };
     }
+    // The confirm command has settled. Consume the mutable slot even on a
+    // refusal, so the next iteration cannot observe the same round as new.
+    try { unlinkSync(sourceAbs); } catch { /* duplicate journal identity still prevents a replay */ }
     try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
     if (!confirmReport.pass) {
       const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
@@ -7003,6 +7054,20 @@ export function discoverConfiguredCommandScopes(projectDir: string): string[] {
   return [...scopes].sort();
 }
 
+/** Vitest creates and removes these files even for a targeted invocation that
+ * does not spell the configured package test command. Keep the exemption tied
+ * to actual project configuration, and never exempt a declared input tree. */
+function transientVitestOutputScopes(projectDir: string, runId: string, configuredScopes: readonly string[]): string[] {
+  const briefPath = join(runDir(projectDir, runId), 'task_brief.md');
+  const declaredInputs = existsSync(briefPath)
+    ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf-8'))
+    : [];
+  return configuredScopes.filter((scope) => (
+    scope.endsWith('node_modules/.vite-temp/**')
+    && !firstDeclaredInputScopeConflict([scope], declaredInputs, projectDir)
+  ));
+}
+
 function commandAliases(display: string): string[] {
   const aliases = [display];
   if (display === 'npm run test') aliases.push('npm test');
@@ -7575,7 +7640,14 @@ export function inspectDispatchAdmission(input: {
       criterionTerminalRefs.set(owner.id, refs);
     }
     if (ordinaryWorkers.length > 0 && gates.length === 0) {
-      errors.push(`criterion ${criterion.id}: not assigned to a gate`);
+      const emptyDownstreamGates = input.dispatched.filter((stage) => (
+        stage.is_gate && stage.criterion_refs.length === 0
+        && ordinaryWorkers.some((worker) => transitivelyDependsOn(stage.id, worker.id, byId))
+      ));
+      const hint = emptyDownstreamGates.length === 1
+        ? `; downstream ${emptyDownstreamGates[0].id}.criterion_refs is empty — assign this criterion there if that gate is responsible`
+        : '';
+      errors.push(`criterion ${criterion.id}: not assigned to a gate${hint}`);
     } else if (ordinaryWorkers.length > 0 && !gates.some((gate) => ordinaryWorkers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
       errors.push(`criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`);
     } else if (ordinaryWorkers.length === 0 && terminalWorkers.length > 0 && gates.length > 0) {
@@ -9163,9 +9235,19 @@ export async function recordGateValidationDelta(
   const snapshot = readRunValidationBaseline(base);
   if (!snapshot) return undefined;
   const validationStartedAt = new Date().toISOString();
+  const guardedRunner: ValidationCommandRunner = dependencies.runCommand ?? ((request) => {
+    const outward = outwardProjectSymlink(projectDir);
+    if (outward) return {
+      exitCode: null,
+      durationMs: 0,
+      error: `Gate validation replay refused: project symlink ${relative(projectDir, outward)} resolves outside the project; run validation in an isolated project before retrying`,
+    };
+    return runValidationCommand(request);
+  });
   const current = await runProjectValidationBaseline(projectDir, {
     ...dependencies,
     commands: snapshot.baseline.discovery.commands,
+    runCommand: guardedRunner,
   });
   const delta = evaluateValidationDelta(snapshot.baseline, current.results);
   const baselineBytes = readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE));
@@ -12670,6 +12752,9 @@ function createSchedulerLiveConstraintGuardFactory(input: {
   const projectDefaults = loadProjectDefaults(input.projectDir);
   const defaultExemptPatterns = projectDefaults.live_constraint_exempt_patterns;
   const configuredGeneratedPatterns = discoverConfiguredCommandScopes(input.projectDir);
+  const transientVitestPatterns = transientVitestOutputScopes(
+    input.projectDir, input.runId, configuredGeneratedPatterns,
+  );
   const configuredCommands = discoverProjectValidation(input.projectDir).commands;
   const factory: LiveConstraintGuardFactory = ({ attemptIndex }) => {
     const attemptContext = getScopeAttemptContext(input.context, input.stage.id, attemptIndex);
@@ -12730,7 +12815,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
         const baseline = input.context.snapshot.rollbackBaseline;
         const exemptPatterns = validationCommandActive
           ? [...defaultExemptPatterns, ...configuredGeneratedPatterns]
-          : defaultExemptPatterns;
+          : [...defaultExemptPatterns, ...transientVitestPatterns];
         const candidates = new Set<string>();
         const exemptCandidates = new Set<string>();
         const exemptedPaths = new Set<string>();
@@ -12742,7 +12827,7 @@ function createSchedulerLiveConstraintGuardFactory(input: {
           const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
           const defaultExemption = isLiveConstraintExemptPath(
             path,
-            defaultExemptPatterns,
+            [...defaultExemptPatterns, ...transientVitestPatterns],
             baseline.trackedPaths,
           );
           const configuredValidationExemption = validationCommandActive && isLiveConstraintExemptPath(
@@ -13189,6 +13274,11 @@ function reconcileStageScope(input: {
     effectiveScope: governedScope,
     exemptPatterns: [
       ...loadProjectDefaults(input.projectDir).live_constraint_exempt_patterns,
+      ...transientVitestOutputScopes(
+        input.projectDir,
+        input.runId,
+        discoverConfiguredCommandScopes(input.projectDir),
+      ),
     ],
     configuredGeneratedPatterns: discoverConfiguredCommandScopes(input.projectDir),
     validationGeneratedWrites: attempt.validationGeneratedWrites,

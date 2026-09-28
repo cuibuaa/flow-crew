@@ -163,7 +163,15 @@ export function parseGuidanceLedger(text: string): GuidanceEnvelope[] {
 export function guidanceForStageFromText(text: string, stageId: string): GuidanceEnvelope[] {
   const seen = new Set<string>();
   return parseGuidanceLedger(text).filter((entry) => {
-    if (entry.quarantined || (entry.target !== stageId && entry.target !== RUN_WIDE_GUIDANCE_TARGET)) return false;
+    // An operator can give a running stage an explicit prohibition for later
+    // stages. The authored target still records who received it first, while
+    // the prohibition itself remains binding within this run. Ordinary stage
+    // advice and supervisor prose keep their exact target.
+    const operatorFutureProhibition = entry.source === 'operator'
+      && /\b(?:do not|don't|never|must not|stop)\b/i.test(entry.body)
+      && /\b(?:any|all)\s+later\s+(?:\w+\s+){0,2}(?:stage|window)s?\b/i.test(entry.body);
+    if (entry.quarantined || (entry.target !== stageId
+      && entry.target !== RUN_WIDE_GUIDANCE_TARGET && !operatorFutureProhibition)) return false;
     if (seen.has(entry.id)) return false;
     seen.add(entry.id);
     return true;

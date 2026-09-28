@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, type Dirent } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
 import { loadProjectDefaults } from './config.js';
 
@@ -735,6 +735,40 @@ function boundedOutput(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf-8');
   if (bytes.length <= maxBytes) return value;
   return `[... ${bytes.length - maxBytes} earlier bytes omitted ...]\n${bytes.subarray(bytes.length - maxBytes).toString('utf-8')}`;
+}
+
+/** A gate replay has no stage-local environment or live input guard. Refuse
+ * execution while a project path can resolve outside the project through a
+ * symlink; otherwise a test can write an external ledger through that path. */
+export function outwardProjectSymlink(projectDir: string): string | undefined {
+  const root = realpathSync(projectDir);
+  const contained = (candidate: string): boolean => {
+    const rel = relative(root, candidate);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  };
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    let entries: Dirent<string>[];
+    try { entries = readdirSync(directory, { withFileTypes: true }); }
+    catch { return directory; } // an unreadable subtree cannot be cleared
+    for (const entry of entries) {
+      if (entry.name === '.git' && directory === root) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+      } else if (entry.isSymbolicLink()) {
+        let target: string;
+        try { target = realpathSync(path); }
+        catch {
+          try { target = resolve(dirname(path), readlinkSync(path)); }
+          catch { return path; }
+        }
+        if (!contained(target)) return path;
+      }
+    }
+  }
+  return undefined;
 }
 
 export const runValidationCommand: ValidationCommandRunner = (request) => new Promise((resolveResult) => {

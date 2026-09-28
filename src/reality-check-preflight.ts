@@ -12,6 +12,7 @@ import type {
 
 export type RealityCheckPreflightCode =
   | 'presentation_proxy_heading_literal'
+  | 'numeric_display_literal_proxy'
   | 'contract_exception_conflict'
   | 'undeclared_artifact_existence'
   | 'copy_byte_equivalence'
@@ -563,6 +564,22 @@ function exactHeadingProxy(script: string): HeadingProxy | undefined {
   return undefined;
 }
 
+/** A displayed decimal in the brief is a measurement expectation, not a
+ * byte-for-byte report fragment unless the brief explicitly says so. */
+function numericDisplayGrepProxy(script: string, brief: string): string | undefined {
+  const pattern = /\bgrep(?:\s+-[A-Za-z]+)*\s+(['"])(-?\d+(?:\\\.|\.)\d+)\1[^\r\n]*\|\|\s*exit\s+[1-9]\d*/gi;
+  for (const match of script.matchAll(pattern)) {
+    const value = match[2].replace(/\\\./g, '.');
+    const at = brief.indexOf(value);
+    if (at < 0) continue;
+    const lineStart = brief.lastIndexOf('\n', at) + 1;
+    const preceding = brief.slice(lineStart, at);
+    if (/\b(?:exact(?:ly)?|literal(?:ly)?|verbatim|byte[- ]for[- ]byte)\b[^\n]{0,70}$/i.test(preceding)) continue;
+    return `${match[0]} (brief displays ${value} without an exact-text requirement)`;
+  }
+  return undefined;
+}
+
 function shellWords(segment: string): string[] {
   return [...segment.matchAll(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)]
     .map((match) => match[0].replace(/^(['"])([\s\S]*)\1$/, '$2'));
@@ -1094,6 +1111,7 @@ function finding(
   const tier: RealityCheckPreflightTier = code === 'copy_byte_equivalence'
       || code === 'hard_check_cannot_fail'
       || code === 'hard_check_cannot_pass'
+      || code === 'numeric_display_literal_proxy'
     ? 'blocking'
     : code === 'invalid_reality_check_declaration'
       ? 'structural'
@@ -1241,6 +1259,16 @@ export function inspectRealityChecks(
     const params = record(declaration.params) ?? {};
 
     if (declaration.type === 'exec-script-exit-zero' && typeof params.script === 'string') {
+      const numericProxy = numericDisplayGrepProxy(params.script, taskBrief);
+      if (numericProxy) {
+        findings.push(finding(
+          declaration,
+          checkIndex,
+          'numeric_display_literal_proxy',
+          'A hard grep requires the displayed decimal as literal report bytes. A full-precision measurement can satisfy the brief while failing this check. Compare parsed numeric values at the displayed precision, or require exact text explicitly in the brief.',
+          numericProxy,
+        ));
+      }
       const heading = exactHeadingProxy(params.script);
       if (heading && !contract.requiredHeadingLiterals.includes(heading.literal)) {
         findings.push(finding(
