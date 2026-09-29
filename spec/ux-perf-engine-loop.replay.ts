@@ -435,7 +435,9 @@ describe('UX/performance engine-loop evidence replays', () => {
     const events = readRunEvents(projectDir, created.runId);
     expect(events.filter((event) => event.type === 'scope_revision_requested')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'scope_revision_decided')).toHaveLength(1);
-    expect(events.filter((event) => event.type === 'guidance_written' && event.stageId === 'work')).toHaveLength(1);
+    // One accepted decision writes an attempt-bound stop notice and a
+    // continuation notice for the re-dispatched execution.
+    expect(events.filter((event) => event.type === 'guidance_written' && event.stageId === 'work')).toHaveLength(2);
   }, 15_000);
 
   it('unchanged-base seam item 3: the recorded direct sidecar load and shared-slot existence assertion are rejected for every role', () => {

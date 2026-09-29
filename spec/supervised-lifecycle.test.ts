@@ -71,10 +71,18 @@ describe('portable supervised lifecycle through the real CLI', () => {
 
     const cancelled = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
     const output = `${cancelled.stdout}${cancelled.stderr}`;
+    const controlDir = join(harness.fcHome, 'supervise', safeUnit(task.unit));
+    const runningPath = join(controlDir, 'running.json');
+    const exitPath = join(controlDir, 'exit.json');
+    let shimState = 'unreadable';
+    try {
+      const running = JSON.parse(readFileSync(runningPath, 'utf-8')) as { shimPid?: number };
+      if (running.shimPid) shimState = `${running.shimPid}:${pidProbe(running.shimPid)}`;
+    } catch { /* failure message remains useful when the record is absent */ }
 
     expect(
       { status: cancelled.status, output },
-      `cancel did not converge for recorded pid ${pid}: ${output}`,
+      `cancel did not converge for recorded pid ${pid} (${pidProbe(pid)}), shim ${shimState}, exit=${existsSync(exitPath)}: ${output}; daemon=${harness.daemonOutput.slice(-500)}`,
     ).toMatchObject({ status: 0, output: expect.stringContaining(`Task #${task.id} cancelled`) });
   });
 

@@ -454,7 +454,9 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
             duration_ms: 20, writes: [], writeAttribution: 'structured',
           };
         }
-        expect(prompt).toContain(`Scope revision synthetic-${shape.stage} was accepted`);
+        expect(prompt).toContain('# Accepted scope revision');
+        expect(prompt).toContain('Continue the stage work in execution 2');
+        expect(prompt).not.toContain(`Scope revision synthetic-${shape.stage} was accepted. This attempt stops`);
         for (const path of requestedPaths) {
           mkdirSync(join(projectDir, path, '..'), { recursive: true });
           writeFileSync(join(projectDir, path), `${shape.origin}\n`);

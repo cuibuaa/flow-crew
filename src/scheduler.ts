@@ -8852,6 +8852,26 @@ export function validateVerdictAgainstMetricFile(
 ): string | null {
   const metricContradiction = explicitPassContradiction(metric, 'metric.json', verdict.pass === true);
   if (metricContradiction) return metricContradiction;
+  // A threshold-free domain observation cannot overrule a passing report
+  // audit whose declared measure is zero failing checks. There is no failing
+  // threshold to hide in this narrow case; contracted or same-name measures
+  // continue through the consistency checks below.
+  const metricNotes = typeof metric.notes === 'string' ? metric.notes : '';
+  const informationalMetric = metric.informational === true
+    || (/\b(?:exploratory|informational|descriptive)\b/i.test(metricNotes)
+      && /\b(?:report|audit) gate evaluates\b/i.test(metricNotes));
+  if (!contract
+    && informationalMetric
+    && verdict.pass === true
+    && typeof verdict.metric === 'string'
+    && /^failing_(?:required_)?checks$/i.test(verdict.metric)
+    && verdict.score === 0
+    && verdict.threshold === 0
+    && typeof metric.metric === 'string'
+    && !metricNamesMatch(metric.metric, verdict.metric)
+    && typeof metric.value === 'number'
+    && Number.isFinite(metric.value)
+    && metric.threshold == null) return null;
   if (metric.pass === false && verdict.pass === true) {
     // A closeout/ceiling-deliverable audit legitimately passes (the deliverable is valid)
     // while the beat-metric legitimately fails (no beat) — an honest negative is a valid
@@ -12519,8 +12539,17 @@ async function monitorScopeRevisionRequests(input: {
           runDir: runDirPath,
           target: stage.id,
           source: 'scheduler',
+          attemptIndex: request.attemptIndex,
           knownStageIds: input.selected.map((candidate) => candidate.id),
           body: `Scope revision ${request.requestId} was accepted. This attempt stops at the control boundary and the same stage will be re-dispatched with effective scope ${JSON.stringify(attemptContext.effectiveScope)}.${consequence ?? ''}`,
+        });
+        appendGuidanceEnvelope({
+          runDir: runDirPath,
+          target: stage.id,
+          source: 'scheduler',
+          attemptIndex: request.attemptIndex + 1,
+          knownStageIds: input.selected.map((candidate) => candidate.id),
+          body: `Scope revision ${request.requestId} was accepted for execution ${request.attemptIndex}. Continue the stage work with effective scope ${JSON.stringify(attemptContext.effectiveScope)}; read the durable decision for the exact added paths.${consequence ?? ''}`,
         });
       }
       recordRunEvent(input.projectDir, input.runId, {

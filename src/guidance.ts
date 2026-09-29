@@ -13,6 +13,8 @@ export interface GuidanceEnvelope {
   source: 'supervisor' | 'operator' | 'scheduler';
   createdAt: string;
   body: string;
+  /** Control notices owned by one execution must not be replayed on redispatch. */
+  attemptIndex?: number;
   /** Canonical brief criteria this operator-authored ruling names. */
   criterionIds?: string[];
   quarantined?: boolean;
@@ -35,9 +37,10 @@ function boundedBody(body: string): string {
   return body.replace(/\r\n/g, '\n').trim();
 }
 
-function envelopeId(input: Pick<GuidanceEnvelope, 'target' | 'source' | 'createdAt' | 'body'>): string {
+function envelopeId(input: Pick<GuidanceEnvelope, 'target' | 'source' | 'createdAt' | 'body' | 'attemptIndex'>): string {
   return createHash('sha256')
-    .update(JSON.stringify([input.target, input.source, input.createdAt, input.body]))
+    .update(JSON.stringify([input.target, input.source, input.createdAt, input.body,
+      ...(input.attemptIndex === undefined ? [] : [input.attemptIndex])]))
     .digest('hex')
     .slice(0, 20);
 }
@@ -53,6 +56,7 @@ export function renderGuidanceEnvelope(envelope: GuidanceEnvelope): string {
     // Frame new entries so marker-shaped operator text remains opaque body
     // content instead of being reparsed as a second, forged envelope.
     bodyLength: body.length,
+    ...(envelope.attemptIndex === undefined ? {} : { attemptIndex: envelope.attemptIndex }),
     ...(envelope.criterionIds?.length ? { criterionIds: envelope.criterionIds } : {}),
     ...(envelope.quarantined ? { quarantined: true, quarantineReason: envelope.quarantineReason } : {}),
   });
@@ -87,6 +91,9 @@ function parseEnvelopeBlock(metadataText: string, body: string): GuidanceEnvelop
       source: metadata.source,
       createdAt: metadata.createdAt,
       body: boundedBody(body),
+      ...(typeof metadata.attemptIndex === 'number'
+        && Number.isSafeInteger(metadata.attemptIndex) && metadata.attemptIndex > 0
+        ? { attemptIndex: metadata.attemptIndex } : {}),
       ...(Array.isArray(metadata.criterionIds)
         && metadata.criterionIds.every((value) => typeof value === 'string' && value.length > 0)
         ? { criterionIds: [...new Set(metadata.criterionIds)] }
@@ -160,7 +167,7 @@ export function parseGuidanceLedger(text: string): GuidanceEnvelope[] {
   return parsed;
 }
 
-export function guidanceForStageFromText(text: string, stageId: string): GuidanceEnvelope[] {
+export function guidanceForStageFromText(text: string, stageId: string, attemptIndex?: number): GuidanceEnvelope[] {
   const seen = new Set<string>();
   return parseGuidanceLedger(text).filter((entry) => {
     // An operator can give a running stage an explicit prohibition for later
@@ -170,7 +177,9 @@ export function guidanceForStageFromText(text: string, stageId: string): Guidanc
     const operatorFutureProhibition = entry.source === 'operator'
       && /\b(?:do not|don't|never|must not|stop)\b/i.test(entry.body)
       && /\b(?:any|all)\s+later\s+(?:\w+\s+){0,2}(?:stage|window)s?\b/i.test(entry.body);
-    if (entry.quarantined || (entry.target !== stageId
+    if (entry.quarantined
+      || (entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex)
+      || (entry.target !== stageId
       && entry.target !== RUN_WIDE_GUIDANCE_TARGET && !operatorFutureProhibition)) return false;
     if (seen.has(entry.id)) return false;
     seen.add(entry.id);
@@ -178,18 +187,18 @@ export function guidanceForStageFromText(text: string, stageId: string): Guidanc
   });
 }
 
-export function readGuidanceForStage(runDir: string, stageId: string): GuidanceEnvelope[] {
+export function readGuidanceForStage(runDir: string, stageId: string, attemptIndex?: number): GuidanceEnvelope[] {
   const entries: GuidanceEnvelope[] = [];
   const ledgerPath = join(runDir, 'supervisor_guidance.md');
   if (existsSync(ledgerPath)) {
-    try { entries.push(...guidanceForStageFromText(readFileSync(ledgerPath, 'utf-8'), stageId)); } catch { /* optional */ }
+    try { entries.push(...guidanceForStageFromText(readFileSync(ledgerPath, 'utf-8'), stageId, attemptIndex)); } catch { /* optional */ }
   }
   const stagePath = join(runDir, 'stages', stageId, 'guidance.md');
   if (existsSync(stagePath)) {
     try {
       const text = readFileSync(stagePath, 'utf-8');
       const parsed = parseGuidanceLedger(text);
-      const structured = guidanceForStageFromText(text, stageId);
+      const structured = guidanceForStageFromText(text, stageId, attemptIndex);
       if (structured.length > 0) entries.push(...structured);
       else if (parsed.length === 0 && !text.includes(ENVELOPE_PREFIX) && text.trim()) {
         const body = boundedBody(text);
@@ -373,6 +382,7 @@ export function appendGuidanceEnvelope(input: {
   knownStageIds?: readonly string[];
   criterionIds?: readonly string[];
   createdAt?: string;
+  attemptIndex?: number;
 }): GuidanceEnvelope {
   const createdAt = input.createdAt ?? new Date().toISOString();
   const body = boundedBody(input.body);
@@ -381,7 +391,8 @@ export function appendGuidanceEnvelope(input: {
     || (STAGE_ID.test(requestedTarget)
       && (input.knownStageIds === undefined || input.knownStageIds.includes(requestedTarget)));
   const target = requestedTarget || '__missing__';
-  const base = { target, source: input.source, createdAt, body };
+  const base = { target, source: input.source, createdAt, body,
+    ...(input.attemptIndex === undefined ? {} : { attemptIndex: input.attemptIndex }) };
   const criterionIds = input.source === 'operator'
     ? inferOperatorCriterionIds(input.runDir, body, input.criterionIds)
     : [];

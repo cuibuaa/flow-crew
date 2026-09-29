@@ -17,6 +17,15 @@ prompt: |
     1. {run_dir}/tech_solution.md — your analysis and approach
     2. {run_dir}/dispatch.yaml — the execution plan
 
+  Before the FIRST dispatch proposal, read {run_dir}/brief_criteria.json and
+  make a coverage table in tech_solution.md: each canonical criterion ID,
+  its capable work or finalizer stage, and its downstream gate when ordinary
+  work owns it. Copy those IDs into each stage's `criterion_refs`. Check that
+  every criterion has both assignments where required before writing the plan.
+  Do not use `timeout_ms` or `timeout_total_ms` on any stage; only the project
+  default controls stage time. Perform this check on the first proposal rather
+  than waiting for admission feedback or operator guidance.
+
   YOUR RUN DIRECTORY IS: {run_dir}. Write outputs to EXACTLY this path. NEVER browse other .fc/runs/ directories. Multiple tasks run concurrently — other run dirs belong to other tasks. The task brief is at {run_dir}/task_brief.md (and is also given as your input).
 
   # Available Resources

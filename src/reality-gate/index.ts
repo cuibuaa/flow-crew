@@ -35,7 +35,10 @@ export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
     const rest = markdown.slice(start);
     const next = rest.search(/^##\s/m);
     let body = (next >= 0 ? rest.slice(0, next) : rest).trim();
-    const fence = body.match(/^```(?:ya?ml)?\s*\n([\s\S]*?)\n```\s*$/);
+    // A planner may explain a complete fenced declaration below the fence.
+    // Parse only the closed YAML block; an unclosed fence or malformed YAML
+    // still reaches the invalid-declaration path below.
+    const fence = body.match(/^```(?:ya?ml)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/);
     if (fence) body = fence[1];
     let parsed: { checks?: unknown } | null = null;
     try {

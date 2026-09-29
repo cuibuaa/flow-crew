@@ -288,7 +288,9 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
           expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'scheduler-policy' });
           return { output: 'scope accepted; stop at the control boundary', exitCode: 0, duration_ms: 20, writes: [], writeAttribution: 'structured' };
         }
-        expect(prompt).toContain('Scope revision ordinary-shared was accepted');
+        expect(prompt).toContain('# Accepted scope revision');
+        expect(prompt).toContain('Continue the stage work in execution 2');
+        expect(prompt).not.toContain('Scope revision ordinary-shared was accepted. This attempt stops');
         writeFileSync(join(projectDir, 'src', 'shared.ts'), 'shared\n');
         return { output: 'done', exitCode: 0, duration_ms: 20, writes: ['src/shared.ts'], writeAttribution: 'structured' };
       }

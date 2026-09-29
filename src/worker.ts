@@ -7,6 +7,7 @@ export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/fai
 import { loadAdapterByName } from './adapters/loader.js';
 import { buildStagePrompt } from './handoff.js';
 import { loadProjectDefaults } from './config.js';
+import { extractBriefCriteria } from './brief-criteria.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
   beginStageAttempt,
@@ -64,6 +65,17 @@ import {
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
+}
+
+/** Put the canonical IDs beside the planner's first proposal instructions. */
+export function plannerCriterionAssignmentContext(brief: string): string {
+  const criteria = extractBriefCriteria(brief).criteria;
+  if (criteria.length === 0) return '';
+  return [
+    '# First-proposal criterion assignments',
+    'Use these exact IDs in criterion_refs. Assign every ID to a capable work or finalizer stage and to a downstream gate when ordinary work owns it. Do not set per-stage timeout fields.',
+    ...criteria.map((criterion) => `- ${criterion.id}: ${criterion.text}`),
+  ].join('\n');
 }
 
 export interface StageOpts {
@@ -395,7 +407,6 @@ async function runStageWithWriterLease(
   opts: StageOpts,
 ): Promise<RunResult> {
   const skillNames = opts.stageSkills ?? [];
-  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId);
   let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
     promptTemplate: opts.promptTemplate,
@@ -420,6 +431,14 @@ async function runStageWithWriterLease(
   if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an execution index`);
   const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
   if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
+  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
+  const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
+    const rendered = renderGuidanceDelivery(entries);
+    return rendered
+      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${rendered}\n\n`
+        + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
+      : '';
+  };
   const liveConstraintGuard = opts.liveConstraintGuardFactory?.({ attemptIndex, attemptStartedAt });
   // Compatibility aggregates remain in the attempt ledger; live top-level
   // outcome fields must describe this execution, not the one it retried.
@@ -428,6 +447,15 @@ async function runStageWithWriterLease(
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
+  const priorAttempt = runningStatus.attempts?.at(-2);
+  if (priorAttempt?.status === 'suspended'
+    && (priorAttempt.constraintAudit?.acceptedRevisionCount ?? 0) > 0) {
+    prompt += `\n\n# Accepted scope revision\nThe prior execution stopped at its scope-control boundary. Continue the stage work in execution ${attemptIndex} with the accepted effective project-write scope ${JSON.stringify(opts.projectWriteScope ?? [])}. Read the durable scope revision decision for the exact added paths.`;
+  }
+  // buildStagePrompt ran before the execution index existed and intentionally
+  // included only run-wide guidance. Add notices bound to this execution now.
+  const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex === attemptIndex);
+  if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
   writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   recordRunEvent(opts.projectDir, opts.runId, {
@@ -443,13 +471,6 @@ async function runStageWithWriterLease(
   const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
   const deliveredGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
   const deliveredGuidance = [...guidanceBeforePrompt];
-  const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
-    const rendered = renderGuidanceDelivery(entries);
-    return rendered
-      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${rendered}\n\n`
-        + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
-      : '';
-  };
   const persistGuidanceReceipt = (): void => {
     try {
       mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
@@ -469,7 +490,7 @@ async function runStageWithWriterLease(
     let entries: ReturnType<typeof readGuidanceForStage> = [];
     try {
       routePendingOperatorGuidanceToStage(opts.runDir, opts.stageId);
-      entries = readGuidanceForStage(opts.runDir, opts.stageId)
+      entries = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex)
         .filter((entry) => !deliveredGuidanceIds.has(entry.id));
       for (const entry of entries) {
         deliveredGuidanceIds.add(entry.id);
@@ -564,6 +585,8 @@ async function runStageWithWriterLease(
         }
       }
     } catch { /* non-critical */ }
+    const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
+    if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
