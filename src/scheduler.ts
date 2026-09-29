@@ -1,6 +1,7 @@
-import { readFileSync, readlinkSync, realpathSync, mkdirSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch, openSync, closeSync, type Stats } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, existsSync, unlinkSync, appendFileSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, chmodSync, symlinkSync, watch, openSync, closeSync, type Stats } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -141,7 +142,7 @@ import { readShipSetupReadyValidationBaseline } from './ship-setup-record.js';
 import {
   evaluateValidationDelta,
   discoverProjectValidation,
-  outwardProjectSymlink,
+  outwardProjectSymlinks,
   runProjectValidationBaseline,
   runValidationCommand,
   validationPathImpacts,
@@ -9244,6 +9245,54 @@ export function snapshotShipSetupValidationBaseline(
   return artifact;
 }
 
+// The bind mounts protect the targets found before launch. Landlock also denies
+// writes to a new target if a command replaces a project-side symlink later.
+// Python only installs the kernel rules and then execs the configured command;
+// a missing helper or unsupported kernel refuses replay before that command.
+const LINKED_INPUT_LANDLOCK = `
+import ctypes, os, platform, sys
+
+def refuse(message):
+    print('flowcrew-linked-input-guard: ' + message, file=sys.stderr)
+    sys.exit(125)
+
+class Ruleset(ctypes.Structure):
+    _fields_ = [('handled_access_fs', ctypes.c_uint64)]
+
+class PathBeneath(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [('allowed_access', ctypes.c_uint64), ('parent_fd', ctypes.c_int32)]
+
+libc = ctypes.CDLL(None, use_errno=True)
+if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
+    refuse('Landlock syscall numbers are unknown on this architecture')
+abi = libc.syscall(444, None, 0, 1)
+if abi < 3:
+    refuse('Landlock ABI 3 or newer is required')
+access = sum(1 << bit for bit in (1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14) + ((15,) if abi >= 5 else ()))
+ruleset = libc.syscall(444, ctypes.byref(Ruleset(access)), ctypes.sizeof(Ruleset), 0)
+if ruleset < 0:
+    refuse('Landlock ruleset creation failed: errno ' + str(ctypes.get_errno()))
+try:
+    for path, rights in ((sys.argv[1], access), (sys.argv[2], access),
+                         ('/dev/null', (1 << 1) | (1 << 14) | ((1 << 15) if abi >= 5 else 0))):
+        path_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        try:
+            rule = PathBeneath(rights, path_fd)
+            if libc.syscall(445, ruleset, 1, ctypes.byref(rule), 0) < 0:
+                refuse('Landlock path rule failed: errno ' + str(ctypes.get_errno()))
+        finally:
+            os.close(path_fd)
+    if libc.syscall(446, ruleset, 0) < 0:
+        refuse('Landlock restriction failed: errno ' + str(ctypes.get_errno()))
+finally:
+    os.close(ruleset)
+try:
+    os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+except OSError as error:
+    refuse('configured command could not start: ' + str(error))
+`.trim();
+
 /** Execute and persist the baseline comparison at the gate consumer boundary. */
 export async function recordGateValidationDelta(
   projectDir: string,
@@ -9256,13 +9305,56 @@ export async function recordGateValidationDelta(
   if (!snapshot) return undefined;
   const validationStartedAt = new Date().toISOString();
   const guardedRunner: ValidationCommandRunner = dependencies.runCommand ?? ((request) => {
-    const outward = outwardProjectSymlink(projectDir);
-    if (outward) return {
-      exitCode: null,
-      durationMs: 0,
-      error: `Gate validation replay refused: project symlink ${relative(projectDir, outward)} resolves outside the project; run validation in an isolated project before retrying`,
-    };
-    return runValidationCommand(request);
+    const links = outwardProjectSymlinks(projectDir);
+    if (links.length === 0) return runValidationCommand(request);
+    const projectRoot = realpathSync(projectDir);
+    const refuse = (reason: string) => ({ exitCode: null, durationMs: 0,
+      error: `Gate validation replay refused: ${reason}` });
+    if (process.platform !== 'linux') return refuse('read-only linked-input mount isolation is unavailable on this platform');
+    // A bind mount of a directory does not make a nested mount or a symlink's
+    // separate referent read-only. Refuse those shapes instead of trusting them.
+    const mountPoints = readFileSync('/proc/self/mountinfo', 'utf8').split('\n')
+      .map((line) => line.split(' ')[4]?.replace(/\\([0-7]{3})/g, (_, octal: string) =>
+        String.fromCharCode(Number.parseInt(octal, 8))))
+      .filter((path): path is string => Boolean(path));
+    const targets: string[] = [];
+    for (const link of links) {
+      if (!link.target) return refuse(`project path ${relative(projectDir, link.path)} could not be inspected`);
+      let target: string;
+      try { target = realpathSync(link.path); }
+      catch { return refuse(`project symlink ${relative(projectDir, link.path)} has no readable target`); }
+      const pending = [target];
+      let visited = 0;
+      while (pending.length > 0) {
+        const path = pending.pop()!;
+        if (++visited > 50_000) return refuse(`linked input ${relative(projectDir, link.path)} exceeds the isolation scan limit`);
+        let entries;
+        try {
+          if (!lstatSync(path).isDirectory()) continue;
+          entries = readdirSync(path, { withFileTypes: true });
+        } catch { return refuse(`linked input ${relative(projectDir, link.path)} could not be inspected`); }
+        for (const entry of entries) {
+          if (entry.isSymbolicLink()) return refuse(`linked input ${relative(projectDir, link.path)} contains another symlink`);
+          if (entry.isDirectory()) pending.push(join(path, entry.name));
+        }
+      }
+      if (mountPoints.some((point) => point !== target && point.startsWith(`${target}${sep}`))) {
+        return refuse(`linked input ${relative(projectDir, link.path)} contains a separate mount`);
+      }
+      if (!targets.some((prior) => target === prior || target.startsWith(`${prior}${sep}`))) targets.push(target);
+    }
+    // All mounts are private to the child namespace. Keep the caller's UID
+    // after setup so validation scripts see their normal user identity.
+    // Failure to establish a read-only bind refuses before command launch.
+    const script = 'command -v setpriv >/dev/null && test -x /usr/bin/python3 || { printf "flowcrew-linked-input-guard: isolation helper unavailable\\n" >&2; exit 125; }; while [ "$1" != -- ]; do mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" || { printf "flowcrew-linked-input-guard: mount failed\\n" >&2; exit 125; }; shift; done; shift; code="$1"; project="$2"; scratch="$3"; shift 3; exec setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /usr/bin/python3 -I -B -c "$code" "$project" "$scratch" "$@"';
+    const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-gate-validation-'));
+    return Promise.resolve(runValidationCommand({ ...request, command: 'unshare',
+      args: ['--user', '--map-current-user', '--keep-caps', '--mount', '--fork', 'sh', '-c', script, 'sh', ...targets, '--', LINKED_INPUT_LANDLOCK, projectRoot, scratch, request.command, ...request.args],
+      env: { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch,
+        NPM_CONFIG_CACHE: join(scratch, 'npm-cache'), XDG_CACHE_HOME: join(scratch, 'xdg-cache') },
+    })).then((result) => result.exitCode === 125 || /^unshare: /m.test(result.stderr ?? '')
+      ? { ...result, exitCode: null, error: `Gate validation replay refused: linked-input isolation failed: ${result.stderr ?? ''}` }
+      : result).finally(() => { rmSync(scratch, { recursive: true, force: true }); });
   });
   const current = await runProjectValidationBaseline(projectDir, {
     ...dependencies,

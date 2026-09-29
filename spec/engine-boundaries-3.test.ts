@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   buildRetryPreamble,
   captureRepairRoundSnapshot,
@@ -296,6 +296,12 @@ describe('C — temporal retry context', () => {
 });
 
 describe('D — bounded configured pytest replay', () => {
+  const previousPythonUserBase = process.env.PYTHONUSERBASE;
+  beforeAll(() => { process.env.PYTHONUSERBASE ??= join(userInfo().homedir, '.local'); });
+  afterAll(() => {
+    if (previousPythonUserBase === undefined) delete process.env.PYTHONUSERBASE;
+    else process.env.PYTHONUSERBASE = previousPythonUserBase;
+  });
   function audit(project: string, report: string, command: string) {
     const run = root();
     write(join(project, report), `# Replay\n\nReplay command: \`${command}\`\n`);
@@ -304,7 +310,7 @@ describe('D — bounded configured pytest replay', () => {
 
   it('executes configured Python and Makefile pytest commands and rejects a failing test', () => {
     const project = root();
-    if (!pytestAvailable(project)) return;
+    if (!pytestAvailable(project)) throw new Error('pytest is required to verify the configured replay; a missing runner cannot pass this test');
     write(join(project, 'pyproject.toml'), '[project]\nname="probe"\nversion="0.1.0"\ndependencies=["pytest"]\n');
     write(join(project, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
     const passing = audit(project, 'reports/pass.md', 'python3 -m pytest tests/test_ok.py -q');
@@ -324,7 +330,7 @@ describe('D — bounded configured pytest replay', () => {
 
   it('does not trust a terminal-summary hook over skipped-only pytest results', () => {
     const project = root();
-    if (!pytestAvailable(project)) return;
+    if (!pytestAvailable(project)) throw new Error('pytest is required to verify skipped-only replay; a missing runner cannot pass this test');
     write(join(project, 'pyproject.toml'), '[project]\nname="probe"\nversion="0.1.0"\ndependencies=["pytest"]\n');
     write(join(project, 'conftest.py'), 'def pytest_terminal_summary(terminalreporter):\n    terminalreporter.write_line("1 passed")\n');
     write(join(project, 'tests/test_skip.py'), 'import pytest\ndef test_skip():\n    pytest.skip("no execution")\n');

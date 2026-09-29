@@ -48,6 +48,7 @@ export interface ValidationDiscovery {
 
 export interface ValidationRunRequest extends ValidationCommand {
   cwd: string;
+  env?: NodeJS.ProcessEnv;
   observer?: ValidationProgressObserver;
 }
 
@@ -737,21 +738,26 @@ function boundedOutput(value: string, maxBytes: number): string {
   return `[... ${bytes.length - maxBytes} earlier bytes omitted ...]\n${bytes.subarray(bytes.length - maxBytes).toString('utf-8')}`;
 }
 
-/** A gate replay has no stage-local environment or live input guard. Refuse
- * execution while a project path can resolve outside the project through a
- * symlink; otherwise a test can write an external ledger through that path. */
-export function outwardProjectSymlink(projectDir: string): string | undefined {
+export interface OutwardProjectSymlink {
+  path: string;
+  target: string;
+}
+
+/** Collect every outward link before a gate replay. An unreadable or dangling
+ * link is left for the caller to refuse; it cannot be mounted read-only. */
+export function outwardProjectSymlinks(projectDir: string): OutwardProjectSymlink[] {
   const root = realpathSync(projectDir);
   const contained = (candidate: string): boolean => {
     const rel = relative(root, candidate);
     return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
   };
   const pending = [root];
+  const outward: OutwardProjectSymlink[] = [];
   while (pending.length > 0) {
     const directory = pending.pop()!;
     let entries: Dirent<string>[];
     try { entries = readdirSync(directory, { withFileTypes: true }); }
-    catch { return directory; } // an unreadable subtree cannot be cleared
+    catch { return [...outward, { path: directory, target: '' }]; } // cannot clear an unreadable subtree
     for (const entry of entries) {
       if (entry.name === '.git' && directory === root) continue;
       const path = join(directory, entry.name);
@@ -762,20 +768,25 @@ export function outwardProjectSymlink(projectDir: string): string | undefined {
         try { target = realpathSync(path); }
         catch {
           try { target = resolve(dirname(path), readlinkSync(path)); }
-          catch { return path; }
+          catch { return [...outward, { path, target: '' }]; }
         }
-        if (!contained(target)) return path;
+        if (!contained(target)) outward.push({ path, target });
       }
     }
   }
-  return undefined;
+  return outward;
+}
+
+/** Compatibility probe used by diagnostics and existing callers. */
+export function outwardProjectSymlink(projectDir: string): string | undefined {
+  return outwardProjectSymlinks(projectDir)[0]?.path;
 }
 
 export const runValidationCommand: ValidationCommandRunner = (request) => new Promise((resolveResult) => {
   const started = Date.now();
   const child = spawn(request.command, request.args, {
     cwd: request.cwd,
-    env: process.env,
+    env: request.env ?? process.env,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

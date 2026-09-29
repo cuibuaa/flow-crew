@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { appendGuidanceEnvelope, readGuidanceForStage } from '../src/guidance.js';
@@ -235,6 +235,12 @@ describe('gate metric authority', () => {
 });
 
 describe('bounded Makefile pytest replay', () => {
+  const previousPythonUserBase = process.env.PYTHONUSERBASE;
+  beforeAll(() => { process.env.PYTHONUSERBASE ??= join(userInfo().homedir, '.local'); });
+  afterAll(() => {
+    if (previousPythonUserBase === undefined) delete process.env.PYTHONUSERBASE;
+    else process.env.PYTHONUSERBASE = previousPythonUserBase;
+  });
   function audit(projectDir: string, command: string) {
     const report = 'reports/replay.md';
     write(join(projectDir, report), `# Replay\n\nReplay command: \`${command}\`\n`);
@@ -244,7 +250,7 @@ describe('bounded Makefile pytest replay', () => {
 
   it('verifies the exact target through a statically configured Makefile runner', () => {
     const project = temporaryRoot();
-    if (!pytestAvailable(project)) return;
+    if (!pytestAvailable(project)) throw new Error('pytest is required to verify Makefile replay; a missing runner cannot pass this test');
     write(join(project, 'Makefile'), 'PY ?= python3\n\n.PHONY: test\ntest:\n\tPYTHONPATH=. PYTEST_ADDOPTS=-p\\ no:cacheprovider $(PY) -m pytest tests/ -q\n');
     write(join(project, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
     const bare = audit(project, 'pytest tests/test_ok.py -q');

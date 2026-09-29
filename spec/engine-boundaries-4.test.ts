@@ -69,7 +69,7 @@ describe('engine boundaries from recorded runs', () => {
     }
   });
 
-  it('refuses a gate replay through an outward symlink while a contained real regression still fails the gate', async () => {
+  it('passes a read-only linked-input replay, blocks a write-through, and still fails a contained regression', async () => {
     const previousHome = fcGlobalDir();
     const root = fixture('validation');
     try {
@@ -82,16 +82,60 @@ describe('engine boundaries from recorded runs', () => {
       mkdirSync(runDirPath, { recursive: true });
       setFcGlobalDir(join(root, 'home'));
       symlinkSync(external, join(projectDir, 'linked'));
-      writeFileSync(join(projectDir, 'test.cjs'), "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');\n");
+      writeFileSync(join(external, 'ledger.txt'), 'original');
+      writeFileSync(join(projectDir, 'test.cjs'), "if (require('node:fs').readFileSync('linked/ledger.txt', 'utf8') !== 'original') process.exit(1); console.log('1 passed');\n");
       const command = { role: 'test' as const, command: process.execPath, args: ['test.cjs'], display: 'node test.cjs' };
       const baseline = await runProjectValidationBaseline(projectDir, {
         commands: [command], runCommand: () => ({ exitCode: 0, stdout: '1 passed', durationMs: 1 }),
       });
       writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline }));
+      const readable = await recordGateValidationDelta(projectDir, runId, 'qa_readonly');
+      expect(readable?.pass).toBe(true);
+      expect(readable?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+
+      writeFileSync(join(projectDir, 'test.cjs'), "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');\n");
       const blocked = await recordGateValidationDelta(projectDir, runId, 'qa');
       expect(blocked?.pass).toBe(false);
-      expect(blocked?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'launch_error' });
-      expect(existsSync(join(external, 'ledger.txt'))).toBe(false);
+      expect(blocked?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'failed', exitCode: 1 });
+      expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('original');
+
+      writeFileSync(join(projectDir, 'test.cjs'), [
+        "const { spawnSync } = require('node:child_process');",
+        `const remount = spawnSync('mount', ['-o', 'remount,bind,rw', ${JSON.stringify(external)}]);`,
+        "if (remount.status === 0) process.exit(88);",
+        "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');",
+      ].join('\n'));
+      const attemptedRemount = await recordGateValidationDelta(projectDir, runId, 'qa_remount');
+      expect(attemptedRemount?.pass).toBe(false);
+      expect(attemptedRemount?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'failed', exitCode: 1 });
+      expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('original');
+
+      const secondLive = join(root, 'second-live');
+      mkdirSync(secondLive);
+      writeFileSync(join(secondLive, 'ledger.txt'), 'second-original');
+      writeFileSync(join(projectDir, 'test.cjs'), [
+        "const fs = require('node:fs');",
+        "fs.unlinkSync('linked');",
+        `fs.symlinkSync(${JSON.stringify(secondLive)}, 'linked', 'dir');`,
+        "fs.writeFileSync('linked/ledger.txt', 'changed');",
+      ].join('\n'));
+      const retargeted = await recordGateValidationDelta(projectDir, runId, 'qa_retarget');
+      expect(retargeted?.pass).toBe(false);
+      expect(retargeted?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'failed', exitCode: 1 });
+      expect(readFileSync(join(secondLive, 'ledger.txt'), 'utf8')).toBe('second-original');
+      expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('original');
+      unlinkSync(join(projectDir, 'linked'));
+      symlinkSync(external, join(projectDir, 'linked'));
+
+      const nestedTarget = join(root, 'nested-live');
+      mkdirSync(nestedTarget);
+      writeFileSync(join(nestedTarget, 'ledger.txt'), 'nested-original');
+      symlinkSync(nestedTarget, join(external, 'forward'));
+      writeFileSync(join(projectDir, 'test.cjs'), "if (require('node:fs').readFileSync('linked/forward/ledger.txt', 'utf8') !== 'nested-original') process.exit(1);\n");
+      const nested = await recordGateValidationDelta(projectDir, runId, 'qa_nested');
+      expect(nested?.pass).toBe(false);
+      expect(nested?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'launch_error' });
+      expect(readFileSync(join(nestedTarget, 'ledger.txt'), 'utf8')).toBe('nested-original');
 
       unlinkSync(join(projectDir, 'linked'));
       mkdirSync(join(projectDir, 'linked'));

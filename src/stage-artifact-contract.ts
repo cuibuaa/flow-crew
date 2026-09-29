@@ -142,7 +142,54 @@ function commandText(value: string): string {
   return text;
 }
 
-function replayCommandTexts(text: string): string[] {
+function externalHistoricalCommand(value: string, projectDir: string): boolean {
+  const command = commandText(value);
+  const words = shellWords(command);
+  if (!words || !COMMAND_START.test(command) || /[;&|<>$]/.test(command)) return false;
+  const executable = words[0]?.toLowerCase();
+  let offset: number;
+  if (executable === 'pytest' || executable === 'vitest') offset = 1;
+  else if ((executable === 'python' || executable === 'python3')
+    && words[1] === '-m' && words[2] === 'pytest') offset = 3;
+  else if (executable === 'node' && words[1] === '--test') offset = 2;
+  else if (executable === 'npx' && words[1]?.toLowerCase() === 'vitest') offset = 2;
+  else return false;
+  const mentions: string[] = [];
+  for (let index = offset; index < words.length; index += 1) {
+    const argument = words[index];
+    if (['-q', '-qq', '-v', '--quiet', '--verbose'].includes(argument)) continue;
+    if ((executable === 'vitest' || executable === 'npx')
+      && index === offset && ['run', '--run'].includes(argument)) continue;
+    if (argument === '-p' && words[index + 1] === 'no:cacheprovider') { index += 1; continue; }
+    if (argument.startsWith('-')) return false;
+    mentions.push(argument);
+  }
+  return mentions.length > 0 && mentions.every((mention) => {
+    if (!isAbsolute(mention) || within(projectDir, mention)) return false;
+    try {
+      return existsSync(mention) && !within(projectDir, realpathSync(mention));
+    } catch {
+      return false;
+    }
+  });
+}
+
+function proseClauses(line: string): string[] {
+  const clauses: string[] = [];
+  let start = 0;
+  let inCode = false;
+  for (let index = 0; index < line.length; index++) {
+    if (line[index] === '`') inCode = !inCode;
+    else if (line[index] === ';' && !inCode) {
+      clauses.push(line.slice(start, index));
+      start = index + 1;
+    }
+  }
+  clauses.push(line.slice(start));
+  return clauses;
+}
+
+function replayCommandTexts(text: string, projectDir: string): string[] {
   const commands: string[] = [];
   const add = (value: string, commandContext: boolean, explicitlyPublished = false): void => {
     const candidate = commandText(value);
@@ -160,11 +207,24 @@ function replayCommandTexts(text: string): string[] {
       inCodeFence = !inCodeFence;
       continue;
     }
-    if (NON_OBLIGATING.test(line)) continue;
     const explicit = line.match(/replay command\s*:\s*(.+)$/i)?.[1];
     if (explicit) add(explicit, true, true);
-    for (const inline of line.matchAll(/`([^`\r\n]+)`/g)) add(inline[1] ?? '', true);
     const plain = line.trim().replace(/^[-*]\s+/, '');
+    const standalone = plain.match(/^`([^`\r\n]+)`\s*[.!]?$/);
+    if (standalone) add(standalone[1] ?? '', true);
+    // A historical citation exempts only its command. Prose about another
+    // project cannot exempt a command with a project-relative test path.
+    for (const clause of proseClauses(line)) {
+      const inlines = [...clause.matchAll(/`([^`\r\n]+)`/g)];
+      for (const inline of inlines) {
+        if (!externalHistoricalCommand(inline[1] ?? '', projectDir)) {
+          add(inline[1] ?? '', true);
+        }
+      }
+    }
+    for (const directive of plain.matchAll(/\b(?:run|execute|verify with|replay with)\s+`([^`\r\n]+)`/gi)) {
+      add(directive[1] ?? '', true);
+    }
     add(plain, inCodeFence);
   }
   return commands;
@@ -224,7 +284,7 @@ function resolveReplayTarget(token: string, projectDir: string): ReplayTarget | 
   const path = isAbsolute(mention)
     ? resolve(mention)
     : resolve(projectDir, mention.replace(/^\.\//, ''));
-  return within(projectDir, path) ? { mention, path } : undefined;
+  return { mention, path };
 }
 
 function parseRunnerArguments(
@@ -508,7 +568,7 @@ function replayCommands(
   projectDir: string,
   sourcePath?: string,
 ): ReplayCommandCandidate[] {
-  return replayCommandTexts(text).map((command) => (
+  return replayCommandTexts(text, projectDir).map((command) => (
     parseReplayCommand(command, source, projectDir, sourcePath)
   ));
 }
@@ -881,7 +941,8 @@ function executeReplayCommand(candidate: ReplayCommandCandidate, projectDir: str
   if (candidate.parseError) return failedReplay(candidate, candidate.parseError);
   const missing = candidate.targets.filter((target) => {
     try {
-      return !existsSync(target.path)
+      return !within(projectDir, target.path)
+        || !existsSync(target.path)
         || !statSync(target.path).isFile()
         || !within(projectDir, realpathSync(target.path));
     } catch {
@@ -986,7 +1047,7 @@ export function captureDeferredStageArtifactContract(input: StageArtifactContrac
 /**
  * Check only attributable, unambiguous promises: imperative file paths in the
  * stage's own template and exact test-file arguments in a requested replay
- * command. Examples, optional mentions and globs are not promoted into
+ * command. Optional file mentions and globs are not promoted into artifact
  * obligations; command-shaped shell text is recorded but never handed to a
  * shell.
  */
@@ -1035,6 +1096,13 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput):
     .map((path) => resolve(path)));
   const producedPromptArtifacts = producedPromptArtifactPaths(input, promptObligations);
   const existenceViolations = obligations.flatMap((obligation): StageArtifactContractViolation[] => {
+    if (obligation.kind === 'replay_command_target'
+      && !within(input.projectDir, obligation.path)) {
+      return [{
+        ...obligation,
+        reason: `published replay command names ${obligation.mention}, but the target is outside this project`,
+      }];
+    }
     try {
       if (existsSync(obligation.path) && statSync(obligation.path).isFile()) {
         if (obligation.kind !== 'prompt_artifact' || producedPromptArtifacts.has(resolve(obligation.path))) {
