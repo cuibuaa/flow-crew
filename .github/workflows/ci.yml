@@ -28,6 +28,15 @@ jobs:
           node-version: "22"
           cache: npm
 
+      # Validation-replay specs run real pytest recipes, and the linked-input
+      # replay isolates its child with an unprivileged user+mount namespace,
+      # which Ubuntu 24.04 runners forbid through AppArmor by default.
+      - name: Provide pytest and unprivileged user namespaces
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-pytest
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - run: npm ci
       - run: npm run build
       - run: npm run build:ui
