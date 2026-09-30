@@ -573,18 +573,57 @@ function replayCommands(
   ));
 }
 
+/** Prose boundaries bound ownership; quoted paths and path components are indivisible. */
+function artifactDirectiveClauses(line: string): string[] {
+  const clauses: string[] = [];
+  let start = 0;
+  let quote: string | undefined;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (quote) {
+      if (character === quote && line[index - 1] !== '\\') quote = undefined;
+      continue;
+    }
+    if (character === '`' || character === '"'
+      || (character === "'" && (index === 0 || /[\s(]/.test(line[index - 1])))) {
+      quote = character;
+      continue;
+    }
+    if (character === ';' || (character === '.' && (index + 1 === line.length || /\s/.test(line[index + 1])))) {
+      clauses.push(line.slice(start, index));
+      start = index + 1;
+      continue;
+    }
+    // A comparison clause can be followed by another genuine output demand.
+    if (index === 0 || /[\s,]/.test(line[index - 1])) {
+      const inputIntroduction = /^(?:(?:with\s+)?replay command\s*:|(?:selected by|described by|provided by|read from|based on|according to|using|compare(?:d)?\s+(?:with|to)|comparing)(?=\s))/i;
+      if (inputIntroduction.test(line.slice(index))) {
+        clauses.push(line.slice(start, index));
+        start = index;
+      }
+      const nextDirective = line.slice(index).match(/^(?:and|then)\s+(?=(?:also\s+)?(?:write|create|produce|publish|save|emit)\b)/i);
+      if (nextDirective) {
+        clauses.push(line.slice(start, index));
+        start = index + nextDirective[0].length;
+        index = start - 1;
+      }
+    }
+  }
+  clauses.push(line.slice(start));
+  return clauses;
+}
+
 function promptArtifactObligations(
   template: string,
   projectDir: string,
   runDir: string,
 ): StageArtifactObligation[] {
   const obligations: StageArtifactObligation[] = [];
-  for (const line of substitute(template, projectDir, runDir).split(/\r?\n/)) {
-    const imperative = line.match(/^\s*(?:[-*]\s*)?(?:write|create|produce|publish|save|emit)\b\s+(.+)$/i);
-    if (!imperative || NON_OBLIGATING.test(line)) continue;
-    const artifactClause = imperative[1]
-      .split(/\b(?:with\s+)?replay command\s*:/i)[0]
-      .split(/\b(?:selected by|described by|provided by|read from|based on|according to|using)\b/i)[0];
+  const clauses = substitute(template, projectDir, runDir).split(/\r?\n/).flatMap(artifactDirectiveClauses);
+  for (const clause of clauses) {
+    const imperative = clause.match(/^\s*(?:[-*]\s*)?(?:(?:then|also|finally)\s+)?(?:write|create|produce|publish|save|emit)\b\s+(.+)$/i);
+    if (!imperative || NON_OBLIGATING.test(clause)) continue;
+    const artifactClause = imperative[1];
     for (const mention of pathMentions(artifactClause)) {
       const mentionIndex = artifactClause.indexOf(mention);
       const runLocal = mentionIndex >= 0

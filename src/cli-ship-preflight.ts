@@ -3,15 +3,19 @@ import {
   constants,
   existsSync,
   lstatSync,
+  mkdirSync,
+  mkdtempSync,
   readFileSync,
   readlinkSync,
   readdirSync,
   realpathSync,
+  rmSync,
   statSync,
   type Stats,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   canonicalCampaignStorageKey,
@@ -32,10 +36,13 @@ import {
   type RpcResponse,
 } from './orchestrator-rpc.js';
 import {
+  discoverProjectValidation,
+  runValidationCommand,
   runProjectValidationBaseline,
   type ProjectValidationBaseline,
   type ValidationProgressObserver,
   type ValidationCommandRunner,
+  type ValidationRunRequest,
 } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import {
@@ -96,6 +103,7 @@ export interface ShipPreflightDependencies {
   readCampaignEntries?: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
+  prepareValidationWriteGuard?: (projectDir: string, packageRoot: string) => ValidationWriteGuard;
   inspectLiveRun?: (runId: string, runPath: string) => boolean;
   findDistConsumers?: (distDir: string) => DeployedDistConsumer[];
 }
@@ -119,6 +127,7 @@ interface ResolvedDependencies {
   readCampaignEntries: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
+  prepareValidationWriteGuard: (projectDir: string, packageRoot: string) => ValidationWriteGuard;
   inspectLiveRun: (runId: string, runPath: string) => boolean;
   findDistConsumers: (distDir: string) => DeployedDistConsumer[];
 }
@@ -281,6 +290,7 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     readCampaignEntries: overrides.readCampaignEntries ?? readCampaignEntries,
     probeDaemon: overrides.probeDaemon ?? probeRunningDaemon,
     runValidationCommand: overrides.runValidationCommand,
+    prepareValidationWriteGuard: overrides.prepareValidationWriteGuard ?? prepareValidationWriteGuard,
     inspectLiveRun: overrides.inspectLiveRun
       ?? ((runId, runPath) => inspectRunScheduler(runId, runPath).kind === 'live'),
     findDistConsumers: overrides.findDistConsumers
@@ -352,6 +362,221 @@ function canonicalize(path: string, deps: ResolvedDependencies): { path: string;
     return { path: deps.realpath(absolute), fallback: false };
   } catch {
     return { path: absolute, fallback: true };
+  }
+}
+
+function containsPath(root: string, target: string): boolean {
+  const path = relative(root, target);
+  return path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path));
+}
+
+function pathsOverlap(first: string, second: string): boolean {
+  return containsPath(first, second) || containsPath(second, first);
+}
+
+function validationMayRebuildEngineDist(
+  project: { path: string; fallback: boolean },
+  deps: ResolvedDependencies,
+): boolean {
+  const engine = canonicalize(deps.packageRoot, deps);
+  // Failed identity resolution cannot establish independence. Ancestor and
+  // nested targets can dispatch the engine build, so both remain protected.
+  if (project.fallback || engine.fallback || pathsOverlap(project.path, engine.path)) return true;
+  const engineDistPath = join(engine.path, 'dist');
+  const engineDist = deps.exists(engineDistPath)
+    ? canonicalize(engineDistPath, deps)
+    : { path: engineDistPath, fallback: false };
+  if (engineDist.fallback) return true;
+  const projectDist = join(project.path, 'dist');
+  if (deps.exists(projectDist)) {
+    const output = canonicalize(projectDist, deps);
+    // A distinct checkout can still alias the deployed output directory.
+    if (output.fallback || pathsOverlap(output.path, engineDist.path)) return true;
+  }
+  return configuredValidationReferencesEngine(project.path, engine.path, engineDist.path, deps);
+}
+
+/** A fail-fast hint only. Transitive effects are protected by the child write guard. */
+function configuredValidationReferencesEngine(
+  projectDir: string,
+  engineDir: string,
+  engineDist: string,
+  deps: ResolvedDependencies,
+): boolean {
+  const discovery = discoverProjectValidation(projectDir, { exists: deps.exists, readText: deps.readText });
+  const configPaths = new Set(discovery.commands.flatMap(({ evidencePath }) => evidencePath ? [evidencePath] : []));
+  for (const configPath of configPaths) {
+    let recipes: string;
+    try {
+      const config = deps.readText(configPath);
+      // Include lifecycle hooks and script indirection, not just the three role names.
+      recipes = basename(configPath) === 'package.json'
+        ? Object.values(JSON.parse(config).scripts ?? {}).filter((value) => typeof value === 'string').join('\n')
+        : config;
+    } catch {
+      return true; // An unreadable declaration cannot establish independence.
+    }
+    // Inspect quoted strings both as complete paths and as command bodies.
+    // This preserves early diagnostics; neither tokenization proves safety.
+    const tokens = [...recipes.matchAll(/"([^"\n]*)"|'([^'\n]*)'|([^\s"'`;&|<>]+)/g),
+      ...recipes.matchAll(/([^\s"'`;&|<>]+)/g)];
+    for (const match of tokens) {
+      const token = (match[1] ?? match[2] ?? match[3]).replace(/^(?:--?)?[\w-]+=/, '');
+      if (!token || token.startsWith('-') || /[$`]/.test(token)) continue;
+      const destination = resolve(projectDir, token);
+      // Resolve an existing ancestor too: a new output can sit beneath a symlink.
+      let ancestor = destination;
+      while (!deps.exists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+      const identity = canonicalize(ancestor, deps);
+      if (identity.fallback) return true;
+      const canonicalDestination = resolve(identity.path, relative(ancestor, destination));
+      if (pathsOverlap(canonicalDestination, engineDir) || pathsOverlap(canonicalDestination, engineDist)) return true;
+    }
+  }
+  return false;
+}
+
+export interface ValidationWriteGuard {
+  wrap(request: ValidationRunRequest): ValidationRunRequest;
+  cleanup(): void;
+  description?: string;
+}
+
+// Python's standard-library ctypes supplies the Linux syscall bridge without
+// installing a native Node addon. No project code executes before restrict_self.
+// ABI 3 is mandatory: ABI 1/2 cannot deny truncation. Reads remain unrestricted.
+const LINUX_VALIDATION_WRITE_GUARD = String.raw`
+import ctypes, json, os, platform, re, stat, sys
+
+def checked(value, operation):
+    if value < 0:
+        raise OSError(ctypes.get_errno(), operation)
+    return value
+
+def overlaps(first, second):
+    shared = os.path.commonpath([first, second])
+    return shared == first or shared == second
+
+try:
+    config = json.loads(sys.argv[1])
+    if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
+        raise RuntimeError('unsupported Linux syscall architecture')
+    project = os.path.realpath(config['project'])
+    engine = os.path.realpath(config['engine'])
+    scratch = os.path.realpath(config['scratch'])
+    if overlaps(project, engine) or overlaps(scratch, engine):
+        raise RuntimeError('writable roots overlap the consumed engine')
+    # A pre-existing hard link or symlink into an allowed hierarchy can defeat
+    # path separation. Refuse ambiguous consumed identities, never grant them.
+    pending = [os.path.join(engine, 'dist')]
+    visited = set()
+    protected = set()
+    ancestor = os.path.realpath(pending[0])
+    while True:
+        if os.path.exists(ancestor):
+            info = os.stat(ancestor)
+            protected.add((info.st_dev, info.st_ino))
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            break
+        ancestor = parent
+    while pending:
+        path = pending.pop()
+        if path == os.path.join(engine, 'dist') and not os.path.lexists(path):
+            continue
+        physical = os.path.realpath(path)
+        if overlaps(physical, project) or overlaps(physical, scratch):
+            raise RuntimeError('consumed output aliases a writable root: ' + path)
+        info = os.stat(path)
+        protected.add((info.st_dev, info.st_ino))
+        if stat.S_ISDIR(info.st_mode):
+            identity = (info.st_dev, info.st_ino)
+            if identity not in visited:
+                visited.add(identity)
+                with os.scandir(path) as entries:
+                    pending.extend(entry.path for entry in entries)
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise RuntimeError('consumed output has multiple hard links: ' + path)
+    # realpath does not reveal bind mounts. A writable root or nested mount
+    # that aliases a protected object/ancestor cannot be admitted either.
+    project_info = os.stat(project)
+    if (project_info.st_dev, project_info.st_ino) in protected:
+        raise RuntimeError('project identity aliases consumed output or an ancestor')
+    with open('/proc/self/mountinfo') as mounts:
+        for line in mounts:
+            mountpoint = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split()[4])
+            if os.path.commonpath([project, mountpoint]) == project:
+                info = os.stat(mountpoint)
+                if (info.st_dev, info.st_ino) in protected:
+                    raise RuntimeError('project mount aliases consumed output or an ancestor: ' + mountpoint)
+    libc = ctypes.CDLL(None, use_errno=True)
+    abi = checked(libc.syscall(444, 0, 0, 1), 'landlock_create_ruleset ABI')
+    if abi < 3:
+        raise RuntimeError('Landlock ABI 3 or newer is required, found ' + str(abi))
+    # WRITE_FILE, REMOVE_DIR/FILE, all MAKE_* rights, REFER and TRUNCATE.
+    writes = (1 << 1) | sum(1 << bit for bit in range(4, 15))
+    class Ruleset(ctypes.Structure):
+        _fields_ = [('handled_access_fs', ctypes.c_uint64)]
+    class PathRule(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [('allowed_access', ctypes.c_uint64), ('parent_fd', ctypes.c_int32)]
+    attr = Ruleset(writes)
+    ruleset = checked(libc.syscall(444, ctypes.byref(attr), ctypes.sizeof(attr), 0), 'landlock_create_ruleset')
+    for path, rights in ((project, writes), (scratch, writes), (os.devnull, (1 << 1) | (1 << 14))):
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        try:
+            rule = PathRule(rights, fd)
+            checked(libc.syscall(445, ruleset, 1, ctypes.byref(rule), 0), 'landlock_add_rule')
+        finally:
+            os.close(fd)
+    checked(libc.prctl(38, 1, 0, 0, 0), 'PR_SET_NO_NEW_PRIVS')
+    checked(libc.syscall(446, ruleset, 0), 'landlock_restrict_self')
+    os.close(ruleset)
+    if sys.argv[2:] == ['--probe']:
+        print(json.dumps({'abi': abi}))
+        sys.exit(0)
+    home = os.path.join(scratch, 'home')
+    os.environ.update(HOME=home, USERPROFILE=home, TMPDIR=os.path.join(scratch, 'tmp'),
+        TMP=os.path.join(scratch, 'tmp'), TEMP=os.path.join(scratch, 'tmp'),
+        XDG_CACHE_HOME=os.path.join(home, '.cache'), XDG_CONFIG_HOME=os.path.join(home, '.config'),
+        XDG_STATE_HOME=os.path.join(home, '.local', 'state'),
+        FC_HOME=os.path.join(home, '.fc'), FLOWCREW_DAEMON_SOCKET=os.path.join(scratch, 'unavailable.sock'),
+        npm_config_cache=os.path.join(home, '.npm'), NPM_CONFIG_CACHE=os.path.join(home, '.npm'))
+    os.environ.pop('FLOWCREW_LAUNCH_RESULT_PATH', None)
+except Exception as error:
+    print('FlowCrew validation write confinement unavailable: ' + str(error), file=sys.stderr)
+    sys.exit(125)
+
+# exec preserves the policy through shells, package hooks and arbitrary scripts.
+# The launcher has no pre-opened writable project/engine descriptors to inherit.
+os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+`;
+
+export function prepareValidationWriteGuard(projectDir: string, packageRoot: string): ValidationWriteGuard {
+  if (process.platform !== 'linux') throw new Error('Linux Landlock write confinement is unavailable on this platform');
+  const engine = realpathSync.native(packageRoot);
+  const temporaryRoot = realpathSync.native(tmpdir());
+  if (containsPath(engine, temporaryRoot)) throw new Error('Temporary directory is inside the consumed engine');
+  const scratch = mkdtempSync(join(temporaryRoot, 'flowcrew-validation-'));
+  try {
+    mkdirSync(join(scratch, 'home', '.fc'), { recursive: true });
+    mkdirSync(join(scratch, 'tmp'));
+    const payload = JSON.stringify({ project: realpathSync.native(projectDir), engine, scratch });
+    const args = ['-I', '-S', '-B', '-c', LINUX_VALIDATION_WRITE_GUARD, payload];
+    const { abi } = JSON.parse(execFileSync('python3', [...args, '--probe'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000,
+    })) as { abi: number };
+    return {
+      wrap: (request) => ({ ...request, command: 'python3', args: [...args, request.command, ...request.args] }),
+      cleanup: () => rmSync(scratch, { recursive: true, force: true }),
+      description: `Linux Landlock ABI ${abi}; writes confined to ${projectDir} and isolated temporary home/cache ${scratch}`,
+    };
+  } catch (error) {
+    rmSync(scratch, { recursive: true, force: true });
+    const detail = error instanceof Error && 'stderr' in error
+      ? String((error as Error & { stderr: unknown }).stderr).trim()
+      : errorMessage(error);
+    throw new Error(detail || errorMessage(error), { cause: error });
   }
 }
 
@@ -842,7 +1067,7 @@ export async function collectShipPreflight(
       );
     }
   }
-  if (liveDistConsumers.length > 0) {
+  if (liveDistConsumers.length > 0 && validationMayRebuildEngineDist(canonicalProject, deps)) {
     const labels = liveDistConsumers.map(({ label }) => label).join(', ');
     deps.stderr.write(
       `WARNING: live process(es) ${labels} execute from this engine checkout's dist. `
@@ -860,12 +1085,33 @@ export async function collectShipPreflight(
   }
   const observer = validationProgressObserver(deps.stderr);
   if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED by --no-baseline; no project command was launched.\n');
-  const validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
-    fs: { exists: deps.exists, readText: deps.readText },
-    ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-    observer,
-    skipExecution: parsed.noBaseline,
-  });
+  let writeGuard: ValidationWriteGuard | undefined;
+  if (!parsed.noBaseline && liveDistConsumers.length > 0) {
+    try {
+      writeGuard = deps.prepareValidationWriteGuard(canonicalProject.path, deps.packageRoot);
+      deps.stderr.write(`Validation baseline: WRITE CONFINEMENT — ${writeGuard.description ?? 'child write guard installed'}. File content writes, creation and removal outside these roots are denied.\n`);
+    } catch (error) {
+      throw new Error(
+        `Validation baseline refused because live process(es) ${liveDistConsumers.map(({ label }) => label).join(', ')} `
+        + `execute from ${distDir} and write confinement could not be installed: ${errorMessage(error)}. `
+        + 'No project command was launched. Use --no-baseline to collect facts, wait for the consumers to stop, '
+        + 'or use a separate engine checkout with supported write confinement.',
+        { cause: error },
+      );
+    }
+  }
+  let validationBaseline: ProjectValidationBaseline;
+  try {
+    const runner = deps.runValidationCommand ?? runValidationCommand;
+    validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
+      fs: { exists: deps.exists, readText: deps.readText },
+      runCommand: writeGuard ? (request) => runner(writeGuard!.wrap(request)) : runner,
+      observer,
+      skipExecution: parsed.noBaseline,
+    });
+  } finally {
+    writeGuard?.cleanup();
+  }
 
   return {
     json: parsed.json,

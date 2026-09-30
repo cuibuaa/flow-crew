@@ -658,7 +658,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('7 — refuses before command one when a cross-project run consumes this checkout dist', async () => {
+  it('7 — permits unrelated validation when a cross-project run consumes this checkout dist', async () => {
     const root = temporaryRoot('item-7');
     const projectDir = join(root, 'target-project');
     const otherProject = join(root, 'other-project');
@@ -758,17 +758,21 @@ describe('engine self-collision after-state replays and controls', () => {
       inspectLiveRun: () => true,
       findDistConsumers: () => consumers,
       runValidationCommand: runner,
+      prepareValidationWriteGuard: () => ({ wrap: (request) => request, cleanup: () => {} }),
       stdout: new Capture().writer,
       stderr: stderr.writer,
     };
-    const refused = await cmdShipPreflightWithDeps(['ship-preflight'], dependencies);
-    expect(refused).toBe(1);
-    expect(runner).not.toHaveBeenCalled();
-    expect(stderr.value).toContain('No project command was launched');
+    const unrelatedTarget = await cmdShipPreflightWithDeps(['ship-preflight'], dependencies);
+    expect(unrelatedTarget).toBe(0);
+    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(stderr.value).not.toContain('Validation baseline refused');
 
-    const noBaseline = await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], dependencies);
+    const noBaselineRunner = vi.fn<ValidationCommandRunner>();
+    const noBaseline = await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], {
+      ...dependencies, runValidationCommand: noBaselineRunner,
+    });
     expect(noBaseline).toBe(0);
-    expect(runner).not.toHaveBeenCalled();
+    expect(noBaselineRunner).not.toHaveBeenCalled();
 
     const quietRunner = vi.fn<ValidationCommandRunner>((request) => ({
       exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
@@ -801,9 +805,9 @@ describe('engine self-collision after-state replays and controls', () => {
       evaluatedImportDetected: evaluatedImport,
       cwdRelativeEntrypointDetected: relativeEntrypoint,
       cwdRelativeOtherDistributionIgnored: relativeOtherDistribution,
-      refusedExitCode: refused,
-      rolesLaunchedBeforeRefusal: runner.mock.calls.map(([request]) => request.role),
-      refusalOutput: stderr.value,
+      unrelatedTargetExitCode: unrelatedTarget,
+      unrelatedTargetRoles: runner.mock.calls.map(([request]) => request.role),
+      validationOutput: stderr.value,
       noBaselineExitCode: noBaseline,
       unrelatedConsumerExitCode: quiet,
       unrelatedConsumerRoles: quietRunner.mock.calls.map(([request]) => request.role),

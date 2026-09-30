@@ -287,6 +287,18 @@ export function runningRecordBindingStatus(record: SupervisionRunningRecord): Ru
   return processCommandBinding(record.shimPid, record.shimCommand);
 }
 
+function terminalExitObservation(exit: SupervisionExitRecord): PortableUnitObservation {
+  return {
+    status: {
+      kind: 'terminal',
+      exitCode: exit.normalized,
+      ...(exit.signal ? { signal: exit.signal } : {}),
+      ...(exit.launchRefusal ? { launchRefusal: exit.launchRefusal } : {}),
+    },
+    exit,
+  };
+}
+
 /**
  * Read order is a safety property, not an implementation detail. A durable exit
  * result wins even while a stale PID or a systemd cgroup still appears alive.
@@ -298,17 +310,7 @@ export function observePortableUnit(
 ): PortableUnitObservation {
   const paths = supervisionPaths(baseDir, unit);
   const exit = readSupervisionExit(paths.exit);
-  if (exit) {
-    return {
-      status: {
-        kind: 'terminal',
-        exitCode: exit.normalized,
-        ...(exit.signal ? { signal: exit.signal } : {}),
-        ...(exit.launchRefusal ? { launchRefusal: exit.launchRefusal } : {}),
-      },
-      exit,
-    };
-  }
+  if (exit) return terminalExitObservation(exit);
 
   const runningExists = existsSync(paths.running);
   const running = readSupervisionRunning(paths.running);
@@ -326,6 +328,11 @@ export function observePortableUnit(
         running,
       };
     }
+    // The shim publishes exit.json before exiting. It can do both between our
+    // first exit read and the binding probe; re-read validated durable evidence
+    // before declaring its fate unknown. Absence or invalid JSON still fails closed.
+    const finalExit = readSupervisionExit(paths.exit);
+    if (finalExit) return terminalExitObservation(finalExit);
     return {
       status: { kind: 'terminal-unknown', reason: 'shim-died-without-status' },
       running,

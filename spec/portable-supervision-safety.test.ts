@@ -32,7 +32,10 @@ import {
   RunCancellationCoordinator,
 } from '../src/run-control.js';
 import {
+  atomicWriteJson,
+  observePortableUnit,
   readSupervisionRunning,
+  SUPERVISION_PROTOCOL_VERSION,
   supervisionPaths,
   type SupervisorBackend,
   type UnitStatus,
@@ -165,6 +168,78 @@ class PersistentlyActiveUnits implements SupervisorBackend {
 }
 
 describe('portable supervision safety invariants', () => {
+  it.each([0, 3, 143])('observes durable exit %i published between the first status read and loss of shim binding', (normalized) => {
+    const unit = 'publication-race.service';
+    const paths = supervisionPaths(fixtureRoot, unit);
+    const deadShim = 2147483647;
+    atomicWriteJson(paths.running, {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      shimPid: deadShim, shimCommand: 'fixture-finished-shim',
+      agentPid: 2147483646, command: 'fixture-finished-agent', startedAt: new Date().toISOString(),
+    });
+    const exit = {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      exitCode: normalized === 143 ? null : normalized,
+      normalized,
+      ...(normalized === 143 ? { signal: 'SIGTERM' } : {}),
+      endedAt: new Date().toISOString(),
+    };
+    const originalKill = process.kill;
+    let published = false;
+    const probe = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === deadShim && signal === 0) {
+        // The reader has already seen the exit path absent. Match finalize's
+        // atomic publication followed by shim exit; never send a real signal.
+        expect(existsSync(paths.exit)).toBe(false);
+        atomicWriteJson(paths.exit, exit);
+        published = true;
+        throw Object.assign(new Error('fixture shim exited'), { code: 'ESRCH' });
+      }
+      return originalKill.call(process, pid, signal);
+    });
+    try {
+      const observation = observePortableUnit(fixtureRoot, unit);
+      expect(published).toBe(true);
+      expect(observation).toEqual({
+        status: { kind: 'terminal', exitCode: normalized, ...(normalized === 143 ? { signal: 'SIGTERM' } : {}) },
+        exit,
+      });
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it('keeps a lost shim with a live owned child and absent or invalid exit evidence unknown', async () => {
+    const temporaryHome = join(fixtureRoot, 'home');
+    const temporaryFcHome = join(fixtureRoot, 'fc');
+    mkdirSync(temporaryHome);
+    mkdirSync(temporaryFcHome);
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: fixtureRoot,
+      env: { ...process.env, HOME: temporaryHome, USERPROFILE: temporaryHome, FC_HOME: temporaryFcHome },
+      stdio: 'ignore',
+    });
+    ownedChildren.add(child);
+    await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    const unit = 'lost-shim-live-child.service';
+    const paths = supervisionPaths(fixtureRoot, unit);
+    atomicWriteJson(paths.running, {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      shimPid: 2147483647, shimCommand: 'fixture-lost-shim',
+      agentPid: child.pid, command: 'fixture-live-child', startedAt: new Date().toISOString(),
+    });
+    const unknown = { kind: 'terminal-unknown', reason: 'shim-died-without-status' };
+    expect(processIsAlive(child.pid!)).toBe(true);
+    expect(observePortableUnit(fixtureRoot, unit).status).toEqual(unknown);
+    atomicWriteJson(paths.exit, { version: 999, exitCode: 0, normalized: 0, endedAt: new Date().toISOString() });
+    expect(observePortableUnit(fixtureRoot, unit).status).toEqual(unknown);
+    expect(processIsAlive(child.pid!)).toBe(true);
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    child.kill('SIGKILL');
+    await exited;
+    ownedChildren.delete(child);
+  });
+
   it('keeps the portable identity, group signal, and ENOENT authority in one safety bundle', () => {
     const orchestrator = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf-8');
     expect(orchestrator).toContain('processStartTokensMatch(recordedToken, processStartToken(fallbackPid))');

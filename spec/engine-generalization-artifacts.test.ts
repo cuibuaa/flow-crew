@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { captureStageArtifactContractPreimages, inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 
 const roots: string[] = [];
 
@@ -219,11 +219,8 @@ describe('19 — lexical suffixes are not promoted into replay paths', () => {
 
     expect(audit.obligations.map((obligation) => obligation.mention)).toEqual([
       'reports/regexes.md',
-      'docs/report.md',
     ]);
-    expect(audit.violations).toEqual([
-      expect.objectContaining({ mention: 'docs/report.md', reason: expect.stringContaining('no readable file exists') }),
-    ]);
+    expect(audit.violations).toEqual([]);
   });
 
   it('leaves the recorded precise suite-count sentence as prose', () => {
@@ -282,6 +279,66 @@ describe('19 — lexical suffixes are not promoted into replay paths', () => {
     ]));
     expect(audit.violations).toEqual([
       expect.objectContaining({ mention: '.test.ts', reason: expect.stringContaining('no readable input file exists') }),
+    ]);
+  });
+});
+
+describe('prompt artifact ownership', () => {
+  it.each(['reports/comparing.md', 'reports/comparing-results.md', 'comparing.md', 'reports/using.md'])(
+    'still requires the demanded path %s with and without backticks', (path) => {
+      const { projectDir, runDir } = fixture('keyword-output');
+      for (const quoted of [false, true]) {
+        const template = `Write ${quoted ? `\`${path}\`` : path}.`;
+        const audit = inspectStageArtifactContract({ stageId: 'report', template, projectDir, runDir, writes: [] });
+        expect(audit.obligations.map(({ mention }) => mention)).toEqual([path]);
+        expect(audit.violations).toEqual([
+          expect.objectContaining({ mention: path, reason: expect.stringContaining('no readable file exists') }),
+        ]);
+      }
+    },
+  );
+
+  it('reads a run baseline as comparison input after a report directive', () => {
+    const { projectDir, runDir } = fixture('comparison-input');
+    const template = "Write `reports/result.v1.md`. Discover validation and compare with this run's validation_baseline.json. Read docs/reference.md.";
+    write(join(runDir, 'validation_baseline.json'), '{}\n');
+    const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir });
+    write(join(projectDir, 'reports/result.v1.md'), '# Result\n');
+    const audit = inspectStageArtifactContract({
+      stageId: 'report', template, projectDir, runDir, preimages, writes: ['reports/result.v1.md'],
+    });
+    expect(audit.obligations.map(({ mention }) => mention)).toEqual(['reports/result.v1.md']);
+    expect(audit.violations).toEqual([]);
+  });
+
+  it('still refuses later explicit outputs after an inline comparison and a sentence boundary', () => {
+    const { projectDir, runDir } = fixture('later-output');
+    const template = 'Write "reports/result.v1.md" after comparing `inputs/base.v2.json` and write `reports/summary.v1.json`. Then create `reports/second.v1.md` using inputs/reference.json.';
+    write(join(projectDir, 'reports/result.v1.md'), '# Result\n');
+    const audit = inspectStageArtifactContract({
+      stageId: 'report', template, projectDir, runDir, writes: ['reports/result.v1.md'],
+    });
+    expect(audit.obligations.map(({ mention }) => mention)).toEqual([
+      'reports/result.v1.md', 'reports/summary.v1.json', 'reports/second.v1.md',
+    ]);
+    expect(audit.violations).toEqual([
+      expect.objectContaining({ mention: 'reports/summary.v1.json', reason: expect.stringContaining('no readable file exists') }),
+      expect.objectContaining({ mention: 'reports/second.v1.md', reason: expect.stringContaining('no readable file exists') }),
+    ]);
+  });
+
+  it('still requires authorship of an explicitly demanded pre-existing output', () => {
+    const { projectDir, runDir } = fixture('unowned-output');
+    const template = "Write reports/existing.md. Compare with this run's validation_baseline.json.";
+    write(join(projectDir, 'reports/existing.md'), '# Old report\n');
+    write(join(runDir, 'validation_baseline.json'), '{}\n');
+    const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir });
+    const audit = inspectStageArtifactContract({
+      stageId: 'report', template, projectDir, runDir, preimages, writes: [],
+    });
+    expect(audit.obligations.map(({ mention }) => mention)).toEqual(['reports/existing.md']);
+    expect(audit.violations).toEqual([
+      expect.objectContaining({ mention: 'reports/existing.md', reason: expect.stringContaining('predated the stage') }),
     ]);
   });
 });

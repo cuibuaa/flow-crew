@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 15 -->
+<!-- flowcrew-skill-revision: 16 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -34,8 +34,9 @@ entry type/size/digest, and whether the brief explicitly authorizes use of exist
 
 Exit 0 means those facts were gathered; it does not mean they are favorable. Invalid arguments,
 an unreadable requested brief, or a collection failure exit non-zero. Missing or unproven input
-evidence and stale code are launch blockers. An existing non-empty create-only output or any symlink
-at a declared output path is also a blocker; use a fresh path unless the brief explicitly declares
+evidence blocks launch. A stale daemon calls for the loaded-build assessment in §1.6. An existing
+non-empty create-only output or any symlink at a declared output path is also a blocker; use a fresh
+path unless the brief explicitly declares
 the existing artifact as input or says `on_existing: update|append|replace`. Adverse history or a red baseline is information to
 understand and encode as a delta, not a result about the task's subject.
 
@@ -252,8 +253,32 @@ before that digest-bound confirmation.
 After confirmation, run setup with the approved identity and absolute brief path. Proceed only on
 `Ship setup: READY`. For the default background launch, `flowcrew daemon status` exits 0 when fresh,
 1 when no listener exists, and 2 when stale or unverified. Start the daemon after 1 and fall back to
-foreground only if that confirmed start fails; status 2 is an inspect/rebuild/restart blocker. An
-explicit `--foreground` selection skips the daemon probe.
+foreground only if that confirmed start fails. An explicit `--foreground` selection skips the daemon
+probe.
+
+For status 2, read the diagnosis rather than the exit code alone. `RESPONSIVE:` plus `STALE:` with
+no `UNVERIFIED:` means the listener's owner and loaded-build identity were verified, but its loaded
+`build:` fingerprint differs from the current disk `dist`. Record that loaded hash and compute the
+disk hash from the same FlowCrew package root that supplied `daemon status` (without rebuilding it):
+
+```bash
+cd <FlowCrew package root>
+node --input-type=module -e "import { computeBuildFingerprint } from './dist/daemon-identity.js'; console.log(computeBuildFingerprint('./dist').hash)"
+```
+
+Map the loaded hash to a known build or revision and check whether the specific fixes required for
+this launch are present there. A hash difference alone does not identify which fixes are absent.
+Tell the operator the loaded hash, disk hash, required-fix status, and consequence before a background
+launch; return to §1.5 for fresh digest-bound confirmation if that adds a risk the user has not
+accepted. A verified stale daemon can register a background `quick` when the approved launch does
+not depend on an absent fix; `quick` does not check daemon freshness. If a required fix is absent,
+wait for a safe restart or return to §1.5 for an explicitly selected foreground launch. If build
+provenance cannot establish whether a required fix is live, inspect that gap before launching in the
+background.
+
+`UNVERIFIED:` or `NONRESPONSIVE:` on status 2 remains an inspection case, even if a recorded build
+and disk hash differ. Establish socket ownership and the loaded build before deciding on a background
+launch; a persisted build is not proof of what an unverified listener loaded.
 
 Launch by stdin so trailing newlines—and therefore the reviewed digest—are preserved:
 

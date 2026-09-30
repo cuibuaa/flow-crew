@@ -228,7 +228,7 @@ describe('ship skill semantic contract', () => {
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
     // Update both values together when the guidance changes: the digest names the bytes the
     // stamp describes, so a mismatch means one of them was left behind.
-    expect({ revision: stamp, digest }).toEqual({ revision: '15', digest: 'b15d83bfd7bd' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '16', digest: '71dcf6b4a5d3' });
   });
 
   it('contains no private measured case studies', () => {

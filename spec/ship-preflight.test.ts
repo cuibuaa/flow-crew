@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
+  linkSync,
   realpathSync,
   readFileSync,
   readdirSync,
@@ -12,13 +13,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
 import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
   extractBriefInputPaths,
+  prepareValidationWriteGuard,
   type DaemonLoadedBuildProbe,
   type ShipPreflightDependencies,
 } from '../src/cli-ship-preflight.js';
@@ -29,6 +31,7 @@ import {
   verifyBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { runValidationCommand, type ValidationCommandRunner } from '../src/project-validation.js';
 
 class Capture {
   value = '';
@@ -95,6 +98,9 @@ function commonDeps(overrides: ShipPreflightDependencies = {}): ShipPreflightDep
     packageRoot: fixture.packageRoot,
     readGitCommonDir: () => '.git',
     readCampaignEntries: () => [],
+    // These fact/dispatch tests use mock runners. Enforcement cases below use
+    // the production guard and real descendants instead of this test seam.
+    prepareValidationWriteGuard: () => ({ wrap: (request) => request, cleanup: () => {} }),
     probeDaemon: async (): Promise<DaemonLoadedBuildProbe> => ({
       state: 'fresh', loadedBuild: 'same', diskBuild: 'same',
     }),
@@ -111,6 +117,266 @@ function writeRun(id: string, state: Record<string, unknown>, mtime: number): st
   utimesSync(statePath, timestamp, timestamp);
   return runPath;
 }
+
+describe('live engine distribution validation boundary', () => {
+  const consumers = [{ pid: 4242, kind: 'process' as const, label: 'fixture live engine process' }];
+
+  function configureValidation(project: string): void {
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, 'package.json'), JSON.stringify({
+      scripts: { build: 'node build-dist.mjs', test: 'node check.mjs', lint: 'node style.mjs' },
+    }));
+    writeFileSync(join(project, 'package-lock.json'), '{}\n');
+    // The guard must stop this real dist-writing recipe before command one.
+    writeFileSync(join(project, 'build-dist.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync("dist/probe.js", "replacement engine build");\n');
+  }
+
+  it('keeps consumers visible while validating an independent Python project', async () => {
+    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, durationMs: 1, stdout: 'fixture passed\n' }));
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+    }));
+    expect(result.report.liveDistConsumers).toEqual(consumers);
+    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(result.report.validationBaseline.results.map(({ exitCode }) => exitCode)).toEqual([0, 0, 0]);
+  });
+
+  it('keeps unrelated validation independent when the consumed dist directory is absent', async () => {
+    rmSync(join(fixture.packageRoot, 'dist'), { recursive: true });
+    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'passed' }));
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+    }));
+    expect(result.report.liveDistConsumers).toEqual(consumers);
+    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+  });
+
+  it.each(['absolute', 'relative', 'alias', 'make-cd', 'output-alias', 'quoted-shell'])(
+    'refuses separate-project %s delegation to the consumed engine before command one', async (form) => {
+      configureValidation(fixture.packageRoot);
+      let build = `npm --prefix "${fixture.packageRoot}" run build`;
+      if (form === 'quoted-shell') build = `sh -c 'npm --prefix ${fixture.packageRoot} run build'`;
+      if (form === 'relative') build = 'npm --prefix=../package run build';
+      if (form === 'alias') {
+        const alias = join(fixture.root, 'linked-engine');
+        symlinkSync(fixture.packageRoot, alias, 'dir');
+        build = `npm --prefix "${alias}" run build`;
+      }
+      if (form === 'output-alias') {
+        symlinkSync(join(fixture.packageRoot, 'dist'), join(fixture.project, 'generated'), 'dir');
+        build = 'tsc --outDir=generated/new-build';
+      }
+      if (form === 'make-cd') {
+        writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tcd ../package && npm run build\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+      } else {
+        writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
+          scripts: { build, test: 'node check.mjs', lint: 'node style.mjs' },
+        }));
+        writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
+      }
+      const before = readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8');
+      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+      const stderr = new Capture();
+      const deps = commonDeps({
+        findDistConsumers: () => consumers, runValidationCommand: runner,
+        stdout: new Capture().writer, stderr: stderr.writer,
+      });
+      expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
+      expect(stderr.value).toContain('No project command was launched');
+      expect(runner).not.toHaveBeenCalled();
+      expect(readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8')).toBe(before);
+      expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+      expect(runner).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['own', 'ancestor', 'nested', 'project-alias', 'package-alias', 'dist-alias', 'unknown-project', 'unknown-package'])(
+    'refuses %s identity with live consumers before invoking a dist-writing build', async (relation) => {
+      configureValidation(fixture.packageRoot);
+      let project = fixture.packageRoot;
+      let packageRoot = fixture.packageRoot;
+      if (relation === 'ancestor') project = fixture.root;
+      if (relation === 'nested') project = join(fixture.packageRoot, 'nested-project');
+      if (relation === 'project-alias') {
+        project = join(fixture.root, 'linked-engine');
+        symlinkSync(fixture.packageRoot, project, 'dir');
+      }
+      if (relation === 'package-alias') {
+        packageRoot = join(fixture.root, 'linked-package');
+        symlinkSync(fixture.packageRoot, packageRoot, 'dir');
+      }
+      if (relation === 'dist-alias') {
+        project = fixture.project;
+        symlinkSync(join(fixture.packageRoot, 'dist'), join(project, 'dist'), 'dir');
+      }
+      if (relation === 'unknown-project' || relation === 'unknown-package') project = fixture.project;
+      if (relation !== 'own' && relation !== 'project-alias' && relation !== 'package-alias') configureValidation(project);
+      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+      const stderr = new Capture();
+      const realpath = (path: string): string => {
+        if ((relation === 'unknown-project' && path === resolve(project))
+          || (relation === 'unknown-package' && path === resolve(packageRoot))) throw new Error('identity unavailable');
+        return realpathSync.native(path);
+      };
+      const code = await cmdShipPreflightWithDeps(['ship-preflight', '--project', project], commonDeps({
+        packageRoot, realpath, findDistConsumers: () => consumers, runValidationCommand: runner,
+        stdout: new Capture().writer, stderr: stderr.writer,
+      }));
+      expect(code).toBe(1);
+      expect(runner).not.toHaveBeenCalled();
+      expect(stderr.value).toContain('No project command was launched');
+    },
+  );
+
+  it('still refuses an independent target shared by a verified live run and supports facts-only collection', async () => {
+    configureValidation(fixture.project);
+    writeRun('live-target', { projectDir: fixture.project, status: 'running' }, 3_000);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+    const stderr = new Capture();
+    const deps = commonDeps({
+      inspectLiveRun: () => true, findDistConsumers: () => consumers, runValidationCommand: runner,
+      stdout: new Capture().writer, stderr: stderr.writer,
+    });
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
+    expect(stderr.value).toContain('verified live run(s) live-target');
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('refuses before command one when child write confinement cannot be installed', async () => {
+    configureValidation(fixture.project);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
+    const prepare = vi.fn(() => { throw new Error('confinement unavailable'); });
+    const stderr = new Capture();
+    const deps = commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+      prepareValidationWriteGuard: prepare, stdout: new Capture().writer, stderr: stderr.writer,
+    });
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
+    expect(stderr.value).toContain('write confinement could not be installed');
+    expect(stderr.value).toContain('No project command was launched');
+    expect(runner).not.toHaveBeenCalled();
+    prepare.mockClear();
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  // Unsupported hosts exercise the fail-closed case above. Only an available
+  // kernel guard can exercise the real syscall/descendant controls below.
+  function requireKernelGuard(context: { skip(note?: string): void }): void {
+    try { prepareValidationWriteGuard(fixture.project, fixture.packageRoot).cleanup(); }
+    catch { context.skip('Linux Landlock/Python 3 write confinement unavailable'); }
+  }
+
+  it.each(['imported-script', 'environment', 'make-script', 'shell-script'])(
+    'denies a consumed-dist write hidden in %s without classifying the command', async (form, context) => {
+      requireKernelGuard(context);
+      const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
+      const before = readFileSync(runtime, 'utf-8');
+      writeFileSync(join(fixture.project, 'target.json'), JSON.stringify({ runtime }));
+      writeFileSync(join(fixture.project, 'writer.mjs'), [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        'const { runtime } = JSON.parse(readFileSync("target.json", "utf8"));',
+        'writeFileSync(runtime, "replacement generation");',
+      ].join('\n'));
+      let build = 'node writer.mjs';
+      if (form === 'environment') {
+        // The path is loaded by executable code after dispatch, never by the
+        // configured-recipe hint. Descendants inherit the kernel restriction.
+        writeFileSync(join(fixture.project, 'env-writer.mjs'), [
+          'import { readFileSync } from "node:fs";',
+          'process.env.FIXTURE_ENGINE_OUTPUT = JSON.parse(readFileSync("target.json", "utf8")).runtime;',
+          'await import("./env-child.mjs");',
+        ].join('\n'));
+        writeFileSync(join(fixture.project, 'env-child.mjs'), 'import {writeFileSync} from "node:fs"; writeFileSync(process.env.FIXTURE_ENGINE_OUTPUT, "replacement");\n');
+        build = 'node env-writer.mjs';
+      }
+      if (form === 'shell-script') build = 'sh -c "node writer.mjs"';
+      if (form === 'make-script') {
+        writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tnode writer.mjs\ntest:\n\tnode -e ""\nlint:\n\tnode -e ""\n');
+      } else {
+        writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: {
+          build, test: 'node -e ""', lint: 'node -e ""',
+        } }));
+        writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
+      }
+      const stderr = new Capture();
+      const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+        findDistConsumers: () => consumers, prepareValidationWriteGuard,
+        stderr: stderr.writer,
+      }));
+      expect(stderr.value).toContain('WRITE CONFINEMENT');
+      expect(result.report.validationBaseline.results[0]).toMatchObject({ role: 'build', state: 'failed' });
+      expect(result.report.validationBaseline.results[0].output).toContain('EACCES');
+      expect(result.report.validationBaseline.results.slice(1).map(({ state }) => state)).toEqual(['passed', 'passed']);
+      expect(readFileSync(runtime, 'utf-8')).toBe(before);
+    },
+  );
+
+  it('allows independent project/home/temp writes while denying protected file mutations and symlink traversal', async (context) => {
+    requireKernelGuard(context);
+    const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
+    const before = readFileSync(runtime, 'utf-8');
+    symlinkSync(runtime, join(fixture.project, 'output-alias'));
+    writeFileSync(join(fixture.project, 'target.json'), JSON.stringify({ runtime }));
+    writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: {
+      build: 'node mutations.mjs', test: 'node -e ""', lint: 'node -e ""',
+    } }));
+    writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
+    writeFileSync(join(fixture.project, 'mutations.mjs'), [
+      'import fs from "node:fs"; import os from "node:os"; import path from "node:path";',
+      'const { runtime } = JSON.parse(fs.readFileSync("target.json", "utf8"));',
+      'const operations = { write: () => fs.writeFileSync(runtime, "changed"), truncate: () => fs.truncateSync(runtime, 0),',
+      'readonlyTruncate: () => fs.closeSync(fs.openSync(runtime, fs.constants.O_RDONLY | fs.constants.O_TRUNC)),',
+      'unlink: () => fs.unlinkSync(runtime), rename: () => fs.renameSync(runtime, "stolen"), link: () => fs.linkSync(runtime, "linked"),',
+      'create: () => fs.writeFileSync(path.join(path.dirname(runtime), "new.js"), "changed"), alias: () => fs.writeFileSync("output-alias", "changed") };',
+      'const results = {}; for (const [name, operation] of Object.entries(operations)) { try { operation(); results[name] = "ALLOWED"; } catch (error) { results[name] = error.code; } }',
+      'fs.writeFileSync("denied.json", JSON.stringify(results));',
+      'fs.writeFileSync(path.join(process.argv[2], "cache-write"), "ok"); fs.writeFileSync(path.join(os.tmpdir(), "temp-write"), "ok");',
+      'fs.writeFileSync("independent-output", fs.readFileSync(runtime));',
+    ].join('\n'));
+    const runner = vi.fn<ValidationCommandRunner>((request) => {
+      if (request.role !== 'build') return runValidationCommand(request);
+      // Give the fixture its guard-owned home explicitly; no ambient user-home
+      // lookup is needed to verify that temporary cache writes remain allowed.
+      const { scratch } = JSON.parse(request.args[5]) as { scratch: string };
+      return runValidationCommand({ ...request, args: [...request.args, '--', join(scratch, 'home')] });
+    });
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, prepareValidationWriteGuard, runValidationCommand: runner,
+      stderr: new Capture().writer,
+    }));
+    expect(result.report.validationBaseline.results.map(({ state }) => state)).toEqual(['passed', 'passed', 'passed']);
+    const denied = JSON.parse(readFileSync(join(fixture.project, 'denied.json'), 'utf-8')) as Record<string, string>;
+    expect(Object.keys(denied)).toEqual(['write', 'truncate', 'readonlyTruncate', 'unlink', 'rename', 'link', 'create', 'alias']);
+    for (const code of Object.values(denied)) expect(['EACCES', 'EPERM', 'EXDEV']).toContain(code);
+    expect(readFileSync(runtime, 'utf-8')).toBe(before);
+    expect(readFileSync(join(fixture.project, 'independent-output'), 'utf-8')).toBe(before);
+    const payload = JSON.parse(runner.mock.calls[0][0].args[5]) as { scratch: string };
+    expect(readdirSync(fixture.project)).toContain('denied.json');
+    expect(() => statSync(payload.scratch)).toThrow();
+  });
+
+  it('refuses pre-existing consumed-file hard links before launching a guarded command', async (context) => {
+    requireKernelGuard(context);
+    configureValidation(fixture.project);
+    const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
+    const before = readFileSync(runtime, 'utf-8');
+    linkSync(runtime, join(fixture.project, 'existing-alias'));
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
+    const stderr = new Capture();
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, prepareValidationWriteGuard, runValidationCommand: runner,
+      stdout: new Capture().writer, stderr: stderr.writer,
+    }))).toBe(1);
+    expect(stderr.value).toContain('multiple hard links');
+    expect(runner).not.toHaveBeenCalled();
+    expect(readFileSync(runtime, 'utf-8')).toBe(before);
+  });
+});
 
 describe('ship-preflight previous-run fact', () => {
   it('matches canonical project paths in one runs-root pass and exposes non-clean evidence', async () => {
