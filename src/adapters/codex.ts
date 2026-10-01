@@ -3,10 +3,9 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import type { Adapter, AdapterFailureKind, AgentConfig, RunOpts, RunResult } from './base.js';
+import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
-import { findExecutableOnPath } from './availability.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
 import { CommandActivityTracker } from '../command-activity.js';
@@ -438,15 +437,6 @@ export function codexArgs(): string[] {
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
-function preserveMissingCodexDiagnostic(result: RunResult): void {
-  // execWithStdin currently settles an asynchronous spawn error without its
-  // Error object. Recover only the unambiguous missing-executable case; an
-  // executable that exits silently must keep its original empty output.
-  if (result.exitCode === 1 && result.output === '' && findExecutableOnPath('codex') === undefined) {
-    result.output = 'Command not found: codex. Install the adapter CLI and try again.';
-  }
-}
-
 export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[] {
   if (sessionId !== undefined && !isCodexSessionUuid(sessionId)) {
     throw new Error('Codex session resume requires an explicit UUID');
@@ -483,7 +473,7 @@ export class CodexAdapter implements Adapter {
     let resumeSessionId = opts.resumeSessionId;
     let args = buildCodexExecArgs(prompt, resumeSessionId);
 
-    let result: RunResult | undefined;
+    let result: ExecResult | undefined;
     const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
     try {
       // SURGICAL param-fix retry: when the failure output NAMES a fixable
@@ -514,15 +504,23 @@ export class CodexAdapter implements Adapter {
             timeout_ms: opts.timeout_ms,
             liveLogPath,
             env: { CODEX_HOME: codexHome },
+            captureStreams: true,
             onStdout: (chunk) => commandActivity?.feed(chunk),
             abortSignal: opts.abortSignal,
           });
-          preserveMissingCodexDiagnostic(result);
         } finally {
           commandActivity?.close();
         }
         if (result.exitCode === 0) break;
-        diagnosis = diagnoseAdapterFailure(result.output, result.exitCode);
+        // Machine events and the stderr stream are failure evidence. Agent
+        // messages inside JSONL must not supply a CLI parameter-fix diagnosis.
+        const attemptEvents = parseCodexJsonl(result.stdout ?? result.output);
+        const failureEvidence = attemptEvents.eventCount > 0
+          ? [attemptEvents.terminalError, result.stderr].filter(Boolean).join('\n')
+          : result.output;
+        diagnosis = result.spawnError && result.exitCode !== 124 && result.exitCode !== 137
+          ? { fix: 'none', friendly: `Could not launch Codex: ${result.spawnError.message}. Check the executable, its interpreter and working directory ${result.spawnError.cwd}.`, matched: result.spawnError.code ?? 'spawn error' }
+          : diagnoseAdapterFailure(failureEvidence, result.exitCode);
         if (diagnosis.fix === 'none' || applied.has(diagnosis.fix) || applied.size >= 2) break;
         applied.add(diagnosis.fix);
         if (diagnosis.fix === 'drop_effort') rememberCodexUnsupportedEffort(opts.runDir, capabilityIdentity);
@@ -538,7 +536,7 @@ export class CodexAdapter implements Adapter {
       }
       if (result.exitCode !== 0 && diagnosis.friendly) result.friendlyError = diagnosis.friendly;
       const rawOutput = result.output;
-      const parsed = parseCodexJsonl(rawOutput, opts.workDir);
+      const parsed = parseCodexJsonl(result.stdout ?? rawOutput, opts.workDir);
       const tokens = parsed.eventCount > 0
         ? { tokens_in: parsed.tokens_in, tokens_out: parsed.tokens_out }
         : parseTokens(rawOutput);
@@ -561,20 +559,29 @@ export class CodexAdapter implements Adapter {
       } else {
         result.writeAttribution = 'unknown';
       }
-      // Return the agent's final message plus a structured terminal error, if
-      // present. `codex exec` echoes the entire session (banner + full prompt +
+      // Return the agent's final message plus failure diagnostics from the
+      // terminal event, stderr or launch error. `codex exec` echoes the entire session (banner + full prompt +
       // prior-stage transcripts + token footer). Returning that raw stream
       // would pollute output.md, downstream handoff context, and run summaries. The raw
       // transcript is preserved in live.log for debugging.
       // (Parse tokens above FIRST — cleaning strips the "tokens used" footer.)
-      result.output = parsed.output || extractFinalMessage(rawOutput);
+      result.output = result.spawnError ? rawOutput
+        : parsed.output || extractFinalMessage(result.stdout ?? rawOutput);
+      if (result.exitCode !== 0 && result.stderr?.trim() && !result.output.includes(result.stderr.trim())) {
+        result.output = [result.output, result.stderr.trim()].filter(Boolean).join('\n');
+      }
+      if (result.exitCode === 137 && !result.output.includes('[stage cancelled by control plane]')) {
+        result.output += '\n[stage cancelled by control plane]\n';
+      }
       if (result.exitCode !== 0 && result.exitCode !== 124 && result.exitCode !== 137) {
-        const kind = parsed.eventCount > 0
-          ? parsed.adapterFailureKind
+        const kind = result.spawnError ? undefined : parsed.eventCount > 0
+          ? parsed.adapterFailureKind ?? classifyAdapterFailure(result.stderr ?? '')
           : classifyAdapterFailure(rawOutput);
         result.adapterError = kind !== undefined;
         result.adapterFailureKind = kind;
       }
+      delete result.stdout;
+      delete result.stderr;
       return result;
     } finally {
       // Preserve a successful owner home only when the scheduler proved there

@@ -29,17 +29,40 @@ export function hasRealityChecksHeading(markdown: string): boolean {
 
 export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
   const headings = [...markdown.matchAll(/^## Reality checks[^\n]*(?:\n|$)/gm)];
-  for (const heading of headings.reverse()) {
+  if (headings.length > 1) return [invalidBlockDeclaration('Multiple Reality checks sections are ambiguous')];
+  for (const heading of headings) {
     if (heading.index === undefined) continue;
     const start = heading.index + heading[0].length;
     const rest = markdown.slice(start);
     const next = rest.search(/^##\s/m);
     let body = (next >= 0 ? rest.slice(0, next) : rest).trim();
-    // A planner may explain a complete fenced declaration below the fence.
-    // Parse only the closed YAML block; an unclosed fence or malformed YAML
-    // still reaches the invalid-declaration path below.
-    const fence = body.match(/^```(?:ya?ml)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/);
-    if (fence) body = fence[1];
+    // Explanations may surround one complete declaration. Inspect every fence
+    // before selecting it, so a good block cannot conceal a broken second one.
+    const declarations: string[] = [];
+    const outside: string[] = [];
+    let fence: { marker: string; length: number; language: string; lines: string[] } | undefined;
+    let sawFence = false;
+    for (const line of body.split(/\r?\n/)) {
+      if (fence) {
+        const closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+        if (closing && closing[1][0] === fence.marker && closing[1].length >= fence.length) {
+          if (/^(?:ya?ml)?$/i.test(fence.language)) declarations.push(fence.lines.join('\n'));
+          fence = undefined;
+        } else fence.lines.push(line);
+      } else {
+        const opening = /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)[ \t]*$/.exec(line);
+        if (opening) {
+          sawFence = true;
+          fence = { marker: opening[1][0], length: opening[1].length, language: opening[2], lines: [] };
+        } else outside.push(line);
+      }
+    }
+    if (fence) return [invalidBlockDeclaration('YAML parsing failed: unclosed fenced block in Reality checks')];
+    if (declarations.length > 1 || (declarations.length === 1 && /^\s*checks\s*:/m.test(outside.join('\n')))) {
+      return [invalidBlockDeclaration('Multiple Reality checks declarations are ambiguous')];
+    }
+    if (sawFence && declarations.length === 0) return [invalidBlockDeclaration('YAML parsing failed: no YAML declaration fence in Reality checks')];
+    if (declarations.length === 1) body = declarations[0];
     let parsed: { checks?: unknown } | null = null;
     try {
       parsed = parseYaml(body) as { checks?: unknown } | null;

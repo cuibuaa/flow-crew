@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe('size-independent adapter prompt delivery', () => {
-  it('preserves missing-CLI diagnostics when the stdin-backed Codex spawn fails', async () => {
+  it('preserves launch provenance when the stdin-backed Codex spawn fails', async () => {
     const root = temporaryRoot('flowcrew-prompt-missing-codex-');
     const emptyPath = join(root, 'empty-path');
     const runDir = join(root, 'run');
@@ -79,9 +79,11 @@ describe('size-independent adapter prompt delivery', () => {
 
     expect(result).toMatchObject({
       exitCode: 1,
-      output: 'Command not found: codex. Install the adapter CLI and try again.',
-      friendlyError: 'The adapter CLI is not installed or not on PATH. Run `flowcrew doctor`.',
+      spawnError: { code: 'ENOENT', syscall: 'spawn codex', path: 'codex', cwd: root },
     });
+    expect(result.output).toContain('spawn codex ENOENT');
+    expect(result.output).toContain(root);
+    expect(result.friendlyError).toContain('executable, its interpreter and working directory');
   });
 
   it('delivers a prompt above the OS single-argument limit through every shipped adapter', async () => {

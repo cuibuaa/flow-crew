@@ -43,6 +43,20 @@ export interface RunResult {
   suspensionReason?: 'scope_revision' | 'approval';
   suspensionRequestId?: string;
   suspensionRequestingStageId?: string;
+  /** Original launch failure; ENOENT can name a missing cwd or interpreter too. */
+  spawnError?: {
+    message: string;
+    code?: string;
+    syscall?: string;
+    path?: string;
+    cwd: string;
+  };
+}
+
+/** Raw streams are for adapter parsing, not downstream handoff context. */
+export interface ExecResult extends RunResult {
+  stdout?: string;
+  stderr?: string;
 }
 
 export type CommandLifecyclePhase = 'started' | 'completed';
@@ -130,6 +144,8 @@ export function resolveChildTerminationTiming(
 }
 
 function hardKillChild(child: ChildProcess): void {
+  // A failed spawn has no owned process to signal, even before its error event.
+  if (!child.pid) return;
   try {
     if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
     else child.kill('SIGKILL');
@@ -178,6 +194,10 @@ function createChildTerminator(
   const terminateGracefully = (): void => {
     if (terminationStarted) return;
     terminationStarted = true;
+    if (!child.pid) {
+      completeTermination();
+      return;
+    }
 
     // Node maps signal names to forceful process termination on Windows and
     // cannot signal a Windows process group. Waiting after "SIGTERM" there
@@ -314,13 +334,15 @@ export function execWithStdin(
     liveLogPath?: string;
     env?: NodeJS.ProcessEnv;
     onStdout?: (text: string) => void;
+    /** Opt in when the adapter parses stdout separately from diagnostics. */
+    captureStreams?: boolean;
     /** Invoked once the child is spawned, gives caller a kill handle (e.g. to
      *  force-exit a hung subprocess after detecting a success event in stdout). */
     onChild?: (handles: { kill: () => void }) => void;
     abortSignal?: AbortSignal;
     terminationTiming?: ChildTerminationTiming;
   },
-): Promise<RunResult> {
+): Promise<ExecResult> {
   const start = Date.now();
   if (opts.liveLogPath) {
     mkdirSync(dirname(opts.liveLogPath), { recursive: true });
@@ -366,6 +388,9 @@ export function execWithStdin(
       } catch { /* child already gone; close/error event will settle the promise */ }
     }
     const chunks: Buffer[] = [];
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let spawnError: RunResult['spawnError'];
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
@@ -377,19 +402,38 @@ export function execWithStdin(
           exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
           duration_ms: Date.now() - start,
           timedOut,
+          ...(opts.captureStreams ? {
+            stdout: Buffer.concat(stdout).toString('utf-8'),
+            stderr: Buffer.concat(stderr).toString('utf-8'),
+          } : {}),
+          ...(spawnError ? { spawnError } : {}),
         });
       });
     };
     child.stdout.on('data', (d: Buffer) => {
       chunks.push(d);
+      if (opts.captureStreams) stdout.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
       opts.onStdout?.(d.toString('utf-8'));
     });
     child.stderr.on('data', (d: Buffer) => {
       chunks.push(d);
+      if (opts.captureStreams) stderr.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
     });
     child.on('close', (code) => finish(code));
-    child.on('error', () => finish(1));
+    child.on('error', (error: NodeJS.ErrnoException & { path?: string }) => {
+      spawnError = {
+        message: error.message,
+        code: error.code,
+        syscall: error.syscall,
+        path: error.path,
+        cwd: opts.cwd,
+      };
+      const diagnostic = `\n[process launch failed: ${error.message}; cwd=${JSON.stringify(opts.cwd)}]\n`;
+      chunks.push(Buffer.from(diagnostic));
+      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, diagnostic); } catch { /* non-critical */ }
+      finish(1);
+    });
   });
 }

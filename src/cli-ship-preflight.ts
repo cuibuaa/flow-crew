@@ -457,6 +457,9 @@ def overlaps(first, second):
     shared = os.path.commonpath([first, second])
     return shared == first or shared == second
 
+def fail_scan(error):
+    raise error
+
 try:
     config = json.loads(sys.argv[1])
     if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
@@ -466,23 +469,47 @@ try:
     scratch = os.path.realpath(config['scratch'])
     if overlaps(project, engine) or overlaps(scratch, engine):
         raise RuntimeError('writable roots overlap the consumed engine')
-    # A pre-existing hard link or symlink into an allowed hierarchy can defeat
-    # path separation. Refuse ambiguous consumed identities, never grant them.
-    pending = [os.path.join(engine, 'dist')]
-    visited = set()
-    protected = set()
-    ancestor = os.path.realpath(pending[0])
-    while True:
-        if os.path.exists(ancestor):
-            info = os.stat(ancestor)
-            protected.add((info.st_dev, info.st_ino))
-        parent = os.path.dirname(ancestor)
-        if parent == ancestor:
-            break
-        ancestor = parent
+    # Builds archive unchanged output with hard links. Count actual directory
+    # entries in both protected trees, never symlink/bind views of an entry.
+    roots = [os.path.join(engine, 'dist'), os.path.join(engine, '.cache', 'build-generations')]
+    aliases = {}
+    snapshots = {}
+    alias_directories = set()
+    pending = roots.copy()
     while pending:
         path = pending.pop()
-        if path == os.path.join(engine, 'dist') and not os.path.lexists(path):
+        if path in roots and not os.path.lexists(path):
+            continue
+        physical = os.path.realpath(path)
+        if os.path.commonpath([physical, engine]) != engine or overlaps(physical, project) or overlaps(physical, scratch):
+            raise RuntimeError('protected output aliases an unprotected root: ' + path)
+        info = os.lstat(path)
+        identity = (info.st_dev, info.st_ino)
+        snapshots[path] = (identity, info.st_mode, info.st_nlink, info.st_ctime_ns, info.st_mtime_ns)
+        if stat.S_ISDIR(info.st_mode) and identity not in alias_directories:
+            alias_directories.add(identity)
+            with os.scandir(path) as entries:
+                pending.extend(entry.path for entry in entries)
+        elif stat.S_ISREG(info.st_mode):
+            aliases[identity] = aliases.get(identity, 0) + 1
+    # A writable or unknown hard-link alias can defeat path separation.
+    # Protect generations too: a consumer may still execute an older build.
+    pending = roots.copy()
+    visited = set()
+    protected = set()
+    for root in roots:
+        ancestor = os.path.realpath(root)
+        while True:
+            if os.path.exists(ancestor):
+                info = os.stat(ancestor)
+                protected.add((info.st_dev, info.st_ino))
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+    while pending:
+        path = pending.pop()
+        if path in roots and not os.path.lexists(path):
             continue
         physical = os.path.realpath(path)
         if overlaps(physical, project) or overlaps(physical, scratch):
@@ -495,17 +522,24 @@ try:
                 visited.add(identity)
                 with os.scandir(path) as entries:
                     pending.extend(entry.path for entry in entries)
-        elif stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
-            raise RuntimeError('consumed output has multiple hard links: ' + path)
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink != aliases.get((info.st_dev, info.st_ino), 0):
+            raise RuntimeError('consumed output has unaccounted hard links: ' + path)
     # realpath does not reveal bind mounts. A writable root or nested mount
     # that aliases a protected object/ancestor cannot be admitted either.
-    project_info = os.stat(project)
-    if (project_info.st_dev, project_info.st_ino) in protected:
-        raise RuntimeError('project identity aliases consumed output or an ancestor')
+    for writable in (project, scratch):
+        root_info = os.stat(writable)
+        if (root_info.st_dev, root_info.st_ino) in protected:
+            raise RuntimeError('writable root identity aliases consumed output or an ancestor')
+        for base, dirs, names in os.walk(writable, followlinks=False, onerror=fail_scan):
+            for name in dirs + names:
+                path = os.path.join(base, name)
+                info = os.lstat(path)
+                if not stat.S_ISLNK(info.st_mode) and (info.st_dev, info.st_ino) in protected:
+                    raise RuntimeError('writable tree aliases consumed output: ' + path)
     with open('/proc/self/mountinfo') as mounts:
         for line in mounts:
             mountpoint = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split()[4])
-            if os.path.commonpath([project, mountpoint]) == project:
+            if any(os.path.commonpath([writable, mountpoint]) == writable for writable in (project, scratch)):
                 info = os.stat(mountpoint)
                 if (info.st_dev, info.st_ino) in protected:
                     raise RuntimeError('project mount aliases consumed output or an ancestor: ' + mountpoint)
@@ -532,13 +566,21 @@ try:
     checked(libc.prctl(38, 1, 0, 0, 0), 'PR_SET_NO_NEW_PRIVS')
     checked(libc.syscall(446, ruleset, 0), 'landlock_restrict_self')
     os.close(ruleset)
+    # Refuse if a concurrent build changed the alias/identity snapshot while
+    # confinement was being installed. Descendants cannot create new outside
+    # aliases after this point (REFER and all write rights are handled).
+    for path, previous in snapshots.items():
+        info = os.lstat(path)
+        current = ((info.st_dev, info.st_ino), info.st_mode, info.st_nlink, info.st_ctime_ns, info.st_mtime_ns)
+        if current != previous:
+            raise RuntimeError('protected output changed during confinement preparation: ' + path)
     if sys.argv[2:] == ['--probe']:
         print(json.dumps({'abi': abi}))
         sys.exit(0)
     home = os.path.join(scratch, 'home')
-    os.environ.update(HOME=home, USERPROFILE=home, TMPDIR=os.path.join(scratch, 'tmp'),
+    os.environ.update(HOME=os.environ.get('HOME', home), USERPROFILE=os.environ.get('USERPROFILE', os.environ.get('HOME', home)), TMPDIR=os.path.join(scratch, 'tmp'),
         TMP=os.path.join(scratch, 'tmp'), TEMP=os.path.join(scratch, 'tmp'),
-        XDG_CACHE_HOME=os.path.join(home, '.cache'), XDG_CONFIG_HOME=os.path.join(home, '.config'),
+        XDG_CACHE_HOME=os.path.join(home, '.cache'), XDG_CONFIG_HOME=os.environ.get('XDG_CONFIG_HOME', os.path.join(os.environ.get('HOME', home), '.config')),
         XDG_STATE_HOME=os.path.join(home, '.local', 'state'),
         FC_HOME=os.path.join(home, '.fc'), FLOWCREW_DAEMON_SOCKET=os.path.join(scratch, 'unavailable.sock'),
         npm_config_cache=os.path.join(home, '.npm'), NPM_CONFIG_CACHE=os.path.join(home, '.npm'))
@@ -569,7 +611,7 @@ export function prepareValidationWriteGuard(projectDir: string, packageRoot: str
     return {
       wrap: (request) => ({ ...request, command: 'python3', args: [...args, request.command, ...request.args] }),
       cleanup: () => rmSync(scratch, { recursive: true, force: true }),
-      description: `Linux Landlock ABI ${abi}; writes confined to ${projectDir} and isolated temporary home/cache ${scratch}`,
+      description: `Linux Landlock ABI ${abi}; writes confined to ${projectDir} and isolated temporary cache/state ${scratch}; HOME/configuration reads preserved`,
     };
   } catch (error) {
     rmSync(scratch, { recursive: true, force: true });

@@ -372,7 +372,7 @@ describe('live engine distribution validation boundary', () => {
       findDistConsumers: () => consumers, prepareValidationWriteGuard, runValidationCommand: runner,
       stdout: new Capture().writer, stderr: stderr.writer,
     }))).toBe(1);
-    expect(stderr.value).toContain('multiple hard links');
+    expect(stderr.value).toContain('unaccounted hard links');
     expect(runner).not.toHaveBeenCalled();
     expect(readFileSync(runtime, 'utf-8')).toBe(before);
   });

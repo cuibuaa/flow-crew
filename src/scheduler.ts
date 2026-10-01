@@ -7745,26 +7745,32 @@ interface RealityCheckShellToken {
   value: string;
   authored: string;
   operator: boolean;
+  start: number;
+  end: number;
 }
 
 function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
   const tokens: RealityCheckShellToken[] = [];
   let word = '';
   let authored = '';
-  const flush = (): void => {
-    if (word) tokens.push({ value: word, authored, operator: false });
+  let wordStart: number | undefined;
+  const flush = (end: number): void => {
+    if (wordStart !== undefined) tokens.push({ value: word, authored, operator: false, start: wordStart, end });
     word = '';
     authored = '';
+    wordStart = undefined;
   };
   for (let index = 0; index < script.length;) {
     const character = script[index];
     if (character === '\\' && index + 1 < script.length) {
+      wordStart ??= index;
       authored += character + script[index + 1];
       word += script[index + 1];
       index += 2;
       continue;
     }
     if (character === '"' || character === "'" || character === '`') {
+      wordStart ??= index;
       const quote = character;
       if (quote === '`') {
         word += '$';
@@ -7785,31 +7791,32 @@ function realityCheckShellTokens(script: string): RealityCheckShellToken[] {
       if (index < script.length) index += 1;
       continue;
     }
-    if (character === '#' && !word) {
+    if (character === '#' && wordStart === undefined) {
       while (index < script.length && script[index] !== '\n') index += 1;
       continue;
     }
     if (/\s/.test(character)) {
-      flush();
-      if (character === '\n') tokens.push({ value: '\n', authored: '\n', operator: true });
+      flush(index);
+      if (character === '\n') tokens.push({ value: '\n', authored: '\n', operator: true, start: index, end: index + 1 });
       index += 1;
       continue;
     }
     if (';|&<>()'.includes(character)) {
-      flush();
+      flush(index);
       let operator = character;
       while (index + operator.length < script.length
           && script[index + operator.length] === character
           && operator.length < 3) operator += character;
-      tokens.push({ value: operator, authored: operator, operator: true });
+      tokens.push({ value: operator, authored: operator, operator: true, start: index, end: index + operator.length });
       index += operator.length;
       continue;
     }
+    wordStart ??= index;
     authored += character;
     word += character;
     index += 1;
   }
-  flush();
+  flush(script.length);
   return tokens;
 }
 
@@ -7817,13 +7824,15 @@ function realityCheckShellWithoutHeredocs(script: string): string {
   const shellLines: string[] = [];
   let delimiter: string | undefined;
   let stripTabs = false;
-  for (const line of script.split(/\r?\n/)) {
+  for (const line of script.split('\n')) {
     if (delimiter) {
-      const candidate = stripTabs ? line.replace(/^\t+/, '') : line;
+      const candidate = (stripTabs ? line.replace(/^\t+/, '') : line).replace(/\r$/, '');
       if (candidate === delimiter) {
         delimiter = undefined;
         stripTabs = false;
       }
+      // Keep offsets aligned with the quote scanner over the original script.
+      shellLines.push(line.replace(/[^\r]/g, ' '));
       continue;
     }
     shellLines.push(line);
@@ -7986,12 +7995,52 @@ function realityCheckSedProgramTokenIndexes(tokens: RealityCheckShellToken[]): S
   return programs;
 }
 
+function realityCheckPrintfFormatTokenIndexes(tokens: RealityCheckShellToken[]): Set<number> {
+  const formats = new Set<number>();
+  const boundary = (token: RealityCheckShellToken): boolean =>
+    token.operator && ['\n', ';', '&&', '||', '|', '&', '(', ')'].includes(token.value);
+  let commandStart = true;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (boundary(token)) { commandStart = true; continue; }
+    if (token.operator || !commandStart) continue;
+    if (REALITY_CHECK_SHELL_CONTROL_WORDS.has(token.value)
+        || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) continue;
+    // Only wrappers whose operand grammar is known preserve command position.
+    if (token.value === 'command' || token.value === 'builtin') {
+      while (tokens[index + 1] && ['-p', '--'].includes(tokens[index + 1].value)) index += 1;
+      continue;
+    }
+    if (token.value === 'env') {
+      while (tokens[index + 1] && ['-i', '--ignore-environment', '--'].includes(tokens[index + 1].value)) index += 1;
+      continue;
+    }
+    commandStart = false;
+    if (token.value.split('/').at(-1) !== 'printf') continue;
+    for (let cursor = index + 1; cursor < tokens.length && !boundary(tokens[cursor]); cursor += 1) {
+      const operand = tokens[cursor];
+      if (operand.operator && ['<', '>', '>>', '<<'].includes(operand.value)) { cursor += 1; continue; }
+      if (operand.operator) continue;
+      if (/^\d+$/.test(operand.value) && tokens[cursor + 1]?.operator
+          && /[<>]/.test(tokens[cursor + 1].value)) continue;
+      if (operand.value === '--') continue;
+      if (operand.value === '-v') { cursor += 1; continue; }
+      if (operand.value.startsWith('-')) break; // unknown options remain conservative
+      formats.add(cursor);
+      break;
+    }
+  }
+  return formats;
+}
+
 function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void {
   // Shell-token scanning deliberately excludes heredoc bodies. Embedded
   // JavaScript property chains are code, while the surrounding shell still
   // carries literal test operands and paths.
   const tokens = realityCheckShellTokens(realityCheckShellWithoutHeredocs(script));
   const sedProgramIndexes = realityCheckSedProgramTokenIndexes(tokens);
+  const printfFormatIndexes = realityCheckPrintfFormatTokenIndexes(tokens);
+  const printfFormats = [...printfFormatIndexes].map((index) => tokens[index]);
   const sedPrograms = new Set<string>();
   for (const index of sedProgramIndexes) {
     const value = tokens[index]?.value;
@@ -8008,17 +8057,22 @@ function realityCheckScriptLiteralPaths(script: string, out: Set<string>): void 
   }
   const scriptWithoutComments = realityCheckScriptWithoutComments(script);
   // Preserve quoted paths (including paths with spaces) while excluding only
-  // operands already identified by command grammar as sed programs.
+  // operands already identified by command grammar as sed programs or printf
+  // formats. Match printf positions, not values: the same text can be a file
+  // operand elsewhere in this script.
   for (const match of scriptWithoutComments.matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'|`([^`\r\n]+)`/g)) {
     const literal = match[1] ?? match[2] ?? match[3] ?? '';
     const tokenLiteral = match[2] === undefined ? literal.replace(/\\(.)/g, '$1') : literal;
-    if (!sedPrograms.has(tokenLiteral)) addRealityCheckLiteralPath(literal, out, 'generic-literal');
+    const printfFormat = printfFormats.some((token) => match.index >= token.start
+      && match.index + match[0].length <= token.end);
+    if (!printfFormat && !sedPrograms.has(tokenLiteral)) addRealityCheckLiteralPath(literal, out, 'generic-literal');
   }
   realityCheckStaticFileArguments(scriptWithoutComments, out);
 
   for (const [index, token] of tokens.entries()) {
     if (!token.operator
         && !sedProgramIndexes.has(index)
+        && !printfFormatIndexes.has(index)
         && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) {
       addRealityCheckLiteralPath(token.value, out, 'generic-literal', token.authored);
     }
