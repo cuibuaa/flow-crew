@@ -116,10 +116,11 @@ function resolveMention(
   mention: string,
   projectDir: string,
   runDir: string,
+  baseDir = projectDir,
 ): string | undefined {
   const cleaned = cleanedMention(mention);
   if (!cleaned || !isGenericPathLexeme(cleaned) || /[*?{}[\]]/.test(cleaned) || !FILE_SUFFIX.test(cleaned)) return undefined;
-  const absolute = isAbsolute(cleaned) ? resolve(cleaned) : resolve(projectDir, cleaned.replace(/^\.\//, ''));
+  const absolute = isAbsolute(cleaned) ? resolve(cleaned) : resolve(baseDir, cleaned.replace(/^\.\//, ''));
   if (!within(projectDir, absolute) && !within(runDir, absolute)) return undefined;
   return absolute;
 }
@@ -613,23 +614,112 @@ function artifactDirectiveClauses(line: string): string[] {
   return clauses;
 }
 
+/** Join only output-list/location continuations, never another paragraph or bullet. */
+function artifactDirectiveLines(text: string): string[] {
+  const lines: string[] = [];
+  let pending = '';
+  let fence: string | undefined;
+  const flush = (): void => {
+    if (pending) lines.push(pending);
+    pending = '';
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
+    if (marker) {
+      flush();
+      if (!fence) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
+      continue;
+    }
+    // Keep prior exact-file enforcement inside fences, but never merge their
+    // lines with prose or each other. Example intent still needs explicit wording.
+    if (fence) { lines.push(line); continue; }
+    if (!line.trim()) { flush(); continue; }
+    const boundary = /^\s*(?:[-*+]\s|\d+[.)]\s|#|>|(?:then\s+|also\s+|finally\s+)?(?:write|create|produce|publish|save|emit|read|run|do)\b)/i.test(line);
+    const continuation = /\b(?:in|under|into|at|to|and)\s*$|,\s*$/i.test(pending)
+      || /^\s*(?:in|under|into|at|to)\s+/i.test(line);
+    if (pending && !boundary && continuation) pending += ` ${line.trim()}`;
+    else { flush(); pending = line; }
+  }
+  flush();
+  return lines;
+}
+
+interface ArtifactMention {
+  mention: string;
+  index: number;
+  end: number;
+}
+
+function artifactMentions(clause: string): ArtifactMention[] {
+  return [...clause.matchAll(PATH_TOKEN)].map((match) => {
+    const mention = cleanedMention(match[1] ?? match[2] ?? match[3] ?? '');
+    const index = match.index + match[0].indexOf(mention);
+    return { mention, index, end: index + mention.length };
+  });
+}
+
+/** Bind an adjacent output list, not later import/update operands in the same clause. */
+function artifactDestinations(
+  clause: string,
+  mentions: readonly ArtifactMention[],
+  projectDir: string,
+  runDir: string,
+): Array<{ path: string; start: number; end: number }> {
+  const destinations: Array<{ path: string; start: number; end: number }> = [];
+  const location = /\b(?:in|under|into|at|to)\s+((?:(?:the|this|current)\s+)?(?:run|project)(?:['’]s)?\s+(?:directory|dir|root)\b|`([^`]+)`|"([^"]+)"|'([^']+)'|((?:\/|\.\.?\/)[A-Za-z0-9_./-]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]*))/gi;
+  for (const match of clause.matchAll(location)) {
+    let path: string;
+    if (/^(?:(?:the|this|current)\s+)?run(?:['’]s)?\s+(?:directory|dir|root)$/i.test(match[1])) {
+      path = resolve(runDir);
+    } else if (/^(?:(?:the|this|current)\s+)?project(?:['’]s)?\s+(?:directory|dir|root)$/i.test(match[1])) {
+      path = resolve(projectDir);
+    } else {
+      const directory = (match[2] ?? match[3] ?? match[4] ?? match[5]).replace(/[.,;:)]+$/, '');
+      if (!directory || FILE_SUFFIX.test(directory) || /[*?{}[\]]/.test(directory)
+        || !isGenericPathLexeme(directory)) continue;
+      path = resolve(projectDir, directory);
+    }
+    const before = mentions.filter((mention) => mention.end <= match.index);
+    if (before.length) {
+      const gap = clause.slice(before[before.length - 1].end, match.index);
+      if (!/\b(?:before|after|with|from|update|import|read|edit|run)\b/i.test(gap)) {
+        destinations.push({ path, start: 0, end: match.index });
+      }
+    } else {
+      const start = match.index + match[0].length;
+      const first = mentions.find((mention) => mention.index >= start);
+      if (!first || !/^[\s,:]*(?:(?:with|including)\s+)?[`"']?$/i.test(clause.slice(start, first.index))) continue;
+      const nextAction = clause.slice(start).match(/(?:,\s*(?:then\s+)?|\b(?:and|then)\s+|\b(?:before|after)\s+)(?:update|updating|read|reading|import|invoke|run|edit|editing|persist|apply)\s+/i);
+      destinations.push({ path, start, end: nextAction ? start + nextAction.index! : clause.length });
+    }
+  }
+  // Conflicting destinations need more grammar than a shared output-list binding.
+  return new Set(destinations.map((destination) => destination.path)).size <= 1 ? destinations : [];
+}
+
 function promptArtifactObligations(
   template: string,
   projectDir: string,
   runDir: string,
 ): StageArtifactObligation[] {
   const obligations: StageArtifactObligation[] = [];
-  const clauses = substitute(template, projectDir, runDir).split(/\r?\n/).flatMap(artifactDirectiveClauses);
+  const clauses = artifactDirectiveLines(substitute(template, projectDir, runDir)).flatMap(artifactDirectiveClauses);
   for (const clause of clauses) {
     const imperative = clause.match(/^\s*(?:[-*]\s*)?(?:(?:then|also|finally)\s+)?(?:write|create|produce|publish|save|emit)\b\s+(.+)$/i);
     if (!imperative || NON_OBLIGATING.test(clause)) continue;
     const artifactClause = imperative[1];
-    for (const mention of pathMentions(artifactClause)) {
-      const mentionIndex = artifactClause.indexOf(mention);
+    const mentions = artifactMentions(artifactClause);
+    const destinations = artifactDestinations(artifactClause, mentions, projectDir, runDir);
+    for (const { mention, index: mentionIndex } of mentions) {
+      const destination = destinations.find((entry) => mentionIndex >= entry.start && mentionIndex < entry.end)?.path;
       const runLocal = mentionIndex >= 0
         && /\bthis run['’]s\s*[`"']?$/i.test(artifactClause.slice(0, mentionIndex));
-      const path = resolveMention(mention, runLocal ? runDir : projectDir, runDir);
-      if (path) obligations.push({ kind: 'prompt_artifact', mention, path, source: 'prompt' });
+      const baseDir = runLocal ? runDir : !/[\\/]/.test(mention) ? destination ?? projectDir : projectDir;
+      const path = resolveMention(mention, projectDir, runDir, baseDir);
+      if (path && (!runLocal || within(runDir, path))) {
+        obligations.push({ kind: 'prompt_artifact', mention, path, source: 'prompt' });
+      }
     }
   }
   return obligations;
