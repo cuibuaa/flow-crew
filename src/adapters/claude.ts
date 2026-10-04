@@ -87,6 +87,12 @@ export class ClaudeAdapter implements Adapter {
       : undefined;
     let result: RunResult;
     try {
+      opts.onInvocationInput?.({
+        systemPrompt: role.prompt,
+        userPrompt: prompt,
+        model: role.model,
+        transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: prompt, appendedSystemPrompt: role.prompt }) },
+      });
       result = await execWithStdin('claude', args, prompt, {
       cwd: opts.workDir,
       timeout_ms: opts.timeout_ms,

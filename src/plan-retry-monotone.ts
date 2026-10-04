@@ -118,14 +118,22 @@ function boundedSlug(value: string): string {
  * retained separately; identity is deliberately tied to the governed object,
  * not to incidental counts or the exact wording of a later validation phase.
  */
+export function planRetryRealityCheckName(detail: string): string | undefined {
+  const match = /^(?:[A-Z][A-Z0-9_]*:\s+)?reality check\s+("(?:\\.|[^"\\])*")/i.exec(detail);
+  if (!match) return undefined;
+  try { return JSON.parse(match[1]) as string; } catch { return undefined; }
+}
+
 export function planRetryRequirement(
   detail: string,
   source: PlanRetryFindingSource = 'admission',
   structuredId?: string,
 ): PlanRetryRequirement {
   if (structuredId) return { id: structuredId, detail, source };
-  const check = /^reality check\s+"([^"]+)"/i.exec(detail);
-  if (check) return { id: `reality-check:${boundedSlug(check[1])}`, detail, source };
+  const check = planRetryRealityCheckName(detail);
+  if (check !== undefined) return { id: `reality-check:${boundedSlug(check)}`, detail, source };
+  const artifactStage = /^ARTIFACT_[A-Z_]+:\s+([a-z][a-z0-9_]*)\./i.exec(detail);
+  if (artifactStage) return {id:`stage:${boundedSlug(artifactStage[1])}:artifact_contract`,detail,source};
   const terminalPath = /^terminal_states path\s+(.+?):/i.exec(detail);
   if (terminalPath) return { id: `terminal-owner:${boundedSlug(terminalPath[1])}`, detail, source };
   const criterion = /^criterion\s+(\S+):/i.exec(detail);
@@ -373,6 +381,11 @@ function implicatedStageFields(requirements: readonly PlanRetryRequirement[]): {
     const match = /^stage:([^:]+)(?::([^:]+))?$/.exec(requirement.id);
     if (!match) continue;
     const current = fields.get(match[1]) ?? new Set<string>();
+    if (match[2] === 'artifact_contract') {
+      current.add('artifact_contract');
+      fields.set(match[1], current);
+      continue;
+    }
     // The diagnostic's field identifies the failing component, but a coherent
     // repair can require adjacent fields on the same stage (for example,
     // separating a terminal writer changes both scope and condition). Other

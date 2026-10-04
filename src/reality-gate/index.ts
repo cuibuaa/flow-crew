@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { REALITY_CHECK_REGISTRY } from './registry.js';
+import { ArtifactReadSchema } from '../artifact-declarations.js';
+import { inspectDeclaredStageReads } from '../declared-artifact-audit.js';
+import type { StageStatus } from '../store.js';
 import type {
   CheckContext,
   CheckDecl,
@@ -100,10 +104,13 @@ function normalizeChecks(checks: unknown[]): CheckDecl[] {
       return invalidDeclaration(position, 'must have a string type', rec.name);
     }
     const params = rec.params && typeof rec.params === 'object' ? rec.params as object : {};
+    const reads = rec.reads === undefined ? undefined : ArtifactReadSchema.array().safeParse(rec.reads);
+    if (reads && !reads.success) return invalidDeclaration(position, `reads must declare exact rooted inputs: ${reads.error.message}`, rec.name);
     return {
       name: rec.name,
       type: rec.type,
       params,
+      ...(reads?.success ? { reads: reads.data } : {}),
       ...(rec.advisory === true ? { advisory: true } : {}),
     };
   });
@@ -146,6 +153,19 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
       continue;
     }
     try {
+      if (decl.reads !== undefined) {
+        let statuses: Record<string, StageStatus> | undefined;
+        if (decl.reads.some((read) => read.source.kind === 'stage' || read.when)) {
+          const run = JSON.parse(readFileSync(join(context.taskDir, 'run.json'), 'utf8')) as { runId?: string; projectDir?: string; stages?: Record<string, StageStatus> };
+          if (run.runId !== basename(context.taskDir) || !run.projectDir || resolve(run.projectDir) !== resolve(context.projectDir) || !run.stages) throw new Error('ARTIFACT_READ_FACTS_UNBOUND: reality reads require this run\'s settled producer facts');
+          statuses = run.stages;
+        }
+        const errors = inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses });
+        if (errors.length) {
+          results.push({ name: decl.name, type: decl.type, pass: false, details: errors.join('; '), ...(decl.advisory === true ? { advisory: true } : {}) });
+          continue;
+        }
+      }
       const { advisory: handlerAdvisory, ...result } = await handler.run(decl.params, context);
       results.push({
         name: decl.name,

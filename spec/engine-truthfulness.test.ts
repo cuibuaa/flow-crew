@@ -1,4 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -72,10 +74,10 @@ function dynamicWorkflow(name: string): { config: WorkflowConfig; yaml: string }
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name,
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -140,7 +142,7 @@ describe('current-attempt truth', () => {
   });
 });
 
-function waitForDashboard(child: ChildProcessWithoutNullStreams): Promise<{ port: number; output: string }> {
+function waitForDashboard(child: ChildProcessByStdio<null, Readable, Readable>): Promise<{ port: number; output: string }> {
   return new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => {
@@ -162,7 +164,7 @@ function waitForDashboard(child: ChildProcessWithoutNullStreams): Promise<{ port
   });
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<{ code: number | null; signal: NodeJS.Signals | null } | null> {
+function waitForExit(child: ChildProcessByStdio<null, Readable, Readable>, timeoutMs: number): Promise<{ code: number | null; signal: NodeJS.Signals | null } | null> {
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -346,10 +348,10 @@ describe('campaign cost honesty', () => {
       '    role: planner',
       '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {
+    const config: WorkflowConfig = {description: '', 
       name: 'p6-replan-cost',
       defaults: { max_iterations: 2, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -369,7 +371,7 @@ describe('campaign cost honesty', () => {
           planCalls++;
           planPrompts.push(prompt);
           const suffix = planCalls === 1 ? 'one' : 'two';
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: work_${suffix}`,
             '    role: coder',
@@ -384,7 +386,7 @@ describe('campaign cost honesty', () => {
             `    dependency_reasons: {work_${suffix}: "verify iteration ${planCalls}"}`,
             '    is_gate: true',
             `    task: verify iteration ${planCalls}`,
-          ].join('\n'));
+          ].join('\n')));
           return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 };
         }
         if (opts.stageId === 'work_one') {
@@ -457,7 +459,7 @@ describe('gate-aware DAG ordering', () => {
         if (opts.stageId === '_summary') return { output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 };
         if (opts.stageId === 'plan') {
           calls.push('plan');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: design_gate',
             '    role: qa',
@@ -479,7 +481,7 @@ describe('gate-aware DAG ordering', () => {
             '    depends_on: [design_gate]',
             '    dependency_reasons: {design_gate: "build only from an accepted design"}',
             '    task: build product',
-          ].join('\n'));
+          ].join('\n')));
           return { output: 'planned', exitCode: 0, duration_ms: 1 };
         }
         if (opts.stageId === 'design_gate') {
@@ -565,7 +567,7 @@ async function runScopeRevisionScenario(input: {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') return { output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 };
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: scope_gate',
           '    role: qa',
@@ -590,7 +592,7 @@ async function runScopeRevisionScenario(input: {
             '    retry_to: [scope_gate]',
             '    task: peer repair',
           ] : []),
-        ].join('\n'));
+        ].join('\n')));
         return { output: 'planned', exitCode: 0, duration_ms: 1 };
       }
       if (opts.stageId === 'scope_gate') {

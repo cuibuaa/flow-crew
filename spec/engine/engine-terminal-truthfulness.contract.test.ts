@@ -1,3 +1,4 @@
+import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Engine terminal truthfulness contracts for budget, integrity, summary, and confirm state.
  * (honesty edges the prior A+ work did not cover). All task-agnostic: no domain field/threshold.
@@ -27,7 +28,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 6', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'research', defaults: { max_iterations: 6 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(): string {
@@ -69,12 +70,12 @@ function loopAdapter(results: number[]): Adapter {
   return {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
-        ].join('\n'));
+        ].join('\n')));
         return ok('planned a round');
       }
       if (opts.stageId === 'measure') {
@@ -155,7 +156,7 @@ describe('rejected research rounds settle their repair before the journal advanc
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           order.push('plan');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: measure',
             '    role: researcher',
@@ -177,7 +178,7 @@ describe('rejected research rounds settle their repair before the journal advanc
             '    scope: [docs/repair_marker.txt]',
             '    retry_to: [audit_round]',
             '    task: repair the rejected round',
-          ].join('\n'));
+          ].join('\n')));
           return ok('planned measured, audited, and repairable work');
         }
         if (opts.stageId === 'measure') {

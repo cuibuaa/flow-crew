@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -76,14 +77,14 @@ async function run(
 
 const dispatch = (id: string, scope = ['docs/task_summary.md']) => ({
   runFiles: {
-    'dispatch.yaml': [
+    'dispatch.yaml': declaredDispatch([
       `- id: ${id}`,
       '  role: coder',
       '  depends_on: [plan]',
       '  dependency_reasons: {plan: "execute the planned terminal work"}',
       `  scope: [${scope.join(', ')}]`,
       '  prompt_template: do the work',
-    ].join('\n') + '\n',
+    ].join('\n') + '\n'),
   },
 });
 

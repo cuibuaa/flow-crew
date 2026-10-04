@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -77,11 +78,11 @@ async function waitForDecision(directory: string): Promise<Record<string, any>> 
 function singleStageWorkflow(input: { gate: boolean; scopePresent: boolean; name: string }): { config: WorkflowConfig; yaml: string } {
   const role = input.gate ? 'qa' : 'coder';
   const scope = input.scopePresent ? ['src/declared.ts'] : undefined;
-  const stage = {
+  const stage = {criterion_refs: [], 
     id: 'subject', role, depends_on: [], prompt_template: 'M3 matrix fixture', skills: [],
     dynamic_dispatch: false, is_gate: input.gate, ...(scope ? { scope } : {}),
   };
-  const config: WorkflowConfig = {
+  const config: WorkflowConfig = {description: '', 
     name: input.name,
     defaults: { max_iterations: 1, max_retries: 0 },
     stages: [stage],
@@ -314,10 +315,10 @@ describe('scheduler-authoritative full-tree enforcement', () => {
         mkdirSync(join(projectDir, file.path, '..'), { recursive: true });
         writeFileSync(join(projectDir, file.path), file.body);
       }
-      const config: WorkflowConfig = {
+      const config: WorkflowConfig = {description: '', 
         name: input.name,
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [{
+        stages: [{criterion_refs: [], 
           id: 'subject', role: 'coder', depends_on: [], prompt_template: 'J8 fixture', skills: [],
           dynamic_dispatch: false, is_gate: false, scope: input.scope,
         }],
@@ -415,10 +416,10 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
     { timeout: 15_000 },
     async (shape) => {
       const role = shape.gate ? 'qa' : 'coder';
-      const config: WorkflowConfig = {
+      const config: WorkflowConfig = {description: '', 
         name: `historical-${shape.stage}`,
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [{
+        stages: [{criterion_refs: [], 
           id: shape.stage, role, depends_on: [], prompt_template: `synthetic shape ${shape.origin}`,
           skills: [], dynamic_dispatch: false, is_gate: shape.gate,
         }],
@@ -494,10 +495,10 @@ describe('rejected digest handoff across planner iterations', () => {
     'publishes one digest and records planner %s on iteration two',
     { timeout: 25_000 },
     async (disposition) => {
-      const config: WorkflowConfig = {
+      const config: WorkflowConfig = {description: '', 
         name: `m3-two-iteration-${disposition}`,
         defaults: { max_iterations: 2, max_retries: 0 },
-        stages: [{
+        stages: [{criterion_refs: [], 
           id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [],
           dynamic_dispatch: true, is_gate: false,
         }],
@@ -516,14 +517,14 @@ describe('rejected digest handoff across planner iterations', () => {
         if (opts.stageId === 'plan') {
           planCalls++;
           if (planCalls === 1) {
-            writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
               'stages:',
               '  - id: work_1', '    role: coder', '    scope: []', '    depends_on: [plan]',
               '    dependency_reasons: {plan: "consume the first planner iteration"}', '    task: produce one rejected scope digest',
               '  - id: review_gate_1', '    role: qa', '    scope: []', '    depends_on: [work_1]',
               '    dependency_reasons: {work_1: "review the first iteration work"}',
               '    is_gate: true', '    task: first iteration gate',
-            ].join('\n'));
+            ].join('\n')));
           } else {
             const inputName = readdirSync(opts.runDir).find((file) => file.startsWith('scope_negotiation_input_'));
             if (!inputName) throw new Error('iteration two did not receive a scope planning input artifact');
@@ -533,7 +534,7 @@ describe('rejected digest handoff across planner iterations', () => {
             expect(prompt).toContain('# Engine-owned unresolved stage obligations');
             expect(prompt).toContain('review_gate_1');
             const scopeLine = disposition === 'resolve' ? `    scope: [${requestedPath}]` : '    scope: []';
-            writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+            writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
               'scope_negotiation:',
               '  defer:',
               ...(disposition === 'defer' ? [`    - ${observedDigest}`] : []),
@@ -543,7 +544,7 @@ describe('rejected digest handoff across planner iterations', () => {
               '  - id: review_gate_2', '    role: qa', '    scope: []', '    depends_on: [work_2]',
               '    dependency_reasons: {work_2: "review the disposition consumer"}',
               '    is_gate: true', '    task: second iteration gate',
-            ].join('\n'));
+            ].join('\n')));
           }
           return { output: `planner iteration ${planCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         }

@@ -37,12 +37,14 @@ import {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   readRunReservation,
+  readRunState,
   resolveRunStatus,
   reserveRun,
   RUN_STATUS,
   runsRoot,
 } from './store.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
+import { reconcileHostInterruptedRun } from './restart-recovery.js';
 import {
   RunCancellationCoordinator,
   type CancellationResult,
@@ -80,6 +82,7 @@ interface BoundRun {
   path: string;
   status: string;
   failureReason?: string;
+  checkpointed?: boolean;
 }
 
 export interface GitAdapter {
@@ -702,6 +705,7 @@ export class Orchestrator {
         runId?: unknown;
         status?: unknown;
         failureReason?: unknown;
+        engineCheckpoint?: unknown;
       };
       if (typeof parsed.status !== 'string') return undefined;
       return {
@@ -709,6 +713,7 @@ export class Orchestrator {
         path,
         status: parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
+        ...(parsed.engineCheckpoint ? { checkpointed: true } : {}),
       };
     } catch {
       return undefined;
@@ -811,6 +816,13 @@ export class Orchestrator {
         + `resume explicitly with flowcrew quick --existing-run-id ${bound.runId}`,
       );
       return { kind: 'stop' };
+    }
+    if (bound.checkpointed && readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
+      const reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId);
+      if (reconciled.recovery?.kind !== 'resumable') {
+        this.failClosed(task, `${leading}${reconciled.failureReason ?? 'RECOVERY_FATE_UNKNOWN: checkpoint could not be reconciled'}`);
+        return { kind: 'stop' };
+      }
     }
     const pid = observed.kind === 'missing' ? '' : ` pid ${observed.pid}`;
     return {

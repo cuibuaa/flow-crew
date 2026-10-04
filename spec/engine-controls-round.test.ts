@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import {
   copyFileSync,
@@ -155,13 +156,14 @@ function inlineManifestCheck(options: {
   ].join('\n');
 }
 
-function checkMarkdown(script: string): string {
+function checkMarkdown(script: string, reads?: unknown[]): string {
   return [
     '## Reality checks',
     '```yaml',
     'checks:',
     '  - name: manifest fields exist',
     '    type: exec-script-exit-zero',
+    ...(reads ? [`    reads: ${JSON.stringify(reads)}`] : []),
     '    params:',
     '      script: |',
     ...script.trimEnd().split('\n').map((line) => `        ${line}`),
@@ -207,10 +209,10 @@ function oneStageWorkflow(name: string, prompt = 'exercise the engine control'):
       `    prompt_template: ${prompt}`,
       '',
     ].join('\n'),
-    config: {
+    config: {description: '', 
       name,
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'subject', role: 'coder', depends_on: [], scope: [],
         prompt_template: prompt, skills: [],
         dynamic_dispatch: false, is_gate: false,
@@ -373,10 +375,10 @@ describe('engine controls round replays', () => {
     const projectDir = join(sandboxRoot, 'problem-1', 'workflow');
     seedEngineProject(projectDir);
     writeJson(join(projectDir, 'output', 'manifest.json'), { artifact: 'generic.summary.v2', records: [] });
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'admission-after-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: 'write the deterministic dispatch and check', skills: [],
         dynamic_dispatch: true, is_gate: false,
@@ -391,12 +393,12 @@ describe('engine controls round replays', () => {
       plan: {
         output: 'planned',
         runFiles: {
-          'dispatch.yaml': [
+          'dispatch.yaml': declaredDispatch([
             '- id: work', '  role: coder', '  depends_on: [plan]',
             '  dependency_reasons: {plan: "execute the admitted construction"}',
             '  scope: []', '  prompt_template: Complete without changing the pre-existing artifact.',
-          ].join('\n'),
-          'reality_checks.md': checkMarkdown(variants[0].script),
+          ].join('\n')),
+          'reality_checks.md': checkMarkdown(variants[0].script,[{id:'manifest',root:'project',path:'output/manifest.json',source:{kind:'input'}}]),
         },
       },
       work: { output: 'work complete' },

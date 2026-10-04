@@ -1,8 +1,12 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
-import { formatDispatchStageSchemaFailure, StageConfigSchema } from '../src/scheduler.js';
+import { formatDispatchStageSchemaFailure, StageConfigSchema, parseDispatchedStageConfig, inspectDispatchAdmission, parseBriefFrontmatter, readGateVerdict } from '../src/scheduler.js';
+import { fcGlobalDir, setFcGlobalDir, createRun, runDir } from '../src/store.js';
+import { inspectRealityChecks } from '../src/reality-check-preflight.js';
+import { parsePlannerPolicySelection, renderPlannerPolicies } from '../src/planner-policies.js';
 
 const PLANNER_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml');
 const BRIEF_CONTRACT_PATH = resolve(import.meta.dirname, '..', 'guide', 'brief-contract.md');
@@ -19,32 +23,8 @@ const REQUIRED_CLAUSES = [
     pattern: /scope: \[<project-relative paths or globs>\]/,
   },
   {
-    id: 'scope-required-for-every-stage',
-    pattern: /Every stage MUST declare `scope`/,
-  },
-  {
-    id: 'writable-gate-scope',
-    pattern: /For a gate, `scope: \[\]` is valid only when its verification is strictly read-only\. If a gate may create or update tests, probes, snapshots, reports, generated outputs, or any other project artifact while verifying, include every such project-relative writable path in that gate's `scope`, so it can complete its first verification attempt without a scope violation\./,
-  },
-  {
-    id: 'terminal-path-final-stage-only',
-    pattern: /Every path declared by the task frontmatter under `terminal_states\.<status>\.paths` MUST be scoped to and written only by the final stage whose success commits that status\. Never put a declared terminal path in a non-final stage's `scope` or instruct a non-final stage to create or modify it: a fresh write commits the terminal status and skips every stage still pending, including verification and repair\./,
-  },
-  {
-    id: 'raw-validation-exit-forbidden',
-    pattern: /A hard Reality-Gate check MUST NOT make its verdict the unprocessed exit status of a project build, test, or lint command\. Compare current failure identities with the recorded validation baseline and its gate criterion, or omit the redundant validation check\./,
-  },
-  {
     id: 'gate-metric-optional-unless-contracted',
     pattern: /A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate\./,
-  },
-  {
-    id: 'missing-contracted-metric-refuses-before-repair',
-    pattern: /A missing required value is an engine refusal before product repair or re-planning, not a defect for a repair stage to chase\./,
-  },
-  {
-    id: 'metric-verdict-consistency-remains-strict',
-    pattern: /The engine rejects `pass:true` when the same attempt's metric says fail; never weaken or route around that self-deception guard\./,
   },
   {
     id: 'durable-gate-report-citation',
@@ -71,10 +51,6 @@ const REQUIRED_CLAUSES = [
     pattern: /add an edge ONLY when the downstream stage has a genuine data dependency/,
   },
   {
-    id: 'one-reason-per-dependency',
-    pattern: /For every explicit `depends_on` entry, `dependency_reasons` MUST contain exactly one matching key whose value is one sentence/,
-  },
-  {
     id: 'temporary-work-under-os-root',
     pattern: /temporary or one-off work product[\s\S]*`os\.tmpdir\(\)` \/ `\$TMPDIR`/,
   },
@@ -88,23 +64,7 @@ const REQUIRED_CLAUSES = [
   },
 ] as const;
 
-const GROUND_TRUTH_MUTATIONS = [
-  {
-    id: 'writable-gate-scope',
-    original: 'include every such project-relative writable path',
-    weakened: 'include whichever project-relative writable paths are convenient',
-  },
-  {
-    id: 'terminal-path-final-stage-only',
-    original: 'written only by the final stage',
-    weakened: 'written by any stage',
-  },
-  {
-    id: 'raw-validation-exit-forbidden',
-    original: 'MUST NOT make its verdict the unprocessed exit status',
-    weakened: 'may make its verdict the unprocessed exit status',
-  },
-] as const;
+
 
 const LINEAR_BY_DEFAULT = [
   /(?:stages|workflow) (?:must|should) (?:form|follow|use) (?:a )?(?:strictly )?linear chain by default/i,
@@ -175,7 +135,8 @@ const FORMER_INSTANCE_ONLY_RULE = [
 function readPlannerPrompt(): string {
   const parsed = parse(readFileSync(PLANNER_PATH, 'utf-8')) as PlannerConfig;
   if (typeof parsed.prompt !== 'string') throw new Error('planner.yaml must contain a string prompt');
-  return parsed.prompt;
+  const defaults = parse(readFileSync(resolve(import.meta.dirname, '..', 'config', 'defaults.yaml'), 'utf-8')) as { planner_policies?: unknown };
+  return parsed.prompt + '\n' + renderPlannerPolicies(parsePlannerPolicySelection(defaults.planner_policies));
 }
 
 function readShipSkill(): string {
@@ -208,6 +169,65 @@ function referenceExamples(prompt: string): string {
   return examples.split('# Runtime Context Handlers', 1)[0];
 }
 
+
+const CORE_GUARDS = [
+  {
+    "id": "scope-required-for-every-stage"
+  },
+  {
+    "id": "writable-gate-scope"
+  },
+  {
+    "id": "terminal-path-final-stage-only"
+  },
+  {
+    "id": "raw-validation-exit-forbidden"
+  },
+  {
+    "id": "missing-contracted-metric-refuses-before-repair"
+  },
+  {
+    "id": "metric-verdict-consistency-remains-strict"
+  },
+  {
+    "id": "one-reason-per-dependency"
+  }
+] as const;
+function verifyCoreGuard(id: string): void {
+  const root = mkdtempSync(join(tmpdir(), 'planner-core-protection-'));
+  const project = join(root, 'project'); mkdirSync(project);
+  const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
+  try {
+    const stage = (id: string, extra = {}) => StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false, id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',artifact_contract:{version:1,produces:[],reads:[]},...extra});
+    if (id === 'scope-required-for-every-stage') {
+      expect(() => parseDispatchedStageConfig({criterion_refs: [], dynamic_dispatch: false, id:'work',role:'coder',depends_on:[],dependency_reasons:{},prompt_template:'Work.'})).toThrow('scope');
+    } else if (id === 'writable-gate-scope') {
+      const gate = stage('gate', {role:'qa',is_gate:true,scope:[],artifact_contract:{version:1,produces:[{id:'probe',root:'project',path:'spec/qa.test.ts'}],reads:[]}});
+      expect(inspectDispatchAdmission({dispatched:[gate],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
+    } else if (id === 'terminal-path-final-stage-only') {
+      const terminalStates = parseBriefFrontmatter('---\nterminal_states:\n  complete:\n    paths: [docs/final.md]\n---\n').terminalStates;
+      const report = inspectDispatchAdmission({dispatched:[stage('first'),stage('second')],baseStages:[],dispatchStageId:'plan',terminalStates});
+      expect(report.pass).toBe(false); expect(report.errors.join(';')).toMatch(/terminal.*owner|owner.*terminal/);
+    } else if (id === 'one-reason-per-dependency') {
+      expect(() => parseDispatchedStageConfig({...stage('reader'),depends_on:['producer'],dependency_reasons:{}})).toThrow('dependency_reasons');
+    } else if (id === 'raw-validation-exit-forbidden') {
+      const report = inspectRealityChecks('Validation may not add a failing test identity.', '## Reality checks\n\x60\x60\x60yaml\nchecks:\n - name: raw status\n   type: exec-script-exit-zero\n   reads: []\n   params: {script: "node validation.mjs"}\n\x60\x60\x60\n', {validationBaseline:{version:1,projectDir:project,discovery:{state:'partial',configPath:join(project,'package.json'),commands:[{role:'test',command:'node',args:['validation.mjs'],display:'node validation.mjs'}],missingRoles:['build','lint']},results:[{role:'test',display:'node validation.mjs',state:'failed',exitCode:1,durationMs:1,output:'',failureCount:1,failureIdentifiers:['known_failure'],failureIdentity:'known'}],gateCriteria:[{role:'test',rule:'no_regression_from_baseline',baselineFailureCount:1,baselineFailureIdentifiers:['known_failure'],description:'No new failures'}]}});
+      expect(report.blockingTierFindings.some((finding)=>finding.code==='hard_check_cannot_pass')).toBe(true);
+    } else {
+      const runId = createRun(project,'fixture','name: fixture\nstages: []\n',['gate']).runId;
+      const directory = runDir(project,runId); mkdirSync(join(directory,'stages/gate'),{recursive:true});
+      writeFileSync(join(directory,'verdict_gate.json'), JSON.stringify({pass:true,reason:'Claimed passing verdict'}));
+      if (id === 'missing-contracted-metric-refuses-before-repair') {
+        writeFileSync(join(directory,'stages/gate/metric.json'),JSON.stringify({hasMetric:false}));
+        expect(readGateVerdict(project,'gate',runId,{metric:'quality',threshold:7,higherIsBetter:true})).toMatchObject({pass:false,reason:expect.stringContaining('missing required numeric gate value')});
+      } else {
+        writeFileSync(join(directory,'stages/gate/metric.json'),JSON.stringify({hasMetric:true,metric:'quality',value:0,threshold:1,pass:false}));
+        expect(readGateVerdict(project,'gate',runId)).toMatchObject({pass:false,reason:expect.stringContaining('metric says fail')});
+      }
+    }
+  } finally { setFcGlobalDir(previous); rmSync(root,{recursive:true,force:true}); }
+}
+
 describe('planner dispatch contract', () => {
   it('names the invalid dispatch field and a repair action', () => {
     const parsed = StageConfigSchema.safeParse({ id: 'work', role: 'coder', scope: 'src/**' });
@@ -223,7 +243,7 @@ describe('planner dispatch contract', () => {
 
   it('requires safe parallel scope, real dependency reasons, and TMPDIR placement', () => {
     expect(contractViolations(readPlannerPrompt())).toEqual([]);
-    expect(readPlannerPrompt()).toMatch(/\n\s*13\. A hard Reality-Gate check MUST NOT make its verdict/);
+    expect(readPlannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
   });
 
   it.each(REQUIRED_CLAUSES)('rejects omission of $id', ({ id, pattern }) => {
@@ -234,11 +254,7 @@ describe('planner dispatch contract', () => {
     expect(contractViolations(withoutClause)).toContain(`missing:${id}`);
   });
 
-  it.each(GROUND_TRUTH_MUTATIONS)('rejects weakening of $id', ({ id, original, weakened }) => {
-    const prompt = readPlannerPrompt();
-    expect(prompt, `fixture setup must find ${id}`).toContain(original);
-    expect(contractViolations(prompt.replace(original, weakened))).toContain(`missing:${id}`);
-  });
+  it.each(CORE_GUARDS)('enforces $id in the core without a planner sentence', ({ id }) => { verifyCoreGuard(id); });
 
   it.each([
     'Stages should form a linear chain by default.',

@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -243,8 +244,8 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     ].join('\n');
     return {
       yaml,
-      config: {
-        name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{
+      config: {description: '', 
+        name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{criterion_refs: [], 
           id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture',
           max_retries: maxRetries, skills: [], dynamic_dispatch: false, is_gate: false,
         }],
@@ -261,10 +262,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       '  - id: audit_gate', '    role: qa', '    scope: []', '    depends_on: [ordinary]',
       '    dependency_reasons: {ordinary: "audit the implementation"}', '    is_gate: true', '    prompt_template: gate fixture',
     ].join('\n');
-    const config: WorkflowConfig = {
+    const config: WorkflowConfig = {description: '', 
       name: 'e9-scope-gate', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-        { id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture', skills: [], dynamic_dispatch: false, is_gate: false },
-        { id: 'audit_gate', role: 'qa', depends_on: ['ordinary'], dependency_reasons: { ordinary: 'audit the implementation' }, scope: [], prompt_template: 'gate fixture', skills: [], dynamic_dispatch: false, is_gate: true },
+        {criterion_refs: [],  id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture', skills: [], dynamic_dispatch: false, is_gate: false },
+        {criterion_refs: [],  id: 'audit_gate', role: 'qa', depends_on: ['ordinary'], dependency_reasons: { ordinary: 'audit the implementation' }, scope: [], prompt_template: 'gate fixture', skills: [], dynamic_dispatch: false, is_gate: true },
       ],
     };
     const created = prepareRun(config, yaml);
@@ -409,7 +410,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       'name: repair-scope-attempts', 'defaults:', '  max_iterations: 1', '  max_retries: 0',
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = { name: 'repair-scope-attempts', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{
+    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{criterion_refs: [], 
       id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
     }] };
     const created = prepareRun(config, yaml);
@@ -419,14 +420,14 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
           '    dependency_reasons: {plan: "review the planned repair"}', '    is_gate: true', '    task: review',
           '  - id: repair', '    role: repair', '    scope: [src/declared.ts]', '    depends_on: [review_gate]',
           '    dependency_reasons: {review_gate: "repair only after an explicit rejection"}', '    retry_to: [review_gate]',
           '    max_retries: 1', '    task: repair',
-        ].join('\n'));
+        ].join('\n')));
         return { output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       if (opts.stageId === 'review_gate') {
@@ -475,12 +476,12 @@ describe('approval attempt suspension', () => {
       '  - id: downstream', '    role: coder', '    scope: []', '    depends_on: [action]',
       '    dependency_reasons: {action: "consume the approved action"}', '    prompt_template: finish',
     ].join('\n');
-    const config: WorkflowConfig = {
+    const config: WorkflowConfig = {description: '', 
       name: 'approval-suspension',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [
-        { id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
-        { id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
+        {criterion_refs: [],  id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
+        {criterion_refs: [],  id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
       ],
     };
     const created = prepareRun(config, yaml);
@@ -567,7 +568,7 @@ describe('gate verdict facts and repair eligibility', () => {
   it('normalizes retry targets and blocks ordinary dependents on an explicit negative verdict', () => {
     const gate = StageConfigSchema.parse({ id: 'legacy_gate', role: 'qa', prompt_template: 'gate' });
     const repair = StageConfigSchema.parse({ id: 'repair', role: 'coder', prompt_template: 'repair', retry_to: ['legacy_gate'] });
-    const downstream = StageConfigSchema.parse({ id: 'downstream', role: 'coder', prompt_template: 'down', depends_on: ['legacy_gate'] });
+    const downstream = StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false,  id: 'downstream', role: 'coder', prompt_template: 'down', depends_on: ['legacy_gate'] });
     normalizeRetryGateRelationships([gate, repair, downstream]);
     expect(gate.is_gate).toBe(true);
     expect(repair.depends_on).toContain('legacy_gate');
@@ -596,7 +597,7 @@ describe('gate verdict facts and repair eligibility', () => {
     // not the retry loop. Rejection still reaches the fix, through that loop.
     const gate = StageConfigSchema.parse({ id: 'passing_gate', role: 'qa', prompt_template: 'gate' });
     const repair = StageConfigSchema.parse({ id: 'fix', role: 'coder', prompt_template: 'fix', retry_to: ['passing_gate'] });
-    const downstream = StageConfigSchema.parse({ id: 'after', role: 'coder', prompt_template: 'after', depends_on: ['passing_gate'] });
+    const downstream = StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false,  id: 'after', role: 'coder', prompt_template: 'after', depends_on: ['passing_gate'] });
     normalizeRetryGateRelationships([gate, repair, downstream]);
     expect(repair.depends_on).toContain('passing_gate');
 
@@ -621,8 +622,8 @@ describe('gate verdict facts and repair eligibility', () => {
       'name: e9-gates', 'defaults:', '  max_iterations: 1', '  max_retries: 0',
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = { name: 'e9-gates', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-      { id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false },
+    const config: WorkflowConfig = {description: '',  name: 'e9-gates', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
+      {criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false },
     ] };
     const created = prepareRun(config, yaml);
     const calls: string[] = [];
@@ -633,7 +634,7 @@ describe('gate verdict facts and repair eligibility', () => {
       if (summary) return summary;
       calls.push(opts.stageId);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
           '    dependency_reasons: {plan: "review the planned work"}', '    is_gate: true', '    task: review',
@@ -645,7 +646,7 @@ describe('gate verdict facts and repair eligibility', () => {
           '    dependency_reasons: {review_gate: "repair only the rejected review"}', '    retry_to: [review_gate]', '    task: fix review',
           '  - id: fix_release', '    role: repair', '    scope: [src/release.ts]', '    depends_on: [release_gate]',
           '    dependency_reasons: {release_gate: "repair only the rejected release"}', '    retry_to: [release_gate]', '    task: fix release',
-        ].join('\n'));
+        ].join('\n')));
       } else if (opts.stageId === 'review_gate') {
         reviewCalls++;
         writeFileSync(join(opts.runDir, 'verdict_review_gate.json'), JSON.stringify({ pass: reviewCalls > 1, reason: reviewCalls > 1 ? 'fixed' : 'rejected' }));
@@ -743,7 +744,7 @@ describe('bounded timeout negotiation', () => {
     const base = { id: 'work', role: 'coder' };
     expect(() => StageConfigSchema.parse({ ...base, timeout_ms: 100 })).toThrow('config/defaults.yaml::default_timeout_ms');
     expect(() => StageConfigSchema.parse({ ...base, timeout_total_ms: 100 })).toThrow('config/defaults.yaml::default_timeout_ms');
-    expect(() => WorkflowConfigSchema.parse({
+    expect(() => WorkflowConfigSchema.parse({description: '', 
       name: 'removed-default', defaults: { timeout_ms: 100 }, stages: [base],
     })).toThrow('config/defaults.yaml::default_timeout_ms');
   });
@@ -754,7 +755,7 @@ describe('bounded timeout negotiation', () => {
         'name: resume-timeout', 'defaults:', '  max_iterations: 1', '  max_retries: 1', 'stages:',
         '  - id: work', '    role: coder', '    max_retries: 1', '    prompt_template: resume timeout',
       ].join('\n');
-      const config: WorkflowConfig = { name: 'resume-timeout', defaults: { max_iterations: 1, max_retries: 1 }, stages: [{
+      const config: WorkflowConfig = {description: '',  name: 'resume-timeout', defaults: { max_iterations: 1, max_retries: 1 }, stages: [{criterion_refs: [], 
         id: 'work', role: 'coder', depends_on: [], prompt_template: 'resume timeout',
         max_retries: 1, skills: [], dynamic_dispatch: false, is_gate: false,
       }] };
@@ -924,7 +925,7 @@ describe('bounded timeout negotiation', () => {
       '    max_retries: 1',
       '    prompt_template: finish the work',
     ].join('\n');
-    const config = WorkflowConfigSchema.parse({
+    const config = WorkflowConfigSchema.parse({description: '', 
       name: 'retry-after-timeout',
       defaults: { max_iterations: 1, max_retries: 1 },
       stages: [{ id: 'work', role: 'coder', max_retries: 1, prompt_template: 'finish the work' }],
@@ -980,7 +981,7 @@ describe('bounded timeout negotiation', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           '- id: work',
           '  role: coder',
           '  scope: []',
@@ -988,7 +989,7 @@ describe('bounded timeout negotiation', () => {
           '  dependency_reasons: {plan: "Consumes the planner output."}',
           '  max_retries: 0',
           '  prompt_template: finish the dispatched work',
-        ].join('\n'));
+        ].join('\n')));
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       workCalls++;

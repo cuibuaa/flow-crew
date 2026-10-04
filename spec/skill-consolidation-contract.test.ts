@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { inspectBrief } from '../src/brief-preflight.js';
+import { extractBriefCriteria } from '../src/brief-criteria.js';
+import { inspectDispatchAdmission, StageConfigSchema } from '../src/scheduler.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 
@@ -12,12 +14,6 @@ function plannerPrompt(): string {
   ) as { prompt?: unknown };
   if (typeof parsed.prompt !== 'string') throw new Error('planner prompt is not a string');
   return parsed.prompt;
-}
-
-function numberedRule(prompt: string, number: number): string {
-  const rule = new RegExp(`^${number}\\. (.+)$`, 'm').exec(prompt)?.[1];
-  if (!rule) throw new Error(`planner hard rule ${number} is missing`);
-  return rule;
 }
 
 function structuredBrief(body: string): string {
@@ -33,43 +29,26 @@ function structuredBrief(body: string): string {
 }
 
 describe('skill-consolidation release contract', () => {
-  it('makes both ground-truth decisions actionable from the planner prompt alone', () => {
-    const prompt = plannerPrompt();
-    const gateScope = numberedRule(prompt, 6);
-    const terminalPaths = numberedRule(prompt, 12);
-    const criterionTransport = numberedRule(prompt, 14);
-    const terminalOwnership = numberedRule(prompt, 16);
-
-    expect(gateScope).toContain('For a gate, `scope: []` is valid only');
-    expect(gateScope).toContain('strictly read-only');
-    expect(gateScope).toContain('tests, probes, snapshots, reports, generated outputs');
-    expect(gateScope).toContain('every such project-relative writable path');
-    expect(gateScope).toContain('first verification attempt without a scope violation');
-
-    expect(terminalPaths).toContain('`terminal_states.<status>.paths`');
-    expect(terminalPaths).toContain('only by the final stage');
-    expect(terminalPaths).toContain("non-final stage's `scope`");
-    expect(terminalPaths).toContain('create or modify it');
-    expect(terminalPaths).toContain('commits the terminal status');
-    expect(terminalPaths).toContain('skips every stage still pending, including verification and repair');
-    expect(terminalPaths).toContain('Ownership is per declared path');
-    expect(terminalPaths).toContain('different guarded final sink stages');
-    expect(terminalPaths).toContain('round/result producer is never a terminal owner');
-
-    expect(criterionTransport).toContain('criterion assigned to ordinary work MUST also appear on a gate downstream');
-    expect(criterionTransport).toContain('only during terminal materialization');
-    expect(criterionTransport).toContain('needs no impossible post-terminal gate');
-    expect(criterionTransport).toContain('must be an ancestor of those writers');
-
-    expect(terminalOwnership).toContain('Each terminal path has exactly ONE scoped owner');
-    expect(terminalOwnership).toContain('multiple path-specific sinks');
-    expect(terminalOwnership).toContain('validation-only');
-    expect(terminalOwnership).toContain('restores and rejects any durable non-terminal delta');
-    expect(terminalOwnership).toContain('mechanically false on `continue`');
-    expect(terminalOwnership).toContain('`research.terminalPath == <that exact declared path>`');
-    expect(terminalOwnership).toContain('only terminal values the policy emits are `ship` and `stop_ceiling`');
-    expect(terminalOwnership).toContain('do not use run-status aliases such as `shipped` or `ceiling_hit`');
-    expect(terminalOwnership).toContain('Never use `research.decision == continue`');
+  it('enforces write, ownership, criterion and routing protections without numbered planner rules', () => {
+    expect(plannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
+    const stage = (id: string, extra = {}) => StageConfigSchema.parse({
+      id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',
+      artifact_contract:{version:1,produces:[],reads:[]},...extra,
+    });
+    const admit = (stages: ReturnType<typeof stage>[], extra = {}) => inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan',...extra});
+    const writableGate = stage('gate',{role:'qa',is_gate:true,scope:[],artifact_contract:{version:1,produces:[
+      {id:'verdict',root:'run',path:'verdict_gate.json'},{id:'probe',root:'project',path:'spec/probe.test.ts'},
+    ],reads:[]}});
+    expect(admit([writableGate]).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
+    const terminalStates = {complete:{paths:['docs/final.md']}};
+    expect(admit([stage('first'),stage('second')],{terminalStates}).errors.join(';')).toContain('expected exactly one scoped owner, found 2');
+    const criteria = extractBriefCriteria('# Task\n## Acceptance Criteria\n1. The report must preserve independently verified evidence.\n');
+    expect(criteria.criteria.length).toBeGreaterThan(0);
+    const work = stage('work',{criterion_refs:criteria.criteria.map((criterion)=>criterion.id)});
+    const uncovered = admit([work],{criteria});
+    expect(uncovered.pass).toBe(false);
+    expect(uncovered.errors.join(';')).toContain('not assigned to a gate');
+    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.join(';')).toContain('non-research run');
   });
 
   it('retires terminal-path prose inference for level-two sections and declarations', () => {

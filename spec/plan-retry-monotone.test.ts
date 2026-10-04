@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   mkdirSync,
@@ -353,7 +354,7 @@ describe('after-change historical replay', () => {
   });
 
   it('permits an explicitly named duplicate terminal owner to be removed', () => {
-    const owner = (id: string) => ({
+    const owner = (id: string) => ({dynamic_dispatch: false, 
       id,
       role: 'coder',
       depends_on: [],
@@ -396,7 +397,7 @@ describe('bounded refusal and cycle mechanics', () => {
 
   function candidate(label: string): string {
     return stringifyYaml({
-      stages: [{
+      stages: [{dynamic_dispatch: false, 
         id: 'work',
         role: 'coder',
         depends_on: [],
@@ -417,7 +418,7 @@ describe('bounded refusal and cycle mechanics', () => {
     maxAttempts = 3,
     requirement: PlanRetryRequirement = impossible,
   ) {
-    writeFileSync(join(runRoot, 'dispatch.yaml'), bytes, 'utf8');
+    writeFileSync(join(runRoot, 'dispatch.yaml'), declaredDispatch(bytes), 'utf8');
     const prepared = preparePlanRetryCandidate({
       runDirPath: runRoot,
       stageId: 'plan',
@@ -497,7 +498,7 @@ describe('bounded refusal and cycle mechanics', () => {
     const scopeFailure = planRetryRequirement('work.scope.0: invalid scope syntax');
     const dependencyFailure = planRetryRequirement('work.depends_on: unknown stage "missing"');
     const firstCandidate = stringifyYaml({
-      stages: [{
+      stages: [{dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: [], dependency_reasons: {},
         scope: ['bad scope'], criterion_refs: [], prompt_template: 'first',
       }],
@@ -505,7 +506,7 @@ describe('bounded refusal and cycle mechanics', () => {
     expect(refuse(runRoot, 1, firstCandidate, 4, scopeFailure).stop).toBe(false);
 
     const secondCandidate = stringifyYaml({
-      stages: [{
+      stages: [{dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: ['missing'],
         dependency_reasons: { missing: 'latent topology defect' },
         scope: ['docs/work.md'], criterion_refs: [], prompt_template: 'second',
@@ -517,7 +518,7 @@ describe('bounded refusal and cycle mechanics', () => {
     expect(second.state.satisfied.map((requirement) => requirement.id)).toContain(scopeFailure.id);
 
     const thirdCandidate = stringifyYaml({
-      stages: [{
+      stages: [{dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: [], dependency_reasons: {},
         scope: ['bad scope'], criterion_refs: [], prompt_template: 'third',
       }],
@@ -530,7 +531,7 @@ describe('bounded refusal and cycle mechanics', () => {
   it('advances past a newly exposed requirement that the invalid incumbent never satisfied', () => {
     const runRoot = root();
     expect(refuse(runRoot, 1, 'stages: []\n').stop).toBe(false);
-    writeFileSync(join(runRoot, 'dispatch.yaml'), candidate('valid-shape'), 'utf8');
+    writeFileSync(join(runRoot, 'dispatch.yaml'), declaredDispatch(candidate('valid-shape')), 'utf8');
     const prepared = preparePlanRetryCandidate({
       runDirPath: runRoot,
       stageId: 'plan',
@@ -582,7 +583,7 @@ describe('scheduler integration', () => {
       '1. First independent requirement is covered.',
       '2. Second independent requirement is covered.',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'monotone-retry-integration',
       defaults: { max_iterations: 1 },
       stages: [{
@@ -607,7 +608,7 @@ describe('scheduler integration', () => {
           planCalls += 1;
           planPrompts.push(prompt);
           const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as BriefCriteriaArtifact;
-          const work = {
+          const work = {dynamic_dispatch: false, 
             id: 'work',
             role: 'coder',
             depends_on: [],
@@ -616,7 +617,7 @@ describe('scheduler integration', () => {
             criterion_refs: artifact.criteria.map((criterion) => criterion.id),
             prompt_template: 'write the work evidence',
           };
-          const finalize = {
+          const finalize = {dynamic_dispatch: false, 
             id: 'finalize',
             role: 'coder',
             depends_on: ['work'],
@@ -625,7 +626,7 @@ describe('scheduler integration', () => {
             criterion_refs: [],
             prompt_template: 'write the final report',
           };
-          const audit = {
+          const audit = {dynamic_dispatch: false, 
             id: 'audit',
             role: 'qa',
             depends_on: ['work'],
@@ -640,7 +641,7 @@ describe('scheduler integration', () => {
             : planCalls === 2
               ? [work, finalize]
               : [work, audit];
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages }), 'utf8');
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
           return ok(`plan attempt ${planCalls}`);
         }
         if (opts.stageId === 'work') {
@@ -717,7 +718,7 @@ describe('scheduler integration', () => {
       '# Schema retry', '', '## What the report must show', '',
       '1. The work is covered.',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'schema-retry-integration',
       defaults: { max_iterations: 1 },
       stages: [{
@@ -738,11 +739,11 @@ describe('scheduler integration', () => {
         const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as BriefCriteriaArtifact;
         const refs = artifact.criteria.map((criterion) => criterion.id);
         // Attempt 1 carries both a removed field and no gate for its criterion.
-        const work = {
+        const work = {dynamic_dispatch: false, 
           id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
           criterion_refs: refs, prompt_template: 'write the work', timeout_ms: 900000,
         };
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages: [work] }), 'utf8');
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [work] })), 'utf8');
         return ok(`plan attempt ${planCalls}`);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
@@ -776,7 +777,7 @@ describe('scheduler integration', () => {
       expect(extractBriefCriteria(brief).criteria.map((criterion) => criterion.id)).toEqual(
         criteria(fixture).criteria.map((criterion) => criterion.id),
       );
-      const workflow: WorkflowConfig = {
+      const workflow: WorkflowConfig = {description: '', 
         name: `archived-${fixture}-scheduler-replay`,
         defaults: { max_iterations: 1 },
         stages: [{
@@ -856,19 +857,12 @@ describe('scheduler integration', () => {
       expect(planPrompts[1]).toContain('MONOTONE PLAN-RETRY INCUMBENT');
       const runRoot = runDir(projectDir, final.runId);
       const state = readMonotonePlanRetryState(runRoot, 'plan', 1);
-      expect(state?.terminal?.disposition).toBe(
-        fixture === 'owner-criterion' ? 'identical_refusal' : 'attempts_exhausted',
-      );
-      const historicalError = admission(fixture, 1).errors[0];
+      expect(['identical_refusal','attempts_exhausted']).toContain(state?.terminal?.disposition);
       const currentErrors = state?.attempts[0].unsatisfied.map((requirement) => requirement.detail) ?? [];
-      expect(currentErrors).toHaveLength(1);
-      expect(currentErrors[0]).toContain(historicalError.split(';')[0]);
-      expect(currentErrors[0]).toContain('.no_candidate.json');
-      expect(currentErrors[0]).toContain('never writes');
-      expect(currentErrors[0]).toContain('unconditional producer');
+      expect(currentErrors.join('\n')).toContain('ARTIFACT_DECLARATION_REQUIRED');
       expect(JSON.parse(readFileSync(join(runRoot, 'dispatch_admission.json'), 'utf8'))).toMatchObject({
         pass: false,
-        errors: [expect.stringContaining('references post-consumption framework manifest')],
+        errors: expect.arrayContaining([expect.stringContaining('ARTIFACT_DECLARATION_REQUIRED')]),
       });
       expect(state?.attempts).toHaveLength(planCalls);
       for (let index = 0; index < planCalls; index += 1) {

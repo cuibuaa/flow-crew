@@ -2,9 +2,12 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
+import { recordInvocationInput } from './run-state-view.js';
 import {
   resolveRunStatus,
   readRunState,
+  updateRunState,
+  STAGE_STATUS,
   RUN_STATUS,
   runsRoot,
   TERMINAL_STATUSES as STORE_TERMINAL_STATUSES,
@@ -427,13 +430,31 @@ ${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatc
     prompt: systemPrompt,
   };
 
+  const startedAt = new Date().toISOString();
+  const attemptIndex = (state.auxiliaryAttempts?._summary?.length ?? 0) + 1;
+  let invocationIndex = 0;
+  const finish = (result?: import('./adapters/base.js').RunResult, error?: string): void => {
+    updateRunState(projectDir, runId, (current) => {
+      const attempt = current.auxiliaryAttempts?._summary?.find((entry) => entry.index === attemptIndex && entry.startedAt === startedAt);
+      if (attempt) Object.assign(attempt, { status: result?.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED, completedAt: new Date().toISOString(), exitCode: result?.exitCode ?? 1, duration_ms: result?.duration_ms ?? Math.max(0, Date.now() - Date.parse(startedAt)), tokens_in: result?.tokens_in, tokens_out: result?.tokens_out, tokenUsage: result?.tokens_in !== undefined && result.tokens_out !== undefined ? 'known' : 'unknown', error });
+    });
+  };
+  const capture = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
+    recordInvocationInput(runDir, { runId, stageId: '_summary', attemptIndex, attemptStartedAt: startedAt, invocationIndex: ++invocationIndex, boundary, adapter: 'configured-summary-adapter', model: input.model ?? summaryAgent.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, transport: input.transport, resumeSessionId: input.resumeSessionId });
+  };
   try {
+    updateRunState(projectDir, runId, (current) => { current.auxiliaryAttempts ??= {}; current.auxiliaryAttempts._summary ??= []; current.auxiliaryAttempts._summary.push({ index: attemptIndex, startedAt, status: 'running' }); });
+    capture({ systemPrompt: summaryAgent.prompt, userPrompt: prompt }, 'adapter');
     const result = await adapter.run(prompt, summaryAgent, {
       timeout_ms: 30000,
       workDir: projectDir,
       runDir,
       stageId: '_summary',
+      attemptIndex,
+      attemptStartedAt: startedAt,
+      onInvocationInput: (input) => capture(input, 'model'),
     });
+    finish(result);
     if (result.exitCode !== 0 || !result.output.trim()) {
       log.warn({ runId, exitCode: result.exitCode }, 'Narrative generation failed');
       return null;
@@ -445,6 +466,7 @@ ${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatc
     }
     return cleaned;
   } catch (err) {
+    try { finish(undefined, err instanceof Error ? err.message : String(err)); } catch { /* preserve existing optional-summary failure behavior */ }
     log.warn({ runId, err }, 'Narrative generation threw');
     return null;
   }

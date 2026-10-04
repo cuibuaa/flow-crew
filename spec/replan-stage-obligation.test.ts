@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -31,10 +32,10 @@ function workflow(maxIterations: number, dynamicDispatch = true): { config: Work
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'replan-stage-obligation',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan',
         role: 'planner',
         depends_on: [],
@@ -136,9 +137,9 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return result('summary');
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? firstPlan()
-            : passingReplacementPlan());
+            : passingReplacementPlan()));
           return result(`plan ${planCalls}`);
         }
         if (opts.stageId === 'gate_phase4') {
@@ -205,7 +206,7 @@ describe('engine-owned unresolved stage obligations', () => {
                   '    is_gate: true',
                   '    task: accept the fully discharged plan',
                 ].join('\n');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), dispatch);
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatch));
           return result(`plan ${planCalls}`);
         }
         if (opts.stageId === 'gate_phase4') {
@@ -249,7 +250,7 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return result('summary');
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? firstPlan()
             : [
                 'stages:',
@@ -266,7 +267,7 @@ describe('engine-owned unresolved stage obligations', () => {
                 '    scope: []',
                 '    is_gate: true',
                 '    task: accept after discharge',
-              ].join('\n'));
+              ].join('\n')));
           return result(`plan ${planCalls}`);
         }
         if (opts.stageId === 'gate_phase4') {
@@ -358,7 +359,7 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return result('summary');
         adapterCalls++;
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: terminal_writer',
             '    role: builder',
@@ -366,7 +367,7 @@ describe('engine-owned unresolved stage obligations', () => {
             '    dependency_reasons: {plan: "write the sole declared terminal artifact"}',
             '    scope: [docs/explicit-terminal.md]',
             '    task: write the explicit terminal artifact',
-          ].join('\n'));
+          ].join('\n')));
           return result('planned terminal writer');
         }
         expect(opts.stageId).toBe('terminal_writer');

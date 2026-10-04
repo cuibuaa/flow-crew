@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
+import { ArtifactContractSchema, ArtifactPathSchema, inspectArtifactDeclarations, artifactActivation } from './artifact-declarations.js';
+import { resourceLeaseRegistryPath } from './resource-leases.js';
+import { applyPlanRevision, recordAdmittedPlan, type RevisionAdmission } from './plan-revisions.js';
+import { captureEngineCheckpoint, engineGeneration, reconcileHostInterruptedRun } from './restart-recovery.js';
+import { AuditFindingsSchema, buildScopedRepair } from './scoped-audit-repair.js';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { ABORT_SIGNAL_VERSION, type StageAbortSignal } from './abort-signal.js';
 import { loadAdapterByName } from './adapters/loader.js';
@@ -52,6 +57,7 @@ import {
   describeLiveRunOwner,
   findLiveRunOwnerForProject,
   invalidateRunLockCache,
+  inspectRunScheduler,
   isLiveFlowcrewSchedulerForRun,
   parseSchedulerPidMarker,
   releaseLaunchIntent,
@@ -195,6 +201,7 @@ import {
   planRetryPairDigest,
   planRetryPreflightRequirement,
   planRetryRequirement,
+  planRetryRealityCheckName,
   preparePlanRetryCandidate,
   readMonotonePlanRetryState,
   recordPlanRetryAdmission,
@@ -3286,8 +3293,8 @@ function planRetrySatisfiedRequirements(input: {
   }
   const failedCheckNames = new Set((input.preflightFindings ?? []).map((finding) => finding.checkName));
   for (const error of input.report?.errors ?? []) {
-    const match = /^reality check\s+"([^"]+)"/i.exec(error);
-    if (match) failedCheckNames.add(match[1]);
+    const checkName = planRetryRealityCheckName(error);
+    if (checkName !== undefined) failedCheckNames.add(checkName);
   }
   for (const check of parseChecksFromMarkdown(input.checksMarkdown ?? '')) {
     if (!completeAdmissionObserved || check.kind === 'invalid' || failedCheckNames.has(check.name)) continue;
@@ -3831,6 +3838,20 @@ export const StageConfigSchema = z.object({
   retry_to: z.array(z.string()).optional(),
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
   criterion_refs: z.array(z.string()).optional().default([]),
+  /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
+  artifact_contract: ArtifactContractSchema.optional(),
+  resources: z.object({
+    gpu_cards: z.array(z.string().min(1)).default([]),
+    disk: z.array(z.object({
+      root: z.enum(['project', 'run']),
+      path: z.union([z.literal('.'), ArtifactPathSchema]).default('.'),
+      bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      minimum_free_bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
+    }).strict()).default([]),
+  }).strict().superRefine((request, context) => {
+    if (!request.gpu_cards.length && !request.disk.length) context.addIssue({ code: 'custom', message: 'RESOURCE_REQUEST_EMPTY: declare at least one GPU card or disk reservation' });
+    if (new Set(request.gpu_cards).size !== request.gpu_cards.length) context.addIssue({ code: 'custom', path: ['gpu_cards'], message: 'RESOURCE_GPU_DUPLICATE: each card may be requested once' });
+  }).optional(),
 });
 
 const StrictDispatchedStageConfigSchema = StageConfigSchema.extend({
@@ -3882,6 +3903,27 @@ export const WorkflowConfigSchema = z.object({
 
 export type StageConfig = z.infer<typeof StageConfigSchema>;
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
+
+/** The scheduler resolves conditions; every consumer reads the same admitted facts. */
+function refreshRunQueryState(state: StoreState, stages: StageConfig[]): void {
+  const previous = state.queryState ?? { version: 1 as const };
+  state.queryState = {
+    ...previous, version: 1,
+    resourceRegistryPath: resourceLeaseRegistryPath(),
+    artifacts: stages.flatMap((stage) => [
+      ...(stage.artifact_contract?.produces ?? []).map((artifact) => ({
+        id: `${stage.id}:${artifact.id}`, root: artifact.root, path: artifact.path, kind: artifact.kind,
+        stageId: stage.id, role: 'produce' as const, activation: artifactActivation(artifact.when, state.stages),
+        group: stage.artifact_contract?.groups.find((group) => group.members.includes(artifact.id))?.id,
+        source: 'admitted_declaration',
+      })),
+      ...(stage.artifact_contract?.reads ?? []).map((artifact) => ({
+        id: `${stage.id}:${artifact.id}`, root: artifact.root, path: artifact.path, kind: artifact.kind,
+        stageId: stage.id, role: 'read' as const, activation: artifactActivation(artifact.when, state.stages), source: 'admitted_declaration',
+      })),
+    ]),
+  };
+}
 
 export interface SupervisorReplanSignalV2 {
   version: 2;
@@ -7388,6 +7430,8 @@ export function inspectDispatchAdmission(input: {
   criterionDischarges?: CriterionDischargeRecord[];
   declaredInputs?: readonly DeclaredInputWriteBinding[];
   projectDir?: string;
+  runDir?: string;
+  requireArtifactContracts?: boolean;
 }): DispatchAdmissionReport {
   const errors: string[] = [];
   const warnings = parallelScopeAdmissionWarnings(input.dispatched);
@@ -7399,6 +7443,17 @@ export function inspectDispatchAdmission(input: {
   }
   const all = [...input.baseStages, ...input.dispatched];
   const byId = new Map(all.map((stage) => [stage.id, stage]));
+  errors.push(...inspectArtifactDeclarations({
+    stages: all,
+    scopeOwns: (stage, path) => stageScopeOwnsPath(byId.get(stage.id)!, path),
+    projectDir: input.projectDir,
+    runDir: input.runDir,
+  }));
+  // Legacy readers can inspect already-admitted records. New planner proposals
+  // select this format requirement before any text can create an obligation.
+  if (input.requireArtifactContracts) for (const stage of input.dispatched) {
+    if (!stage.artifact_contract) errors.push(`ARTIFACT_DECLARATION_REQUIRED: ${stage.id}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[]} explicitly; prose cannot supply this contract`);
+  }
   const knownIds = new Set(byId.keys());
   const frameworkReservedScopes = new Map<string, string[]>();
   const frameworkManifest = input.research
@@ -8146,6 +8201,9 @@ export function inspectRealityCheckReachability(input: {
   stages: StageConfig[];
   terminalStates?: TerminalStatesConfig;
   research?: ResearchConfig;
+  runDir?: string;
+  /** New admission requires explicit reads; retained legacy records stay readable. */
+  requireDeclaredReads?: boolean;
 }): string[] {
   const researchPaths = input.research ? resolveResearchPaths(input.research) : undefined;
   const optionalResearchResultPath = researchPaths
@@ -8167,10 +8225,43 @@ export function inspectRealityCheckReachability(input: {
   const errors: string[] = [];
   for (const check of parseChecksFromMarkdown(input.markdown)) {
     if (check.kind === 'invalid' || check.advisory === true) continue;
+    if (input.requireDeclaredReads && check.reads === undefined) {
+      errors.push(`REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(check.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`);
+      continue;
+    }
     const paths = new Set<string>();
-    realityCheckLiteralPaths(check.params, paths);
+    if (check.reads !== undefined) {
+      for (const read of check.reads) {
+        if (read.root === 'run') {
+          if (read.source.kind === 'framework') {
+            const expected = read.source.artifact === 'task_brief' ? 'task_brief.md' : 'run.json';
+            if (read.path !== expected) errors.push(`ARTIFACT_FRAMEWORK_READ_INVALID: reality check ${JSON.stringify(check.name)}.${read.id} must read run:${expected}`);
+          } else if (read.source.kind === 'stage') {
+            const source = read.source;
+            const producer = input.stages.find((stage) => stage.id === source.stage);
+            const output = producer?.artifact_contract?.produces.find((artifact) => artifact.id === source.artifact);
+            if (!output || output.root !== 'run' || output.path !== read.path || output.when || producer?.condition || producer?.retry_to?.length || producer?.artifact_contract?.groups.some((group) => group.members.includes(output.id))) errors.push(`ARTIFACT_READ_UNREACHABLE: reality check ${JSON.stringify(check.name)}.${read.id} needs an unconditional matching run artifact producer`);
+          } else if (!input.runDir || !existsSync(join(input.runDir, read.path))) errors.push(`ARTIFACT_INPUT_ABSENT: reality check ${JSON.stringify(check.name)}.${read.id} requires existing run:${read.path}`);
+          continue;
+        }
+        paths.add(read.path);
+        if (read.source.kind === 'stage') {
+          const source = read.source;
+          const producer = input.stages.find((stage) => stage.id === source.stage);
+          const output = producer?.artifact_contract?.produces.find((artifact) => artifact.id === source.artifact);
+          if (!output || output.root !== read.root || output.path !== read.path || output.kind !== read.kind || output.when || producer?.condition || producer?.retry_to?.length || producer?.artifact_contract?.groups.some((group) => group.members.includes(output.id))) errors.push(`ARTIFACT_READ_UNREACHABLE: reality check ${JSON.stringify(check.name)}.${read.id} needs an unconditional matching artifact producer`);
+        } else if (read.source.kind === 'framework') errors.push(`ARTIFACT_FRAMEWORK_READ_INVALID: reality check ${JSON.stringify(check.name)}.${read.id} framework inputs must use the run root`);
+        else if (!existsSync(join(input.projectDir, read.path))) errors.push(`ARTIFACT_INPUT_ABSENT: reality check ${JSON.stringify(check.name)}.${read.id} declares an existing input at ${read.path}`);
+      }
+      // Handler parameters are typed hard reads; arbitrary script strings are not.
+      const handlerPaths = new Set<string>();
+      if (['file-exists-nonempty', 'json-schema-match', 'static-ast-scan', 'variance-floor'].includes(check.type)) realityCheckLiteralPaths(check.params, handlerPaths);
+      for (const path of handlerPaths) if (!paths.has(path)) errors.push(`ARTIFACT_HANDLER_READ_UNDECLARED: reality check ${JSON.stringify(check.name)}.reads must declare handler input project:${path}`);
+    } else realityCheckLiteralPaths(check.params, paths);
     for (const path of paths) {
-      const producers = input.stages.filter((stage) => stageScopeOwnsPath(stage, path));
+      const producers = input.stages.filter((stage) => check.reads !== undefined
+        ? stage.artifact_contract?.produces.some((artifact) => artifact.root === 'project' && artifact.path === path && !artifact.when && !stage.artifact_contract?.groups.some((group) => group.members.includes(artifact.id)))
+        : stageScopeOwnsPath(stage, path));
       if (postConsumptionManifestPath === path && !existsSync(join(input.projectDir, path))) {
         errors.push(`reality check ${JSON.stringify(check.name)} references post-consumption framework manifest ${path}; the scheduler writes it only after the current round's confirmation gates settle. Use scheduler-injected immutable round evidence for current-round confirmation`);
         continue;
@@ -8378,6 +8469,8 @@ function injectDispatchedStages(
     criterionDischarges: validatedCriterionDischarges(runDirPath, state, effectiveCriteria?.briefDigest),
     declaredInputs,
     projectDir,
+    runDir: runDirPath,
+    requireArtifactContracts: true,
   });
   admission.proposalDigest = proposalDigest;
   if (admission.pass) {
@@ -8386,9 +8479,11 @@ function injectDispatchedStages(
       const reachabilityErrors = inspectRealityCheckReachability({
         markdown: readFileSync(checksPath, 'utf-8'),
         projectDir,
+        runDir: runDirPath,
         stages: dispatched,
         terminalStates: state.terminalStates,
         research: state.research,
+        requireDeclaredReads: true,
       });
       if (reachabilityErrors.length > 0) {
         admission.pass = false;
@@ -8466,11 +8561,15 @@ function injectDispatchedStages(
       is_gate: s.is_gate || undefined,
       retry_to: s.retry_to?.length ? s.retry_to : undefined,
       criterion_refs: s.criterion_refs.length ? s.criterion_refs : undefined,
+      artifact_contract: s.artifact_contract,
+      resources: s.resources,
     });
     writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
   } catch { /* best effort */ }
 
   state.dispatchedStages = dispatched;
+  refreshRunQueryState(state, sorted);
+  recordAdmittedPlan(state, sorted, runDirPath, 'Initial dispatch admitted', true, admission);
   // Dispatch topology, reachability, and preflight have now been admitted as
   // one proposal. Only at this boundary may candidate check bytes replace the
   // prior scheduler-owned snapshot.
@@ -9476,6 +9575,11 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
+  if (v.audit_findings !== undefined) {
+    const findings = AuditFindingsSchema.safeParse(v.audit_findings);
+    if (!findings.success) return { pass: false, reason: `AUDIT_FINDINGS_INVALID: ${findings.error.message}` };
+    if (v.pass === true && findings.data.findings.length) return { pass: false, reason: 'AUDIT_FINDINGS_OPEN: a passing verdict cannot contain unresolved structured findings' };
+  }
   if (runId && v.pass === true) {
     const candidate = readResearchGateCandidate(base, stageId);
     if (candidate && (candidate.kind === 'invalid' || candidate.kind === 'absent')) {
@@ -10483,8 +10587,19 @@ export async function runWorkflow(
       throw new Error(`Existing run is unreadable and has no valid reservation: ${runId}`);
     }
     if (hasRunState) {
-      const archived = readRunState(projectDir, runId);
+      let archived = readRunState(projectDir, runId);
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
+      if (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint && !archived.recovery) {
+        const owner = inspectRunScheduler(runId, runDirPath);
+        if (owner.kind !== 'dead' && owner.kind !== 'missing') throw new Error(`RECOVERY_FATE_UNKNOWN: scheduler identity is ${owner.kind}; exclude a live or unverifiable owner before reconciliation`);
+        archived = reconcileHostInterruptedRun(projectDir, runId);
+      }
+      // User cancellation is authoritative for this run. Return before launch
+      // claims, signal cleanup, workflow resets or any new execution; further
+      // work requires a new run, including when recovery observed cancellation.
+      if (archived.status === RUN_STATUS.STOPPED) return archived;
+      if (archived.recovery?.kind === 'blocked') throw new Error(archived.recovery.reason);
+      if (archived.recovery?.kind === 'resumable' && archived.engineCheckpoint?.generation !== engineGeneration()) throw new Error('RECOVERY_GENERATION_MISMATCH: load the interrupted run\'s verified generation before resuming');
     }
     const launchClaim = claimLaunchIntent(projectDir, runId);
     if (!launchClaim.claimed) {
@@ -10681,6 +10796,10 @@ export async function runWorkflow(
   let supervisor: Supervisor | undefined;
   let schedulerHeartbeat: SchedulerHeartbeatHandle | undefined;
   try {
+  const checkpointState = readRunState(projectDir, runId);
+  checkpointState.engineCheckpoint = captureEngineCheckpoint(projectDir, runId);
+  if (checkpointState.recovery?.kind === 'resumable') checkpointState.recovery.kind = 'resuming';
+  writeRunState(projectDir, runId, checkpointState);
   const heartbeatDefaults = loadDefaults(projectDir);
   schedulerHeartbeat = startSchedulerHeartbeat({
     runPath: runDirPath,
@@ -11272,8 +11391,9 @@ export async function runWorkflow(
     writeRunState(projectDir, runId, state);
 
     // Build sorted stages for this iteration: start from base stages
-    const sorted: StageConfig[] = baseStages.map(s => ({ ...s }));
+    const sorted: StageConfig[] = (isResumedIteration && state.planControl ? state.planControl.stages : baseStages).map(s => ({ ...s }));
     const injectedDispatchStages = new Set<string>();
+    if (isResumedIteration && state.planControl) for (const stage of sorted) if (stage.dynamic_dispatch && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) injectedDispatchStages.add(stage.id);
     // Per-plan-stage bounded retry counter for the empty/invalid-dispatch case
     // (FIX 1). Scoped to this iteration's executeIteration call so a transient
     // dispatch flake re-plans up to default_plan_stage_retries times before
@@ -11499,6 +11619,7 @@ export async function runWorkflow(
     if (iterationDispatchedIds.length > 0) {
       const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
       const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
+      state = admitScopedAuditRepairs(sorted, state, outerCheck, projectDir, runId, runDirPath, workflow, roleRegistry);
       log.info({
         event: 'gate_retry_outer_check',
         runId,
@@ -11552,6 +11673,7 @@ export async function runWorkflow(
               );
             }
             const currentRejectedGateIds = currentCheck.rejectedGateIds;
+            state = admitScopedAuditRepairs(sorted, state, currentCheck, projectDir, runId, runDirPath, workflow, roleRegistry);
             const breakConditions = { allPass: currentCheck.allPass };
             const shouldBreakForPassingGates = breakConditions.allPass;
             log.info({
@@ -11746,6 +11868,7 @@ export async function runWorkflow(
 
             // Check gates again
             const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+            state = admitScopedAuditRepairs(sorted, state, recheck, projectDir, runId, runDirPath, workflow, roleRegistry);
             if (recheck.contractRefusals.length > 0) {
               archiveRejectedGateRuntimeFacts(
                 runDirPath,
@@ -14532,6 +14655,9 @@ async function executeSingleStage(
         ? `${buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
+      artifactContract: stage.artifact_contract,
+      artifactStatuses: state.stages,
+      resources: stage.resources,
       timeout_ms: prepared.budgetMs,
       ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
       projectDir,
@@ -14634,6 +14760,136 @@ async function executeSingleStage(
  * Returns the final state for this iteration. The caller (runWorkflow) then handles
  * gate evaluation and decides whether to re-plan.
  */
+function admitScopedAuditRepairs(sorted: StageConfig[], state: StoreState, facts: GateRuntimeFacts, projectDir: string, runId: string, directory: string, workflow: WorkflowConfig, roles: Map<string, { name: string; description: string }>): StoreState {
+  for (const evaluation of facts.evaluations) {
+    if (evaluation.effectiveVerdict?.pass === true) {
+      const findings = state.queryState?.findings ?? [];
+      let changed = false;
+      for (const finding of findings) if (finding.gateId === evaluation.id && finding.status === 'open') { finding.status = 'resolved'; changed = true; }
+      if (changed) writeRunState(projectDir, runId, state);
+      continue;
+    }
+    const gate = sorted.find((stage) => stage.id === evaluation.id);
+    if (!gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE || evaluation.authoredVerdict?.pass !== false) continue;
+    const verdictPath = join(directory, `verdict_${gate.id}.json`);
+    let raw: Record<string, unknown>;
+    try { raw = JSON.parse(readFileSync(verdictPath, 'utf8')) as Record<string, unknown>; } catch { continue; }
+    if (raw.audit_findings === undefined) continue;
+    const parsed = AuditFindingsSchema.safeParse(raw.audit_findings);
+    if (!parsed.success) continue; // readGateVerdict records the precise malformed declaration refusal.
+    state.queryState ??= { version: 1 };
+    state.queryState.findings ??= [];
+    const evidenceDirectory = join(directory, 'audit_findings');
+    mkdirSync(evidenceDirectory, { recursive: true });
+    const evidenceName = `${gate.id}_${createHash('sha256').update(JSON.stringify(raw)).digest('hex')}.json`;
+    const evidencePath = join(evidenceDirectory, evidenceName);
+    if (!existsSync(evidencePath)) atomicWrite(evidencePath, `${JSON.stringify(raw, null, 2)}\n`);
+    for (const finding of parsed.data.findings) {
+      const id = `${gate.id}:${finding.id}`;
+      if (!state.queryState.findings.some((entry) => entry.id === id)) state.queryState.findings.push({ id, status: 'open', paths: finding.paths, gateId: gate.id, reason: finding.reason, criterionIds: finding.criterion_ids, invalidatesPlan: finding.invalidates_plan, evidencePath: `audit_findings/${evidenceName}` });
+    }
+    writeRunState(projectDir, runId, state);
+    if (parsed.data.findings.some((finding) => finding.invalidates_plan)) continue;
+    for (const finding of parsed.data.findings) {
+      const refusal = join(directory, `scoped_repair_refusal_${gate.id}_${finding.id}.json`);
+      if (existsSync(refusal)) continue;
+      try {
+        if (!gate.artifact_contract?.produces.some((artifact) => artifact.root === 'run' && artifact.path === `verdict_${gate.id}.json`)) throw new Error('SCOPED_REPAIR_VERDICT_UNBOUND: authoring gate must declare its exact run verdict output');
+        const repair = buildScopedRepair(gate, finding);
+        if (sorted.some((stage) => stage.id === repair.id)) continue;
+        const revision = state.queryState?.planRevision;
+        const attempt = state.stages[gate.id]?.attempts?.at(-1);
+        if (!revision || !attempt) throw new Error('SCOPED_REPAIR_PLAN_UNBOUND: admitted plan and settled gate execution are required');
+        const result = applyPlanRevision({ projectDir, runId,
+          request: { version: 1, requestId: repair.id, runId, stageId: gate.id, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, baseRevision: revision.revision, baseDigest: revision.digest, reason: `Scoped repair of ${gate.id} finding ${finding.id}: ${finding.reason}`, stages: [...sorted, repair] },
+          parseStage: parseDispatchedStageConfig,
+          admit: (candidate, current) => admitRevisionCandidate(candidate, current, projectDir, directory, roles),
+          scopeContained: (scope, capabilities) => capabilities.includes(scope) || scopeRequestAlreadyAuthorized(parseDeclaredScope(scope), capabilities.map(parseDeclaredScope)),
+        });
+        state = result.state;
+        if (!result.decision.accepted || !result.stages) throw new Error(result.decision.errors.join('; '));
+        sorted.splice(0, sorted.length, ...topoSort(result.stages));
+        refreshRunQueryState(state, sorted);
+        writeRunState(projectDir, runId, state);
+        atomicWrite(join(directory, 'workflow.yaml'), stringifyYaml({ ...workflow, stages: sorted }));
+        recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: gate.id, requestId: repair.id, detail: `admitted scoped repair ${repair.id} revision ${result.decision.revision}`, source: 'scheduler' });
+      } catch (error) {
+        atomicWrite(refusal, `${JSON.stringify({ version: 1, findingId: finding.id, reason: error instanceof Error ? error.message : String(error) }, null, 2)}\n`);
+      }
+    }
+  }
+  return state;
+}
+
+function admitRevisionCandidate(stages: StageConfig[], state: StoreState, projectDir: string, directory: string, roles: Map<string, { name: string; description: string }>): RevisionAdmission {
+  let criteria: BriefCriteriaArtifact | undefined;
+  try { criteria = readBriefCriteriaForAdmission(directory); }
+  catch (error) { return { pass: false, errors: [`PLAN_REVISION_CRITERIA_UNREADABLE: ${String(error)}`] }; }
+  const briefPath = join(directory, 'task_brief.md');
+  const declaredInputs = existsSync(briefPath) ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
+  const report = inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: stages.find((stage) => stage.dynamic_dispatch)?.id ?? 'plan',
+    terminalStates: state.terminalStates, research: state.research,
+    criteria: criteria?.criteria.length === 0 && !state.briefAdmission ? undefined : criteria,
+    criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest), declaredInputs, projectDir, runDir: directory });
+  for (const stage of stages) if (!roles.has(stage.role)) report.errors.push(`PLAN_REVISION_ROLE_UNKNOWN: ${stage.id}.role ${stage.role} is not configured`);
+  const checksPath = join(directory, 'reality_checks.md');
+  if (existsSync(checksPath)) report.errors.push(...inspectRealityCheckReachability({ markdown: readFileSync(checksPath, 'utf8'), projectDir, runDir: directory, stages, terminalStates: state.terminalStates, research: state.research, requireDeclaredReads: true }));
+  report.pass = report.errors.length === 0;
+  return report;
+}
+
+/** A single idle scheduling boundary; rejected amendments leave the current plan intact. */
+function consumePlanRevisions(sorted: StageConfig[], state: StoreState, projectDir: string, runId: string, directory: string, workflow: WorkflowConfig, roles: Map<string, { name: string; description: string }>): StoreState {
+  if (Object.values(state.stages).some((stage) => stage.status === STAGE_STATUS.RUNNING)) return state;
+  if (!state.planControl && sorted.every((stage) => stage.artifact_contract)) {
+    const admission = admitRevisionCandidate(sorted, state, projectDir, directory, roles);
+    if (admission.pass) {
+      refreshRunQueryState(state, sorted);
+      recordAdmittedPlan(state, sorted, directory, 'Initial typed workflow admitted', true, admission);
+      writeRunState(projectDir, runId, state);
+    } else {
+      state.status = 'failed'; state.failureReason = admission.errors.join('; '); state.completedAt = new Date().toISOString();
+      writeRunState(projectDir, runId, state);
+      return state;
+    }
+  }
+  for (const stage of [...sorted]) {
+    if (!/^[a-z][a-z0-9_]{0,19}$/.test(stage.id)) continue;
+    const requestPath = join(directory, 'stages', stage.id, 'plan_revision_request.json');
+    if (!existsSync(requestPath)) continue;
+    const text = readFileSync(requestPath, 'utf8');
+    const digest = createHash('sha256').update(text).digest('hex');
+    const refusalPath = join(directory, 'stages', stage.id, `plan_revision_refusal_${digest}.json`);
+    if (existsSync(refusalPath)) continue;
+    try {
+      const request = JSON.parse(text) as { requestId?: unknown; stageId?: unknown };
+      if (request.stageId !== stage.id) throw new Error('PLAN_REVISION_STAGE_BINDING: request carrier and stageId differ');
+      if (typeof request.requestId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(request.requestId)
+        && existsSync(join(directory, 'stages', stage.id, `plan_revision_decision_${request.requestId}.json`))) continue;
+      const result = applyPlanRevision({ projectDir, runId, request,
+        parseStage: parseDispatchedStageConfig,
+        admit: (candidate, current) => admitRevisionCandidate(candidate, current, projectDir, directory, roles),
+        scopeContained: (scope, capabilities) => capabilities.includes(scope) || scopeRequestAlreadyAuthorized(parseDeclaredScope(scope), capabilities.map(parseDeclaredScope)),
+      });
+      state = result.state;
+      if (result.decision.accepted && result.stages) {
+        sorted.splice(0, sorted.length, ...topoSort(result.stages));
+        refreshRunQueryState(state, sorted);
+        writeRunState(projectDir, runId, state);
+        atomicWrite(join(directory, 'workflow.yaml'), stringifyYaml({ ...workflow, stages: sorted }));
+      }
+      recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: stage.id, requestId: result.decision.requestId, detail: result.decision.accepted ? `admitted revision ${result.decision.revision}: ${state.queryState?.planRevision?.reason}` : result.decision.errors.join('; '), source: 'scheduler' });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      atomicWrite(refusalPath, `${JSON.stringify({ version: 1, accepted: false, requestDigest: digest, reason }, null, 2)}\n`);
+      recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: new Date().toISOString(), stageId: stage.id, detail: reason, source: 'scheduler', level: 'warning' });
+    }
+  }
+  refreshRunQueryState(state, sorted);
+  writeRunState(projectDir, runId, state);
+  return state;
+}
+
 async function executeIteration(
   sorted: StageConfig[],
   initialState: StoreState,
@@ -14655,6 +14911,7 @@ async function executeIteration(
   const technicalRetries = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
     let state = readRunState(projectDir, runId);
+    if (state.status === RUN_STATUS.RUNNING) state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
 
     // Exit if run was cancelled or reached any terminal state externally
     if (isTerminalRunStatus(state.status)) {
@@ -14705,9 +14962,19 @@ async function executeIteration(
             : '';
           const validationBaseline = readRunValidationBaseline(runDirPath)?.baseline
             ?? readShipSetupReadyValidationBaseline(projectDir, exactTaskBrief);
+          const artifactContracts: NonNullable<StageConfig['artifact_contract']>[] = [];
+          try {
+            const document: unknown = parseYaml(preparedPlanRetry.effective.dispatch);
+            const items = Array.isArray(document) ? document : document && typeof document === 'object' && 'stages' in document ? document.stages : undefined;
+            if (Array.isArray(items)) for (const item of items) {
+              const parsed = StageConfigSchema.safeParse(item);
+              if (parsed.success && parsed.data.artifact_contract && !parsed.data.condition && !parsed.data.retry_to?.length) artifactContracts.push(parsed.data.artifact_contract);
+            }
+          } catch { /* Whole-plan admission owns malformed dispatch diagnostics. */ }
           const preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, {
             validationBaseline,
             projectDir,
+            artifactContracts,
           });
           if (preflight.refusingFindings.length > 0) {
             writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'refused');
@@ -15296,6 +15563,9 @@ async function executeIteration(
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
         artifactObligationTemplate: stage.prompt_template,
+        artifactContract: stage.artifact_contract,
+        artifactStatuses: state.stages,
+        resources: stage.resources,
         timeout_ms: prepared.budgetMs,
         ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
         projectDir,
@@ -15544,6 +15814,8 @@ async function executeIteration(
       return state;
     }
     if (parkedDuringExecution || isPausedRunStatus(state.status)) return state;
+    state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
+    if (isTerminalRunStatus(state.status)) return state;
 
     // Scope admission may split one logical ready set into several physical
     // waves. Do not park, terminate, or return a failure between those waves:

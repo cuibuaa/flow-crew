@@ -1,3 +1,4 @@
+import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — loop-engine behavior (mock-adapter driven, no LLM).
  *
@@ -23,7 +24,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'research', defaults: { max_iterations: 12 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(): string {
@@ -64,12 +65,12 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
   const adapter = {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
-        ].join('\n'));
+        ].join('\n')));
         return ok('planned a round');
       }
       if (opts.stageId === 'measure') {
@@ -135,11 +136,11 @@ describe('loop engine — research behavior (mock-driven)', () => {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           plans++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
             '    is_gate: true', '    task: close out',
-          ].join('\n'));
+          ].join('\n')));
           return ok('planned (no round)');
         }
         if (opts.stageId === 'closeout') {

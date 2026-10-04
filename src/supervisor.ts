@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { recordInvocationInput } from './run-state-view.js';
+import { runStateContext } from './run-state-access.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import {
@@ -2788,6 +2790,7 @@ export class Supervisor {
   }
 
   private async assess(prompt: string, trigger: SupervisorEvent): Promise<SupervisorAssessment | null> {
+    prompt += `\n\n${runStateContext(this.projectDir, this.runId)}`;
     const agentConfig: AgentConfig = {
       name: 'supervisor',
       description: 'Workflow supervisor',
@@ -2798,13 +2801,29 @@ export class Supervisor {
     };
 
     const startedAt = new Date().toISOString();
+    if (!this.usage) {
+      const prior = readRunState(this.projectDir, this.runId).supervisor;
+      this.usage = prior ?? { status: 'running', calls: 0, tokens_in: 0, tokens_out: 0, duration_ms: 0, startedAt, attempts: [] };
+      this.persistUsage();
+    }
+    const attemptIndex = (this.usage?.attempts.length ?? 0) + 1;
+    let invocationIndex = 0;
+    const capture = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
+      recordInvocationInput(this.runDir(), { runId: this.runId, stageId: '_supervisor', attemptIndex, attemptStartedAt: startedAt, invocationIndex: ++invocationIndex, boundary,
+        adapter: this.config.adapter || 'configured-supervisor', model: input.model ?? agentConfig.model ?? 'provider-default-unresolved',
+        systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, resumeSessionId: input.resumeSessionId, transport: input.transport });
+    };
     let result: RunResult;
     try {
+      capture({ systemPrompt: agentConfig.prompt, userPrompt: prompt }, 'adapter');
       result = await this.adapter.run(prompt, agentConfig, {
         timeout_ms: 30000,
         workDir: this.projectDir,
         runDir: this.runDir(),
         stageId: '_supervisor',
+        attemptIndex,
+        attemptStartedAt: startedAt,
+        onInvocationInput: (input) => capture(input, 'model'),
       });
     } catch (err) {
       this.recordAssessmentUsage(startedAt, undefined, null, trigger, err instanceof Error ? err.message : String(err));

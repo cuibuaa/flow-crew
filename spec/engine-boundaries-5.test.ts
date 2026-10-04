@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -51,7 +52,7 @@ describe('planning and reality declaration admission', () => {
       '# Many-criterion admission', '## What the report must show',
       ...Array.from({ length: 12 }, (_, index) => `${index + 1}. Requirement ${index + 1} is implemented and checked.`),
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'first-proposal-admission', defaults: { max_iterations: 1 },
       stages: [{ id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: 'Plan the work.',
         dynamic_dispatch: true, is_gate: false, skills: [], criterion_refs: [] }],
@@ -67,14 +68,16 @@ describe('planning and reality declaration admission', () => {
           const refs = criteria.criteria.map((criterion) => criterion.id);
           for (const ref of refs) expect(role.prompt).toContain(ref);
           expect(role.prompt).toContain('Do not set per-stage timeout fields.');
-          write(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages: [
-            { id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
-              prompt_template: 'Write docs/work.md.', criterion_refs: refs },
-            { id: 'gate', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Check the work.' },
+          write(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [
+            {dynamic_dispatch: false,  id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
+              prompt_template: 'Write docs/work.md.', criterion_refs: refs,
+              artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[]} },
+            {dynamic_dispatch: false,  id: 'gate', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Check the work.' },
               scope: [], is_gate: true, prompt_template: 'Check all criteria.', criterion_refs: refs },
-          ] }));
+          ] })));
           write(join(opts.runDir, 'reality_checks.md'), [
             '## Reality checks', '```yaml', 'checks:', '  - name: work artifact',
+            '    reads: [{id: work, root: project, path: docs/work.md, source: {kind: stage, stage: work, artifact: work}}]',
             '    type: file-exists-nonempty', '    params: { paths: [docs/work.md] }', '```',
             'The check observes the produced work artifact.',
           ].join('\n'));
@@ -122,11 +125,11 @@ describe('planning and reality declaration admission', () => {
     const context = plannerCriterionAssignmentContext(brief);
     for (const ref of refs) expect(context).toContain(ref);
     expect(context).toContain('Do not set per-stage timeout fields.');
-    const work = parseDispatchedStageConfig({
+    const work = parseDispatchedStageConfig({dynamic_dispatch: false, 
       id: 'work', role: 'coder', scope: ['src/**'], depends_on: [], dependency_reasons: {},
       prompt_template: 'Implement the brief.', criterion_refs: refs,
     });
-    const gate = parseDispatchedStageConfig({
+    const gate = parseDispatchedStageConfig({dynamic_dispatch: false, 
       id: 'gate', role: 'qa', scope: [], depends_on: ['work'],
       dependency_reasons: { work: 'The gate checks the work output.' },
       is_gate: true, prompt_template: 'Check all criteria.', criterion_refs: refs,
@@ -152,10 +155,10 @@ describe('planning and reality declaration admission', () => {
     const proposal = (prompt: string, retry: boolean) => {
       const covered = prompt.includes('# First-proposal criterion assignments') || retry;
       const stages = [
-        { id: 'work', role: 'coder', scope: ['docs/work.md'], depends_on: [],
+        {dynamic_dispatch: false,  id: 'work', role: 'coder', scope: ['docs/work.md'], depends_on: [],
           dependency_reasons: {}, prompt_template: 'Write docs/work.md.',
           criterion_refs: covered ? refs : [] },
-        { id: 'gate', role: 'qa', scope: [], depends_on: ['work'],
+        {dynamic_dispatch: false,  id: 'gate', role: 'qa', scope: [], depends_on: ['work'],
           dependency_reasons: { work: 'Check the work.' }, is_gate: true,
           prompt_template: 'Check all criteria.', criterion_refs: covered ? refs : [] },
       ];
@@ -178,8 +181,10 @@ describe('planning and reality declaration admission', () => {
     const prechangePrompt = 'Read brief_criteria.json before dispatching and assign criterion_refs.';
     expect(proposal(prechangePrompt, false).every((stage) => 'timeout_ms' in stage)).toBe(true);
     expect(() => proposal(prechangePrompt, false).map(parseDispatchedStageConfig)).toThrow();
-    const missingCoverage = proposal(prechangePrompt, false).map(({ timeout_ms: _timeout, ...stage }) =>
-      parseDispatchedStageConfig(stage));
+    const missingCoverage = proposal(prechangePrompt, false).map((entry) => {
+      const { timeout_ms: _timeout, ...stage } = { timeout_ms: undefined, ...entry };
+      return parseDispatchedStageConfig(stage);
+    });
     expect(inspectDispatchAdmission({ dispatched: missingCoverage, baseStages: [],
       dispatchStageId: 'plan', criteria }).errors).toHaveLength(18);
     expect(admit(prechangePrompt)).toEqual({ attempts: 2, admitted: true, operatorGuidanceNeeded: false });

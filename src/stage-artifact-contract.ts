@@ -10,14 +10,17 @@ import {
 } from './live-constraint-guard.js';
 import { isGenericPathLexeme } from './path-lexeme.js';
 import { discoverProjectValidation } from './project-validation.js';
+import type { ArtifactContract } from './artifact-declarations.js';
+import type { StageStatus } from './store.js';
+import { declaredArtifactPreimages, inspectDeclaredStageArtifactContract } from './declared-artifact-audit.js';
 
-export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target';
+export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target' | 'declared_artifact';
 
 export interface StageArtifactObligation {
   kind: StageArtifactObligationKind;
   mention: string;
   path: string;
-  source: 'prompt' | 'published_report';
+  source: 'prompt' | 'published_report' | 'declaration';
   sourcePath?: string;
 }
 
@@ -30,6 +33,8 @@ export interface StageArtifactContractAudit {
   stageId: string;
   checkedAt: string;
   completionDeferred?: boolean;
+  /** Possible undeclared mentions are diagnostic, never hard authority in v1. */
+  advisories?: Array<{ mention: string; reason: string }>;
   obligations: StageArtifactObligation[];
   producedPromptArtifacts: string[];
   replayExecutions: StageArtifactReplayExecution[];
@@ -68,6 +73,8 @@ export interface StageArtifactContractInput {
   writes?: readonly string[];
   preimages?: readonly StageArtifactContractPreimage[];
   priorProducedPromptArtifacts?: readonly string[];
+  artifactContract?: ArtifactContract;
+  statuses?: Record<string, StageStatus>;
 }
 
 const PATH_TOKEN = /`([^`\s]+)`|((?:\/|\.\.?\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)|(?:^|[\s("'])(([A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]+))(?=$|[\s"',.;:)])/g;
@@ -1121,8 +1128,9 @@ function absoluteWritePath(
 
 /** Capture prompt-owned artifact identities before an attempt starts. */
 export function captureStageArtifactContractPreimages(
-  input: Pick<StageArtifactContractInput, 'template' | 'projectDir' | 'runDir'>,
+  input: Pick<StageArtifactContractInput, 'template' | 'projectDir' | 'runDir' | 'artifactContract'>,
 ): StageArtifactContractPreimage[] {
+  if (input.artifactContract) return declaredArtifactPreimages({ ...input, artifactContract: input.artifactContract });
   return dedupe(promptArtifactObligations(input.template, input.projectDir, input.runDir))
     .map((obligation) => ({
       path: obligation.path,
@@ -1157,6 +1165,7 @@ function producedPromptArtifactPaths(
 
 /** Record durable production at a scope boundary without judging unfinished work. */
 export function captureDeferredStageArtifactContract(input: StageArtifactContractInput): StageArtifactContractAudit {
+  if (input.artifactContract) return inspectDeclaredStageArtifactContract({ ...input, artifactContract: input.artifactContract }, true);
   const obligations = dedupe(promptArtifactObligations(input.template, input.projectDir, input.runDir));
   return {
     version: 1,
@@ -1181,6 +1190,14 @@ export function captureDeferredStageArtifactContract(input: StageArtifactContrac
  * shell.
  */
 export function inspectStageArtifactContract(input: StageArtifactContractInput): StageArtifactContractAudit {
+  if (input.artifactContract) {
+    const audit = inspectDeclaredStageArtifactContract({ ...input, artifactContract: input.artifactContract });
+    const declared = new Set(audit.obligations.map((entry) => entry.path));
+    audit.advisories = promptArtifactObligations(input.template, input.projectDir, input.runDir)
+      .filter((entry) => !declared.has(entry.path))
+      .map((entry) => ({ mention: entry.mention, reason: 'UNDECLARED_PROSE_MENTION: consider adding an explicit produces/read declaration; this mention cannot fail completion' }));
+    return audit;
+  }
   const promptObligations = promptArtifactObligations(
     input.template,
     input.projectDir,

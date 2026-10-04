@@ -1,3 +1,4 @@
+import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — regression contracts for two grounded engine failures
  * (fixed on branch autonomous-loop-refactor):
@@ -40,7 +41,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const planWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: plan-only', 'defaults:', '  max_iterations: 4', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(roles: string[]): string {
@@ -218,11 +219,11 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
           planCalls++;
           if (planCalls === 1) {
             // First plan: emit an EMPTY dispatch (a transient flake).
-            writeFileSync(join(opts.runDir, 'dispatch.yaml'), 'stages: []');
+            writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch('stages: []'));
             return ok('planned (empty — flake)');
           }
           // Retry: emit a valid single stage.
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n')));
           return ok('planned (valid)');
         }
         return ok(`did ${opts.stageId}`);
@@ -244,7 +245,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n')));
           return ok('planned (unknown role)');
         }
         return ok(`did ${opts.stageId}`);
@@ -272,9 +273,9 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
         if (opts.stageId === 'plan') {
           planCalls += 1;
           planPrompts.push(prompt);
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? measuringOwnerDispatch
-            : separatedResearchDispatch);
+            : separatedResearchDispatch));
           return ok(`planned attempt ${planCalls}`);
         }
         if (opts.stageId === 'measure') {
@@ -304,7 +305,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
     expect(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8'))
-      .toBe(measuringOwnerDispatch);
+      .toBe(declaredDispatch(measuringOwnerDispatch));
     const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: string[] };
     expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
@@ -318,7 +319,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
       async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           planCalls += 1;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), measuringOwnerDispatch);
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(measuringOwnerDispatch));
           return ok('repeated unchanged proposal');
         }
         return ok(`did ${opts.stageId}`);
@@ -336,7 +337,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(final.failureReason).toContain('stage:measure:scope');
     for (const attempt of [1, 2]) {
       expect(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8'))
-        .toBe(measuringOwnerDispatch);
+        .toBe(declaredDispatch(measuringOwnerDispatch));
     }
     expect(existsSync(join(rd, 'dispatch_rejections', 'attempt_3'))).toBe(false);
   }, 60_000);
@@ -362,7 +363,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: finalize',
             '    role: qa',
@@ -371,7 +372,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
             '    scope: [docs/final.md, src/generated.ts]',
             '    criterion_refs: []',
             '    prompt_template: validate and write the terminal report',
-          ].join('\n'));
+          ].join('\n')));
           return ok('planned');
         }
         if (opts.stageId === 'finalize') {
@@ -446,7 +447,7 @@ describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n')));
           return ok('planned');
         }
         if (opts.stageId === 'work') {
@@ -487,7 +488,7 @@ describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n')));
           return ok('planned');
         }
         if (opts.stageId === 'work') {

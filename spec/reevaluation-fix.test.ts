@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -53,10 +54,10 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'reevaluation-retry-ledger',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -81,7 +82,7 @@ describe('repair-stage retry ledger reevaluation', () => {
           return { output: '## What was done\n- verified repair retry ledger', exitCode: 0, duration_ms: 1 };
         }
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -98,7 +99,7 @@ describe('repair-stage retry ledger reevaluation', () => {
             '    retry_to: [release_gate]',
             '    max_retries: 1',
             '    task: repair release',
-          ].join('\n'));
+          ].join('\n')));
           return { output: 'planned', exitCode: 0, duration_ms: 10 };
         }
         if (opts.stageId === 'release_gate') {

@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,10 +41,11 @@ interface CheckFixture {
   type: string;
   params: Record<string, unknown>;
   advisory?: boolean;
+  reads?: Array<{id:string; root:'project'|'run'; path:string; source:{kind:'stage'; stage:string; artifact:string}}>;
 }
 
 function checksMarkdown(...checks: CheckFixture[]): string {
-  return ['## Reality checks', '```yaml', stringify({ checks }).trimEnd(), '```'].join('\n');
+  return ['## Reality checks', '```yaml', stringify({ checks: checks.map((check) => ({reads:[],...check})) }).trimEnd(), '```'].join('\n');
 }
 
 function findingCodes(check: CheckFixture, brief = CONTRACT_BRIEF): RealityCheckPreflightCode[] {
@@ -151,6 +153,7 @@ const GOOD_CHECKS: Array<{ label: string; check: CheckFixture }> = [
       name: 'terminal report exists',
       type: 'file-exists-nonempty',
       params: { paths: ['docs/final.md'] },
+      reads: [{id:'report',root:'project',path:'docs/final.md',source:{kind:'stage',stage:'work',artifact:'report'}}],
     },
   },
   {
@@ -934,10 +937,10 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'reality-check-preflight-fixture',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan',
         role: 'planner',
         depends_on: [],
@@ -958,6 +961,10 @@ const WORK_DISPATCH = [
   '  dependency_reasons: {plan: "write the sole declared terminal report"}',
   '  scope: [docs/final.md]',
   '  prompt_template: Write the declared terminal report.',
+  '  artifact_contract:',
+  '    version: 1',
+  '    produces: [{id: report, root: project, path: docs/final.md}]',
+  '    reads: []',
 ].join('\n');
 
 const BAD_CHECK_MARKDOWN = checksMarkdown(BAD_CHECKS[0].check);
@@ -997,7 +1004,7 @@ describe('planner check admission boundary', () => {
 
   it('demotes an intent-dependent finding, surfaces it, and proceeds without a re-plan', async () => {
     const adapter = new ScriptedAdapter({
-      plan: { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': BAD_CHECK_MARKDOWN } },
+      plan: { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': BAD_CHECK_MARKDOWN } },
       work: { projectFiles: { 'docs/final.md': '# Final\n\nEvidence is present.\n' } },
       _summary: { output: '# Summary\n' },
     });
@@ -1043,8 +1050,8 @@ describe('planner check admission boundary', () => {
   it('re-plans a mechanically decidable blocking finding before work', async () => {
     const adapter = new ScriptedAdapter({
       plan: [
-        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': BLOCKING_BAD_CHECK_MARKDOWN } },
-        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': GOOD_CHECK_MARKDOWN } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': BLOCKING_BAD_CHECK_MARKDOWN } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': GOOD_CHECK_MARKDOWN } },
       ],
       work: { projectFiles: { 'docs/final.md': '# Final\n\nEvidence is present.\n' } },
       _summary: { output: '# Summary\n' },
@@ -1098,8 +1105,8 @@ describe('planner check admission boundary', () => {
     }), 'utf-8');
     const adapter = new ScriptedAdapter({
       plan: [
-        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': RAW_RED_BASELINE_CHECK_MARKDOWN } },
-        { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': GOOD_CHECK_MARKDOWN } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': RAW_RED_BASELINE_CHECK_MARKDOWN } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': GOOD_CHECK_MARKDOWN } },
       ],
       work: { projectFiles: { 'docs/final.md': '# Final\n\nEvidence is present.\n' } },
       _summary: { output: '# Summary\n' },
@@ -1128,7 +1135,7 @@ describe('planner check admission boundary', () => {
 
   it('exhausts the bounded planner retry with the lint reason and never runs work', async () => {
     const adapter = new ScriptedAdapter({
-      plan: { runFiles: { 'dispatch.yaml': WORK_DISPATCH, 'reality_checks.md': BLOCKING_BAD_CHECK_MARKDOWN } },
+      plan: { runFiles: { 'dispatch.yaml': declaredDispatch(WORK_DISPATCH), 'reality_checks.md': BLOCKING_BAD_CHECK_MARKDOWN } },
       work: { projectFiles: { 'docs/final.md': '# Final\n' } },
       _summary: { output: '# Summary\n' },
     });

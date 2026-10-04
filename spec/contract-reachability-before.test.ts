@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -187,7 +188,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       '---',
       '# Completed malformed round finish replay',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'malformed-round-finishes',
       defaults: { max_iterations: 2 },
       stages: [{
@@ -298,7 +299,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       '---',
       '# Completed malformed round replay',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'malformed-round-replan',
       defaults: { max_iterations: 2 },
       stages: [{
@@ -325,12 +326,12 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
           planPrompts.push(prompt);
           const stages = planCalls === 1
             ? [
-                {
+                {dynamic_dispatch: false, 
                   id: 'measure', role: 'worker', depends_on: [], dependency_reasons: {},
                   scope: [resultFile, sidecar], criterion_refs: [],
                   prompt_template: 'write exactly one research round artifact',
                 },
-                ...terminalPaths.map((path, index) => ({
+                ...terminalPaths.map((path, index) => ({dynamic_dispatch: false, 
                   id: ['write_ship', 'write_ceiling', 'write_escalation'][index],
                   role: 'worker',
                   depends_on: ['measure'],
@@ -341,7 +342,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
                   prompt_template: `write ${path} only when selected`,
                 })),
               ]
-            : [{
+            : [{dynamic_dispatch: false, 
                 id: `orphan_round_${planCalls}`,
                 role: 'worker',
                 depends_on: [],
@@ -350,7 +351,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
                 criterion_refs: [],
                 prompt_template: `invalid recovery proposal ${planCalls}`,
               }];
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages }), 'utf8');
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
           return { output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 };
         }
         if (opts.stageId === 'measure') {
@@ -543,7 +544,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     const root = temporaryRoot('retry-summary');
     const dispatchPath = join(root, 'dispatch.yaml');
     const dispatches = ['first', 'second', 'third'].map((label) => stringifyYaml({
-      stages: [{
+      stages: [{dynamic_dispatch: false, 
         id: `work_${label}`,
         role: 'worker',
         depends_on: [],
@@ -564,7 +565,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     ];
     let terminalReason = '';
     observations.forEach((unsatisfied, index) => {
-      writeFileSync(dispatchPath, dispatches[index], 'utf8');
+      writeFileSync(dispatchPath, declaredDispatch(dispatches[index]), 'utf8');
       const prepared = preparePlanRetryCandidate({
         runDirPath: root,
         stageId: 'plan',
@@ -607,7 +608,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       '',
       'The required historical evidence artifact is `.fc/runs/prior/evidence.json`.',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'planner-refusal-replay',
       defaults: { max_iterations: 1 },
       stages: [{
@@ -629,7 +630,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
         if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
         if (opts.stageId !== 'plan') return { output: 'unexpected work stage', exitCode: 0, duration_ms: 1 };
         planCalls += 1;
-        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({
+        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({dynamic_dispatch: false, 
           id,
           role: 'worker',
           depends_on: id === 'execute_round' ? ['repair_round', 'write_ship'] : [],
@@ -643,7 +644,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
           criterion_refs: [],
           prompt_template: `produce ${id}`,
         }));
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages }), 'utf8');
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
         writeFileSync(join(opts.runDir, 'reality_checks.md'), [
           '## Reality checks',
           '',
@@ -653,6 +654,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
               name: 'run-history',
               type: 'file-exists-nonempty',
               params: { paths: ['.fc/runs/prior/evidence.json'] },
+              reads: [{id:'history',root:'project',path:'.fc/runs/prior/evidence.json',source:{kind:'input'}}],
             }],
           }).trimEnd(),
           '```',
@@ -692,12 +694,12 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     ))).toHaveLength(3);
     expect(retryState.attempts[1].unsatisfied).toEqual([
       expect.objectContaining({
-        detail: expect.stringContaining('references absent .fc/runs/prior/evidence.json'),
+        id:'reality-check:run-history',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
       }),
     ]);
     expect(retryState.attempts[2].unsatisfied).toEqual([
       expect.objectContaining({
-        detail: expect.stringContaining('references absent .fc/runs/prior/evidence.json'),
+        id:'reality-check:run-history',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
       }),
     ]);
     expect(final.failureReason).toContain('reality-check:run-history');
@@ -1163,7 +1165,7 @@ describe('5 — violation path at durable and human event layers', () => {
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'live-event-path-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [{
@@ -1320,7 +1322,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
     write(join(projectDir, 'reports.md'), '# stale preimage\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'artifact-stale-stage-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [{
@@ -1368,7 +1370,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'artifact-promise-replay',
       defaults: { max_iterations: 1 },
       stages: [
@@ -1473,7 +1475,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
     const replayPath = 'spec/existing-replay.test.ts';
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'artifact-promise-control',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [{

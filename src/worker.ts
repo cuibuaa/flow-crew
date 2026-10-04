@@ -1,12 +1,19 @@
 // Module: worker
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { recordInvocationInput } from './run-state-view.js';
+import { runStateContext } from './run-state-access.js';
+import { inspectDeclaredStageReads } from './declared-artifact-audit.js';
+import { captureResourceLeaseOwner, ResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseHandle } from './resource-leases.js';
+import { engineGeneration } from './restart-recovery.js';
+import { ArtifactPathSchema, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { buildStagePrompt } from './handoff.js';
 import { loadProjectDefaults } from './config.js';
+import { renderPlannerPolicies } from './planner-policies.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
@@ -79,6 +86,11 @@ export function plannerCriterionAssignmentContext(brief: string): string {
 }
 
 export interface StageOpts {
+  artifactContract?: ArtifactContract;
+  artifactStatuses?: Record<string, StageStatus>;
+  resources?: { gpu_cards: string[]; disk: Array<{ root: 'project' | 'run'; path: string; bytes: number; minimum_free_bytes: number }> };
+  /** Trusted engine provider injection; never supplied by a model declaration. */
+  resourceRegistry?: ResourceLeaseRegistry;
   stageId: string;
   role: AgentConfig;
   dependsOn: string[];
@@ -587,19 +599,23 @@ async function runStageWithWriterLease(
     } catch { /* non-critical */ }
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
+    const policies = renderPlannerPolicies(loadProjectDefaults(opts.projectDir).planner_policies ?? []);
+    if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
+  prompt += `\n\n${runStateContext(opts.projectDir, opts.runId)}`;
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
   const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope, [kgPath]);
   const artifactContractPath = join(opts.runDir, 'stages', opts.stageId, 'artifact_contract.json');
-  const artifactContractPreimages = opts.artifactObligationTemplate?.trim()
+  const artifactContractPreimages = opts.artifactContract || opts.artifactObligationTemplate?.trim()
     ? captureStageArtifactContractPreimages({
-        template: opts.artifactObligationTemplate,
+        template: opts.artifactObligationTemplate ?? '',
         projectDir: opts.projectDir,
         runDir: opts.runDir,
+        artifactContract: opts.artifactContract,
       })
     : [];
   let priorProducedPromptArtifacts: string[] = [];
@@ -607,7 +623,7 @@ async function runStageWithWriterLease(
     const prior = JSON.parse(readFileSync(artifactContractPath, 'utf-8')) as {
       producedPromptArtifacts?: unknown;
     };
-    if (Array.isArray(prior.producedPromptArtifacts)) {
+    if (Array.isArray(prior.producedPromptArtifacts) && (!opts.artifactContract || priorAttempt?.status === 'suspended')) {
       priorProducedPromptArtifacts = prior.producedPromptArtifacts
         .filter((path): path is string => typeof path === 'string');
     }
@@ -968,6 +984,7 @@ async function runStageWithWriterLease(
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
   let invocationIndex = 0;
+  let inputRecordIndex = 0;
   let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
@@ -990,6 +1007,25 @@ async function runStageWithWriterLease(
     const effectiveInvocationPrompt = invocationGuidance.length > 0
       ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}`
       : invocationPrompt;
+    const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
+      // The public standalone worker API predates initialized run projections.
+      // Keep it usable, but do not manufacture an authenticated run carrier.
+      if (!existsSync(join(opts.runDir, 'run.json'))) {
+        appendFileSync(liveLogPath, '\nINVOCATION_INPUT_UNAVAILABLE: standalone stage has no initialized run projection.\n');
+        return;
+      }
+      recordInvocationInput(opts.runDir, {
+        runId: opts.runId, stageId: opts.stageId, attemptIndex, attemptStartedAt,
+        invocationIndex: ++inputRecordIndex, boundary,
+        adapter: selectedRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
+        model: input.model ?? selectedRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
+        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: [...deliveredGuidanceIds],
+      });
+    };
+    // input.md remains a compatible latest alias; immutable records carry exact inputs.
+    writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
+    captureInput({ systemPrompt: selectedRole.prompt, userPrompt: effectiveInvocationPrompt,
+      resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined }, 'adapter');
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
     activeInvocationAbortController = invocationAbortController;
@@ -1178,6 +1214,7 @@ async function runStageWithWriterLease(
         preserveSession: opts.preserveSession,
         abortSignal: invocationAbortSignal,
         onCommandLifecycle,
+        onInvocationInput: (input) => captureInput(input, 'model'),
       }).then(
         (value) => {
           liveMonitor?.observePaths(value.writes ?? []);
@@ -1365,10 +1402,45 @@ async function runStageWithWriterLease(
   };
 
   let result: RunResult;
+  let resourceHandle: ResourceLeaseHandle | undefined;
+  const resourceRegistry = opts.resources ? opts.resourceRegistry ?? new ResourceLeaseRegistry({ registryPath: resourceLeaseRegistryPath() }) : undefined;
   // Abort and legacy-extension polling live through adapter backoff and
   // fallback so every phase remains governed by this attempt's one deadline.
   try {
-    result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
+    const preflightErrors = opts.artifactContract ? inspectDeclaredStageReads({ artifactContract: opts.artifactContract, projectDir: opts.projectDir, runDir: opts.runDir, statuses: opts.artifactStatuses }) : [];
+    if (opts.resources && resourceRegistry && preflightErrors.length === 0) {
+      const disk = opts.resources.disk.map((entry) => ({
+        path: entry.path === '.' ? (entry.root === 'run' ? opts.runDir : opts.projectDir)
+          : resolveArtifactLocation({ root: entry.root, path: ArtifactPathSchema.parse(entry.path) }, opts.projectDir, opts.runDir),
+        bytes: entry.bytes, minimumFreeBytes: entry.minimum_free_bytes,
+      }));
+      const request = { version: 1 as const,
+        requestId: `${opts.runId}:${opts.stageId}:${attemptIndex}:${attemptStartedAt}`,
+        owner: captureResourceLeaseOwner({ runId: opts.runId, stageId: opts.stageId, attemptIndex, attemptStartedAt, generation: engineGeneration() ?? 'unpublished-source' }),
+        gpuCards: opts.resources.gpu_cards, disk,
+      };
+      resourceRegistry.reconcile();
+      let decision = resourceRegistry.acquire(request);
+      if (!decision.ok && ['GPU_BUSY', 'DISK_HEADROOM'].includes(decision.code)) {
+        const waitStartedAt = new Date().toISOString();
+        const startedElapsedMs = attemptElapsedMs();
+        recordRunEvent(opts.projectDir, opts.runId, { type: 'resource_lease_wait_started', runId: opts.runId, timestamp: waitStartedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt, waitStartedAt, requestId: request.requestId, detail: `${decision.code}: ${decision.reason}`, source: 'worker' });
+        // Resource contention spends this attempt's existing immutable budget.
+        // Missing providers and malformed requests remain immediate refusals.
+        while (!decision.ok && ['GPU_BUSY', 'DISK_HEADROOM'].includes(decision.code)
+          && await attemptDeadline.boundedSleep(1000, attemptAbortController.signal)) {
+          resourceRegistry.reconcile();
+          decision = resourceRegistry.acquire(request);
+        }
+        recordRunEvent(opts.projectDir, opts.runId, { type: 'resource_lease_wait_finished', runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt, waitStartedAt, waitedMs: Math.round(attemptElapsedMs() - startedElapsedMs), requestId: request.requestId, detail: decision.ok ? `acquired ${decision.handle.leaseId}` : `${decision.code}: ${decision.reason}; wait ended without acquisition`, source: 'worker' });
+      }
+      if (decision.ok) resourceHandle = decision.handle;
+      else preflightErrors.push(`${decision.code}: ${decision.reason}`);
+      recordRunEvent(opts.projectDir, opts.runId, { type: 'resource_lease_decided', runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt, detail: decision.ok ? `acquired ${decision.handle.leaseId}` : preflightErrors.join('; '), source: 'worker' });
+    }
+    result = aggregateAbortSignal.aborted ? { ...cancelledResult(), output: preflightErrors.join('\n') }
+      : preflightErrors.length ? { output: preflightErrors.join('\n'), exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), friendlyError: preflightErrors.join('; ') }
+      : await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
     if (result.exitCode !== 0 && result.adapterError === true) {
@@ -1441,21 +1513,23 @@ async function runStageWithWriterLease(
     attemptDeadline.dispose();
   }
 
-  if (result.exitCode === 0 && opts.artifactObligationTemplate?.trim()) {
+  if (result.exitCode === 0 && (opts.artifactContract || opts.artifactObligationTemplate?.trim())) {
     try {
       const artifactInput = {
         stageId: opts.stageId,
-        template: opts.artifactObligationTemplate,
+        template: opts.artifactObligationTemplate ?? '',
         projectDir: opts.projectDir,
         runDir: opts.runDir,
         writes: result.writes,
         preimages: artifactContractPreimages,
         priorProducedPromptArtifacts,
+        artifactContract: opts.artifactContract,
+        statuses: opts.artifactStatuses,
       };
       const audit = scopeRevisionBoundaryReached
         ? captureDeferredStageArtifactContract(artifactInput)
         : inspectStageArtifactContract(artifactInput);
-      if (audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
+      if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
       if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
         const detail = audit.violations.map((violation) => violation.reason).join('; ');
         result.exitCode = 1;
@@ -1581,6 +1655,10 @@ async function runStageWithWriterLease(
   });
   if (approvalSuspended) {
     final = suspendStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex);
+  }
+  if (resourceHandle && resourceRegistry) {
+    try { resourceRegistry.release(resourceHandle, { kind: 'attempt_finished', runDirectory: opts.runDir }); }
+    catch (error) { recordRunEvent(opts.projectDir, opts.runId, { type: 'resource_lease_retained', runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt, detail: error instanceof Error ? error.message : String(error), source: 'worker', level: 'warning' }); }
   }
   recordRunEvent(opts.projectDir, opts.runId, {
     type: approvalSuspended ? 'approval_attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',

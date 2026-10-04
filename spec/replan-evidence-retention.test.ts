@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,10 +39,10 @@ const workflowYaml = [
   '    dynamic_dispatch: true',
 ].join('\n');
 
-const workflow: WorkflowConfig = {
+const workflow: WorkflowConfig = {description: '', 
   name: 'replan-evidence-retention',
   defaults: { max_iterations: 2, max_retries: 0 },
-  stages: [{
+  stages: [{criterion_refs: [], 
     id: 'plan',
     role: 'planner',
     depends_on: [],
@@ -68,7 +69,7 @@ function writeRoles(): string {
   return agentsDir;
 }
 
-function dispatch(workId: string, gateId: string): string {
+function dispatch(workId: string, gateId: string, declareReport = false): string {
   return [
     'stages:',
     `  - id: ${workId}`,
@@ -76,6 +77,7 @@ function dispatch(workId: string, gateId: string): string {
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "execute this iteration"}',
     '    scope: [docs/final.md]',
+    ...(declareReport ? ['    artifact_contract: {version: 1, produces: [{id: report, root: project, path: docs/final.md}], reads: []}'] : []),
     '    task: produce non-empty implementation evidence',
     `  - id: ${gateId}`,
     '    role: qa',
@@ -96,6 +98,7 @@ function checksMarkdown(check: Record<string, unknown>): string {
   return `## Reality checks\n\n\`\`\`yaml\nchecks:\n${[
     `  - name: ${check.name}`,
     `    type: ${check.type}`,
+    `    reads: ${JSON.stringify(check.reads ?? [])}`,
     ...(params.paths
       ? ['    params:', '      paths:', ...params.paths.map((path) => `        - ${path}`)]
       : [
@@ -122,8 +125,8 @@ describe('outer re-plan evidence retention', () => {
   it('keeps iteration-1 status, attempts, output, and verdict reachable after iteration 2 replaces the DAG', async () => {
     const adapter = new ScriptedAdapter({
       plan: [
-        { output: 'iteration 1 plan', runFiles: { 'dispatch.yaml': dispatch('first_work', 'first_gate') } },
-        { output: 'iteration 2 plan', runFiles: { 'dispatch.yaml': dispatch('replacement_work', 'replacement_gate') } },
+        { output: 'iteration 1 plan', runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('first_work', 'first_gate')) } },
+        { output: 'iteration 2 plan', runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('replacement_work', 'replacement_gate')) } },
       ],
       first_work: { output: 'iteration 1 implementation evidence' },
       first_gate: {
@@ -152,7 +155,7 @@ describe('outer re-plan evidence retention', () => {
       false,
     );
 
-    expect(final.status).toBe('complete');
+    expect(final.status, final.failureReason).toBe('complete');
     expect(final.currentIteration).toBe(2);
     expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(2);
     expect(final.stages).not.toHaveProperty('first_work');
@@ -208,8 +211,8 @@ describe('outer re-plan evidence retention', () => {
   it('keeps same-ID iterations distinct without stale completion or attempt aliases suppressing new work', async () => {
     const adapter = new ScriptedAdapter({
       plan: [
-        { output: 'first shared plan', runFiles: { 'dispatch.yaml': dispatch('shared_work', 'shared_gate') } },
-        { output: 'second shared plan', runFiles: { 'dispatch.yaml': dispatch('shared_work', 'shared_gate') } },
+        { output: 'first shared plan', runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('shared_work', 'shared_gate')) } },
+        { output: 'second shared plan', runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('shared_work', 'shared_gate')) } },
       ],
       shared_work: [
         { output: 'shared work from iteration 1' },
@@ -260,10 +263,11 @@ describe('outer re-plan evidence retention', () => {
   }, 15_000);
 
   it('does not alter retired evidence when blocking preflight deletes and retries iteration-2 proposal files', async () => {
-    const goodChecks = checksMarkdown({
+    const goodChecks = (workId: string) => checksMarkdown({
       name: 'the final file exists',
       type: 'file-exists-nonempty',
       params: { paths: ['docs/final.md'] },
+      reads:[{id:'report',root:'project',path:'docs/final.md',source:{kind:'stage',stage:workId,artifact:'report'}}],
     });
     const blockingChecks = checksMarkdown({
       name: 'validation always passes',
@@ -274,15 +278,15 @@ describe('outer re-plan evidence retention', () => {
       plan: [
         {
           output: 'iteration 1 plan',
-          runFiles: { 'dispatch.yaml': dispatch('first_work', 'first_gate'), 'reality_checks.md': goodChecks },
+          runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('first_work', 'first_gate',true)), 'reality_checks.md': goodChecks('first_work') },
         },
         {
           output: 'blocked iteration 2 proposal',
-          runFiles: { 'dispatch.yaml': dispatch('replacement_work', 'replacement_gate'), 'reality_checks.md': blockingChecks },
+          runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('replacement_work', 'replacement_gate',true)), 'reality_checks.md': blockingChecks },
         },
         {
           output: 'corrected iteration 2 proposal',
-          runFiles: { 'dispatch.yaml': dispatch('replacement_work', 'replacement_gate'), 'reality_checks.md': goodChecks },
+          runFiles: { 'dispatch.yaml': declaredDispatch(dispatch('replacement_work', 'replacement_gate',true)), 'reality_checks.md': goodChecks('replacement_work') },
         },
       ],
       first_work: {
@@ -320,9 +324,10 @@ describe('outer re-plan evidence retention', () => {
 
     expect(final.status).toBe('complete');
     expect(final.currentIteration).toBe(2);
-    expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(3);
+    expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(4);
     expect(adapter.calls.filter((call) => call.stageId === 'replacement_work')).toHaveLength(1);
     expect(adapter.calls.filter((call) => call.stageId === 'plan')[2].prompt).toContain('hard_check_cannot_fail');
+    expect(adapter.calls.filter((call) => call.stageId === 'plan')[3].prompt).toContain('ARTIFACT_READ_UNREACHABLE');
     const archived = stageEvidence(final).filter((entry) => entry.iteration === 1 && entry.stageId === 'first_work');
     expect(archived).toHaveLength(1);
     expect(readFileSync(join(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8'))

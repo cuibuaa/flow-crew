@@ -32,8 +32,9 @@ export interface ScriptedTurn {
 
 export type StageScript = ScriptedTurn | ScriptedTurn[];
 
-function writeContained(root: string, files: Record<string, string> | undefined): void {
-  if (!files) return;
+function writeContained(root: string, files: Record<string, string> | undefined): string[] {
+  const writes: string[] = [];
+  if (!files) return writes;
   const base = resolve(root);
   for (const [rel, content] of Object.entries(files)) {
     const target = resolve(base, rel);
@@ -41,7 +42,9 @@ function writeContained(root: string, files: Record<string, string> | undefined)
     if (r === '' || r.startsWith('..') || isAbsolute(r)) continue;
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content, 'utf-8');
+    writes.push(rel);
   }
+  return writes;
 }
 
 export class ScriptedAdapter implements Adapter {
@@ -65,12 +68,13 @@ export class ScriptedAdapter implements Adapter {
     else turn = entry;
     if (!turn) turn = this.fallback;
 
-    writeContained(opts.workDir, turn.projectFiles);
-    writeContained(opts.runDir, turn.runFiles);
+    const writes = [...writeContained(opts.workDir, turn.projectFiles), ...writeContained(opts.runDir, turn.runFiles).map((path) => `run:${path}`)];
     return {
       output: turn.output ?? '',
       exitCode: turn.exitCode ?? 0,
       duration_ms: 1,
+      writes,
+      writeAttribution: 'structured',
       ...(turn.tokens_out !== undefined ? { tokens_out: turn.tokens_out } : {}),
     };
   }

@@ -1,3 +1,4 @@
+import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * engine-a-plus regression contracts — the 3 confirmed gaps + 3 A+ deltas of the
  * framework-pure engine hardening on branch engine-a-plus.
@@ -191,7 +192,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
 
   const planWorkflow: { config: WorkflowConfig; yaml: string } = {
     yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-    config: { name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
   };
   const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
@@ -218,11 +219,11 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
             '    is_gate: true', '    task: gate',
-          ].join('\n'));
+          ].join('\n')));
           return ok('planned a gate');
         }
         if (opts.stageId === 'check') {

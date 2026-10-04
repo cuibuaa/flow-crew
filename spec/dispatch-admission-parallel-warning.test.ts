@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   inspectDispatchAdmission,
+  selectRunnableBatch,
   parseDispatchedStageConfig,
   type StageConfig,
 } from '../src/scheduler.js';
@@ -54,6 +55,7 @@ describe('parallel scope dispatch admission', () => {
     ])).toEqual([]);
 
     const plannerPrompt = readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf-8');
-    expect(plannerPrompt).toContain('Stages eligible to run together MUST have disjoint `scope` entries.');
+    expect(plannerPrompt).toContain('The scheduler serializes scopes whose');
+    expect(selectRunnableBatch([stage('left', ['src/shared/**']), stage('right', ['src/shared/file.ts'])]).selected).toHaveLength(1);
   });
 });

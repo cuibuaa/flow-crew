@@ -85,7 +85,7 @@ describe('transactional build and truthful fast-test contracts', () => {
     const copiedDist = join(root, 'dist');
     const copiedGate = join(copiedDist, 'reality-gate');
     const terminalPath = join(root, 'terminal.json');
-    cpSync(join(repositoryRoot, 'dist', 'reality-gate'), copiedGate, { recursive: true });
+    cpSync(join(repositoryRoot, 'dist'), copiedDist, { recursive: true });
     symlinkSync(join(repositoryRoot, 'node_modules'), join(root, 'node_modules'), 'dir');
     const indexUrl = pathToFileURL(join(copiedGate, 'index.js')).href;
     const source = [

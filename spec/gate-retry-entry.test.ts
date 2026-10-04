@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -92,10 +93,10 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'e18-gate-retry-entry',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [],
         scope: ['src/scheduler.ts', 'spec/e18-gate-retry-entry.test.ts', 'docs/task_summary.md'],
         prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
@@ -189,11 +190,11 @@ async function runScenario(options: ScenarioOptions): Promise<{
       if (opts.stageId === 'plan') {
         writeFileSync(
           join(opts.runDir, 'dispatch.yaml'),
-          dispatchYaml(
+          declaredDispatch(dispatchYaml(
             options.includeUnrelatedRejectedGate,
             options.terminalArtifactOnPass,
             options.escalationTerminal,
-          ),
+          )),
         );
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }

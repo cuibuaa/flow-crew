@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,10 +43,10 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'attempts',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -95,7 +96,7 @@ describe('append-only stage attempts', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return { output: '## What was done\n- fixed and verified', exitCode: 0, duration_ms: 1 };
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -111,7 +112,7 @@ describe('append-only stage attempts', () => {
             '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
-          ].join('\n'));
+          ].join('\n')));
           return { output: 'planned', exitCode: 0, duration_ms: 2000, tokens_out: 2 };
         }
         if (opts.stageId === 'release_gate') {
@@ -153,7 +154,7 @@ describe('append-only stage attempts', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return { output: '## What was done\n- retained retry evidence', exitCode: 0, duration_ms: 1 };
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -170,7 +171,7 @@ describe('append-only stage attempts', () => {
             '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
-          ].join('\n'));
+          ].join('\n')));
           return { output: 'planned', exitCode: 0, duration_ms: 10 };
         }
         if (opts.stageId === 'fix_release') return { output: 'fixed', exitCode: 0, duration_ms: 200 };

@@ -3,6 +3,7 @@ import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
 import { inspectVersionedJsonShapeCheck } from './reality-gate/versioned-json-admission.js';
 import { resolveResearchPaths } from './research-paths.js';
+import type { ArtifactContract } from './artifact-declarations.js';
 import type {
   ProjectValidationBaseline,
   ValidationCommand,
@@ -55,6 +56,8 @@ export interface RealityCheckPreflightContext {
   validationBaseline?: ProjectValidationBaseline;
   /** Canonical project root used only for contained, already-present artifact evidence. */
   projectDir?: string;
+  /** Versioned declarations parsed from this exact candidate, never prompt text. */
+  artifactContracts?: readonly ArtifactContract[];
 }
 
 export interface RealityCheckAdvisoryRewrite {
@@ -1242,6 +1245,13 @@ export function inspectRealityChecks(
 ): RealityCheckPreflightReport {
   const declarations = parseChecksFromMarkdown(realityChecksMarkdown);
   const contract = deriveBriefContract(taskBrief);
+  for (const artifacts of context.artifactContracts ?? []) {
+    for (const output of artifacts.produces) {
+      if (output.root === 'project' && !output.when && !artifacts.groups.some((group) => group.members.includes(output.id))) {
+        contract.requiredArtifacts.push(output.path);
+      }
+    }
+  }
   const findings: RealityCheckPreflightFinding[] = [];
 
   declarations.forEach((declaration, offset) => {

@@ -1,4 +1,6 @@
 import Fastify from "fastify";
+import { readRunStateView } from './run-state-view.js';
+import { reconcileHostInterruptedRun } from './restart-recovery.js';
 import fastifyStatic from "@fastify/static";
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, unlinkSync, renameSync, openSync, readSync, closeSync } from "node:fs";
 import { join, extname, dirname, resolve } from "node:path";
@@ -589,6 +591,7 @@ export function performStartupRecovery(projectDir: string, limit = 50): void {
         if (isRunningRunStatus(state.status)) {
           if (hasLiveDirectRunner(projectDir, id)) continue;
           if (hasLiveScheduler(projectDir, id)) continue;
+          if (state.engineCheckpoint) { reconcileHostInterruptedRun(state.projectDir, id); continue; }
           state.status = RUN_STATUS.FAILED;
           state.failureReason = 'Scheduler process gone while task was running (orphan reconciled)';
           state.completedAt = new Date().toISOString();
@@ -2527,6 +2530,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   // ===================== Durable approval inbox =====================
+  app.get<{ Params: { runId: string }; Querystring: { prompts?: string } }>("/api/runs/:runId/state", async (req, reply) => {
+    try {
+      return readRunStateView(projectDir, req.params.runId, { includePromptText: req.query.prompts === 'true' });
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
 
   app.get<{ Querystring: { state?: string; runId?: string } }>("/api/inbox", async (req, reply) => {
     const state = req.query.state ?? INBOX_FILTER_STATE.PENDING;

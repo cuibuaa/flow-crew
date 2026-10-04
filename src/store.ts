@@ -560,6 +560,15 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  engineCheckpoint?: import('./restart-recovery.js').EngineCheckpoint;
+  recovery?: import('./restart-recovery.js').RestartRecovery;
+  /** Durable authority for reconciling a partially published interruption. */
+  recoveryIntent?: import('./restart-recovery.js').RecoveryIntent;
+  planControl?: import('./plan-revisions.js').PlanControl;
+  /** Transaction-bound revision decisions; stage files are replayable projections. */
+  planRevisionDecisions?: Record<string, import('./plan-revisions.js').PlanRevisionDecision>;
+  /** Scheduler-admitted query facts. Legacy runs remain readable without them. */
+  queryState?: import('./run-state-view.js').RunQueryState;
   runId: string;
   workflowName: string;
   projectDir: string;
@@ -610,6 +619,8 @@ export interface StoreState {
   unresolvedStageObligations?: UnresolvedStageObligation[];
   /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */
   supervisor?: SupervisorUsage;
+  /** Engine-owned model work outside dispatched stages, with the same attempt ledger. */
+  auxiliaryAttempts?: Record<string, StageAttempt[]>;
   startedAt: string;
   completedAt?: string;
   plan?: unknown[];
@@ -1207,8 +1218,8 @@ export function createRun(
   return initializeReservedRun(projectDir, reservation.runId, workflowName, workflowYaml, stageIds);
 }
 
-const RUN_HISTORY_FILE = 'run-history.v1.jsonl' as const;
-const RUN_STATE_LOCK_FILE = '.run-state.lock';
+export const RUN_HISTORY_FILE = 'run-history.v1.jsonl' as const;
+export const RUN_STATE_LOCK_FILE = '.run-state.lock';
 const RUN_STATE_LOCK_TIMEOUT_MS = 5_000;
 const RUN_STATE_STALE_LOCK_MS = 30_000;
 
@@ -1714,7 +1725,7 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
   withRunStateLock(projectDir, runId, () => persistRunStateUnlocked(projectDir, runId, state));
 }
 
-export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void): StoreState {
+export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
   // Serialize read/mutate/commit under the run-local lock. This closes the old
   // mtime check-to-rename race while retaining a byte-exact CAS for a legacy
   // writer that does not yet participate in the lock.
@@ -1727,6 +1738,9 @@ export function updateRunState(projectDir: string, runId: string, mutator: (stat
       mutator(state);
       try {
         persistRunStateUnlocked(projectDir, runId, state, { raw });
+        // Opt-in recovery notification stays ordered before cancellation's
+        // acknowledgement. This callback must not re-enter the run-state lock.
+        afterCommit?.(state);
         return state;
       } catch (error) {
         if (!(error instanceof RunStateProjectionConflictError)) throw error;
@@ -1762,6 +1776,29 @@ export function writeStageStatus(
       state.stages[stageId] = status;
     });
   }
+}
+
+/** Opt-in publication for recovery: validate fresh authority and write the
+ * execution ledger and aggregate while holding cancellation's run-local lock.
+ * Returning undefined preserves a lifecycle that superseded recovery. A crash
+ * between the two files remains repairable from the attempt-bound intent. */
+export function updateStageStatusUnderRunLock(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  mutator: (state: StoreState, ledger: StageStatus) => StageStatus | undefined,
+): StoreState {
+  return withRunStateLock(projectDir, runId, () => {
+    const directory = runDir(projectDir, runId);
+    const raw = readFileSync(join(directory, 'run.json'), 'utf8');
+    const state = hydrateRunProjection(directory, JSON.parse(raw) as ArchivedStoreState) as StoreState;
+    const status = mutator(state, readStageStatus(projectDir, runId, stageId));
+    if (status === undefined) return state;
+    atomicWrite(join(stageDir(projectDir, runId, stageId), 'status.json'), JSON.stringify(status, null, 2));
+    state.stages[stageId] = status;
+    persistRunStateUnlocked(projectDir, runId, state, { raw });
+    return state;
+  });
 }
 
 function readStageStatusIfPresent(projectDir: string, runId: string, stageId: string): StageStatus | undefined {
@@ -1835,6 +1872,17 @@ export function completeStageAttempt(
   completion: CompleteStageAttemptInput,
 ): StageStatus {
   const previous = readStageStatusIfPresent(projectDir, runId, stageId);
+  const final = completedStageAttemptStatus(previous, retries, completion);
+  writeStageStatus(projectDir, runId, stageId, final);
+  return final;
+}
+
+/** Pure completion calculation, shared with lock-serialized recovery. */
+export function completedStageAttemptStatus(
+  previous: StageStatus | undefined,
+  retries: number,
+  completion: CompleteStageAttemptInput,
+): StageStatus {
   const completedAt = completion.completedAt ?? new Date().toISOString();
   const attempts = [...(previous?.attempts ?? [])];
   let currentIndex = attempts.length - 1;
@@ -1892,7 +1940,6 @@ export function completeStageAttempt(
     constraintAudit: completion.constraintAudit ?? previous?.constraintAudit,
     timeout: completion.timeout ?? previous?.timeout,
   };
-  writeStageStatus(projectDir, runId, stageId, final);
   return final;
 }
 

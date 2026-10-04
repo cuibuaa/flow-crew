@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,10 +46,10 @@ function workflow(maxIterations = 3): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'default',
       defaults: { max_iterations: maxIterations },
-      stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -110,7 +111,7 @@ describe('terminal final contract workflow behavior', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: ${gateId}`,
             '    role: qa',
@@ -126,7 +127,7 @@ describe('terminal final contract workflow behavior', () => {
             '    scope: []',
             `    retry_to: [${gateId}]`,
             '    task: repair final gate evidence',
-          ].join('\n'));
+          ].join('\n')));
           return result('planned');
         }
         if (opts.stageId === gateId) {
@@ -167,7 +168,7 @@ describe('terminal final contract workflow behavior', () => {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? [
                 'stages:',
                 `  - id: ${phaseGate}`,
@@ -187,7 +188,7 @@ describe('terminal final contract workflow behavior', () => {
                 '    scope: []',
                 '    is_gate: true',
                 '    task: verify final transfer gate',
-              ].join('\n'));
+              ].join('\n')));
           return result(`planned ${planCalls}`);
         }
         if (opts.stageId === phaseGate) {

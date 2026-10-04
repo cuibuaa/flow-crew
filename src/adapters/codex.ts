@@ -499,6 +499,13 @@ export class CodexAdapter implements Adapter {
             })
           : undefined;
         try {
+          opts.onInvocationInput?.({
+            systemPrompt: effectiveRole.prompt,
+            userPrompt: prompt,
+            model: effectiveRole.model,
+            resumeSessionId,
+            transport: { kind: 'request', payload: JSON.stringify({ executable: 'codex', argv: args, stdin: prompt, developer_instructions: effectiveRole.prompt, reasoning_effort: effectiveRole.reasoning_effort }) },
+          });
           result = await execWithStdin('codex', args, prompt, {
             cwd: opts.workDir,
             timeout_ms: opts.timeout_ms,

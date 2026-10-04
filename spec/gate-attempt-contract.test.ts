@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,10 +49,10 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'gate-attempt-contract',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -112,7 +113,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
       }
       if (opts.stageId === 'plan') {
         planCalls += 1;
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), dispatchYaml(options.includeRepair === true));
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatchYaml(options.includeRepair === true)));
         if (options.contract) {
           writeFileSync(join(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
         }

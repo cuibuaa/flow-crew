@@ -7,6 +7,12 @@ import type { AdapterFailureKind } from './adapters/base.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'resource_lease_decided'
+  | 'resource_lease_retained'
+  | 'resource_lease_wait_started'
+  | 'resource_lease_wait_finished'
+  | 'plan_revision_decided'
+  | 'recovery_reconciled'
   | 'attempt_started'
   | 'attempt_finished'
   | 'attempt_failed'

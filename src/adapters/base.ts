@@ -72,6 +72,14 @@ export interface CommandLifecycleEvent {
 }
 
 export interface RunOpts {
+  /** Final credential-free transport boundary, called before every internal retry. */
+  onInvocationInput?: (input: {
+    systemPrompt: string;
+    userPrompt: string;
+    model?: string;
+    resumeSessionId?: string;
+    transport?: { kind: 'stdin' | 'argv' | 'request'; payload: string };
+  }) => void;
   /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
   timeout_ms: number;
   workDir: string;

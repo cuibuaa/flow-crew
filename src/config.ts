@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { isRecognizedLiveConstraintExemptPattern } from './generated-path-policy.js';
+import { parsePlannerPolicySelection, type PlannerPolicyName } from './planner-policies.js';
 
 // --- Types ---
 
@@ -16,6 +17,8 @@ export interface FlowCrewPaths {
 }
 
 export interface ProjectDefaults {
+  /** Explicit project authoring policies; omission never disables core admission. */
+  planner_policies?: PlannerPolicyName[];
   timeout_ms: number;
   /** Wall clock a single validation command (build/test/lint) may take before it
    * is killed. A project's suite grows as rounds add tests, and ship-setup runs
@@ -167,6 +170,7 @@ export function ensureProjectDefaultsFile(projectDir?: string): string {
       // directory unless the user explicitly configures one.
       const publicDefaults = readYamlFile(source);
       delete publicDefaults.campaign;
+      delete publicDefaults.planner_policies;
       writeFileSync(target, stringifyYaml(publicDefaults), 'utf-8');
     }
     return target;
@@ -300,6 +304,7 @@ export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults
   const rawPaths = raw.paths as Partial<FlowCrewPaths> | undefined;
   const templatePaths = template.paths as Partial<FlowCrewPaths> | undefined;
   const parsed: ProjectDefaults = {
+    planner_policies: resolve(p) === resolve(defaultsPath(projectDir)) ? parsePlannerPolicySelection(raw.planner_policies) : [],
     timeout_ms: numberValue(raw, template, 'default_timeout_ms'),
     validation_timeout_ms: numberValue(raw, template, 'default_validation_timeout_ms'),
     live_constraint_exempt_patterns: liveConstraintExemptPatternsValue(raw, template),
@@ -349,6 +354,7 @@ function compatibleCandidateDefaults(value: unknown): value is ProjectDefaults {
     && typeof item.reasoning_effort === 'string' && item.reasoning_effort.length > 0
     && typeof item.adapter === 'string' && item.adapter.length > 0
     && typeof item.sessionReuse === 'boolean'
+    && (item.planner_policies === undefined || (() => { try { parsePlannerPolicySelection(item.planner_policies); return true; } catch { return false; } })())
     && Array.isArray(item.live_constraint_exempt_patterns)
     && item.live_constraint_exempt_patterns.every((entry) => typeof entry === 'string')
     && Boolean(item.paths && Object.values(item.paths).every((entry) => typeof entry === 'string' && entry.length > 0));

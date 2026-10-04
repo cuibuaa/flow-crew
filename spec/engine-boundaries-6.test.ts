@@ -84,9 +84,6 @@ describe('engine boundary cases 57 and 59', () => {
   });
 
   it('guides non-research terminal routing through a real gate fact and retains research admission refusal', () => {
-    const planner = parseYaml(readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf8')) as { prompt: string };
-    expect(planner.prompt).toContain('`terminal_states:` alone does not enable research mode');
-    expect(planner.prompt).toContain('named, typed fact from a real upstream stage verdict');
     const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
       prompt_template: 'fixture', skills: [], criterion_refs: [], is_gate: false,
       depends_on: [], dependency_reasons: {}, ...raw,

@@ -17,6 +17,44 @@ prompt: |
     1. {run_dir}/tech_solution.md — your analysis and approach
     2. {run_dir}/dispatch.yaml — the execution plan
 
+  Declare new dispatched stages' outputs and reads with `artifact_contract`
+  version 1. A declaration uses exact relative paths with root `project` or
+  `run`; the engine checks existence, kind, freshness and producer lineage.
+  Example (an explicitly empty list is meaningful):
+    artifact_contract:
+      version: 1
+      produces:
+        - id: report
+          root: project
+          path: docs/report.md
+      reads:
+        - id: task
+          root: run
+          path: task_brief.md
+          source: {kind: framework, artifact: task_brief}
+  A stage-produced read names `source: {kind: stage, stage: producer_id,
+  artifact: producer_artifact_id}`. An existing input uses `source: {kind: input}`.
+  Either/or outputs belong in `groups: [{id: outcome, mode: exactly_one,
+  members: [success, escalation]}]`, with both artifact IDs declared in
+  `produces`. A conditional output uses `when: {stage: ancestor_id,
+  field: exitCode, equals: 0}` and waits for that ancestor's settled fact.
+  Reality checks declare the same `reads` list alongside `type` and
+  `params`; declare every file on which a script depends. For versioned
+  declarations, prose and script literals do not create additional duties.
+  New proposals missing either declaration are refused with a precise format
+  error. Already-admitted historical stages retain their recorded behavior.
+
+  Use the shared state query included in the stage input to inspect the current
+  plan, output evidence, budgets, resources, findings and invocation records.
+  Plan further work when an outcome makes it concrete. A settled stage can
+  submit its complete proposed stage list in its own
+  `plan_revision_request.json`; the scheduler admits it at an idle boundary.
+  The request binds runId, stageId, attemptIndex, attemptStartedAt,
+  baseRevision and baseDigest from the shared view, with version 1, requestId
+  and reason. See guide/engine-state-and-revisions.md for the request shape.
+  Admission retains existing duties and checks every revision. A refusal
+  names the declaration to repair; it never widens the stage's write authority.
+
   Before the FIRST dispatch proposal, read {run_dir}/brief_criteria.json and
   make a coverage table in tech_solution.md: each canonical criterion ID,
   its capable work or finalizer stage, and its downstream gate when ordinary
@@ -48,6 +86,7 @@ prompt: |
       - name: <human label>
         type: <one of the check types above>
         # advisory: true  # OPTIONAL; ONLY for heuristic wording/documentation expectations
+        reads: []  # replace with exact rooted inputs and their sources
         params: { <per that check's params> }
     ```
   Checks are HARD by default. Evidence checks (file existence, command exit code,
@@ -200,39 +239,41 @@ prompt: |
       Read {run_dir}/tech_solution.md. Implement X by editing
       {project}/path/to/file.py with <specific changes>. Verify <criteria>.
 
-  Hard rules (gate will reject otherwise):
-  1. Every retry_to stage MUST also have depends_on pointing to the same gate(s).
-  2. Every is_gate stage MUST write a verdict to {run_dir}/verdict_<stage_id>.json. State this in its prompt_template.
-  3. Never hardcode absolute paths in prompt_template — use {run_dir} and {project} (the scheduler substitutes these at runtime).
-  4. Do NOT put the task brief (or any reference to it like `{task_description}` or "Task: ...") in `prompt_template`. The scheduler injects it automatically.
-  5. Use `prompt_template:` (not `task:`).
-  6. Every stage MUST declare `scope`: the project-relative files, directories, or globs it may create, modify, or delete, including generated project outputs touched by its commands. Absolute paths, `{project}/` prefixes, and `..` escapes are invalid. Use `scope: []` only when the stage writes no project file; run-directory handoffs and verdicts are not project writes. For a gate, `scope: []` is valid only when its verification is strictly read-only. If a gate may create or update tests, probes, snapshots, reports, generated outputs, or any other project artifact while verifying, include every such project-relative writable path in that gate's `scope`, so it can complete its first verification attempt without a scope violation.
-  7. Default to parallel execution. Start with `depends_on: []` and add an edge ONLY when the downstream stage has a genuine data dependency: it consumes a concrete file, result, decision, or identifier produced by that predecessor and therefore cannot start yet. Stage numbering, similar roles, a preference for ordering, or overlapping write scopes are not dependencies. Never form a linear chain by default; combine overlapping writers when practical and never invent an edge merely to serialize them.
-  8. For every explicit `depends_on` entry, `dependency_reasons` MUST contain exactly one matching key whose value is one sentence naming the predecessor output consumed and why it is required. Use `dependency_reasons: {}` when `depends_on` is empty; do not include unmatched reasons.
-  9. Stages eligible to run together MUST have disjoint `scope` entries. A scope is a declaration; make it complete and conservative so runtime conflict checks can safely admit parallel work.
-  10. A stage with is_gate: true should not also have retry_to. Gates evaluate; fix stages retry.
-  11. For a QA gate's first execution, describe the validation objective, evidence boundaries, and required mechanical suites, then require the validator to audit as exhaustively as it can across every dimension it identifies — including risks absent from the brief — and to end with its own Coverage Map (aspect, reproducible evidence/command, conclusion, and unexamined items with reasons). Do NOT turn the brief into a finite planner-owned checklist; the coverage map is the validator's output. For re-evaluations after a fix, require only reproducible verification of every rejected item, the full mechanical regression suites, and re-execution of every prior Coverage Map check touched by the complete repair diff; do not ask for unrelated new probes.
-  12. Every path declared by the task frontmatter under `terminal_states.<status>.paths` MUST be scoped to and written only by the final stage whose success commits that status. Never put a declared terminal path in a non-final stage's `scope` or instruct a non-final stage to create or modify it: a fresh write commits the terminal status and skips every stage still pending, including verification and repair. Ownership is per declared path: different mutually exclusive status paths may use different guarded final sink stages. In research mode, the round/result producer is never a terminal owner.
-  13. A hard Reality-Gate check MUST NOT make its verdict the unprocessed exit status of a project build, test, or lint command. Compare current failure identities with the recorded validation baseline and its gate criterion, or omit the redundant validation check.
-  14. Read `{run_dir}/brief_criteria.json` before dispatching. If `{run_dir}/criterion_discharges.json` exists, its brief-digest-bound records are scheduler-derived proof that the named ordinary-work obligations already completed behind passing gates; do not reassign those obligations merely because this is a settlement iteration. Every other canonical criterion ID MUST appear in `criterion_refs` on at least one capable work/finalizer stage. A criterion assigned to ordinary work MUST also appear on a gate downstream of that work. A criterion whose obligation occurs only during terminal materialization belongs directly on every capable terminal writer even if related ordinary work was discharged; it needs no impossible post-terminal gate, and any gate that also carries it must be an ancestor of those writers. Gates must report per-ID evidence for their assigned IDs; a missing acting-stage assignment or required gate ID is an engine rejection. Do not paraphrase criteria into a lossy checklist.
-  15. `dispatch.yaml` is admitted atomically: one unknown role, duplicate/invalid ID, missing scope/dependency reason, unknown edge, cycle, or inconsistent retry edge rejects the WHOLE proposal. Never rely on the engine to rename, drop, reorder, or repair a stage silently.
-  16. Each terminal path has exactly ONE scoped owner: a non-gate, non-repair DAG sink. One sink may own several paths, or mutually exclusive statuses may use multiple path-specific sinks; every unconditional required work stage and every gate must be an ancestor of each applicable owner. A terminal owner may declare report-support or generated validation paths needed to rerun final checks, but those entries are validation-only: the engine restores and rejects any durable non-terminal delta left after the passed gates. In research mode every owner MUST have a predicate mechanically false on `continue`; prefer `research.terminalPath == <that exact declared path>` (or matching `research.terminalStatus`) for path-specific writers. If comparing `research.decision` directly, the only terminal values the policy emits are `ship` and `stop_ceiling`; do not use run-status aliases such as `shipped` or `ceiling_hit`. Never use `research.decision == continue` or a broad inequality such as `research.decision != shipped`: continuing a campaign is never a terminal outcome.
-  17. A repair stage has `retry_to` naming exactly its gate dependencies and `depends_on` on those same gates. A gate never has `retry_to`. A rejected gate is never accepted because a retry budget ended; plan an honest escalation/finalizer route for persistent blockage.
-  18. Every absent project path used by a hard Reality-Gate check must be owned by an admitted producer stage or by a declared framework emitter, and that producer must run before terminal verification. A terminal check may inspect the finalizer's artifact because the engine materializes the candidate before checking it; do not require an artifact from a genuinely later stage.
-  19. Research-round tests must remain true after later valid rounds and after legitimate closure. Never assert that the shared latest-result file retains the current round label, and never assert that a terminal artifact remains absent. Test immutable round evidence or behavior instead.
-  20. In research mode, `research` is the framework-owned condition namespace (`research.decision`) and MUST NOT be used as a stage ID.
-  21. Check the task frontmatter for a `research:` declaration before using any `research.*` condition. `terminal_states:` alone does not enable research mode. In a non-research task, make every required ordinary work stage and gate reachable without research facts; when terminal paths branch, use a named, typed fact from a real upstream stage verdict for their owner conditions. Instruct that stage to publish the fact for every outcome. Admission will refuse undefined research facts; do not expect a retry to repair that plan automatically.
+  # Dispatch interface and planning judgement
+  Each stage supplies id, role, prompt_template, scope and artifact_contract.
+  Include generated files in the project's write scope. Describe the predecessor
+  output consumed and why it is needed in dependency_reasons. A gate uses
+  is_gate: true and declares run:verdict_<stage_id>.json as an unconditional
+  output; its verdict contains pass, reason and per-ID criteria evidence.
+  A repair uses retry_to and depends_on on its rejecting gate. The engine
+  reports malformed fields, ownership, unsafe ordering and absent inputs
+  before launching work; fix those named declarations from admission feedback.
 
-  Gate measurement and evidence contract (hard):
-  - A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate. Never invent a metric merely because a stage is a gate; a qualitative gate may decide pass/fail from cited evidence alone.
-  - When an applicable gate contract exists, instruct the gate to supply the current attempt's finite numeric value and metric name in its verdict or `stages/<gate>/metric.json`. A missing required value is an engine refusal before product repair or re-planning, not a defect for a repair stage to chase.
-  - A gate that supplies `metric.json` MUST keep its verdict consistent with that metric. The engine rejects `pass:true` when the same attempt's metric says fail; never weaken or route around that self-deception guard.
-  - Gate reports MUST cite the scheduler-injected durable rejected-verdict path under `gate_reevaluation/iteration_<n>/round_<n>/`, never present the reusable live `{run_dir}/verdict_<gate_id>.json` path as durable evidence.
+  Default to parallel execution. Start with depends_on: [] and
+  add an edge ONLY when the downstream stage has a genuine data dependency: it consumes a
+  concrete predecessor output and cannot start until that output exists.
+  Similar roles, numbering, ordering preferences and overlapping scopes do
+  not establish data dependencies. The scheduler serializes scopes whose
+  disjointness is not proven; combine overlapping writers when practical.
 
-  Evidence-exposure rules (hard; keep hard rules 1–13 numbered as above):
-  - A requested headline or quoted statistic MUST require its mean, median, and where the reported value sits in its own distribution.
-  - A rule frozen or pre-registered before outcome measurement MUST require an expected qualifying-member count computed from structural quantities, a numeric feasibility floor, and revision below that floor before any outcome is seen.
-  - An operator-supplied numeric expectation MUST require both exact result fields `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.
+  Read brief_criteria.json and any brief-bound criterion_discharges.json to
+  assign the remaining obligations to capable stages. Preserve the complete
+  criteria; do not paraphrase them into a shorter acceptance checklist.
+  For the first QA execution, describe its objective, evidence boundaries and
+  mechanical suites. Require an exhaustive independent audit, including risks
+  absent from the brief, and a validator-owned Coverage Map with commands,
+  conclusions and unexamined items. After a repair require every rejected
+  item, the full regression suites and prior Coverage Map checks affected by
+  the complete diff. The validator chooses its audit dimensions.
+  The Coverage Map is the validator's output. Do NOT turn the brief into a finite planner-owned checklist.
+
+  A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate.
+  When such a contract applies, provide its finite numeric value and name for
+  the current attempt in the verdict or stages/<gate>/metric.json.
+  Gate reports MUST cite the scheduler-injected durable rejected-verdict path under `gate_reevaluation/iteration_<n>/round_<n>/`, rather than a reusable live verdict alias.
+  Research tests consume immutable round evidence supplied by the scheduler;
+  later valid rounds must not invalidate their assertions. Use the state view
+  to learn the current outcome before extending a plan.
 
   # Temporary-work placement (hard rule)
   Any temporary or one-off work product — including a clean-tree export, dependency-install sandbox such as one used for `npm ci`, probe file, or temporary archive — MUST be created under the operating system temporary root (`os.tmpdir()` / `$TMPDIR`), never inside the project directory. Put this instruction in each affected stage's `prompt_template`. Projects may live on a WSL2 drvfs mount, where small-file I/O has been measured at more than 6× slower than the native temporary filesystem. Normal project outputs `dist/`, `ui/dist/`, and the project's own `node_modules` are explicit exceptions: keep them in the project because they are not temporary work products.

@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -118,10 +119,10 @@ describe('append-only gate history under a technical retry', () => {
       '    role: planner',
       '    dynamic_dispatch: true',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'gate-technical-retry-history',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{
+      stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -139,7 +140,7 @@ describe('append-only gate history under a technical retry', () => {
           return { output: '## What was done\n- verified retry history', exitCode: 0, duration_ms: 1 };
         }
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -156,7 +157,7 @@ describe('append-only gate history under a technical retry', () => {
             '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
-          ].join('\n'));
+          ].join('\n')));
           return { output: 'planned', exitCode: 0, duration_ms: 10 };
         }
         if (opts.stageId === 'fix_release') {

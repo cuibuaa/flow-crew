@@ -19,6 +19,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
   if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--supervise] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
   if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
+  if (command === 'state') return 'Usage: flowcrew state --project <path> --run <run-id> [--prompts] [--summary]';
   if (command === 'campaign') return 'Usage: flowcrew campaign run|list|show|stop ...';
   if (command === 'brief') return 'Usage: flowcrew brief head|diff|rollback|log ...';
   return undefined;
@@ -39,6 +40,9 @@ if (bootstrapHelp !== undefined) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
+} else if (bootstrapArgs[0] === 'state') {
+  const { cmdState } = await import('./run-state-access.js');
+  process.exitCode = cmdState(bootstrapArgs);
 } else {
 const [
   fsModule,

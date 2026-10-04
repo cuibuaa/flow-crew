@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   copyFileSync,
@@ -322,14 +323,14 @@ class PromptCaptureAdapter implements Adapter {
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
     this.calls.push({ stageId: opts.stageId, prompt, systemPrompt: role.prompt });
     if (opts.stageId === 'plan') {
-      writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+      writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
         '- id: implement',
         '  role: coder',
         '  depends_on: [plan]',
         '  dependency_reasons: {plan: "perform the newly planned implementation"}',
         '  scope: []',
         '  prompt_template: Perform the fresh implementation.',
-      ].join('\n') + '\n', 'utf-8');
+      ].join('\n') + '\n'), 'utf-8');
     }
     return { output: 'ok', exitCode: 0, duration_ms: 1 };
   }

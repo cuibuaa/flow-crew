@@ -20,6 +20,8 @@ export interface RealityCheck {
 }
 
 interface ValidCheckDecl {
+  /** Versioned structured reads. Omission selects the legacy compatibility path. */
+  reads?: import('../artifact-declarations.js').ArtifactRead[];
   kind?: 'check';
   name: string;
   type: string;

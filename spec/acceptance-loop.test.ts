@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -56,10 +57,10 @@ function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'e7-acceptance-loop',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{ id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -134,7 +135,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') return { output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 };
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), dispatchYaml());
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatchYaml()));
         writeSession(opts.runDir, 'plan', BUILDER_UUID, 'plan');
         return { output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID };
       }
@@ -281,7 +282,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
     expect(result.gateOpts[0].sessionOwnerStageId).toBeUndefined();
     expect(result.gateOpts[0].resumeSessionId).not.toBe(BUILDER_UUID);
-    expect(canResumeOwnGateSession({
+    expect(canResumeOwnGateSession({criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: ['plan'], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: BUILDER_UUID, ownerStageId: 'plan', capturedAt: '2026-08-01T00:00:00.000Z',
@@ -294,7 +295,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
     expect(existsSync(gateVerdictCorrectionPath(result.runDirPath, GATE_ID))).toBe(false);
-    expect(canResumeOwnGateSession({
+    expect(canResumeOwnGateSession({criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: [], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: GATE_UUID, ownerStageId: GATE_ID, capturedAt: '2026-08-01T00:00:00.000Z',

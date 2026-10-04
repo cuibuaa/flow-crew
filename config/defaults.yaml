@@ -3,6 +3,12 @@
 # Longer values reduce premature timeouts but also delay terminal failure.
 default_timeout_ms: 10800000
 
+# This project's statistical reporting contract. New projects do not inherit
+# these policies; add named policies explicitly to their own defaults file.
+# Core admission and runtime protections remain mandatory with any selection.
+planner_policies:
+  - evidence_statistics
+
 # Wall clock a single validation command (build/test/lint) may take before it is
 # killed. ship-setup runs the suite twice -- source baseline and target baseline
 # -- so this must exceed the slowest of them under whatever else the machine is

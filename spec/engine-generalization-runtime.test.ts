@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
@@ -244,7 +245,7 @@ describe('engine generalization runtime bindings', () => {
     ).map((entry) => entry.id)).toEqual(['repair']);
 
     const { projectDir, agentsDir } = seedProject('recovery', 'planner', 'qa', 'repair');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'typed-gate-recovery',
       defaults: { max_iterations: 1, max_retries: 1 },
       stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
@@ -259,7 +260,7 @@ describe('engine generalization runtime bindings', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -275,7 +276,7 @@ describe('engine generalization runtime bindings', () => {
           '    dependency_reasons: {qa: "repair a substantive product rejection"}',
           '    retry_to: [qa]',
           '    prompt_template: Repair only a product defect.',
-        ].join('\n'));
+        ].join('\n')));
         return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       if (opts.stageId === 'qa') {
@@ -579,7 +580,7 @@ describe('engine generalization runtime bindings', () => {
     })).toEqual([]);
 
     const work = stage({ id: 'measure', role: 'worker', scope: ['src/declared.ts'] });
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'scope-consequence',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [work],
@@ -603,7 +604,7 @@ describe('engine generalization runtime bindings', () => {
           version: 1,
           kind: 'scope_revision',
           requestId: 'validation-input',
-          runId: opts.runId,
+          runId: basename(opts.runDir),
           stageId: opts.stageId,
           attemptIndex: 1,
           requestedBy: 'stage',
@@ -664,7 +665,7 @@ describe('engine generalization runtime bindings', () => {
 
   it('17 — carries the exact no-candidate shape through both dispatch paths and retains runtime refusals', async () => {
     const { projectDir, agentsDir } = seedProject('round-shape', 'planner', 'qa', 'repair');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'round-shape-paths',
       defaults: { max_iterations: 1, max_retries: 1 },
       stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
@@ -675,7 +676,7 @@ describe('engine generalization runtime bindings', () => {
       const summary = summaryResult(opts);
       if (summary) return summary;
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -691,7 +692,7 @@ describe('engine generalization runtime bindings', () => {
           '    dependency_reasons: {qa: "repair the substantive rejection"}',
           '    retry_to: [qa]',
           '    prompt_template: Repair the fixture.',
-        ].join('\n'));
+        ].join('\n')));
       } else if (opts.stageId === 'qa') {
         initialPrompt ||= prompt;
         writeFileSync(join(opts.runDir, 'verdict_qa.json'), JSON.stringify({
