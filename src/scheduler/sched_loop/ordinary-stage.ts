@@ -77,16 +77,16 @@ export async function executeOrdinaryStage(
       let resolvedPrompt = stage.prompt_template;
       if (!resolvedPrompt) {
         resolvedPrompt = (stage.depends_on ?? []).length === 0
-          ? (taskDescription ?? '') + '\nProject: ' + projectDir
+          ? (taskDescription?.trim() || taskDescription || '') + '\nProject: ' + projectDir
           : (taskDescription ?? '');
       }
 
       // Entry stages consume the task text captured and parsed at admission.
       // Re-reading task_brief.md here would let a later sidecar edit replace
       // the exact bytes that the launcher already admitted.
-      if ((stage.depends_on ?? []).length === 0) {
+      if (stage.dynamic_dispatch && (stage.depends_on ?? []).length === 0) {
         const admittedTask = taskDescription?.trim();
-        if (admittedTask) {
+        if (admittedTask && !stage.prompt_template?.trim()) {
           resolvedPrompt = admittedTask + '\nProject: ' + projectDir;
         }
         // On re-plan, include iteration_log.md reference
@@ -176,6 +176,7 @@ export async function executeOrdinaryStage(
         promptTemplate: resolvedPrompt,
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
+        planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
         resources: stage.resources,
         timeout_ms: prepared.budgetMs,
@@ -199,7 +200,7 @@ export async function executeOrdinaryStage(
         criterionRefs: stage.criterion_refs,
         resumeSessionId: resumeSession?.sessionId,
         sessionOwnerStageId: resumeSession?.ownerStageId,
-        preserveSession: currentRetries === 0 && shouldPreserveSession(stage, sorted, sessionReuseEnabled),
+        preserveSession: shouldPreserveSession(stage, sorted, sessionReuseEnabled),
         projectWriteScope: stage.scope ?? [],
         liveConstraintGuardFactory: createSchedulerLiveConstraintGuardFactory({
           stage,

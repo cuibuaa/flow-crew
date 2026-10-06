@@ -28,6 +28,8 @@ export interface GateValidationDeltaArtifact {
   attemptCompletedAt?: string;
   executionId?: string;
   immutablePath?: string;
+  /** Mechanical executions for this settled gate/baseline, including retries. */
+  validationAttemptIndex?: number;
 }
 
 export interface GateValidationExecutionIdentity {
@@ -35,6 +37,18 @@ export interface GateValidationExecutionIdentity {
   attemptStartedAt: string;
   attemptCompletedAt: string;
   executionId: string;
+}
+
+function readValidationDelta(path: string): GateValidationDeltaArtifact | undefined {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as GateValidationDeltaArtifact;
+    if (value.version !== 2 || typeof value.pass !== 'boolean' || !Array.isArray(value.current) || !Array.isArray(value.delta)
+      || value.delta.length !== 3 || new Set(value.delta.map((entry) => entry.role)).size !== 3
+      || value.delta.some((entry) => !['build', 'test', 'lint'].includes(entry.role)
+        || !['pass', 'regression', 'unresolved'].includes(entry.state) || typeof entry.reason !== 'string')
+      || (value.validationAttemptIndex !== undefined && (!Number.isSafeInteger(value.validationAttemptIndex) || value.validationAttemptIndex < 1))) return undefined;
+    return value;
+  } catch { return undefined; }
 }
 
 export function validationExecutionId(
@@ -205,12 +219,48 @@ export async function recordGateValidationDelta(
     ...execution,
     immutablePath: '',
   };
+  const previous = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
+  artifact.validationAttemptIndex = previous?.executionId === execution.executionId
+    && previous.baselineSha256 === artifact.baselineSha256
+    ? (previous.validationAttemptIndex ?? 1) + 1 : 1;
   const validationDigest = createHash('sha256')
-    .update(JSON.stringify({ checkedAt, executionId: execution.executionId, current: artifact.current, delta }), 'utf8')
+    .update(JSON.stringify({ checkedAt, executionId: execution.executionId, validationAttemptIndex: artifact.validationAttemptIndex, current: artifact.current, delta }), 'utf8')
     .digest('hex');
   const immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${validationDigest.slice(0, 16)}.json`;
   artifact.immutablePath = immutablePath;
   publishJsonCreateOnly(join(base, immutablePath), artifact);
   writeFileSync(join(base, `validation_delta_${stageId}.json`), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
   return artifact;
+}
+
+/** A validation failure is not a new authored review. Re-run missing/incomplete
+ * mechanical evidence once, preserving both immutable receipts. Reuse is not
+ * inferred from Git visibility: arbitrary commands can read ignored inputs.
+ * Deleting delta enforcement would lose fail-closed settlement; a separate
+ * mechanical phase is needed because a model cannot repair censored output.
+ */
+export async function settleGateValidationEvidence(
+  projectDir: string,
+  runId: string,
+  stageId: string,
+  dependencies: ProjectValidationDependencies = {},
+): Promise<{ kind: 'unchanged' | 'replayed' } | { kind: 'refused'; reason: string }> {
+  const base = runDir(projectDir, runId);
+  if (!readRunValidationBaseline(base)) return { kind: 'unchanged' };
+  const execution = settledGateValidationExecution(projectDir, runId, stageId);
+  if (!execution) return { kind: 'refused', reason: `Validation settlement for ${stageId} requires a settled complete execution` };
+  const previous = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
+  const digest = createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex');
+  const bound = previous?.version === 2 && previous.stageId === stageId
+    && validationDeltaMatchesCurrentExecution(projectDir, runId, previous) && previous.baselineSha256 === digest;
+  if (previous && bound && (previous.pass === true || previous.delta.some((entry) => entry.state === 'regression'))) return { kind: 'unchanged' };
+  const refuse = (delta?: GateValidationDeltaArtifact) => ({ kind: 'refused' as const,
+    reason: `Validation settlement for ${stageId} remains unresolved after its mechanical retry; authored review is preserved. ${delta?.delta.filter((entry) => entry.state !== 'pass').map((entry) => `${entry.role}: ${entry.reason}`).join('; ') ?? 'No comparable validation receipt'}` });
+  if (previous && bound && (previous.validationAttemptIndex ?? 1) >= 2) return refuse(previous);
+  const next = await recordGateValidationDelta(projectDir, runId, stageId, dependencies);
+  if (!next || !validationDeltaMatchesCurrentExecution(projectDir, runId, next)) return refuse(next);
+  if (next.pass === true) return { kind: 'replayed' };
+  // A measured regression still follows the established gate/repair route.
+  if (next.delta.some((entry) => entry.state === 'regression')) return { kind: 'unchanged' };
+  return refuse(next);
 }

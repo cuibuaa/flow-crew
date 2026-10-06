@@ -8,7 +8,11 @@ import { anyFailed, syncStageStatuses } from '../sched_scope/stage-group.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { classifyGateRecoveryFact, collectGateRuntimeFacts, findGateRecoveryStages, gateIdsForRecoveryStages, gateRetryDiagnosticSnapshot } from '../sched_settlement/gate-recovery.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
-import { STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
+import { loadGateContract } from '../sched_settlement/gate-contract.js';
+import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
+import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
+import { recordRunEvent } from '../../run-events.js';
 import { executeIteration } from './iteration.js';
 import { admitScopedAuditRepairs, consumeSupervisorReject, runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
@@ -53,6 +57,25 @@ export async function settleGateRetries(
     revisitRuntimeFacts = false;
     state = readRunState(projectDir, runId);
     if (iterationDispatchedIds.length > 0) {
+      if (readRunValidationBaseline(runDirPath)) {
+        const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
+        for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE)) {
+          // All authored controls must pass independently before a mechanical
+          // retry can preserve their review. Final adjudication checks both again.
+          if (readGateVerdict(projectDir, gate.id, runId, contract, true, false)?.pass !== true) continue;
+          const validation = await settleGateValidationEvidence(projectDir, runId, gate.id);
+          state = readRunState(projectDir, runId);
+          if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
+          if (validation.kind === 'refused') {
+            state.status = RUN_STATUS.FAILED;
+            state.failureReason = validation.reason;
+            state.completedAt = new Date().toISOString();
+            writeRunState(projectDir, runId, state);
+            recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration, detail: validation.reason });
+            return { kind: 'settled', state };
+          }
+        }
+      }
       const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
       const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
       state = admitScopedAuditRepairs(sorted, state, outerCheck, projectDir, runId, runDirPath, workflow, roleRegistry);

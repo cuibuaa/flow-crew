@@ -31,7 +31,7 @@ import {
   verifyDeclaredBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { runValidationCommand, type ValidationCommandRunner } from '../src/project-validation.js';
+import { runValidationCommand, runProjectValidationBaseline, type ValidationCommandRunner } from '../src/project-validation.js';
 
 class Capture {
   value = '';
@@ -138,8 +138,8 @@ describe('live engine distribution validation boundary', () => {
       findDistConsumers: () => consumers, runValidationCommand: runner,
     }));
     expect(result.report.liveDistConsumers).toEqual(consumers);
-    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
-    expect(result.report.validationBaseline.results.map(({ exitCode }) => exitCode)).toEqual([0, 0, 0]);
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.report.validationBaseline.execution).toBe('skipped');
   });
 
   it('keeps unrelated validation independent when the consumed dist directory is absent', async () => {
@@ -150,11 +150,11 @@ describe('live engine distribution validation boundary', () => {
       findDistConsumers: () => consumers, runValidationCommand: runner,
     }));
     expect(result.report.liveDistConsumers).toEqual(consumers);
-    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it.each(['absolute', 'relative', 'alias', 'make-cd', 'output-alias', 'quoted-shell'])(
-    'refuses separate-project %s delegation to the consumed engine before command one', async (form) => {
+    'collects separate-project %s delegation facts without launching a command', async (form) => {
       configureValidation(fixture.packageRoot);
       let build = `npm --prefix "${fixture.packageRoot}" run build`;
       if (form === 'quoted-shell') build = `sh -c 'npm --prefix ${fixture.packageRoot} run build'`;
@@ -183,7 +183,7 @@ describe('live engine distribution validation boundary', () => {
         findDistConsumers: () => consumers, runValidationCommand: runner,
         stdout: new Capture().writer, stderr: stderr.writer,
       });
-      expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
+      expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
       expect(stderr.value).toContain('No project command was launched');
       expect(runner).not.toHaveBeenCalled();
       expect(readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8')).toBe(before);
@@ -193,7 +193,7 @@ describe('live engine distribution validation boundary', () => {
   );
 
   it.each(['own', 'ancestor', 'nested', 'project-alias', 'package-alias', 'dist-alias', 'unknown-project', 'unknown-package'])(
-    'refuses %s identity with live consumers before invoking a dist-writing build', async (relation) => {
+    'collects %s identity with live consumers without invoking a dist-writing build', async (relation) => {
       configureValidation(fixture.packageRoot);
       let project = fixture.packageRoot;
       let packageRoot = fixture.packageRoot;
@@ -224,13 +224,13 @@ describe('live engine distribution validation boundary', () => {
         packageRoot, realpath, findDistConsumers: () => consumers, runValidationCommand: runner,
         stdout: new Capture().writer, stderr: stderr.writer,
       }));
-      expect(code).toBe(1);
+      expect(code).toBe(0);
       expect(runner).not.toHaveBeenCalled();
       expect(stderr.value).toContain('No project command was launched');
     },
   );
 
-  it('still refuses an independent target shared by a verified live run and supports facts-only collection', async () => {
+  it('collects an independent target shared by a verified live run without executing validation', async () => {
     configureValidation(fixture.project);
     writeRun('live-target', { projectDir: fixture.project, status: 'running' }, 3_000);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
@@ -239,13 +239,13 @@ describe('live engine distribution validation boundary', () => {
       inspectLiveRun: () => true, findDistConsumers: () => consumers, runValidationCommand: runner,
       stdout: new Capture().writer, stderr: stderr.writer,
     });
-    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
-    expect(stderr.value).toContain('verified live run(s) live-target');
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
+    expect(stderr.value).toContain('live FlowCrew run(s): live-target');
     expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
     expect(runner).not.toHaveBeenCalled();
   });
 
-  it('refuses before command one when child write confinement cannot be installed', async () => {
+  it('does not prepare command confinement when collecting facts', async () => {
     configureValidation(fixture.project);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
     const prepare = vi.fn(() => { throw new Error('confinement unavailable'); });
@@ -254,8 +254,8 @@ describe('live engine distribution validation boundary', () => {
       findDistConsumers: () => consumers, runValidationCommand: runner,
       prepareValidationWriteGuard: prepare, stdout: new Capture().writer, stderr: stderr.writer,
     });
-    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(1);
-    expect(stderr.value).toContain('write confinement could not be installed');
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
+    expect(prepare).not.toHaveBeenCalled();
     expect(stderr.value).toContain('No project command was launched');
     expect(runner).not.toHaveBeenCalled();
     prepare.mockClear();
@@ -304,14 +304,14 @@ describe('live engine distribution validation boundary', () => {
         writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
       }
       const stderr = new Capture();
-      const result = await collectShipPreflight(['ship-preflight'], commonDeps({
-        findDistConsumers: () => consumers, prepareValidationWriteGuard,
-        stderr: stderr.writer,
-      }));
-      expect(stderr.value).toContain('WRITE CONFINEMENT');
-      expect(result.report.validationBaseline.results[0]).toMatchObject({ role: 'build', state: 'failed' });
-      expect(result.report.validationBaseline.results[0].output).toContain('EACCES');
-      expect(result.report.validationBaseline.results.slice(1).map(({ state }) => state)).toEqual(['passed', 'passed']);
+      const guard = prepareValidationWriteGuard(fixture.project, fixture.packageRoot);
+      let baseline;
+      try {
+        baseline = await runProjectValidationBaseline(fixture.project, { runCommand: request => runValidationCommand(guard.wrap(request)) });
+      } finally { guard.cleanup(); }
+      expect(baseline.results[0]).toMatchObject({ role: 'build', state: 'failed' });
+      expect(baseline.results[0].output).toContain('EACCES');
+      expect(baseline.results.slice(1).map(({ state }) => state)).toEqual(['passed', 'passed']);
       expect(readFileSync(runtime, 'utf-8')).toBe(before);
     },
   );
@@ -345,11 +345,12 @@ describe('live engine distribution validation boundary', () => {
       const { scratch } = JSON.parse(request.args[5]) as { scratch: string };
       return runValidationCommand({ ...request, args: [...request.args, '--', join(scratch, 'home')] });
     });
-    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
-      findDistConsumers: () => consumers, prepareValidationWriteGuard, runValidationCommand: runner,
-      stderr: new Capture().writer,
-    }));
-    expect(result.report.validationBaseline.results.map(({ state }) => state)).toEqual(['passed', 'passed', 'passed']);
+    const guard = prepareValidationWriteGuard(fixture.project, fixture.packageRoot);
+    let baseline;
+    try {
+      baseline = await runProjectValidationBaseline(fixture.project, { runCommand: request => runner(guard.wrap(request)) });
+    } finally { guard.cleanup(); }
+    expect(baseline.results.map(({ state }) => state)).toEqual(['passed', 'passed', 'passed']);
     const denied = JSON.parse(readFileSync(join(fixture.project, 'denied.json'), 'utf-8')) as Record<string, string>;
     expect(Object.keys(denied)).toEqual(['write', 'truncate', 'readonlyTruncate', 'unlink', 'rename', 'link', 'create', 'alias']);
     for (const code of Object.values(denied)) expect(['EACCES', 'EPERM', 'EXDEV']).toContain(code);
@@ -367,12 +368,7 @@ describe('live engine distribution validation boundary', () => {
     const before = readFileSync(runtime, 'utf-8');
     linkSync(runtime, join(fixture.project, 'existing-alias'));
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
-    const stderr = new Capture();
-    expect(await cmdShipPreflightWithDeps(['ship-preflight'], commonDeps({
-      findDistConsumers: () => consumers, prepareValidationWriteGuard, runValidationCommand: runner,
-      stdout: new Capture().writer, stderr: stderr.writer,
-    }))).toBe(1);
-    expect(stderr.value).toContain('unaccounted hard links');
+    expect(() => prepareValidationWriteGuard(fixture.project, fixture.packageRoot)).toThrow('unaccounted hard links');
     expect(runner).not.toHaveBeenCalled();
     expect(readFileSync(runtime, 'utf-8')).toBe(before);
   });
@@ -623,7 +619,7 @@ describe('ship-preflight daemon and build freshness fact', () => {
 });
 
 describe('ship-preflight validation baseline fact', () => {
-  it('runs the configuration-discovered validation set and reports delta criteria', async () => {
+  it('discovers validation commands without executing them or manufacturing delta criteria', async () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'check', lint: 'lint' },
     }), 'utf-8');
@@ -637,16 +633,11 @@ describe('ship-preflight validation baseline fact', () => {
       runValidationCommand: runner,
     }));
 
-    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
-    expect(result.report.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'failed', failureCount: 2,
-    }));
-    expect(result.report.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 2,
-    }));
-    expect(result.report.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'build', rule: 'must_remain_green',
-    }));
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.report.validationBaseline.execution).toBe('skipped');
+    expect(result.report.validationBaseline.discovery.commands.map(command => command.role)).toEqual(['build', 'test', 'lint']);
+    expect(result.report.validationBaseline.results.every(result => result.state === 'unresolved')).toBe(true);
+    expect(result.report.validationBaseline.gateCriteria.every(criterion => criterion.rule === 'baseline_unresolved')).toBe(true);
   });
 });
 

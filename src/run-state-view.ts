@@ -289,10 +289,10 @@ function budgetView(state: ArchivedStoreState, observedAt: string) {
         const key = JSON.stringify([stageId, attempt.index, attempt.startedAt]);
         if (seen.has(key)) continue;
         seen.add(key);
-        if (attempt.tokenUsage !== 'unknown' && quantity.safeParse(attempt.tokens_in).success && quantity.safeParse(attempt.tokens_out).success) {
-          knownInputTokens += attempt.tokens_in!;
-          knownOutputTokens += attempt.tokens_out!;
-        } else unknownTokenAttempts += 1;
+        if (quantity.safeParse(attempt.tokens_in).success) knownInputTokens += attempt.tokens_in!;
+        if (quantity.safeParse(attempt.tokens_out).success) knownOutputTokens += attempt.tokens_out!;
+        if (attempt.tokenUsage === 'unknown' || attempt.tokenUsage === 'partial'
+          || !quantity.safeParse(attempt.tokens_in).success || !quantity.safeParse(attempt.tokens_out).success) unknownTokenAttempts += 1;
         if (quantity.safeParse(attempt.duration_ms).success) knownAttemptDurationMs += attempt.duration_ms!;
         else unknownDurationAttempts += 1;
       }

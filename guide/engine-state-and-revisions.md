@@ -130,3 +130,22 @@ planner_policies: [evidence_statistics]
 This project's selected statistical evidence instructions concern distributions, feasibility preregistration and comparison with operator expectations. They are appended to the planner system input and captured with the final invocation. A new project does not inherit this selection from the packaged defaults. Unknown or duplicate policy names, null and malformed selections fail with `PLANNER_POLICY_INVALID`. A policy cannot grant write capabilities or override admission. Planning judgement and the dispatch interface remain in the generic prompt.
 
 Before deployment, run the offline decision and state replay tools against a copied baseline distribution and the candidate. `scripts/engine-principles-replay.ts --help` describes the frozen-corpus inputs; its receipts include every decision and its rule. Compatibility changes or unexplained admission differences give a nonzero exit. The intentional migration rule accepts only the exact missing-declaration errors while retaining other core errors, warnings and owners. Native projected stdout remains censored evidence. These tools are available to the operator; they are not yet a mandatory CI deployment gate.
+
+Own-stage Codex continuation uses the stage's explicit UUID and isolated home across
+corrections, retries and accepted scope suspension. Every execution renews its
+write boundary and re-admits inherited scope against active peers; continuity
+never grants capability. A parallel member settles and resumes at its own closed
+child boundary while disjoint peers continue. A conflict waits for the next wave.
+Validation stages never inherit a builder's session. A disproved gate verdict
+still clears the gate's continuation. Resume errors remain recorded; a diagnosed
+fresh fallback receives the complete duties and every previously delivered notice.
+Successful terminal homes keep the existing cleanup policy.
+
+Invocation input gives the controller's immutable absolute deadline and current
+remaining time. Query UTC with `node -e "console.log(new Date().toISOString())"`;
+time advice cannot extend the execution. Ordinary guidance waits for active tools
+to close; explicit command stops and timeout projections retain their authority.
+Empty tool-boundary guidance checks no longer append events or rewrite receipts;
+execution and invocation checks, deliveries and command lifecycle records remain.
+The prompt gives a state-query locator and admitted revision binding. The complete
+read-only state and immutable invocation inputs remain available through the CLI.

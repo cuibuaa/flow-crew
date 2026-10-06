@@ -1554,6 +1554,10 @@ export class Supervisor {
       providerFailure: result?.providerFailure,
       tokens_in: result?.tokens_in,
       tokens_out: result?.tokens_out,
+      tokenUsage: result?.tokenUsage,
+      tokens_cached: result?.tokens_cached,
+      tokens_reasoning: result?.tokens_reasoning,
+      invocations: result?.invocations,
       trigger,
       ...(verdict ? {
         unverifiedAssessment: {

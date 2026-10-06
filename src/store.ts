@@ -31,6 +31,7 @@ import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
+import { usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
 import type { SupervisorEvent } from './supervisor-events.js';
 import {
   UnknownRunStatusError,
@@ -76,7 +77,7 @@ export const STAGE_STATUS = {
 export type StageState = typeof STAGE_STATUS[keyof typeof STAGE_STATUS];
 
 export type StageAttemptState = 'running' | 'complete' | 'failed' | 'suspended';
-export type AttemptTokenUsage = 'known' | 'unknown';
+export type AttemptTokenUsage = TokenUsage;
 export type WriteAttribution = 'structured' | 'snapshot' | 'unknown';
 
 export interface StageAttemptTimeoutSummary {
@@ -115,7 +116,8 @@ export interface StageConstraintAuditSummary {
   unresolvedViolationCount?: number;
 }
 
-export interface StageAttempt {
+export interface StageAttempt extends InvocationUsage {
+  invocations?: NativeInvocationUsage[];
   index: number;
   startedAt: string;
   completedAt?: string;
@@ -237,7 +239,8 @@ export interface UnresolvedStageObligation {
   scopePlanningDigests?: string[];
 }
 
-export interface SupervisorAttempt {
+export interface SupervisorAttempt extends InvocationUsage {
+  invocations?: NativeInvocationUsage[];
   index: number;
   startedAt: string;
   completedAt: string;
@@ -1890,7 +1893,8 @@ export function beginStageAttempt(
   return running;
 }
 
-export interface CompleteStageAttemptInput {
+export interface CompleteStageAttemptInput extends InvocationUsage {
+  invocations?: NativeInvocationUsage[];
   exitCode: number;
   processExitCode?: number | null;
   processSignal?: NodeJS.Signals | null;
@@ -1957,7 +1961,10 @@ export function completedStageAttemptStatus(
     providerFailure: completion.providerFailure,
     tokens_in: tokensIn,
     tokens_out: tokensOut,
-    tokenUsage: tokensIn !== undefined && tokensOut !== undefined ? 'known' : 'unknown',
+    tokenUsage: completion.tokenUsage ?? (usageComplete(completion) ? 'known' : 'unknown'),
+    tokens_cached: completion.tokens_cached,
+    tokens_reasoning: completion.tokens_reasoning,
+    invocations: completion.invocations,
     error: completion.error,
     adapterFailureKind: completion.adapterFailureKind,
     writes: completion.writes,

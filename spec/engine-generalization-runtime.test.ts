@@ -52,6 +52,7 @@ import {
   type StoreState,
 } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+import { settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 const roots: string[] = [];
 const originalStateRoot = fcGlobalDir();
@@ -197,6 +198,40 @@ afterEach(() => {
 });
 
 describe('engine generalization runtime bindings', () => {
+  it('settles incomplete validation once without replacing its authored gate review', async () => {
+    const { projectDir } = seedProject('validation-only');
+    const created = createRun(projectDir, 'validation-only', 'name: validation-only', ['qa']);
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const verdict = JSON.stringify({ pass: true, reason: 'Authored review remains valid' });
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: 1, stdout: 'unparseable failure' }) });
+    expect(first?.pass).toBe(false);
+    expect(first?.delta.every((entry) => entry.state === 'unresolved')).toBe(true);
+    let commands = 0;
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toEqual({ kind: 'replayed' });
+    expect(commands).toBe(3);
+    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('unparseable failure');
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toEqual({ kind: 'unchanged' });
+  });
+  it('keeps persistent unknown validation fail-closed and bounds mechanical retries across calls', async () => {
+    const { projectDir } = seedProject('validation-unresolved');
+    const created = createRun(projectDir, 'validation-unresolved', 'name: validation-unresolved', ['qa']);
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    let commands = 0;
+    const deps = { runCommand: () => { commands++; return { exitCode: 1, stdout: 'unparseable failure' }; } };
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect(commands).toBe(6);
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect(commands).toBe(6);
+  });
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {
     const measure = stage({ id: 'measure', scope: ['artifacts/round.json'] });
     const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),

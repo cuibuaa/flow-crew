@@ -462,7 +462,7 @@ describe('events, help, watch, and preflight', () => {
     expect(all.stdout).toContain('[WATCH] armed · 201 entries');
   });
 
-  it('unchanged-base seam: preflight can skip all commands and streams progress with a live-project warning', async () => {
+  it('preflight only discovers commands and warns about a live project with either baseline option', async () => {
     writeFileSync(join(project, 'package.json'), JSON.stringify({ scripts: { build: 'fixture-build', test: 'fixture-test', lint: 'fixture-lint' } }), 'utf-8');
     writeFileSync(join(project, 'package-lock.json'), '{}', 'utf-8');
     const runDirectory = writeRun('live-run', 'running', 1_000);
@@ -490,7 +490,7 @@ describe('events, help, watch, and preflight', () => {
     expect(runner).not.toHaveBeenCalled();
     expect(stdout.text()).toContain('Validation baseline: SKIPPED');
     expect(stderr.text()).toContain('shared by live FlowCrew run(s): live-run');
-    expect(stderr.text()).toContain('no project command was launched');
+    expect(stderr.text()).toContain('No project command was launched');
 
     const streamedOut = new Capture();
     const streamedErr = new Capture();
@@ -498,13 +498,12 @@ describe('events, help, watch, and preflight', () => {
       ...dependencies,
       stdout: streamedOut.stream,
       stderr: streamedErr.stream,
-    })).toBe(1);
+    })).toBe(0);
     expect(runner).not.toHaveBeenCalled();
     expect(streamedErr.text()).toContain('shared by live FlowCrew run(s)');
-    expect(streamedErr.text()).toContain('Preflight will not launch validation commands while those runs are live');
     expect(streamedErr.text()).toContain('No project command was launched');
-    expect(streamedErr.text()).toContain('pass --no-baseline');
     expect(streamedErr.text()).not.toContain('Validation baseline: START');
+    expect(streamedOut.text()).toContain('Validation baseline: SKIPPED');
   });
 
   it('unchanged-base seam: the production validation runner streams child output', async () => {

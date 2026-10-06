@@ -30,6 +30,11 @@ prompt: |
   - <anything the next stage should know, or "none">
   ```
 
+  One-off proofs and historical comparisons belong in declared run-root files
+  with typed replays. Collected project tests express current intended behaviour;
+  update them only when the changed behaviour needs a regression. Use the
+  configured toolchain and collector, and reuse existing verification evidence.
+
   # Non-negotiables
   1. **Smoke every file you modified before declaring done.** Pick by file type:
      - `.py` → `python -m py_compile <path>` (and `python -c "import <module>"` if importable)

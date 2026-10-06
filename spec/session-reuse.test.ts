@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage } from '../src/invocation-usage.js';
 import {
   buildCodexExecArgs,
   parseCodexJsonl,
@@ -9,11 +13,37 @@ import {
   StageConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
-import type { StageStatus } from '../src/store.js';
+import type { StageStatus, StoreState } from '../src/store.js';
+import { sessionResumeForStage } from '../src/scheduler/sched_admission/sessions.js';
 import { isSessionReuseEnabled } from '../src/config.js';
 import { classifyAdapterFailure } from '../src/worker.js';
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
+
+describe('native invocation cost evidence', () => {
+  it('subtracts resumed cumulative counters, retains cached/reasoning counts and rejects resets', () => {
+    const home = mkdtempSync(join(tmpdir(),'fc-usage-'));
+    try {
+      const dir = join(home,'sessions','2026','10','06'); mkdirSync(dir,{recursive:true});
+      const file = join(dir,`rollout-test-${UUID}.jsonl`);
+      const counter = (input: number, output: number, cached: number, reasoning: number) => JSON.stringify({type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:input,output_tokens:output,cached_input_tokens:cached,reasoning_output_tokens:reasoning}}}})+'\n';
+      writeFileSync(file,counter(100,10,50,3));
+      const before = captureCodexRollouts(home);
+      expect(codexRolloutInterval(before,before,UUID)).toEqual({reason:'rollout_interval_unverified'});
+      appendFileSync(file,counter(160,18,90,5));
+      const after = captureCodexRollouts(home);
+      expect(codexRolloutInterval(before,after,UUID).usage).toEqual({tokens_in:60,tokens_out:8,tokens_cached:40,tokens_reasoning:2});
+      appendFileSync(file,counter(1,1,0,0));
+      expect(codexRolloutInterval(after,captureCodexRollouts(home),UUID)).toEqual({reason:'rollout_counter_reset'});
+      expect(sumInvocationUsage([{tokens_in:60,tokens_out:8,tokenUsage:'partial'},{}])).toMatchObject({tokens_in:60,tokens_out:8,tokenUsage:'partial'});
+    } finally { rmSync(home,{recursive:true,force:true}); }
+  });
+  it('does not turn missing retry usage into a complete aggregate', () => {
+    expect(sumInvocationUsage([{}, {tokens_in:20,tokens_out:2,tokenUsage:'known'}])).toEqual({tokens_in:20,tokens_out:2,tokenUsage:'partial'});
+    expect(sumInvocationUsage([{},{}])).toEqual({tokenUsage:'unknown'});
+    expect(sumInvocationUsage([{tokens_in:Number.MAX_SAFE_INTEGER,tokens_out:1},{tokens_in:1,tokens_out:1}])).toEqual({tokens_out:2,tokenUsage:'partial'});
+  });
+});
 
 function stage(id: string, input: Partial<StageConfig> = {}): StageConfig {
   return StageConfigSchema.parse({ id, role: 'coder', scope: [`${id}.ts`], ...input });
@@ -180,5 +210,24 @@ describe('UUID-only Codex sessions', () => {
       allStages: [build, next],
       destinationStatus: successfulStatus(),
     })).toBe(false);
+  });
+});
+
+
+describe('own-stage continuation', () => {
+  it('retains a settled stage UUID independently of predecessor reuse, without inheriting foreign or gate reasoning', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-own-session-'));
+    try {
+      const subject = stage('work');
+      const state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
+      const writeSession = (record: object) => { mkdirSync(join(root, 'stages', 'work'), { recursive: true }); writeFileSync(join(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
+      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
+      mkdirSync(join(root, 'stages', 'work', 'codex_home'), { recursive: true });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'work' });
+      expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
+      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

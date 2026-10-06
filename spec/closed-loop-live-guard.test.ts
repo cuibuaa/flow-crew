@@ -31,6 +31,9 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { loadClosedLoopEngineEvidence } from './test-support/closed-loop-engine-evidence.js';
+import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
+import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createLiveGuardFactory } from '../src/scheduler/sched_scope/write-enforcement.js';
 
 let projectDir: string;
 let stateDir: string;
@@ -207,7 +210,9 @@ describe('portable live constraint guard', () => {
         const marker = '# Live constraint correction\n';
         const markerAt = prompt.indexOf(marker);
         expect(markerAt).toBeGreaterThanOrEqual(0);
-        correctionBytes = Buffer.from(prompt.slice(markerAt + marker.length), 'utf-8');
+        const instruction = prompt.slice(markerAt + marker.length).split('\n\n# Execution clock\n')[0].trimEnd();
+        correctionBytes = Buffer.from(instruction, 'utf-8');
+        expect(prompt).toContain('absolute deadline');
         const directory = join(opts.runDir, 'stages', opts.stageId);
         const requestedPaths = ['spec/existing.test.ts'];
         const requestId = 'authorize-existing-test';
@@ -265,6 +270,50 @@ describe('portable live constraint guard', () => {
     }));
     expect(correctionBytes).toEqual(Buffer.from(audit.scopeRevisionInstructions[0], 'utf-8'));
     expect(existsSync(join(created.runDirPath, 'stages', 'writer', 'constraint_audit_attempt_1.json'))).toBe(true);
+  });
+
+  it('delivers restored writes to every batch member once and still restores a new write after readmission', async () => {
+    const path = seedProject();
+    const preimage = readFileSync(path, 'utf-8');
+    const writer = StageConfigSchema.parse(workflowFixture([]).config.stages[0]);
+    const peer = { ...writer, id: 'peer' };
+    const created = createRun(projectDir, 'incident-delivery', '', ['writer', 'peer']);
+    const context = createScopeBatchContext(projectDir, [writer, peer], undefined, created.runId);
+    const { createSchedulerLiveConstraintGuardFactory } = createLiveGuardFactory({ transientVitestOutputScopes: () => [] });
+    const scan = async (stage: typeof writer, attemptIndex: number) => {
+      const factory = createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId: created.runId, context })!;
+      const guard = factory({ attemptIndex, attemptStartedAt: new Date().toISOString() });
+      const monitor = guard.beginInvocation(1, () => {});
+      return monitor.finish();
+    };
+
+    writeFileSync(path, 'first unauthorized write\n');
+    expect((await scan(writer, 1)).incidents).toHaveLength(1);
+    expect(readFileSync(path, 'utf-8')).toBe(preimage);
+    // The peer has not yet observed the batch fact, even though bytes are restored.
+    expect((await scan(peer, 1)).incidents).toHaveLength(1);
+    expect((await scan(writer, 2)).incidents).toHaveLength(0);
+    expect((await scan(peer, 2)).incidents).toHaveLength(0);
+
+    writeFileSync(path, 'another unauthorized write after readmission\n');
+    expect((await scan(writer, 2)).incidents).toHaveLength(1);
+    expect(readFileSync(path, 'utf-8')).toBe(preimage);
+    expect((await scan(peer, 2)).incidents).toHaveLength(1);
+
+    // A durable rollback failure cannot be consumed as though it were settled.
+    context.liveViolations.push({
+      sequence: ++context.liveViolationSequence, path: 'unrestored.txt', reason: 'rollback failed',
+      restored: false, rollbackFailure: 'unavailable preimage', entryKind: 'untracked',
+      comparisonOutcome: 'different', changeObserved: true, rollbackAttempted: true,
+      targetStageIds: new Set(['writer', 'peer']), deliveredAttemptKeys: new Set(),
+    });
+    for (const attemptIndex of [3, 4]) {
+      for (const stage of [writer, peer]) {
+        expect((await scan(stage, attemptIndex)).incidents).toContainEqual(expect.objectContaining({
+          path: 'unrestored.txt', restored: false,
+        }));
+      }
+    }
   });
 
   it('keeps a clean initialized gitlink intact during an explicit read-only stage', { timeout: 20_000 }, async () => {

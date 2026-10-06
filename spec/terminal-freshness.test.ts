@@ -77,6 +77,7 @@ async function run(
 
 const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs/task_summary.md']) => ({
   runFiles: {
+    'tech_solution.md': '# Planner analysis\nExecute the declared terminal work and verify its freshness.\n',
     'dispatch.yaml': declaredDispatch([
       `- id: ${id}`,
       '  role: coder',

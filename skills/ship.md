@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 17 -->
+<!-- flowcrew-skill-revision: 18 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -480,9 +480,9 @@ prints a guarded repair command; run it only after checking the reported exact i
 backstops, but neither has to be invoked or remembered for this normal path to keep the ledger true.
 
 Do not edit a project while its run is active; scope attribution can restore the edit as an unauthorized
-stage write. Permanent machine-independent tests belong in the tracked specification suite. One-off,
+stage write. The tracked specification suite expresses current intended behaviour; changes to it need a behaviour regression, not a new test per task criterion. One-off,
 networked, browser-dependent, or host-specific harnesses belong under the operating-system temporary
-root or the run directory. The scheduler owns one-active-run and scope behavior; status commands own
+root or declared run-directory files with typed replays. The scheduler owns one-active-run and scope behavior; status commands own
 freshness. The operator still owns acceptance and cleanup.
 
 If `flowcrew` is unavailable, stop and provide:

@@ -79,24 +79,6 @@ function copyManifest(targetDir: string): void {
   copyFileSync(join(projectDir, 'package-lock.json'), join(targetDir, 'package-lock.json'));
 }
 
-function genericTapRunner(
-  sourceNames: readonly string[],
-  targetNames: readonly string[],
-): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
-  return vi.fn<ValidationCommandRunner>((request) => ({
-    exitCode: 0,
-    stdout: tap(request.cwd === projectDir ? sourceNames : targetNames),
-    durationMs: 7,
-  }));
-}
-
-function genericTapWorktree(): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
-  return vi.fn<GitWorktreeCreator>((request) => {
-    copyManifest(request.targetDir);
-    return { exitCode: 0 };
-  });
-}
-
 const collectTests: ValidationCommandRunner = (request) => {
   const identities: string[] = [];
   const visit = (directory: string): void => {
@@ -237,532 +219,72 @@ describe('ship-setup test population integrity', () => {
   });
 
   it.each([
-    ['Node built-in runner', 'node --test'],
-    ['a differently named runner', 'deno test'],
-  ])('derives matched population from generic TAP for %s', async (_label, testScript) => {
+    ['node --test', tap(['alpha', 'beta'])],
+    ['deno test', tap(['different identity'])],
+    ['mystery-check', 'opaque validation result'],
+    ['node --test', 'TAP version 13\nok 1 - alpha\n1..2'],
+  ])('keeps unsupported %s population unverified and executes only the target', async (testScript, output) => {
     const briefPath = writeRunnerProject(testScript);
-    const targetDir = join(root, `target-${testScript.split(' ')[0]}`);
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: tap(['alpha', 'beta']),
-      durationMs: 7,
-    }));
-
+    const targetDir = join(root, 'target-unverified');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: output }));
     const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
       runValidationCommand: runner,
       globalDir: () => join(root, 'state'),
     });
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        runner: {
-          source: { display: testScript, command: 'npm run test' },
-          target: { display: testScript, command: 'npm run test' },
-        },
-        method: { source: 'baseline_output', format: 'tap' },
-        source: { count: 2, identities: ['1:alpha', '1:beta'] },
-        target: { count: 2, identities: ['1:alpha', '1:beta'] },
-        missingFromTarget: [],
-        extraInTarget: [],
-        reason: expect.stringContaining('Exact collection was unavailable'),
-      },
-    });
-    expect(runner).toHaveBeenCalledTimes(2);
-    expect(runner.mock.calls.map(([request]) => request.cwd)).toEqual([projectDir, targetDir]);
+    expect(report).toMatchObject({ state: 'ready', testPopulation: {
+      state: 'unverified', reason: expect.stringContaining('flowcrew.testPopulation.files'),
+    } });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ role: 'test', cwd: targetDir }));
+    expect(report.validationBaseline?.results).toContainEqual(expect.objectContaining({ role: 'test', state: 'passed' }));
   });
 
-  it('treats an unrelated TAP insertion as source-plus-additions and names only the addition', async () => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetDir = join(root, 'target-with-insertion');
-    const stdout = new Capture();
-    const stderr = new Capture();
-    const runner = genericTapRunner(
-      ['alpha', 'stable'],
-      ['inserted', 'alpha', 'stable'],
-    );
-
-    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
-      createWorktree: genericTapWorktree(),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-      stdout: stdout.writer,
-      stderr: stderr.writer,
-    });
-
-    expect(code).toBe(0);
-    expect(stderr.value).toBe('');
-    expect(stdout.value).toContain('Ship setup: READY');
-    expect(stdout.value).toContain('Test population: MATCHED source=2 target=3');
-    expect(stdout.value).toContain('  relation: SOURCE-PLUS-ADDITIONS');
-    expect(stdout.value).toContain('  extra in target: 1:inserted');
-    expect(stdout.value).not.toContain('missing from target');
-    const records = readdirSync(join(root, 'state', 'ship-setups'));
-    expect(records).toHaveLength(1);
-    const record = JSON.parse(readFileSync(join(root, 'state', 'ship-setups', records[0]), 'utf-8'));
-    expect(record).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        source: { identities: ['1:alpha', '1:stable'] },
-        target: { identities: ['1:inserted', '1:alpha', '1:stable'] },
-        missingFromTarget: [],
-        extraInTarget: ['1:inserted'],
-        reason: expect.stringContaining('SOURCE-PLUS-ADDITIONS'),
-      },
-    });
-    expect(runner).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    {
-      label: 'a missing test',
-      targetName: 'target-missing-tap-test',
-      sourceNames: ['kept', 'dropped'],
-      targetNames: ['kept'],
-      missing: '1:dropped',
-      extra: undefined,
-    },
-    {
-      label: 'a renamed test',
-      targetName: 'target-renamed-tap-test',
-      sourceNames: ['kept', 'old name'],
-      targetNames: ['kept', 'new name'],
-      missing: '1:old name',
-      extra: '1:new name',
-    },
-  ])('still refuses $label and renders its exact TAP difference', async ({
-    targetName,
-    sourceNames,
-    targetNames,
-    missing,
-    extra,
-  }) => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetDir = join(root, targetName);
-    const stdout = new Capture();
-    const stderr = new Capture();
-
-    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
-      createWorktree: genericTapWorktree(),
-      runValidationCommand: genericTapRunner(sourceNames, targetNames),
-      globalDir: () => join(root, 'state'),
-      stdout: stdout.writer,
-      stderr: stderr.writer,
-    });
-
-    expect(code).toBe(1);
-    expect(stdout.value).toBe('');
-    expect(stderr.value).toContain('Ship setup: REFUSED');
-    expect(stderr.value).toContain('Test population: MISMATCHED');
-    expect(stderr.value).toContain(`missing from target: ${missing}`);
-    if (extra) expect(stderr.value).toContain(`extra in target: ${extra}`);
-    else expect(stderr.value).not.toContain('extra in target:');
-    expect(JSON.parse(readFileSync(join(
-      root,
-      'state',
-      'ship-setups',
-      readdirSync(join(root, 'state', 'ship-setups'))[0],
-    ), 'utf-8')).state).toBe('refused');
-  });
-
-  it('uses name-local occurrences to preserve duplicate TAP multiplicity', async () => {
-    const briefPath = writeRunnerProject('node --test');
-    const sourceNames = ['same name', 'same name'];
-    const withInsertion = await runShipSetup(
-      setupArgs(briefPath, join(root, 'target-duplicate-insertion')),
-      {
-        createWorktree: genericTapWorktree(),
-        runValidationCommand: genericTapRunner(
-          sourceNames,
-          ['unrelated insertion', 'same name', 'same name'],
-        ),
-        globalDir: () => join(root, 'state'),
-      },
-    );
-
-    expect(withInsertion).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        source: { identities: ['1:same name', '2:same name'] },
-        target: { identities: ['1:unrelated insertion', '1:same name', '2:same name'] },
-        missingFromTarget: [],
-        extraInTarget: ['1:unrelated insertion'],
-      },
-    });
-    expect(new Set(withInsertion.testPopulation?.source?.identities).size).toBe(2);
-
-    const withDroppedDuplicate = await runShipSetup(
-      setupArgs(briefPath, join(root, 'target-dropped-duplicate')),
-      {
-        createWorktree: genericTapWorktree(),
-        runValidationCommand: genericTapRunner(sourceNames, ['same name']),
-        globalDir: () => join(root, 'state'),
-      },
-    );
-
-    expect(withDroppedDuplicate).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        state: 'mismatched',
-        source: { identities: ['1:same name', '2:same name'] },
-        target: { identities: ['1:same name'] },
-        missingFromTarget: ['2:same name'],
-        extraInTarget: [],
-      },
-      blockers: [expect.objectContaining({
-        reason: expect.stringContaining('missing from target: 2:same name'),
-      })],
-    });
-  });
-
-  it.each([
-    ['omits its name', 'ok 1'],
-    ['contains only a directive', 'ok 1 - # SKIP unavailable'],
-  ])('records complete TAP whose top-level record %s as unverified instead of count-matched', async (_label, record) => {
-    const briefPath = writeRunnerProject('anonymous-tap');
-    const targetDir = join(root, 'target-anonymous-tap');
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: `TAP version 13\n${record}\n1..1`,
-      durationMs: 7,
-    }));
-
-    const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-    });
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'unverified',
-        runner: { source: { display: 'anonymous-tap' } },
-        reason: expect.stringContaining('has no test name'),
-      },
-    });
-    expect(runner).toHaveBeenCalledTimes(2);
-  });
-
-  it('falls back to generic TAP when an available exact collector cannot run', async () => {
+  it('keeps a failed collector unverified without executing source tests', async () => {
     writeNodeProject();
     const briefPath = join(projectDir, 'brief.md');
     writeFileSync(briefPath, '# Goal\nRun the configured test population.\n');
-    const targetDir = join(root, 'target-collector-fallback');
-    const collector = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 1,
-      stderr: 'collector executable unavailable',
-      durationMs: 2,
-    }));
-    const baseline = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: tap(['fallback identity']),
-      durationMs: 7,
-    }));
-
+    const targetDir = join(root, 'target-collector-failure');
+    const collector = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stderr: 'collector unavailable' }));
+    const baseline = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: tap(['opaque identity']) }));
     const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runTestCollectionCommand: collector,
-      runValidationCommand: baseline,
-      globalDir: () => join(root, 'state'),
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
+      runTestCollectionCommand: collector, runValidationCommand: baseline, globalDir: () => join(root, 'state'),
     });
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        method: { source: 'baseline_output', format: 'tap' },
-        reason: expect.stringContaining('Cannot collect exact source/target test populations'),
-      },
-    });
+    expect(report.testPopulation).toMatchObject({ state: 'unverified', reason: expect.stringContaining('collector unavailable') });
     expect(collector).toHaveBeenCalledTimes(1);
-    expect(baseline).toHaveBeenCalledTimes(4);
-  });
-
-  it('records opaque output as ready but unverified, naming the runner and reason in JSON and human output', async () => {
-    const testScript = 'mystery-check --all';
-    const briefPath = writeRunnerProject(testScript);
-    const targetDir = join(root, 'target-unverified');
-    const stdout = new Capture();
-    const stderr = new Capture();
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: 'validation completed; population format unavailable',
-      durationMs: 11,
-    }));
-
-    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-      stdout: stdout.writer,
-      stderr: stderr.writer,
-    });
-
-    expect(code).toBe(0);
-    expect(stderr.value).toBe('');
-    expect(stdout.value).toContain('Ship setup: READY');
-    expect(stdout.value).toContain('Test population: UNVERIFIED');
-    expect(stdout.value).toContain(`runner: ${testScript} (invoked as npm run test)`);
-    expect(stdout.value).toContain('version line missing');
-    const records = readdirSync(join(root, 'state', 'ship-setups'));
-    expect(records).toHaveLength(1);
-    const record = JSON.parse(readFileSync(join(root, 'state', 'ship-setups', records[0]), 'utf-8'));
-    expect(record).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'unverified',
-        runner: {
-          source: { display: testScript, command: 'npm run test' },
-          target: { display: testScript, command: 'npm run test' },
-        },
-        reason: expect.stringContaining(`runner "${testScript}" is unverified`),
-      },
-    });
-  });
-
-  it('still refuses when every target validation role exits 127 during output fallback', async () => {
-    const briefPath = writeRunnerProject('mystery-test');
-    writeFileSync(join(projectDir, 'package.json'), JSON.stringify({
-      scripts: { build: 'mystery-build', test: 'mystery-test', lint: 'mystery-lint' },
-    }));
-    const targetDir = join(root, 'target-launch-error');
-    const stdout = new Capture();
-    const stderr = new Capture();
-    const runner = vi.fn<ValidationCommandRunner>((request) => request.cwd === projectDir
-      ? { exitCode: 0, stdout: 'source runner output is opaque', durationMs: 3 }
-      : { exitCode: 127, stderr: `${request.role} executable not found`, durationMs: 3 });
-
-    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-      stdout: stdout.writer,
-      stderr: stderr.writer,
-    });
-
-    expect(code).toBe(1);
-    expect(stdout.value).toBe('');
-    expect(stderr.value.split('\n')[0]).toBe('Ship setup: REFUSED');
-    expect(stderr.value).toContain('Test population: UNVERIFIED');
-    expect(stderr.value).toContain('runner: mystery-test (invoked as npm run test)');
-    expect(stderr.value.match(/exit 127/g)).toHaveLength(3);
-    expect(runner.mock.calls.map(([request]) => [request.cwd, request.role])).toEqual([
-      [projectDir, 'test'],
-      [targetDir, 'build'],
-      [targetDir, 'test'],
-      [targetDir, 'lint'],
+    expect(baseline.mock.calls.map(([request]) => [request.cwd, request.role])).toEqual([
+      [targetDir, 'build'], [targetDir, 'test'], [targetDir, 'lint'],
     ]);
-    expect(JSON.parse(readFileSync(join(
-      root,
-      'state',
-      'ship-setups',
-      readdirSync(join(root, 'state', 'ship-setups'))[0],
-    ), 'utf-8')).state).toBe('refused');
   });
 
-  it('keeps a failed TAP target as the governing red baseline with its no-regression gate', async () => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetDir = join(root, 'target-red');
-    const output = tap(['passes', 'fails'], new Set([2]));
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 1,
-      stdout: output,
-      durationMs: 13,
-    }));
-
+  it('still refuses target launch errors with an unverified population', async () => {
+    const briefPath = writeRunnerProject('mystery-check');
+    const targetDir = join(root, 'target-launch-error');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 127, stderr: 'executable not found' }));
     const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
+      runValidationCommand: runner, globalDir: () => join(root, 'state'),
     });
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: { state: 'matched', source: { count: 2 }, target: { count: 2 } },
-      validationBaseline: {
-        results: expect.arrayContaining([
-          expect.objectContaining({
-            role: 'test',
-            state: 'failed',
-            exitCode: 1,
-            failureCount: 1,
-            failureIdentifiers: ['fails'],
-            failureIdentity: 'known',
-          }),
-        ]),
-        gateCriteria: expect.arrayContaining([
-          expect.objectContaining({ role: 'test', rule: 'no_regression_from_baseline' }),
-        ]),
-      },
-    });
-  });
-
-  it('records and renders the cause of an unknown failed baseline without changing its gate', async () => {
-    const briefPath = writeRunnerProject('custom-test-runner');
-    const targetDir = join(root, 'target-opaque-red');
-    const stdout = new Capture();
-    const stderr = new Capture();
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 1,
-      stderr: 'custom runner stopped without a recognized failure identity',
-      durationMs: 13,
-    }));
-
-    const code = await cmdShipSetupWithDeps(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-      stdout: stdout.writer,
-      stderr: stderr.writer,
-    });
-
-    expect(code).toBe(0);
-    expect(stderr.value).toBe('');
-    expect(stdout.value).toContain('gate test: no_regression_from_baseline');
-    expect(stdout.value).toContain('non-TAP output format is not recognized');
-    const records = readdirSync(join(root, 'state', 'ship-setups'));
-    expect(records).toHaveLength(1);
-    const record = JSON.parse(readFileSync(join(root, 'state', 'ship-setups', records[0]), 'utf-8'));
-    expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test',
-      state: 'failed',
-      failureIdentifiers: [],
-      failureIdentity: 'unknown',
-      reason: expect.stringContaining('non-TAP output format is not recognized'),
-    }));
-    expect(runner).toHaveBeenCalledTimes(2);
+    expect(report).toMatchObject({ state: 'refused', testPopulation: { state: 'unverified' } });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: targetDir }));
   });
 
   it.each([
-    ['truncated', '[... 512 earlier bytes omitted ...]\nTAP version 13\nok 2 - beta\n1..2'],
-    ['incomplete', 'TAP version 13\nok 1 - alpha\n1..2'],
-    ['ambiguous', 'TAP version 13\nok 1 - alpha\n1..1\n1..1'],
-    ['bailed-out', 'TAP version 13\nnot ok 1 - alpha\nBail out! stopped\n1..1\n# fail 1'],
-    ['plan-less', 'TAP version 13\nnot ok 1 - alpha\n# fail 1'],
-    ['summary-contradiction', 'TAP version 13\nnot ok 1 - alpha\n1..1\n# fail 0'],
-  ])('degrades %s TAP output to a recorded unverified state', async (_label, output) => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetDir = join(root, `target-${_label}`);
-    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: output, durationMs: 5 }));
-
+    [tap(['passes', 'fails'], new Set([2])), 'known', ['fails']],
+    ['custom runner stopped', 'unknown', []],
+  ])('retains the target red baseline and delta rule independently of population evidence', async (output, identity, failures) => {
+    const briefPath = writeRunnerProject('custom-test-runner');
+    const targetDir = join(root, 'target-red');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stdout: output as string }));
     const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
+      runValidationCommand: runner, globalDir: () => join(root, 'state'),
     });
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'unverified',
-        runner: { source: { display: 'node --test' } },
-        reason: expect.stringMatching(/truncated|records do not match|multiple top-level plans|bailout|no top-level plan|failure summary does not match/),
-      },
-    });
-  });
-
-  it('refuses a TAP identity mismatch after capturing the unchanged target baseline', async () => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetDir = join(root, 'target-mismatch');
-    const runner = vi.fn<ValidationCommandRunner>((request) => ({
-      exitCode: 0,
-      stdout: request.cwd === projectDir ? tap(['source identity']) : tap(['target identity']),
-      durationMs: 17,
-    }));
-
-    const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        copyManifest(request.targetDir);
-        return { exitCode: 0 };
-      }),
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-    });
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        state: 'mismatched',
-        missingFromTarget: ['1:source identity'],
-        extraInTarget: ['1:target identity'],
-      },
-      validationBaseline: {
-        results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'passed' })]),
-      },
-      blockers: [expect.objectContaining({
-        phase: 'validation',
-        reason: expect.stringContaining('mismatch from baseline output'),
-      })],
-    });
-    expect(JSON.parse(readFileSync(join(
-      root,
-      'state',
-      'ship-setups',
-      readdirSync(join(root, 'state', 'ship-setups'))[0],
-    ), 'utf-8')).state).toBe('refused');
-  });
-
-  it('records identical target baseline results and gate criteria for TAP-matched and unverified populations', async () => {
-    const briefPath = writeRunnerProject('node --test');
-    const targetOutput = tap(['stable target']);
-    let sourceOutput = targetOutput;
-    const runner = vi.fn<ValidationCommandRunner>((request) => ({
-      exitCode: 1,
-      stdout: request.cwd === projectDir ? sourceOutput : targetOutput,
-      durationMs: 19,
-    }));
-    const createWorktree = vi.fn<GitWorktreeCreator>((request) => {
-      copyManifest(request.targetDir);
-      return { exitCode: 0 };
-    });
-
-    const matched = await runShipSetup(setupArgs(briefPath, join(root, 'target-matched-baseline')), {
-      createWorktree,
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-    });
-    sourceOutput = 'opaque source result';
-    const unverified = await runShipSetup(setupArgs(briefPath, join(root, 'target-unverified-baseline')), {
-      createWorktree,
-      runValidationCommand: runner,
-      globalDir: () => join(root, 'state'),
-    });
-
-    expect(matched.state).toBe('ready');
-    expect(unverified.state).toBe('ready');
-    if (matched.state !== 'ready' || unverified.state !== 'ready') throw new Error('fixture setup refused');
-    expect(matched.testPopulation?.state).toBe('matched');
-    expect(unverified.testPopulation?.state).toBe('unverified');
-    expect(unverified.validationBaseline.results).toEqual(matched.validationBaseline.results);
-    expect(unverified.validationBaseline.gateCriteria).toEqual(matched.validationBaseline.gateCriteria);
+    expect(report).toMatchObject({ state: 'ready', testPopulation: { state: 'unverified' }, validationBaseline: {
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'failed', exitCode: 1,
+        failureIdentity: identity, failureIdentifiers: failures })]),
+      gateCriteria: expect.arrayContaining([expect.objectContaining({ role: 'test', rule: 'no_regression_from_baseline' })]),
+    } });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: targetDir }));
   });
 });

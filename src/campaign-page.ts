@@ -1468,8 +1468,8 @@ function attemptTokens(stage: StageStatus): StageTokenCost {
     const attemptEvidence = attempts.reduce<AttemptTokenEvidenceSummary>((summary, attempt) => {
       const hasBothCounters = finiteNumber(attempt.tokens_in) !== undefined
         && finiteNumber(attempt.tokens_out) !== undefined;
-      if (hasBothCounters) summary.known++;
-      else if (attempt.tokenUsage === 'unknown') summary.recordedUnknown++;
+      if (hasBothCounters && attempt.tokenUsage !== 'partial' && attempt.tokenUsage !== 'unknown') summary.known++;
+      else if (attempt.tokenUsage === 'unknown' || attempt.tokenUsage === 'partial') summary.recordedUnknown++;
       else summary.unrecorded++;
       return summary;
     }, { ...EMPTY_ATTEMPT_TOKEN_EVIDENCE });
@@ -1480,6 +1480,8 @@ function attemptTokens(stage: StageStatus): StageTokenCost {
         + (finiteNumber(attempt.tokens_out) ?? 0)
       ), 0),
       complete: attempts.every((attempt) => (
+        attempt.tokenUsage !== 'unknown' && attempt.tokenUsage !== 'partial'
+        &&
         finiteNumber(attempt.tokens_in) !== undefined
         && finiteNumber(attempt.tokens_out) !== undefined
       )),
@@ -1527,6 +1529,8 @@ export function deriveRunTokenCost(state: StoreState): RunTokenCost {
   let supervisorTokens = 0;
   if (state.supervisor) {
     supervisorTokens = state.supervisor.tokens_in + state.supervisor.tokens_out;
+    if (state.supervisor.attempts?.some(attempt => attempt.tokenUsage === 'partial' || attempt.tokenUsage === 'unknown'
+      || finiteNumber(attempt.tokens_in) === undefined || finiteNumber(attempt.tokens_out) === undefined)) complete = false;
   } else if (state.supervise !== false) {
     complete = false;
   }

@@ -49,7 +49,6 @@ import {
 import { loadProjectDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
-import { parseTapOutput } from './tap-output.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -118,7 +117,7 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
     mkdirSync(path);
   },
   createLink: (source, target, type) => symlinkSync(source, target, type),
-  copyFile: (source, target) => copyFileSync(source, target),
+  copyFile: (source, target) => copyFileSync(source, target, constants.COPYFILE_EXCL),
   removeEntry: (path) => rmSync(path, { recursive: true, force: true }),
   writeAtomic: nodeAtomicWrite,
 };
@@ -401,7 +400,7 @@ export interface DeclaredInputSnapshotSummary {
 }
 
 export interface DeclaredInputStabilityCheck {
-  phase: 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
+  phase: 'input_materialization' | 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
   state: 'stable' | 'changed' | 'unverified';
   before: DeclaredInputSnapshotSummary[];
   after?: DeclaredInputSnapshotSummary[];
@@ -850,7 +849,11 @@ function fingerprintDeclaredInputTree(
 ): { digest: string; entryCount: number } {
   const records: InputTreeRecord[] = [];
   const activeDirectories = new Set<string>();
+  const rootCanonical = fs.realpath(rootPath);
   const visit = (entryPath: string, displayPath: string): void => {
+    if (!within(rootCanonical, fs.realpath(entryPath))) {
+      throw new Error('Input member resolves outside the declared root');
+    }
     const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
     const symbolicLink = lexicalStat.isSymbolicLink?.() === true;
     if (symbolicLink) {
@@ -1363,34 +1366,30 @@ function reconcileInputs(
   const addBlocker = (sourcePath: string, reason: string): void => {
     blockers.push({ phase: 'target', input: normalizedInputPath(sourcePath), reason });
   };
-  const createMissingLink = (source: string, target: string, directory: boolean): void => {
-    if (fs.entryExists(target)) {
-      addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
-      return;
+  const createTargetDirectory = (directory: string): void => {
+    let ancestor = directory;
+    while (!fs.entryExists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    if (!within(targetCanonical, fs.realpath(ancestor))) {
+      throw new Error('Target parent resolves outside the worktree');
     }
-    fs.createDirectory(dirname(target));
-    const parentCanonical = fs.realpath(dirname(target));
-    if (!within(targetCanonical, parentCanonical)) {
-      addBlocker(source, 'Target parent resolves outside the worktree');
-      return;
+    fs.createDirectory(directory);
+    if (!within(targetCanonical, fs.realpath(directory))) {
+      throw new Error('Materialized target directory resolves outside the worktree');
     }
-    fs.createLink(source, target, directory ? 'dir' : 'file');
-    links.push({
-      path: normalizedInputPath(source),
-      source,
-      target,
-      type: directory ? 'directory' : 'file',
-    });
   };
   const copyMissingFile = (source: string, target: string): void => {
     if (fs.entryExists(target)) {
       addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
       return;
     }
-    fs.createDirectory(dirname(target));
+    createTargetDirectory(dirname(target));
     const parentCanonical = fs.realpath(dirname(target));
     if (!within(targetCanonical, parentCanonical)) {
       addBlocker(source, 'Target parent resolves outside the worktree');
+      return;
+    }
+    if (fs.stat(source).isFile?.() === false) {
+      addBlocker(source, 'Declared source entry is not a regular file or directory');
       return;
     }
     fs.copyFile(source, target);
@@ -1407,6 +1406,7 @@ function reconcileInputs(
     sourceDirectory: string,
     targetDirectory: string,
     sourceRootCanonical: string,
+    targetRoot: string,
     ancestors: Set<string>,
   ): void => {
     let names: string[];
@@ -1435,11 +1435,30 @@ function reconcileInputs(
           continue;
         }
         if (!fs.exists(target)) {
+          // Preserve internal module/link topology in the target namespace.
+          // Flattening .bin links changes where relative imports resolve.
+          if (fs.lstat?.(source).isSymbolicLink?.()) {
+            if (fs.entryExists(target)) {
+              addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+              continue;
+            }
+            createTargetDirectory(dirname(target));
+            const mappedSource = resolve(targetRoot, relative(sourceRootCanonical, sourceCanonical));
+            fs.createLink(relative(dirname(target), mappedSource) || '.', target, sourceDirectoryEntry ? 'dir' : 'file');
+            links.push({ path: normalizedInputPath(source), source: mappedSource, target,
+              type: sourceDirectoryEntry ? 'directory' : 'file' });
+            continue;
+          }
+
           if (!sourceDirectoryEntry) {
             copyMissingFile(source, target);
             continue;
           }
-          fs.createDirectory(target);
+          if (fs.entryExists(target)) {
+            addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+            continue;
+          }
+          createTargetDirectory(target);
           const materializedCanonical = fs.realpath(target);
           if (!within(targetCanonical, materializedCanonical)) {
             addBlocker(source, 'Materialized target directory resolves outside the worktree');
@@ -1449,6 +1468,7 @@ function reconcileInputs(
             source,
             target,
             sourceRootCanonical,
+            targetRoot,
             new Set([...ancestors, sourceCanonical]),
           );
           continue;
@@ -1477,6 +1497,7 @@ function reconcileInputs(
             source,
             target,
             sourceRootCanonical,
+            targetRoot,
             new Set([...ancestors, sourceCanonical]),
           );
           continue;
@@ -1511,7 +1532,19 @@ function reconcileInputs(
     try {
       const sourceDirectory = fs.stat(source).isDirectory();
       if (!fs.exists(target)) {
-        createMissingLink(source, target, sourceDirectory);
+        if (!sourceDirectory) {
+          copyMissingFile(source, target);
+        } else if (fs.entryExists(target)) {
+          addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+        } else {
+          createTargetDirectory(target);
+          if (!within(targetCanonical, fs.realpath(target))) {
+            addBlocker(source, 'Materialized target directory resolves outside the worktree');
+            continue;
+          }
+          const sourceCanonical = fs.realpath(source);
+          reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
+        }
         continue;
       }
       if (!fs.readable(target)) {
@@ -1526,13 +1559,12 @@ function reconcileInputs(
       const sourceCanonical = fs.realpath(source);
       const targetEntryCanonical = fs.realpath(target);
       if (!within(targetCanonical, targetEntryCanonical)) {
-        if (targetEntryCanonical !== sourceCanonical) {
-          blockers.push({ phase: 'target', input: input.path, reason: 'Existing declared target input resolves outside the worktree and does not reference the declared source' });
-        }
+        blockers.push({ phase: 'target', input: input.path,
+          reason: 'Existing declared target input resolves outside the worktree; recreate the target to materialize target-owned inputs' });
         continue;
       }
       if (sourceDirectory) {
-        reconcileExistingDirectory(source, target, sourceCanonical, new Set([sourceCanonical]));
+        reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
       } else {
         const sourceBytes = Buffer.from(fs.readBytes(source));
         const targetBytes = Buffer.from(fs.readBytes(target));
@@ -2004,7 +2036,7 @@ async function compareTestPopulations(
         ...(populationRunner ? { runner: populationRunner } : {}),
         missingFromTarget: [],
         extraInTarget: [],
-        reason: reasons.join('; '),
+        reason: `${reasons.join('; ')}; source tests are not executed for population evidence. Declare package.json flowcrew.testPopulation.files or use a supported exact collector.`,
       },
     };
   }
@@ -2062,116 +2094,6 @@ async function compareTestPopulations(
       },
     };
   }
-}
-
-interface ObservedValidationRun {
-  response: ValidationRunResponse;
-  durationMs: number;
-}
-
-async function observeValidationRun(
-  request: ValidationRunRequest,
-  runner: ValidationCommandRunner,
-): Promise<ObservedValidationRun> {
-  const started = Date.now();
-  try {
-    const response = await runner(request);
-    return {
-      response,
-      durationMs: response.durationMs ?? Math.max(0, Date.now() - started),
-    };
-  } catch (error) {
-    return {
-      response: { exitCode: null, error: errorMessage(error) },
-      durationMs: Math.max(0, Date.now() - started),
-    };
-  }
-}
-
-interface TapPopulationParse {
-  observation?: TestPopulationObservation;
-  reason?: string;
-}
-
-function parseTapPopulation(
-  projectDir: string,
-  observed: ObservedValidationRun | undefined,
-): TapPopulationParse {
-  if (!observed) return { reason: 'the test command was not observed' };
-  const { response, durationMs } = observed;
-  if (response.error || response.exitCode === null) {
-    return { reason: response.error ?? 'the test command ended without an exit code' };
-  }
-  const output = [response.stdout, response.stderr]
-    .filter((value): value is string => typeof value === 'string' && value.length > 0)
-    .join('\n');
-  const parsed = parseTapOutput(output);
-  if (parsed.state !== 'complete') return { reason: parsed.reason };
-  const occurrences = new Map<string, number>();
-  const identities = parsed.records.map(({ name }) => {
-    const occurrence = (occurrences.get(name) ?? 0) + 1;
-    occurrences.set(name, occurrence);
-    return `${occurrence}:${name}`;
-  });
-  return {
-    observation: {
-      projectDir,
-      count: identities.length,
-      identities,
-      digest: createHash('sha256').update(identities.join('\0')).digest('hex'),
-      durationMs,
-    },
-  };
-}
-
-function derivePopulationFromBaselineOutput(
-  initial: TestPopulationParity,
-  sourceDir: string,
-  targetDir: string,
-  sourceRun: ObservedValidationRun | undefined,
-  targetRun: ObservedValidationRun | undefined,
-): TestPopulationParity {
-  const sourceParsed = parseTapPopulation(sourceDir, sourceRun);
-  const targetParsed = parseTapPopulation(targetDir, targetRun);
-  const collectorReason = initial.reason ?? 'an exact collector was unavailable';
-  if (sourceParsed.observation && targetParsed.observation) {
-    const sourceSet = new Set(sourceParsed.observation.identities);
-    const targetSet = new Set(targetParsed.observation.identities);
-    const missingFromTarget = sourceParsed.observation.identities
-      .filter((identity) => !targetSet.has(identity));
-    const extraInTarget = targetParsed.observation.identities
-      .filter((identity) => !sourceSet.has(identity));
-    const sourcePlusAdditions = missingFromTarget.length === 0 && extraInTarget.length > 0;
-    return {
-      version: 1,
-      state: missingFromTarget.length === 0 ? 'matched' : 'mismatched',
-      ...(initial.runner ? { runner: initial.runner } : {}),
-      method: {
-        source: 'baseline_output',
-        format: 'tap',
-        display: 'complete top-level TAP from source and target test executions',
-        evidencePath: 'source and target test command output',
-      },
-      source: sourceParsed.observation,
-      target: targetParsed.observation,
-      missingFromTarget,
-      extraInTarget,
-      reason: sourcePlusAdditions
-        ? `Exact collection was unavailable (${collectorReason}); SOURCE-PLUS-ADDITIONS: complete target TAP covers every source identity, with additions recorded in extraInTarget.`
-        : `Exact collection was unavailable (${collectorReason}); population parity was derived from complete TAP emitted by the source run and target baseline.`,
-    };
-  }
-  const runner = initial.runner?.source.display ?? initial.runner?.source.command ?? 'configured test command';
-  return {
-    version: 1,
-    state: 'unverified',
-    ...(initial.runner ? { runner: initial.runner } : {}),
-    ...(sourceParsed.observation ? { source: sourceParsed.observation } : {}),
-    ...(targetParsed.observation ? { target: targetParsed.observation } : {}),
-    missingFromTarget: [],
-    extraInTarget: [],
-    reason: `Population parity for runner "${runner}" is unverified: exact collection was unavailable (${collectorReason}); source output: ${sourceParsed.reason ?? 'complete TAP parsed'}; target baseline output: ${targetParsed.reason ?? 'complete TAP parsed'}.`,
-  };
 }
 
 /** Execute setup without rendering; operational refusals are returned as structured facts. */
@@ -2324,6 +2246,17 @@ export async function runShipSetup(
   }
   if (dependencyPreparation.blocker) return refuse([dependencyPreparation.blocker]);
 
+  // A copy must bind one stable source tree, not assemble leaves observed
+  // across a source mutation. Reuse the existing content/member snapshot rule.
+  const sourceInputRoots: DeclaredInputSnapshotRoot[] = [
+    { location: 'source', verification: sourceVerification, rootDir: projectDir },
+  ];
+  const materializationBefore = captureDeclaredInputSnapshot(sourceInputRoots, deps.fs);
+  const unavailableSource = initialDeclaredInputSnapshotCheck('input_materialization', materializationBefore);
+  if (unavailableSource) {
+    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, unavailableSource] };
+    return refuse([declaredInputStabilityBlocker(unavailableSource)]);
+  }
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
     reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
@@ -2332,6 +2265,14 @@ export async function runShipSetup(
   }
   facts = { ...facts, links: reconciled.links, copies: reconciled.copies };
   if (reconciled.blockers.length > 0) return refuse(reconciled.blockers);
+
+  const materializationCheck = compareDeclaredInputSnapshots(
+    'input_materialization', materializationBefore, captureDeclaredInputSnapshot(sourceInputRoots, deps.fs),
+  );
+  if (materializationCheck.state !== 'stable') {
+    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, materializationCheck] };
+    return refuse([declaredInputStabilityBlocker(materializationCheck)]);
+  }
 
   const targetVerification = verifyDeclaredBriefInputs(brief, targetDir, deps.fs);
   const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs);
@@ -2386,8 +2327,7 @@ export async function runShipSetup(
   }
   if (!observedCollection.outcome.ok) throw observedCollection.outcome.error;
   const populationComparison = observedCollection.outcome.value;
-  stableInputSnapshot = observedCollection.after;
-  let testPopulation = populationComparison.population;
+  const testPopulation = populationComparison.population;
   if (testPopulation) facts = { ...facts, testPopulation };
   if (testPopulation?.state === 'mismatched') {
     const missing = testPopulation.missingFromTarget.length > 0
@@ -2403,38 +2343,6 @@ export async function runShipSetup(
     }]);
   }
 
-  const needsOutputFallback = testPopulation?.state === 'unverified';
-  const baselineRunner = deps.runValidationCommand ?? runValidationCommand;
-  let sourceTestRun: ObservedValidationRun | undefined;
-  if (needsOutputFallback && populationComparison.sourceDiscovery.testCommand) {
-    const observedSourceFallback = await observeDeclaredInputStability(
-      'source_validation_fallback',
-      stableInputSnapshot,
-      sourceAndTargetInputRoots,
-      deps.fs,
-      () => observeValidationRun({
-        ...populationComparison.sourceDiscovery.testCommand!,
-        cwd: projectDir,
-      }, baselineRunner),
-    );
-    facts = {
-      ...facts,
-      declaredInputStability: [...facts.declaredInputStability, observedSourceFallback.check],
-    };
-    if (observedSourceFallback.check.state === 'changed') {
-      return refuse([declaredInputStabilityBlocker(observedSourceFallback.check)]);
-    }
-    if (!observedSourceFallback.outcome.ok) throw observedSourceFallback.outcome.error;
-    sourceTestRun = observedSourceFallback.outcome.value;
-  }
-  let targetTestRun: ObservedValidationRun | undefined;
-  const observingBaselineRunner: ValidationCommandRunner = (request) => {
-    if (request.role !== 'test') return baselineRunner(request);
-    return observeValidationRun(request, baselineRunner).then((observed) => {
-      targetTestRun = observed;
-      return observed.response;
-    });
-  };
   stableInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
   const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
     'target_validation_baseline',
@@ -2454,9 +2362,7 @@ export async function runShipSetup(
     deps.fs,
     () => runProjectValidationBaseline(targetDir, {
       fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-      ...(needsOutputFallback
-        ? { runCommand: observingBaselineRunner }
-        : deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+      ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
       declaredCommands: declaredValidation.commands,
     }),
   );
@@ -2470,16 +2376,6 @@ export async function runShipSetup(
   if (!observedBaseline.outcome.ok) throw observedBaseline.outcome.error;
   const validationBaseline = observedBaseline.outcome.value;
   facts = { ...facts, validationBaseline };
-  if (needsOutputFallback && testPopulation) {
-    testPopulation = derivePopulationFromBaselineOutput(
-      testPopulation,
-      projectDir,
-      targetDir,
-      sourceTestRun,
-      targetTestRun,
-    );
-    facts = { ...facts, testPopulation };
-  }
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
     ? [{
         phase: 'validation',
@@ -2499,19 +2395,6 @@ export async function runShipSetup(
       };
     }));
   if (validationBlockers.length > 0) return refuse(validationBlockers);
-  if (testPopulation?.state === 'mismatched') {
-    const missing = testPopulation.missingFromTarget.length > 0
-      ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
-      : '';
-    const extra = testPopulation.extraInTarget.length > 0
-      ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
-      : '';
-    const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
-    return refuse([{
-      phase: 'validation',
-      reason: `Test population mismatch from baseline output: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
-    }]);
-  }
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,
     measuredBrief.digest,

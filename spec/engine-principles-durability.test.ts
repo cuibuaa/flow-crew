@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -49,14 +49,35 @@ describe('revision decisions survive interruption and concurrent publication', (
     expect(readdirSync(join(directory, 'plan_history')).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
-  it('retains a refusal after its projection is lost even when later state would admit it', () => {
+  it('waits for an idle boundary without journaling a permanent refusal', () => {
     updateRunState(project, runId, (state) => { state.stages.writer.status = 'running'; });
-    const first = revise(); expect(first.decision.accepted).toBe(false);
+    const first = revise(); expect(first.decision).toMatchObject({ accepted: false, pending: true });
     expect(first.decision.errors.join(';')).toContain('PLAN_REVISION_NOT_AT_BOUNDARY');
+    expect(existsSync(decisionPath())).toBe(false);
+    expect(readRunState(project, runId).planRevisionDecisions).toBeUndefined();
     updateRunState(project, runId, (state) => { state.stages.writer.status = 'complete'; });
+    expect(revise().decision.accepted).toBe(true);
+    expect(readRunState(project, runId).queryState?.planHistory).toHaveLength(2);
+  });
+
+  it('keeps a final binding refusal durable after settlement changes', () => {
+    const invalid = { ...request, attemptIndex: 2 };
+    const first = revise(invalid); expect(first.decision.accepted).toBe(false);
+    expect(first.decision.pending).toBeUndefined();
     rmSync(decisionPath());
-    expect(revise().decision).toEqual(first.decision);
+    expect(revise(invalid).decision).toEqual(first.decision);
     expect(readRunState(project, runId).queryState?.planHistory).toHaveLength(1);
+  });
+
+  it('binds a retained failed execution through a later technical retry', () => {
+    const failed = { index: 1, startedAt: request.attemptStartedAt, completedAt: new Date().toISOString(), status: 'failed' as const, exitCode: 1 };
+    const running = { index: 2, startedAt: new Date().toISOString(), status: 'running' as const };
+    writeStageStatus(project, runId, 'writer', { status: 'running', retries: 1, attempts: [failed, running] });
+    expect(revise().decision.pending).toBe(true);
+    expect(existsSync(decisionPath())).toBe(false);
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 1, attempts: [failed, { ...running, status: 'complete', completedAt: new Date().toISOString(), exitCode: 0 }] });
+    expect(revise().decision.accepted).toBe(true);
+    expect(readRunState(project, runId).stages.writer.attempts).toHaveLength(2);
   });
 
   it('refuses conflicting bytes and a corrupt decision projection rather than changing the journal', () => {

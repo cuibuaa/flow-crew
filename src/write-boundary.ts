@@ -120,7 +120,11 @@ function protectedCarriers(input: EngineWriteBoundaryInput): Array<{ path: strin
       const ownStageParent = local === 'stages' || local === `stages/${input.stageId}` || local === `stages/${input.sessionOwnerStageId}`;
       if (input.sessionOwnerStageId && local === `stages/${input.sessionOwnerStageId}/codex_home`) continue;
       if (isEngineOwnedRunPath(local, stage)) paths.push({ path, tree: info.isDirectory() && !ownStageParent });
-      if (info.isDirectory() && (ownStageParent || !isEngineOwnedRunPath(local, stage))) pending.push(path);
+      // Ownership is rooted in the run namespace. Only these namespace
+      // parents can contain mixed engine/stage entries; arbitrary authored
+      // output trees cannot contain a reserved descendant. Python still
+      // checks every protected and writable inode at the kernel boundary.
+      if (info.isDirectory() && ownStageParent) pending.push(path);
     }
   }
   const engineRoot = dirname(dirname(fileURLToPath(import.meta.url)));

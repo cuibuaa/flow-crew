@@ -183,8 +183,8 @@ describe('ship skill semantic contract', () => {
       'flowcrew land --run <run-id>',
       '--complete-fc-task <entry-id> --fc-task-session <session-id>',
       'completes the entry only after worktree removal, prune, and non-force branch deletion all succeed',
-      'Permanent machine-independent tests belong in the tracked specification suite',
-      'operating-system temporary root or the run directory',
+      'The tracked specification suite expresses current intended behaviour',
+      'operating-system temporary root or declared run-directory files',
     ]) {
       expect(normalized, bar).toContain(bar);
     }
@@ -225,7 +225,7 @@ describe('ship skill semantic contract', () => {
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
     // Update both values together when the guidance changes: the digest names the bytes the
     // stamp describes, so a mismatch means one of them was left behind.
-    expect({ revision: stamp, digest }).toEqual({ revision: '17', digest: 'eac6cdf65d23' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '18', digest: '958b655d4130' });
   });
 
   it('contains no private measured case studies', () => {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   lstatSync,
@@ -88,7 +89,7 @@ export type LiveConstraintContentIdentity =
   | { state: 'unavailable'; reason: string }
   | {
       state: 'present';
-      type: 'file' | 'symlink';
+      type: 'file' | 'symlink' | 'directory';
       byteLength: number;
       sha256: string;
     };
@@ -160,7 +161,9 @@ function hashRegularFile(path: string): LiveConstraintContentIdentity {
   for (let attempt = 0; attempt < 2; attempt++) {
     let descriptor: number | undefined;
     try {
-      descriptor = openSync(path, 'r');
+      // A pathname can become a link or FIFO after lstat. Never follow the
+      // replacement or block waiting for a writer before verifying its type.
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const before = fstatSync(descriptor);
       if (!before.isFile()) return { state: 'unavailable', reason: 'path changed type while its content was read' };
       const hash = createHash('sha256');

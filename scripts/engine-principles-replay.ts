@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { FrozenReplayCorpus, parseReplayArguments, requireFreshTemporaryDirectory, sha256 as hash } from './engine-principles-inputs.js';
 import { pathToFileURL } from 'node:url';
 import { parse as yaml, stringify } from 'yaml';
-import { classifyDeclarationAdmissionChange, classifyRealityDeclarationChange, type ReplayDecision } from '../src/recorded-replay-policy.js';
+import { classifyDeclarationAdmissionChange, classifyRealityDeclarationChange, recordedReplayValue, withRecordedReplayClock, type ReplayDecision } from '../src/recorded-replay-policy.js';
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
   console.log('Usage: node --import tsx scripts/engine-principles-replay.ts --census <frozen-corpus> --baseline-dist <copied-dist> --candidate-dist <dist> --private-root <fresh os.tmpdir child> --out <own evidence>');
@@ -25,15 +25,36 @@ for (const name of ['dispatch_records.json','native_planner_records.json','dispa
 const audits=carriers.filter((row)=>row.readable&&/(?:^|\/)artifact_contract\.json$/.test(row.relative_path));
 const verdicts=carriers.filter((row)=>row.readable&&/(?:^|\/)(?:rejected_)?verdict(?:_[^/]+)?\.json$/.test(row.relative_path));
 const admissions=carriers.filter((row)=>row.readable&&/(?:^|\/)(?:(?:proposed|effective)_)?dispatch_admission\.json$/.test(row.relative_path));
-const rawStages=[...json('dispatch_records.json'),...json('native_planner_records.json')],templates=json('replay_templates_unique_context.json'),checks=json('checks_replay_selection.json').members,documents=json('dispatch_documents.json').documents;
+const stageReferences=[...json('dispatch_records.json'),...json('native_planner_records.json')],templates=json('replay_templates_unique_context.json'),checks=json('checks_replay_selection.json').members,documents=json('dispatch_documents.json').documents;
 const nativeDocs=json('native_planner_documents.json').documents.filter((row:any)=>row.status==='stage_document');
+// Frozen indexes carry hashes and source references, rather than another copy
+// of every planner prompt. Legacy inline projections remain readable.
+const documentCache=new Map<string,any[]>();
+function referencedStages(row:any):any[]{
+  const key=JSON.stringify([row.source_path,row.line]);const cached=documentCache.get(key);if(cached)return cached;
+  let text:string;
+  if(row.line!==undefined){const source=nativeDocs.find((item:any)=>item.source_path===row.source_path&&item.line===row.line);if(!source)throw new Error(`Native document reference missing: ${key}`);text=corpus.nativeDocument(source);const fence=text.match(/```(?:yaml|yml)\s*\n([\s\S]*?)```/);if(fence)text=fence[1];}
+  else text=frozen(row.source_path);
+  const raw=yaml(text),items=Array.isArray(raw)?raw:raw?.stages;if(!Array.isArray(items))throw new Error(`Stage document reference invalid: ${key}`);documentCache.set(key,items);return items;
+}
+function referencedStage(row:any):any{
+  if(row.stage)return row.stage;
+  const stage=referencedStages(row).find(item=>item.id===row.stage_id&&hash(JSON.stringify(item))===row.stage_sha256);
+  if(!stage)throw new Error(`Stage projection hash mismatch: ${row.source_path}:${row.stage_id}`);return stage;
+}
+const rawStages=stageReferences.map((row:any)=>({...row,stage:referencedStage(row)}));
+function referencedTemplate(row:any):string{
+  if(typeof row.template==='string')return row.template;
+  const source=row.occurrences[0],stage=referencedStages(source).find(item=>item.id===source.stage_id&&typeof item.prompt_template==='string'&&hash(item.prompt_template)===row.raw_sha256);
+  if(!stage)throw new Error(`Template reference hash mismatch: ${row.raw_sha256}`);return stage.prompt_template;
+} 
 const expected:Record<string,number>={stage_schema:rawStages.length,artifact_contracts:templates.length,check_declarations:checks.length,general_admission:documents.length,native_admission:nativeDocs.length,reality_admission:checks.length,recorded_audits:audits.length,gate_verdicts:verdicts.length,retry_requirements:admissions.length};
 writeFileSync(join(output,'replay_selection_before.json'),JSON.stringify({version:3,at:new Date().toISOString(),expected,sources,rules:['New live inputs add exact contract/replays errors while retaining graph, ownership, warnings and terminal decisions.','Prompt/report prose supplies no obligations; a legacy input is refused for missing declarations.','Reality declarations require reads including advisory checks; malformed declarations fail admission. Only undeclared script references are superseded.','Typed handler reads bind their declared physical root; invalid/outward declarations remain refused.','Recorded obligation/replay/verdict bytes remain readable; no stored command or check runs.','Every other difference is ambiguous_unpredicted and blocks an achieved replay claim.'],context:'Frozen full selected recognition projections; absent original complete-plan role/criteria/input/terminal provenance is censored'},null,2));
 async function runtime(dist:string){const load=(file:string)=>import(pathToFileURL(join(dist,file)).href);return{scheduler:await load('scheduler.js'),contract:await load('stage-artifact-contract.js'),checks:await load('reality-gate/index.js'),retry:await load('plan-retry-monotone.js'),declarations:await load('artifact-declarations.js')};}
 const before=await runtime(baseline),after=await runtime(candidate),reader=await import(pathToFileURL(join(candidate,'recorded-artifact-contract.js')).href);
 const project=join(scratch,'empty-project'),directory=join(scratch,'empty-run');mkdirSync(project);mkdirSync(directory);
-const normalize=(value:unknown):unknown=>JSON.parse(JSON.stringify(value,(k,v)=>k==='checkedAt'||k==='inspectedAt'?'<time>':typeof v==='string'?v.replaceAll(scratch,'<owned-root>'):v));
-function decision(fn:()=>unknown):ReplayDecision{try{return{status:'returned',value:normalize(fn())};}catch(e){return{status:'refused',error:String((e as Error).message??e).replaceAll(scratch,'<owned-root>')};}}
+const replayClock = Date.parse('2000-01-01T00:00:00.000Z');
+function decision(fn:()=>unknown):ReplayDecision{try{return{status:'returned',value:recordedReplayValue(withRecordedReplayClock(replayClock,fn),scratch)};}catch(e){return{status:'refused',error:String((e as Error).message??e).replaceAll(scratch,'<owned-root>')};}}
 const key=(value:unknown)=>JSON.stringify(value),same=(a:ReplayDecision,b:ReplayDecision)=>key(a)===key(b);
 function formatErrors(raw:any):string[]{
   if(!raw.artifact_contract)return[`ARTIFACT_DECLARATION_REQUIRED: ${raw.id??'stage'}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[], replays:[]} explicitly; prose cannot supply this contract`];
@@ -51,7 +72,7 @@ const schemaRows=rawStages.map((row:any)=>{
   return{source:row.source_path,runId:row.run_id,stageId:row.stage_id,line:row.line,digest,partial:!row.recorded_prompt_field,...result,rule:'new_input_declaration_required'};
 });
 const artifactRows=templates.map((row:any,index:number)=>{
-  let template=row.template;if(row.project_dir)template=template.replaceAll(row.project_dir,project);if(row.run_dir)template=template.replaceAll(row.run_dir,directory);
+  let template=referencedTemplate(row);if(row.project_dir)template=template.replaceAll(row.project_dir,project);if(row.run_dir)template=template.replaceAll(row.run_dir,directory);
   const inspect=(engine:typeof after)=>decision(()=>{const i={stageId:'recorded',template,projectDir:project,runDir:directory,writes:[]};const audit=engine.contract.inspectStageArtifactContract({...i,preimages:engine.contract.captureStageArtifactContractPreimages(i)});if(audit.replayExecutions.length)throw new Error('Stored command execution forbidden');return{obligations:audit.obligations,violations:audit.violations};});
   const a=inspect(before),b=inspect(after);const intended=b.status==='returned'&&key((b.value as any).obligations)==='[]'&&(b.value as any).violations.length===1&&(b.value as any).violations[0].reason===formatErrors({id:'recorded'})[0];
   return{index,templateHash:row.raw_sha256,contextState:row.context_state,occurrenceCount:row.occurrences.length,decisions:[a,b],classification:same(a,b)?'unchanged':intended?'intended':'ambiguous_unpredicted',rule:'prose_inference_removed_and_legacy_input_refused'};

@@ -7,7 +7,6 @@ import {
   mkdtempSync,
   realpathSync,
   readFileSync,
-  readlinkSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -432,7 +431,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
   });
 
-  it('creates the exact base and branch, links only absent declared ignored inputs, rechecks them, and atomically records a delta baseline', async () => {
+  it('creates the exact base and branch, copies only absent declared ignored inputs, rechecks them, and atomically records a delta baseline', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     const prices = 'timestamp,price\n2022-01-01,10\n2022-01-03,12\n';
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), prices, 'utf-8');
@@ -478,10 +477,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     const linkedFile = join(fixture.target, 'data', 'frozen.csv');
     const linkedDirectory = join(fixture.target, 'node_modules', 'revision-generator');
-    expect(lstatSync(linkedFile).isSymbolicLink()).toBe(true);
-    expect(lstatSync(linkedDirectory).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(linkedFile)).toBe(join(fixture.project, 'data', 'frozen.csv'));
-    expect(readlinkSync(linkedDirectory)).toBe(join(fixture.project, 'node_modules', 'revision-generator'));
+    expect(lstatSync(linkedFile).isSymbolicLink()).toBe(false);
+    expect(lstatSync(linkedDirectory).isSymbolicLink()).toBe(false);
+    expect(readFileSync(linkedFile, 'utf8')).toBe(prices);
+    expect(readFileSync(join(linkedDirectory, 'alpha.js'), 'utf8')).toBe('export {};\n');
     expect(lstatSync(join(fixture.target, 'package.json')).isSymbolicLink()).toBe(false);
 
     const rendered = JSON.parse(stdout.value) as Record<string, any>;
@@ -496,9 +495,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       targetDir: fixture.target,
       base: 'release-base',
       branch: 'autonomous-result',
-      links: [
-        expect.objectContaining({ path: 'data/frozen.csv', type: 'file' }),
-        expect.objectContaining({ path: IGNORED_MODULE_PATH, type: 'directory' }),
+      links: [],
+      copies: [
+        expect.objectContaining({ path: 'data/frozen.csv' }),
+        expect.objectContaining({ path: `${IGNORED_MODULE_PATH}/alpha.js` }),
+        expect.objectContaining({ path: `${IGNORED_MODULE_PATH}/beta.js` }),
       ],
     });
     expect(record.sourceVerification.inputs).toHaveLength(3);
@@ -1021,7 +1022,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(git).not.toHaveBeenCalled();
   });
 
-  it('refuses when an ignored input cannot be linked, and never runs or records the baseline', async () => {
+  it('refuses when an ignored input cannot be copied, and never runs or records the baseline', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
     writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
@@ -1032,7 +1033,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
       fs: {
         ...nodeShipSetupFileSystem,
-        createLink: () => { throw new Error('link denied by fixture'); },
+        copyFile: () => { throw new Error('copy denied by fixture'); },
       },
     });
 
@@ -1040,33 +1041,33 @@ describe('ship-setup fail-closed worktree transaction', () => {
       state: 'refused',
       worktreeCreated: true,
       blockers: [expect.objectContaining({
-        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('link denied by fixture'),
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('copy denied by fixture'),
       })],
     });
     expect(runner).not.toHaveBeenCalled();
     expect(noReadyRecord()).toBe(true);
   });
 
-  it('re-verifies properties through the target and refuses a changed linked input', async () => {
+  it('compares copied bytes through the target and refuses a corrupted input', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n2\n', 'utf-8');
     writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 2 rows.']);
-    const createLink = vi.fn((_: string, target: string) => {
+    const copyInput = vi.fn((_: string, target: string) => {
       writeFileSync(target, 'id\n1\n', 'utf-8');
     });
 
     const report = await runShipSetup(setupArgs(), {
       createWorktree: successfulGit(),
       runValidationCommand: validationRunner(),
-      fs: { ...nodeShipSetupFileSystem, createLink },
+      fs: { ...nodeShipSetupFileSystem, copyFile: copyInput },
     });
 
-    expect(createLink).toHaveBeenCalledTimes(1);
+    expect(copyInput).toHaveBeenCalledTimes(1);
     expect(report).toMatchObject({
       state: 'refused',
       worktreeCreated: true,
       blockers: [expect.objectContaining({
-        phase: 'target', input: 'data/frozen.csv', assertion: 'row_count', reason: expect.stringContaining('refuted'),
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('does not match the declared source bytes'),
       })],
     });
     expect(noReadyRecord()).toBe(true);
@@ -1235,7 +1236,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(noReadyRecord()).toBe(true);
   });
 
-  it('links a bare directory named in the explicit inputs list', async () => {
+  it('materializes a bare directory named in the explicit inputs list', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     writeFileSync(join(fixture.project, 'dependency_cache', 'tool.js'), 'export {};\n', 'utf-8');
     writeBrief([
@@ -1254,10 +1255,63 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
 
     expect(report.state).toBe('ready');
-    expect(report.links).toContainEqual(expect.objectContaining({
-      path: 'dependency_cache', type: 'directory',
+    expect(report.copies).toContainEqual(expect.objectContaining({
+      path: 'dependency_cache/tool.js',
     }));
-    expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(false);
+  });
+
+  it('refuses a destination link introduced immediately before copying an input', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'a.txt'), 'source bytes');
+    const outside = join(fixture.root, 'engine-carrier.json');
+    writeFileSync(outside, 'protected bytes');
+    writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the stable input.']);
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => { mkdirSync(join(request.targetDir, 'data')); }),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, copyFile: (source, target) => {
+        symlinkSync(outside, target);
+        nodeShipSetupFileSystem.copyFile(source, target);
+      } },
+    });
+    expect(report.state).toBe('refused');
+    expect(readFileSync(outside, 'utf8')).toBe('protected bytes');
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('preserves internal dependency links within the prepared target', async () => {
+    mkdirSync(join(fixture.project, 'tools', '.bin'), { recursive: true });
+    mkdirSync(join(fixture.project, 'tools', 'pkg'));
+    writeFileSync(join(fixture.project, 'tools', 'pkg', 'tool.js'), 'export {};');
+    symlinkSync('../pkg/tool.js', join(fixture.project, 'tools', '.bin', 'tool'));
+    writeBrief(['---', 'inputs: [tools]', '---', '# Goal', 'Read the dependency tree.']);
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(), runValidationCommand: validationRunner(),
+    });
+    expect(report.state).toBe('ready');
+    expect(lstatSync(join(fixture.target, 'tools', '.bin', 'tool')).isSymbolicLink()).toBe(true);
+    expect(realpathSync(join(fixture.target, 'tools', '.bin', 'tool'))).toBe(join(fixture.target, 'tools', 'pkg', 'tool.js'));
+    expect(readFileSync(join(fixture.target, 'tools', '.bin', 'tool'), 'utf8')).toBe('export {};');
+  });
+
+  it('refuses source membership changes while materializing a declared directory', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'a.txt'), 'A');
+    writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the stable input.']);
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => { mkdirSync(join(request.targetDir, 'data')); }),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, copyFile: (source, target) => {
+        nodeShipSetupFileSystem.copyFile(source, target);
+        writeFileSync(join(fixture.project, 'data', 'added.txt'), 'new member');
+      } },
+    });
+    expect(report.state).toBe('refused');
+    expect(report.declaredInputStability).toContainEqual(expect.objectContaining({ phase: 'input_materialization', state: 'changed' }));
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {

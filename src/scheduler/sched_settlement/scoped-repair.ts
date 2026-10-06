@@ -76,6 +76,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
             scopeContained: revisionScopeContained,
           });
           state = result.state;
+          if (result.decision.pending) continue;
           if (!result.decision.accepted || !result.stages) throw new Error(result.decision.errors.join('; '));
           publishRevisedWorkflow(result.stages, sorted, state, projectDir, runId, directory, workflow);
           recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: gate.id, requestId: repair.id, detail: `admitted scoped repair ${repair.id} revision ${result.decision.revision}`, source: 'scheduler' });
@@ -154,6 +155,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
           scopeContained: revisionScopeContained,
         });
         state = result.state;
+        if (result.decision.pending) continue;
         if (result.decision.accepted && result.stages) {
           publishRevisedWorkflow(result.stages, sorted, state, projectDir, runId, directory, workflow);
         }

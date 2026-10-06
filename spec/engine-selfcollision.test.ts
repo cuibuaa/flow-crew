@@ -757,7 +757,7 @@ describe('engine self-collision after-state replays and controls', () => {
     };
     const unrelatedTarget = await cmdShipPreflightWithDeps(['ship-preflight'], dependencies);
     expect(unrelatedTarget).toBe(0);
-    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(runner).not.toHaveBeenCalled();
     expect(stderr.value).not.toContain('Validation baseline refused');
 
     const noBaselineRunner = vi.fn<ValidationCommandRunner>();
@@ -777,7 +777,7 @@ describe('engine self-collision after-state replays and controls', () => {
       stderr: new Capture().writer,
     });
     expect(quiet).toBe(0);
-    expect(quietRunner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(quietRunner).not.toHaveBeenCalled();
 
     const terminalRunner = vi.fn<ValidationCommandRunner>((request) => ({
       exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
@@ -789,7 +789,7 @@ describe('engine self-collision after-state replays and controls', () => {
       stderr: new Capture().writer,
     });
     expect(terminal).toBe(0);
-    expect(terminalRunner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(terminalRunner).not.toHaveBeenCalled();
 
     recordAfter(7, 'run preflight with a verified cross-project consumer of this package dist, then no-baseline, unrelated-dist, terminal-run, and opaque-data-argument controls', {
       consumerDetectorPositive: consumers,

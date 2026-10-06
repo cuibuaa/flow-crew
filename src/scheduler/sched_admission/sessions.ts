@@ -50,6 +50,15 @@ export function sessionResumeForStage(
   runDirPath: string,
   enabled: boolean,
 ): { sessionId: string; ownerStageId: string } | undefined {
+  // Own-stage continuation does not inherit another role's reasoning. It is
+  // independent of the opt-in predecessor reuse experiment. Gates use their
+  // correction-aware continuation path instead.
+  const own = readCodexSession(runDirPath, stage.id);
+  if (!stage.is_gate && own?.ownerStageId === stage.id
+      && existsSync(join(runDirPath, 'stages', stage.id, 'codex_home'))
+      && (state.stages[stage.id]?.attempts?.length ?? 0) > 0) {
+    return { sessionId: own.sessionId, ownerStageId: stage.id };
+  }
   if (!enabled || stage.depends_on.length !== 1) return undefined;
   const predecessor = allStages.find((candidate) => candidate.id === stage.depends_on[0]);
   if (!predecessor) return undefined;

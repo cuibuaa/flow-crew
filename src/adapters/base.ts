@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { confineEngineChild, observeEngineChildBoundary, type EngineChildBoundaryReceipt } from '../write-boundary.js';
 import type { ProviderFailure } from '../provider-result.js';
+import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
 
 export type { ChildProcess } from 'node:child_process';
 
@@ -17,7 +18,7 @@ export type AdapterFailureKind =
   | 'overloaded'
   | 'capacity';
 
-export interface RunResult {
+export interface RunResult extends InvocationUsage {
   output: string;
   writeBoundary?: EngineChildBoundaryReceipt;
   exitCode: number;
@@ -35,6 +36,8 @@ export interface RunResult {
   friendlyError?: string;
   tokens_in?: number;
   tokens_out?: number;
+  /** Small native-call ledger, including calls superseded by parameter repairs. */
+  invocations?: NativeInvocationUsage[];
   /** Structured adapter attribution for files written during this invocation. */
   writes?: string[];
   writeAttribution?: 'structured' | 'snapshot' | 'unknown';
@@ -88,6 +91,8 @@ export interface RunOpts {
     resumeSessionId?: string;
     transport?: { kind: 'stdin' | 'argv' | 'request'; payload: string };
   }) => void;
+  /** Complete duties and delivered guidance if an explicit resume is unavailable. */
+  freshSessionPrompt?: string;
   /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
   timeout_ms: number;
   workDir: string;
@@ -100,7 +105,7 @@ export interface RunOpts {
   resumeSessionId?: string;
   /** Stage whose isolated adapter home owns resumeSessionId. */
   sessionOwnerStageId?: string;
-  /** Keep the owning adapter home for one eligible direct successor. */
+  /** Retain the isolated home across this stage lifecycle or an eligible successor. */
   preserveSession?: boolean;
   /** When triggered, the spawned POSIX process group receives a bounded graceful
    *  termination attempt and the adapter returns exitCode=137 ("Aborted by

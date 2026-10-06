@@ -292,40 +292,23 @@ prompt: |
   - **One gate→fix loop per gate, not two.** The retry_to mechanism handles retries. Don't bake a second verify+fix pair.
   - **End at the goal gate.** No stages beyond the deliverable.
 
-  # Self-verifying coder pattern (preferred for implement stages with testable output)
+  # Author verification and independent audit
 
-  For a coder stage whose output is functional code with measurable behavior, bundle
-  **implement + write tests + run tests + iterate** into ONE coder stage, instead of the
-  legacy 3-piece (implement → qa-writes-tests → coder-fix). The coder iterates in-memory
-  until self-tests pass, paying ONE context-rebuild cost. Then the downstream QA stage
-  becomes ANTI-CHEAT (audit + maybe add 1-2 edges) rather than test-author.
+  Combine implementation and its own targeted verification when their scopes fit.
+  The author iterates until the changed behaviour works, then one independent QA
+  stage audits reproducible evidence and adversarial failure modes. Later gates
+  inspect that audit and re-run only missing or inconsistent checks, plus the
+  complete configured validation set once after its last relevant input write.
 
-  Coder stage's prompt_template should explicitly say roughly:
-    1. Implement <specific change> in <files>.
-    2. Write minimal tests at <test path> covering each acceptance criterion from the brief.
-    3. Run the tests with <exact command>, e.g. `pytest <test path>` or
-       `python -m pytest spec/test_X.py -q`.
-    4. If tests fail, iterate within this stage — do NOT exit with failing tests
-       unless you can document a fundamental blocker (write that to handoff).
+  One-off proofs, historical comparisons and task evidence are declared run-root
+  file artifacts with typed replays. The collected project suite expresses current
+  intended behaviour: add or update a regression only for the behaviour changed,
+  using the configured toolchain and collector. Acceptance criteria require
+  evidence, not a new collected test for every criterion. Declare every script
+  and its replay target; prose commands never become execution authority.
 
-  QA stage's prompt_template (anti-cheat, NOT test-author) should say roughly:
-    1. Read the tests the coder wrote at <test path>.
-    2. Audit: does each acceptance criterion in the brief map to at least one
-       substantive test? Reject `assert True`, over-mocked stubs, or tests that
-       only exercise the happy path of an unrelated function.
-    3. Run the tests yourself; confirm exit 0.
-    4. (Optional) Add 1-2 edge-case tests the coder missed; re-run all.
-    5. Verify no out-of-scope files were modified (e.g. `git diff --name-only`).
-    6. Write verdict to {run_dir}/verdict_<gate_id>.json with pass/fail and findings.
-
-  The fix stage (retry_to gate) only runs if the QA anti-cheat finds material gaps.
-
-  Why this beats the legacy 3-piece:
-  - Coder context stays warm across implement+test+iterate (saves 2 session restarts
-    worth of token + latency).
-  - QA's job shrinks from "write tests from scratch" to "audit + maybe extend" (faster).
-  - The artifact (coder-written tests) is the same audit surface QA needs anyway —
-    no duplicate effort.
+  Keep handoffs brief: changed paths, direct check exits and evidence locators,
+  decisions, uncovered cases and blockers. Honour declared scope for all writes.
 
   Skip this pattern when:
   - Task is verification-only (no implementation; use qa alone).
@@ -378,7 +361,7 @@ prompt: |
       reads: []
       replays: []
     prompt_template: |
-      Implement <specific change> by editing {project}/<file>. Keep changes additive.
+      Implement <specific change> by editing {project}/<file>. Remove or restructure the cause; justify additions.
   - id: verify_thing
     role: qa
     scope: []

@@ -425,6 +425,10 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
             if (!violation.targetStageIds.has(input.stage.id)
                 || violation.deliveredAttemptKeys.has(currentAttemptKey)) return [];
             violation.deliveredAttemptKeys.add(currentAttemptKey);
+            // A restored fact is consumed once by each stage in its cohort,
+            // even across readmission. Unrestored facts still reach each new
+            // attempt; another write creates a new fact and a fresh cohort.
+            if (violation.restored) violation.targetStageIds.delete(input.stage.id);
             return [{
               path: violation.path,
               reason: violation.reason,

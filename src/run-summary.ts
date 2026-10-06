@@ -437,7 +437,7 @@ ${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatc
   const finish = (result?: import('./adapters/base.js').RunResult, error?: string): void => {
     updateRunState(projectDir, runId, (current) => {
       const attempt = current.auxiliaryAttempts?._summary?.find((entry) => entry.index === attemptIndex && entry.startedAt === startedAt);
-      if (attempt) Object.assign(attempt, { status: result?.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED, completedAt: new Date().toISOString(), exitCode: result?.exitCode ?? 1, duration_ms: result?.duration_ms ?? Math.max(0, Date.now() - Date.parse(startedAt)), tokens_in: result?.tokens_in, tokens_out: result?.tokens_out, tokenUsage: result?.tokens_in !== undefined && result.tokens_out !== undefined ? 'known' : 'unknown', error });
+      if (attempt) Object.assign(attempt, { status: result?.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED, completedAt: new Date().toISOString(), exitCode: result?.exitCode ?? 1, duration_ms: result?.duration_ms ?? Math.max(0, Date.now() - Date.parse(startedAt)), tokens_in: result?.tokens_in, tokens_out: result?.tokens_out, tokenUsage: result?.tokenUsage ?? (result?.tokens_in !== undefined && result.tokens_out !== undefined ? 'known' : 'unknown'), tokens_cached: result?.tokens_cached, tokens_reasoning: result?.tokens_reasoning, invocations: result?.invocations, error });
     });
   };
   const capture = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -76,6 +76,38 @@ describe('declared replay execution and collection', () => {
 });
 
 describe('declared output freshness and inert report prose', () => {
+  it('settles a run directory from complete member content without an asserted write list', () => {
+    const { projectDir, runDir } = fixture();
+    const input = { stageId: 'writer', template: '', projectDir, runDir,
+      artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'tree', root: 'run', path: 'evidence', kind: 'directory', nonempty: true }], reads: [], replays: [] }) };
+    const preimages = captureStageArtifactContractPreimages(input);
+    write(join(runDir, 'evidence/deep/member.txt'), 'first');
+    expect(inspectStageArtifactContract({ ...input, preimages }).violations).toEqual([]);
+    const settled = captureStageArtifactContractPreimages(input);
+    expect(inspectStageArtifactContract({ ...input, preimages: settled }).violations[0].reason).toContain('STALE');
+    write(join(runDir, 'evidence/deep/member.txt'), 'other');
+    utimesSync(join(runDir, 'evidence/deep/member.txt'), new Date(0), new Date(0));
+    expect(inspectStageArtifactContract({ ...input, preimages: settled }).violations).toEqual([]);
+    const renamed = captureStageArtifactContractPreimages(input);
+    renameSync(join(runDir, 'evidence/deep/member.txt'), join(runDir, 'evidence/deep/renamed.txt'));
+    expect(inspectStageArtifactContract({ ...input, preimages: renamed }).violations).toEqual([]);
+    const removed = captureStageArtifactContractPreimages(input);
+    rmSync(join(runDir, 'evidence/deep/renamed.txt'));
+    expect(inspectStageArtifactContract({ ...input, preimages: removed }).violations).toEqual([]);
+  });
+  it('refuses unreadable directory content identities even with an asserted write or prior output', () => {
+    const { projectDir, runDir } = fixture();
+    const path = join(runDir, 'evidence');
+    const input = { stageId: 'writer', template: '', projectDir, runDir,
+      artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'tree', root: 'run', path: 'evidence', kind: 'directory', nonempty: true }], reads: [], replays: [] }) };
+    const preimages = captureStageArtifactContractPreimages(input);
+    mkdirSync(path);
+    symlinkSync('missing', join(path, 'link'));
+    const audit = inspectStageArtifactContract({ ...input, preimages, writes: [path], priorProducedPromptArtifacts: [path] });
+    expect(audit.violations[0].reason).toContain('declare link referents as file outputs');
+    rmSync(join(path, 'link'));
+    expect(inspectStageArtifactContract({ ...input, preimages }).violations[0].reason).toContain('STALE');
+  });
   it('creates no duties or replay from prompt syntax, regexes, suffixes or inline command results', () => {
     const { projectDir, runDir } = fixture();
     const artifactContract = artifacts([{ id: 'report', root: 'project', path: 'reports/suffixes.md' }]);

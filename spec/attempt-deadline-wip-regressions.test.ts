@@ -1,5 +1,5 @@
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -44,13 +44,28 @@ describe('immutable attempt deadline regressions', () => {
     const stageId = 'starved_deadline';
     const created = createRun(projectRoot, 'starved-deadline', 'name: starved-deadline', [stageId]);
     const budgetMs = 40;
+    const home = join(created.runDirPath, 'stages', stageId, 'codex_home');
+    let adapterStartedAt: number | undefined;
+    const startedWall = Date.now();
+    // This fixture isolates starvation during a started adapter, rather than
+    // letting unrelated setup load consume the 40ms construction first.
+    const elapsed = () => adapterStartedAt === undefined ? 0 : performance.now() - adapterStartedAt;
+    const deadlineClock = {
+      monotonicNow: elapsed,
+      wallNow: () => startedWall + elapsed(),
+      setTimer: (callback: () => void, delay: number) => setTimeout(callback, delay),
+      clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
+    };
     const adapter: Adapter = {
       async run() {
+        adapterStartedAt = performance.now();
+        mkdirSync(home, { recursive: true });
+        writeFileSync(join(home, 'fixture-thread.json'), '{"messages":["needed thread context"]}');
         const blockedUntil = performance.now() + 120;
         while (performance.now() < blockedUntil) {
           // Deliberately prevent the already-due timer callback from running.
         }
-        return { output: 'late success', exitCode: 0, duration_ms: 120 };
+        return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
 
@@ -59,6 +74,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline starvation fixture',
+      deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
@@ -69,6 +85,8 @@ describe('immutable attempt deadline regressions', () => {
     const status = readStageStatus(projectRoot, created.runId, stageId);
 
     expect(result).toMatchObject({ exitCode: 124, timedOut: true });
+    expect(adapterStartedAt).toBeDefined();
+    expect(existsSync(home)).toBe(true);
     expect(status).toMatchObject({
       status: 'failed',
       error: expect.stringMatching(/timed out/iu),
@@ -142,7 +160,7 @@ describe('immutable attempt deadline regressions', () => {
           timestamp: new Date().toISOString(),
           source: 'supervisor',
         }));
-        return { output: 'late success', exitCode: 0, duration_ms: 120 };
+        return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
 

@@ -3,8 +3,10 @@ import { withEngineWriteBoundary } from './write-boundary.js';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { recordInvocationInput } from './run-state-view.js';
+import { finalizeCodexHome, isCodexSessionUuid, readCodexSession, stageCodexHome } from './adapters/codex.js';
 import { runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
+import { sumInvocationUsage } from './invocation-usage.js';
 import { inspectDeclaredStageReads } from './declared-artifact-audit.js';
 import { captureResourceLeaseOwner, ResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseHandle } from './resource-leases.js';
 import { engineGeneration } from './restart-recovery.js';
@@ -90,6 +92,7 @@ export function plannerCriterionAssignmentContext(brief: string): string {
 
 export interface StageOpts {
   artifactContract?: ArtifactContract;
+  planRevision?: { revision: number; digest: string };
   artifactStatuses?: Record<string, StageStatus>;
   resources?: { gpu_cards: string[]; disk: Array<{ root: 'project' | 'run'; path: string; bytes: number; minimum_free_bytes: number }> };
   /** Trusted engine provider injection; never supplied by a model declaration. */
@@ -448,10 +451,21 @@ async function runStageWithWriterLease(
   const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
   if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
   const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
+  // Retain delivered, targeted notices across execution boundaries. Their
+  // original attempt identity remains explicit; only re-admission grants scope.
+  try {
+    const priorReceipt = readFileSync(join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
+    for (const attempt of runningStatus.attempts ?? []) {
+      for (const entry of guidanceForStageFromText(priorReceipt, opts.stageId, attempt.index)) {
+        if (!guidanceBeforePrompt.some((current) => current.id === entry.id)) guidanceBeforePrompt.push(entry);
+      }
+    }
+  } catch { /* first execution has no delivery receipt */ }
   const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
     const rendered = renderGuidanceDelivery(entries);
+    const historical = entries.some((entry) => entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex);
     return rendered
-      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${rendered}\n\n`
+      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${historical ? 'Historical execution notices retain their original attempt binding; current duties and revalidated capability govern this execution.\n' : ''}${rendered}\n\n`
         + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
       : '';
   };
@@ -470,7 +484,7 @@ async function runStageWithWriterLease(
   }
   // buildStagePrompt ran before the execution index existed and intentionally
   // included only run-wide guidance. Add notices bound to this execution now.
-  const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex === attemptIndex);
+  const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
   if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
   writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
@@ -487,15 +501,15 @@ async function runStageWithWriterLease(
   const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
   const deliveredGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
   const deliveredGuidance = [...guidanceBeforePrompt];
+  let receiptContent: string | undefined;
   const persistGuidanceReceipt = (): void => {
     try {
       mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
       const rendered = renderGuidanceDelivery(deliveredGuidance);
-      writeFileSync(
-        guidanceReceiptPath,
-        rendered ? `${rendered}\n` : 'No supervisor guidance was delivered to this execution.\n',
-        'utf-8',
-      );
+      const content = rendered ? `${rendered}\n` : 'No supervisor guidance was delivered to this execution.\n';
+      if (content === receiptContent) return;
+      writeFileSync(guidanceReceiptPath, content, 'utf-8');
+      receiptContent = content;
     } catch { /* the run event remains the delivery audit */ }
   };
   const consumeNewGuidance = (
@@ -504,6 +518,7 @@ async function runStageWithWriterLease(
     commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
   ): ReturnType<typeof readGuidanceForStage> => {
     let entries: ReturnType<typeof readGuidanceForStage> = [];
+    let checkFailed = false;
     try {
       routePendingOperatorGuidanceToStage(opts.runDir, opts.stageId);
       entries = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex)
@@ -513,7 +528,8 @@ async function runStageWithWriterLease(
         deliveredGuidance.push(entry);
       }
       persistGuidanceReceipt();
-    } catch { /* report the failed/empty check below */ }
+    } catch { checkFailed = true; }
+    if (!entries.length && !checkFailed && boundary !== 'attempt_start' && boundary !== 'adapter_invocation') return entries;
     recordRunEvent(opts.projectDir, opts.runId, {
       type: 'guidance_delivery_checked',
       runId: opts.runId,
@@ -524,7 +540,7 @@ async function runStageWithWriterLease(
       boundary,
       ...(boundaryInvocationIndex === undefined ? {} : { invocationIndex: boundaryInvocationIndex }),
       ...(commandEvent?.id ? { commandId: commandEvent.id } : {}),
-      ...(commandEvent?.command ? { command: commandEvent.command } : {}),
+      ...(checkFailed ? { checkFailed: true } : {}),
       guidanceIds: boundary === 'attempt_start'
         ? [...deliveredGuidanceIds]
         : entries.map((entry) => entry.id),
@@ -609,8 +625,8 @@ async function runStageWithWriterLease(
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
-  prompt += `\n\n${runStateContext(opts.projectDir, opts.runId)}`;
-  if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract, null, 2)}`;
+  prompt += `\n\n${runStateContext(opts.projectDir, opts.runId, opts.planRevision)}`;
+  if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract)}`;
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
@@ -975,6 +991,10 @@ async function runStageWithWriterLease(
       } : {}),
       ...(tokensIn !== undefined ? { tokens_in: tokensIn } : {}),
       ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
+      tokenUsage: telemetry?.tokenUsage,
+      tokens_cached: telemetry?.tokens_cached,
+      tokens_reasoning: telemetry?.tokens_reasoning,
+      invocations: telemetry?.invocations,
     };
   };
   const observeAdapterSettlement = (): void => {
@@ -989,10 +1009,14 @@ async function runStageWithWriterLease(
   let invocationIndex = 0;
   let inputRecordIndex = 0;
   let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
+  const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
+  if (opts.resumeSessionId && isCodexSessionUuid(opts.resumeSessionId)) {
+    continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
+  }
+  const deadlineContext = (): string => `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; absolute deadline ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Query UTC time with node -e "console.log(new Date().toISOString())".`;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
-    session: boolean,
     invocationPrompt = prompt,
   ): Promise<RunResult> => {
     if (aggregateAbortSignal.aborted || attemptDeadline.remainingMs() <= 0) {
@@ -1007,9 +1031,13 @@ async function runStageWithWriterLease(
     });
     invocationIndex++;
     const invocationGuidance = consumeNewGuidance('adapter_invocation', invocationIndex);
-    const effectiveInvocationPrompt = invocationGuidance.length > 0
-      ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}`
-      : invocationPrompt;
+    const continuation = continuations.get(selectedAdapter);
+    // A fresh child (including a failed-resume fallback) needs both its duties
+    // and the current local correction; the thread only carries the former.
+    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}`;
+    const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
+      ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}\n\n${deadlineContext()}`
+      : fullPrompt;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
       // Keep it usable, but do not manufacture an authenticated run carrier.
@@ -1028,7 +1056,7 @@ async function runStageWithWriterLease(
     // input.md remains a compatible latest alias; immutable records carry exact inputs.
     writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
     captureInput({ systemPrompt: selectedRole.prompt, userPrompt: effectiveInvocationPrompt,
-      resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined }, 'adapter');
+      resumeSessionId: continuation?.sessionId }, 'adapter');
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
     activeInvocationAbortController = invocationAbortController;
@@ -1061,9 +1089,7 @@ async function runStageWithWriterLease(
         );
         if (startGuidance.length > 0) {
           commandBoundaryControl = { kind: 'guidance', command: event, guidance: startGuidance };
-          if (!invocationAbortController.signal.aborted) {
-            invocationAbortController.abort('guidance_delivery_at_tool_start');
-          }
+
         }
         if (event.command) {
           const fingerprint = commandFingerprint(event.command);
@@ -1166,11 +1192,9 @@ async function runStageWithWriterLease(
       const guidance = consumeNewGuidance(
         'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
       );
-      if (guidance.length > 0 && !commandBoundaryControl) {
-        commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
-        if (!invocationAbortController.signal.aborted) {
-          invocationAbortController.abort('guidance_delivery_at_tool_completion');
-        }
+      if (guidance.length > 0 && !commandBoundaryControl) commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
+      if (commandBoundaryControl?.kind === 'guidance' && activeCommands.size === 0 && !invocationAbortController.signal.aborted) {
+        invocationAbortController.abort('guidance_delivery_at_tool_completion');
       }
     };
     latestLiveConstraintResult = undefined;
@@ -1207,7 +1231,7 @@ async function runStageWithWriterLease(
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
         stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!, attemptIndex,
-        sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined },
+        sessionOwnerStageId: continuation?.ownerStageId },
       () => selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,
@@ -1215,15 +1239,25 @@ async function runStageWithWriterLease(
         stageId: opts.stageId,
         attemptIndex,
         attemptStartedAt,
-        resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined,
-        sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
-        preserveSession: opts.preserveSession,
+        resumeSessionId: continuation?.sessionId,
+        sessionOwnerStageId: continuation?.ownerStageId,
+        // The worker owns final cleanup; an adapter call may be corrected.
+        preserveSession: true,
+        freshSessionPrompt: fullPrompt,
         abortSignal: invocationAbortSignal,
         onCommandLifecycle,
         onInvocationInput: (input) => captureInput(input, 'model'),
       })).then(
         (value) => {
           liveMonitor?.observePaths(value.writes ?? []);
+          if (isCodexSessionUuid(value.sessionId)) {
+            const recorded = readCodexSession(opts.runDir, opts.stageId);
+            continuations.set(selectedAdapter, {
+              sessionId: value.sessionId,
+              ownerStageId: recorded?.sessionId === value.sessionId ? recorded.ownerStageId
+                : value.sessionId === continuation?.sessionId ? continuation.ownerStageId : opts.stageId,
+            });
+          }
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
@@ -1266,12 +1300,8 @@ async function runStageWithWriterLease(
       ...next,
       output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
       duration_ms: prior.duration_ms + next.duration_ms,
-      tokens_in: (prior.tokens_in === undefined && next.tokens_in === undefined)
-        ? undefined
-        : (prior.tokens_in ?? 0) + (next.tokens_in ?? 0),
-      tokens_out: (prior.tokens_out === undefined && next.tokens_out === undefined)
-        ? undefined
-        : (prior.tokens_out ?? 0) + (next.tokens_out ?? 0),
+      ...sumInvocationUsage([prior, next]),
+      invocations: [...(prior.invocations ?? []), ...(next.invocations ?? [])],
       ...(writes.length > 0 ? { writes } : {}),
       ...(writes.length > 0 ? { writeAttribution: structured ? 'structured' : 'unknown' } : {}),
       ...(validationGeneratedWrites.length > 0 ? { validationGeneratedWrites } : {}),
@@ -1282,13 +1312,11 @@ async function runStageWithWriterLease(
   const invokeAdapterWithLiveCorrection = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
-    session: boolean,
   ): Promise<RunResult> => {
     let combined: RunResult | undefined;
     let invocationPrompt = prompt;
-    let mayResume = session;
     while (true) {
-      const current = await invokeAdapter(selectedAdapter, selectedRole, mayResume, invocationPrompt);
+      const current = await invokeAdapter(selectedAdapter, selectedRole, invocationPrompt);
       combined = mergeInvocationTelemetry(combined, current);
       const commandControl = commandBoundaryControl;
       if (commandControl && !aggregateAbortSignal.aborted) {
@@ -1335,13 +1363,12 @@ async function runStageWithWriterLease(
             source: 'worker',
           });
         }
-        mayResume = false;
         const label = commandControl.kind === 'operator_interrupt'
           ? 'Operator command interrupt'
           : commandControl.kind === 'timeout_projection'
             ? 'Command timeout projection'
             : 'Live guidance delivered at tool completion';
-        invocationPrompt = `${prompt}\n\n# ${label}\n${guidanceBlock(commandControl.guidance)}`;
+        invocationPrompt = `# ${label}\n${guidanceBlock(deliveredGuidance)}`;
         try {
           appendFileSync(
             liveLogPath,
@@ -1393,8 +1420,7 @@ async function runStageWithWriterLease(
         };
       }
       liveReinvocations++;
-      mayResume = false;
-      invocationPrompt = `${prompt}\n\n# Live constraint correction\n${instructions.join('\n')}`;
+      invocationPrompt = `# Live constraint correction\n${instructions.join('\n')}\n${guidanceBlock(deliveredGuidance)}`;
       try {
         appendFileSync(
           liveLogPath,
@@ -1451,7 +1477,7 @@ async function runStageWithWriterLease(
     }
     result = aggregateAbortSignal.aborted ? { ...cancelledResult(), output: preflightErrors.join('\n') }
       : preflightErrors.length ? { output: preflightErrors.join('\n'), exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), friendlyError: preflightErrors.join('; ') }
-      : await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
+      : await invokeAdapterWithLiveCorrection(adapter, resolvedRole);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
     if (result.exitCode !== 0 && result.adapterError === true) {
@@ -1465,7 +1491,7 @@ async function runStageWithWriterLease(
           result = cancelledResult();
           break;
         }
-        result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, false);
+        result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole);
         if (result.exitCode === 0 || result.adapterError !== true) break;
       }
 
@@ -1491,7 +1517,7 @@ async function runStageWithWriterLease(
                 model: projectDefaults.model,
                 reasoning_effort: projectDefaults.reasoning_effort,
               };
-              result = await invokeAdapterWithLiveCorrection(fallbackAdapter, fallbackRole, false);
+              result = await invokeAdapterWithLiveCorrection(fallbackAdapter, fallbackRole);
               try { appendFileSync(liveLogPath, `\n↪︎ Fallback ${fallbackName} returned exit=${result.exitCode}.\n`); } catch { /* ignore */ }
             }
           }
@@ -1694,6 +1720,10 @@ async function runStageWithWriterLease(
       : undefined,
     tokens_in: result.tokens_in,
     tokens_out: result.tokens_out,
+    tokens_cached: result.tokens_cached,
+    tokens_reasoning: result.tokens_reasoning,
+    tokenUsage: result.tokenUsage,
+    invocations: result.invocations,
     adapterFailureKind: result.adapterFailureKind,
     kgChanged: artifacts.some(a => a.endsWith('knowledge_graph.json')),
     writes,
@@ -1733,6 +1763,12 @@ async function runStageWithWriterLease(
   // Surface fallback attribution to callers without changing adapter semantics.
   result.writes = final.attempts?.at(-1)?.writes;
   result.writeAttribution = final.attempts?.at(-1)?.writeAttribution;
+
+  // Final classification and durable settlement, rather than a raw child zero,
+  // determine whether the successful-home cleanup policy applies.
+  if (result.exitCode === 0 && !opts.preserveSession && !scopeRevisionBoundaryReached && !approvalSuspended) {
+    for (const continuation of continuations.values()) finalizeCodexHome(stageCodexHome(opts.runDir, continuation.ownerStageId), 0);
+  }
 
   return result;
 }

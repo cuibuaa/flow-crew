@@ -59,7 +59,7 @@ export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], dir
 }
 
 export interface RevisionAdmission { pass: boolean; errors: string[]; warnings?: string[] }
-export interface PlanRevisionDecision { version: 1; requestId: string; accepted: boolean; at: string; baseRevision: number; requestDigest: string; errors: string[]; revision?: number; digest?: string }
+export interface PlanRevisionDecision { version: 1; requestId: string; accepted: boolean; pending?: true; at: string; baseRevision: number; requestDigest: string; errors: string[]; revision?: number; digest?: string }
 
 /** Complete candidates use exactly the caller's initial-plan mechanical admission. */
 export function applyPlanRevision(input: {
@@ -94,11 +94,24 @@ export function applyPlanRevision(input: {
     const current = state.queryState?.planRevision;
     if (!current || current.revision !== request.baseRevision || current.digest !== request.baseDigest) fail('PLAN_REVISION_STALE: baseRevision/baseDigest must match the admitted current plan');
     if (!state.planControl || planDigest(state.planControl.stages) !== current?.digest) fail('PLAN_REVISION_INTEGRITY: current plan bytes do not match the admitted digest');
-    if (Object.values(state.stages).some((stage) => stage.status === STAGE_STATUS.RUNNING)) fail('PLAN_REVISION_NOT_AT_BOUNDARY: active stages cannot be revised');
     let author = state.stages[request.stageId];
     try { author = readStageStatus(input.projectDir, input.runId, request.stageId); } catch { /* retain projection */ }
-    const attempt = author?.attempts?.at(-1);
-    if (!attempt || attempt.index !== request.attemptIndex || attempt.startedAt !== request.attemptStartedAt || attempt.status === STAGE_STATUS.RUNNING || author?.status === STAGE_STATUS.PENDING) fail('PLAN_REVISION_ATTEMPT_BINDING: requester must name its latest settled execution');
+    // Bind immutable execution facts, not a moving latest-attempt projection.
+    // A technical retry cannot erase the execution that authored the proposal;
+    // unchanged executed duties, the base digest and full admission still apply.
+    const attempt = author?.attempts?.find((entry) => entry.index === request.attemptIndex && entry.startedAt === request.attemptStartedAt);
+    if (!attempt) fail('PLAN_REVISION_ATTEMPT_BINDING: requester must name a retained execution by index and startedAt');
+    const active = attempt?.status === STAGE_STATUS.RUNNING
+      || Object.values(state.stages).some((stage) => stage.status === STAGE_STATUS.RUNNING);
+    if (active && !decision.errors.length) {
+      decision.pending = true;
+      decision.errors.push('PLAN_REVISION_NOT_AT_BOUNDARY: waiting for active executions to settle');
+      return; // Waiting is not a durable refusal; retry this request at idle.
+    }
+    if (active) fail('PLAN_REVISION_NOT_AT_BOUNDARY: active stages cannot be revised');
+    if (attempt && ((attempt.status !== STAGE_STATUS.COMPLETE && attempt.status !== STAGE_STATUS.FAILED) || !attempt.completedAt)) {
+      fail('PLAN_REVISION_ATTEMPT_BINDING: named execution must be settled complete or failed with completedAt');
+    }
     try {
       const original = new Map((state.planControl?.stages ?? []).map((stage) => [stage.id, stage]));
       candidate = request.stages.map((raw) => {
@@ -140,7 +153,9 @@ export function applyPlanRevision(input: {
     } catch (error) { fail(`PLAN_REVISION_INVALID: ${error instanceof Error ? error.message : String(error)}`); }
     state.planRevisionDecisions = { ...state.planRevisionDecisions, [journalKey]: decision };
   });
-  mkdirSync(join(directory, 'stages', request.stageId), { recursive: true });
-  publishImmutable(decisionPath, `${JSON.stringify(decision, null, 2)}\n`);
+  if (!decision.pending) {
+    mkdirSync(join(directory, 'stages', request.stageId), { recursive: true });
+    publishImmutable(decisionPath, `${JSON.stringify(decision, null, 2)}\n`);
+  }
   return { state, decision, ...(decision.accepted ? { stages: candidate } : {}) };
 }

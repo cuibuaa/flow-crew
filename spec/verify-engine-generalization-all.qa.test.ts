@@ -11,7 +11,7 @@ const CASES = [
   { id: 4, file: "engine-generalization-contracts.test.ts", anchor: "4 — keeps a declared but skipped gate non-passing" },
   { id: 5, file: "engine-generalization-contracts.test.ts", anchor: "5 — rejects terminal condition sets" },
   { id: 6, file: "engine-generalization-brief.test.ts", anchor: "recorded already-crossed target" },
-  { id: 7, file: "engine-generalization-setup.test.ts", anchor: "refuses before the first command" },
+  { id: 7, file: "engine-generalization-setup.test.ts", anchor: "discovers facts for live, idle and explicit-skip projects without executing commands" },
   { id: 8, file: "engine-generalization-artifacts.test.ts", anchor: "refuses a selector that exercises no test even though the direct exit is zero" },
   { id: 9, file: "engine-generalization-runtime.test.ts", anchor: "9 — routes authored/effective rejection facts" },
   { id: 10, file: "engine-generalization-runtime.test.ts", anchor: "10 — binds a versioned-shape advisory" },

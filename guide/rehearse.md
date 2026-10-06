@@ -108,3 +108,17 @@ executing the scheduler or confirmation command.
 
 Engineering briefs are valid input. Without a `research` block, rehearsal runs
 the static contract checks, emits a warning, and skips the research simulation.
+
+## Preparing a launch
+
+`ship-preflight` discovers prior-run evidence, declared inputs and outputs,
+freshness, and validation commands. It runs no project build, test, or lint
+command; `--no-baseline` remains accepted for compatibility. `ship-setup`
+measures the validation baseline in the prepared target. Exact population
+collectors retain their comparison; an unsupported or failed collector is
+reported as `unverified`, without running source tests to derive TAP parity.
+
+Missing declared inputs are materialized in the target. Internal dependency
+links stay inside the copied tree, so relative module paths keep working.
+Existing inputs that resolve outside the target are refused; recreate that
+prepared target instead of reusing its source links.

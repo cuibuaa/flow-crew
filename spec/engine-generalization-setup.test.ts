@@ -115,7 +115,7 @@ function writeRunningRun(runsRoot: string): void {
 }
 
 describe('item 7: live-project validation binding', () => {
-  it('refuses before the first command, while retaining the idle and explicit-skip controls', async () => {
+  it('discovers facts for live, idle and explicit-skip projects without executing commands', async () => {
     const liveRuns = join(fixture.state, 'live-runs');
     const emptyRuns = join(fixture.state, 'empty-runs');
     mkdirSync(emptyRuns, { recursive: true });
@@ -130,12 +130,10 @@ describe('item 7: live-project validation binding', () => {
       { stdout: unsafeOut.writer, stderr: unsafeErr.writer },
     ));
 
-    expect(unsafeCode).toBe(1);
+    expect(unsafeCode).toBe(0);
     expect(unsafeRunner).not.toHaveBeenCalled();
-    expect(unsafeOut.value).toBe('');
-    expect(unsafeErr.value).toContain('Preflight will not launch validation commands while those runs are live');
+    expect(unsafeErr.value).toContain('live FlowCrew run(s)');
     expect(unsafeErr.value).toContain('No project command was launched');
-    expect(unsafeErr.value).toContain('pass --no-baseline');
 
     const skippedRunner = validationRunner();
     const skippedErr = new Capture();
@@ -145,7 +143,6 @@ describe('item 7: live-project validation binding', () => {
     );
     expect(skippedCode).toBe(0);
     expect(skippedRunner).not.toHaveBeenCalled();
-    expect(skippedErr.value).toContain('--no-baseline is set');
     expect(skippedErr.value).toContain('Validation baseline: SKIPPED');
 
     const idleRunner = validationRunner();
@@ -154,7 +151,7 @@ describe('item 7: live-project validation binding', () => {
       preflightDependencies(emptyRuns, idleRunner, { stdout: new Capture().writer, stderr: new Capture().writer }),
     );
     expect(idleCode).toBe(0);
-    expect(idleRunner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(idleRunner).not.toHaveBeenCalled();
 
     const idleSkippedRunner = validationRunner();
     const idleSkippedCode = await cmdShipPreflightWithDeps(
@@ -244,11 +241,11 @@ describe('item 14: declared-input stability binding', () => {
         ],
       }),
     ]);
-    expect(readFileSync(frozenFile, 'utf8')).toContain('mutated');
-    expect(existsSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'))).toBe(true);
+    expect(readFileSync(frozenFile, 'utf8')).toContain('original');
+    expect(existsSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'))).toBe(false);
 
     writeFileSync(frozenFile, 'id,value\n1,original\n');
-    rmSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'));
+    rmSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'), { force: true });
     const stableTarget = join(fixture.root, 'stable-target');
     const outputOnlyRunner = validationRunner((_role, cwd) => {
       mkdirSync(join(cwd, 'generated'), { recursive: true });
@@ -341,7 +338,7 @@ describe('item 14: declared-input stability binding', () => {
     expect(baseline).not.toHaveBeenCalled();
   });
 
-  it('checks the source fallback run independently of the target baseline', async () => {
+  it('never executes the source fallback that could mutate an input', async () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'custom-test-runner', lint: 'style' },
     }));
@@ -375,20 +372,15 @@ describe('item 14: declared-input stability binding', () => {
       globalDir: () => fixture.state,
     });
 
-    expect(report.state).toBe('refused');
+    expect(report.state).toBe('ready');
+    expect(report.testPopulation?.state).toBe('unverified');
     expect(report.declaredInputStability).toEqual([
       expect.objectContaining({ phase: 'test_collection', state: 'stable' }),
-      expect.objectContaining({
-        phase: 'source_validation_fallback',
-        state: 'changed',
-        changedInputs: [expect.objectContaining({
-          path: 'data/frozen.csv',
-          before: expect.objectContaining({ location: 'source' }),
-        })],
-      }),
+      expect.objectContaining({ phase: 'target_validation_baseline', state: 'stable' }),
     ]);
-    expect(runner).toHaveBeenCalledTimes(1);
-    expect(runner.mock.calls[0]?.[0]).toMatchObject({ role: 'test', cwd: fixture.project });
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner.mock.calls.every(([request]) => request.cwd === target)).toBe(true);
+    expect(readFileSync(join(fixture.project, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
     expect(readFileSync(join(target, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
   });
 });

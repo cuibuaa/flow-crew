@@ -3,6 +3,24 @@ export type ReplayDecision = {status: 'returned'; value: unknown} | {status: 're
 export type ReplayClassification = 'unchanged' | 'intended' | 'ambiguous_unpredicted';
 const key = (value: unknown): string => JSON.stringify(value);
 
+/** Freeze generated clocks at the producer; recorded timestamps remain data.
+ * This synchronous boundary must not enclose asynchronous work. */
+export function withRecordedReplayClock<T>(timestamp: number, read: () => T): T {
+  const NativeDate = globalThis.Date;
+  globalThis.Date = new Proxy(NativeDate, {
+    construct: (target, args) => Reflect.construct(target, args.length ? args : [timestamp]),
+    apply: () => new NativeDate(timestamp).toString(),
+    get: (target, key) => key === 'now' ? () => timestamp : Reflect.get(target, key),
+  });
+  try { return read(); } finally { globalThis.Date = NativeDate; }
+}
+
+/** Only private fixture roots are transient. Never erase recorded time fields. */
+export function recordedReplayValue(value: unknown, privateRoot: string): unknown {
+  return JSON.parse(JSON.stringify(value, (_key, item) => typeof item === 'string'
+    ? item.replaceAll(privateRoot, '<owned-root>') : item));
+}
+
 export function classifyDeclarationAdmissionChange(input: {
   baseline: ReplayDecision;
   candidate: ReplayDecision;

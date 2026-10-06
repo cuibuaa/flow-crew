@@ -10,7 +10,7 @@
  *    codex-cli 0.144.3), which is why effort pins never took effect before.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -63,5 +63,41 @@ describe('codex config inheritance from the global config', () => {
     const cfg = readFileSync(writeCodexConfig(stageHome, role(undefined, 'high')), 'utf-8');
     expect(cfg).toContain('model_reasoning_effort = "high"');
     expect(cfg).not.toMatch(/^reasoning_effort/m);
+  });
+
+  it.each(['config.toml', 'auth.json', 'credentials.json', 'installation_id'])('refuses linked publication slot %s', (name) => {
+    const outside = join(globalHome, 'carrier');
+    writeFileSync(outside, 'engine');
+    if (name !== 'config.toml') writeFileSync(join(globalHome, name), 'fixture-auth');
+    for (const route of ['symlink', 'hardlink']) {
+      const slot = join(stageHome, name);
+      if (route === 'symlink') symlinkSync(outside, slot);
+      else linkSync(outside, slot);
+      expect(() => writeCodexConfig(stageHome, role('fixture', 'low'))).toThrow('ADAPTER_HOME_REFUSED');
+      expect(readFileSync(outside, 'utf8')).toBe('engine');
+      rmSync(slot);
+    }
+  });
+
+  it.each(['root', 'parent', 'cache-parent'])('refuses a substituted %s directory before publication', (route) => {
+    const outside = join(globalHome, 'outside'); mkdirSync(outside);
+    writeFileSync(join(outside, 'config.toml'), 'engine');
+    let target = stageHome;
+    if (route === 'root') {
+      rmSync(stageHome, { recursive: true }); symlinkSync(outside, stageHome, 'dir');
+    } else if (route === 'parent') {
+      symlinkSync(outside, join(stageHome, 'parent'), 'dir');
+      target = join(stageHome, 'parent', 'home');
+    } else symlinkSync(outside, join(stageHome, '.tmp'), 'dir');
+    expect(() => writeCodexConfig(target, role('fixture', 'low'))).toThrow('ADAPTER_HOME_REFUSED');
+    expect(readFileSync(join(outside, 'config.toml'), 'utf8')).toBe('engine');
+  });
+
+  it('publishes through existing search-only ancestors without requiring directory read access', () => {
+    const parent = join(stageHome, 'parent'), home = join(parent, 'home');
+    mkdirSync(home, { recursive: true }); chmodSync(parent, 0o111);
+    try {
+      expect(readFileSync(writeCodexConfig(home, role('fixture', 'low')), 'utf8')).toContain('model = "fixture"');
+    } finally { chmodSync(parent, 0o700); }
   });
 });

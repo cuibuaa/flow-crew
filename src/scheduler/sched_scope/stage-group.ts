@@ -10,8 +10,8 @@ import { type LiveConstraintGuardFactory } from "../../live-constraint-guard.js"
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { detectParallelWriteConflicts, selectRunnableBatch } from "../sched_admission/frontier.js";
 import { type RepairRoundSnapshot } from './snapshots.js';
-import { createScopeBatchContext } from './scope-batch.js';
-import { stageWithInheritedScope } from './scope-revisions.js';
+import { type ScopeBatchContext, createScopeBatchContext } from './scope-batch.js';
+import { acceptedInheritedScope, stageWithInheritedScope } from './scope-revisions.js';
 import { type createApprovalMonitor } from "../sched_policy/approvals.js";
 import { type createScopeRevisionMonitor } from './revision-monitor.js';
 import { type createLiveGuardFactory } from './write-enforcement.js';
@@ -170,6 +170,42 @@ interface ScopeSafeStageServices {
   reconcileCompletedStageAttempts: ReturnType<typeof createScopeReconciler>['reconcileCompletedStageAttempts'];
 }
 
+/** Settle one closed child before a peer can delay its control boundary. */
+export function settleScopeRevisionBoundary(input: {
+  stage: StageConfig; projectDir: string; runId: string; iteration: number;
+  reconciled: { status: StageStatus; violation: boolean; acceptedRevisionDuringAttempt: boolean; attemptIndex?: number };
+}): boolean {
+  const { reconciled } = input;
+  const attempt = reconciled.status.attempts?.find((entry) => entry.index === reconciled.attemptIndex);
+  if (reconciled.violation || !reconciled.acceptedRevisionDuringAttempt
+      || reconciled.attemptIndex === undefined || attempt?.exitCode !== 0
+      || readStageStatus(input.projectDir, input.runId, input.stage.id).status !== STAGE_STATUS.COMPLETE) return false;
+  suspendStageAttempt(input.projectDir, input.runId, input.stage.id, reconciled.attemptIndex);
+  recordRunEvent(input.projectDir, input.runId, {
+    type: 'attempt_suspended', runId: input.runId, timestamp: new Date().toISOString(), iteration: input.iteration,
+    stageId: input.stage.id, attemptIndex: reconciled.attemptIndex,
+    detail: 'accepted scope revision requires re-dispatch of the same stage', source: 'scheduler',
+  });
+  return true;
+}
+
+/** Re-admit inherited paths against peers before starting another child. */
+export function readmitScopeContinuation(
+  stage: StageConfig, selected: StageConfig[], activeStageIds: Set<string>, runDirPath: string, context: ScopeBatchContext,
+): StageConfig | undefined {
+  const revised = stageWithInheritedScope(runDirPath, stage);
+  const peers = selected.filter((peer) => peer.id !== stage.id && activeStageIds.has(peer.id))
+    .map((peer) => stageWithInheritedScope(runDirPath, peer));
+  const admission = selectRunnableBatch([...peers, revised]);
+  if (admission.deferred.some((entry) => entry.stage.id === revised.id)) return undefined;
+  // Keep the shared frozen preimages and peer attribution. Only the next
+  // attempt's capability changes; old attempt records remain immutable.
+  const inherited = acceptedInheritedScope(runDirPath, stage);
+  context.inheritedScopes.set(stage.id, inherited.scope);
+  context.inheritedDecisionPaths.set(stage.id, new Set(inherited.decisionPaths));
+  return revised;
+}
+
 export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
   const { monitorApprovalRequests, monitorScopeRevisionRequests, createSchedulerLiveConstraintGuardFactory, reconcileCompletedStageAttempts } = services;
 
@@ -203,9 +239,24 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         runId,
       );
       let complete = false;
-      const executions = Promise.all(selected.map(async (stage) => {
+      const redispatch: StageConfig[] = [];
+      const executions = Promise.allSettled(selected.map(async (initialStage) => {
+        let stage = initialStage;
         try {
-          await execute(stage, createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId, context }));
+          while (true) {
+            await execute(stage, createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId, context }));
+            await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+            // Flush the same monitor with a settled observation, including
+            // requests written by a synchronous adapter just before close.
+            await monitorScopeRevisionRequests({ selected, activeStageIds, projectDir, runId, context, isComplete: () => true });
+            const reconciled = reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
+            const temporal = enforceTemporalResearchTestContract(projectDir, runId, stage.id);
+            if (temporal.violation || !settleScopeRevisionBoundary({ stage, projectDir, runId, iteration, reconciled })) break;
+            if (isPausedRunStatus(readRunState(projectDir, runId).status)) break;
+            const next = readmitScopeContinuation(stage, selected, activeStageIds, runDirPath, context);
+            if (!next) { redispatch.push(stageWithInheritedScope(runDirPath, stage)); break; }
+            stage = next;
+          }
         }
         catch (error) {
           const retries = (() => {
@@ -234,9 +285,10 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         isComplete: () => complete,
       });
       let executionError: unknown;
-      let parkedDuringExecution: StoreState | null = null;
+      let parkedDuringExecution: StoreState | null;
       try {
-        await executions;
+        const settled = await executions;
+        executionError = settled.find((item): item is PromiseRejectedResult => item.status === 'rejected')?.reason;
       } catch (error) {
         executionError = error;
       } finally {
@@ -248,38 +300,16 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
       // Let recursive filesystem notifications queued by a synchronous adapter
       // reach the run-scoped journal before reconciliation reads its cursor.
       await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-      const redispatch: StageConfig[] = [];
       const temporalOwners = uniqueStructuredWriteOwners(
         projectDir,
         runId,
         selected.map((stage) => stage.id),
       );
       for (const stage of selected) {
-        const reconciled = reconcileCompletedStageAttempts({ stage, projectDir, runId, context });
         const temporal = enforceTemporalResearchTestContract(projectDir, runId, stage.id, temporalOwners);
-        const acceptedAttempt = reconciled.attemptIndex === undefined
-          ? undefined
-          : reconciled.status.attempts?.find((attempt) => attempt.index === reconciled.attemptIndex);
-        if (
-          !reconciled.violation
-          && !temporal.violation
-          && reconciled.acceptedRevisionDuringAttempt
-          && reconciled.attemptIndex !== undefined
-          && acceptedAttempt?.exitCode === 0
-          && readStageStatus(projectDir, runId, stage.id).status === STAGE_STATUS.COMPLETE
-        ) {
-          suspendStageAttempt(projectDir, runId, stage.id, reconciled.attemptIndex);
-          redispatch.push(stageWithInheritedScope(runDirPath, stage));
-          recordRunEvent(projectDir, runId, {
-            type: 'attempt_suspended', runId, timestamp: new Date().toISOString(), iteration,
-            stageId: stage.id, attemptIndex: reconciled.attemptIndex,
-            detail: 'accepted scope revision requires re-dispatch of the same stage', source: 'scheduler',
-          });
-        } else {
-          const finalStatus = readStageStatus(projectDir, runId, stage.id);
-          if (finalStatus.status === STAGE_STATUS.COMPLETE || finalStatus.status === STAGE_STATUS.FAILED) {
-            recordStageOutcome(projectDir, runId, stage.id, iteration, finalStatus);
-          }
+        const finalStatus = readStageStatus(projectDir, runId, stage.id);
+        if (!temporal.violation && (finalStatus.status === STAGE_STATUS.COMPLETE || finalStatus.status === STAGE_STATUS.FAILED)) {
+          recordStageOutcome(projectDir, runId, stage.id, iteration, finalStatus);
         }
       }
       if (parkedDuringExecution || isPausedRunStatus(readRunState(projectDir, runId).status)) {

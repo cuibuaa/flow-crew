@@ -43,45 +43,6 @@ function copyManifest(targetDir: string): void {
   copyFileSync(join(sourceDir, 'package-lock.json'), join(targetDir, 'package-lock.json'));
 }
 
-function tap(names: readonly string[]): string {
-  return [
-    'TAP version 13',
-    ...names.map((name, index) => `ok ${index + 1} - ${name}`),
-    `1..${names.length}`,
-  ].join('\n');
-}
-
-function genericWorktree(): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
-  return vi.fn<GitWorktreeCreator>((request) => {
-    copyManifest(request.targetDir);
-    return { exitCode: 0 };
-  });
-}
-
-function genericRunner(
-  sourceNames: readonly string[],
-  targetNames: readonly string[],
-): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
-  return vi.fn<ValidationCommandRunner>((request) => ({
-    exitCode: 0,
-    stdout: tap(request.cwd === sourceDir ? sourceNames : targetNames),
-    durationMs: 1,
-  }));
-}
-
-async function genericReport(
-  sourceNames: readonly string[],
-  targetNames: readonly string[],
-  targetName: string,
-) {
-  const briefPath = writeManifest('node --test');
-  return runShipSetup(setupArgs(briefPath, join(root, targetName)), {
-    createWorktree: genericWorktree(),
-    runValidationCommand: genericRunner(sourceNames, targetNames),
-    globalDir: () => join(root, 'state'),
-  });
-}
-
 beforeEach(() => {
   // Canonicalize the fixture root: on macOS the temp directory is reached through a
     // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
@@ -96,102 +57,18 @@ afterEach(() => {
 });
 
 describe('population identity verification', () => {
-  it('keeps all source identities stable in the historical-shaped 66-to-84 insertion', async () => {
-    const named = 'live microphone acceptance evidence is a real PASS for all required prompts';
-    const sourceNames = Array.from({ length: 66 }, (_, index) => `source test ${index + 1}`);
-    sourceNames[25] = named;
-    const additionsBefore = Array.from({ length: 17 }, (_, index) => `inserted test ${index + 1}`);
-    const additions = [...additionsBefore, 'inserted test 18'];
-    const targetNames = [
-      ...additionsBefore,
-      ...sourceNames,
-      additions.at(-1)!,
-    ];
-
-    const report = await genericReport(sourceNames, targetNames, 'target-insertion');
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        source: { count: 66 },
-        target: { count: 84 },
-        missingFromTarget: [],
-        extraInTarget: additions.map((name) => `1:${name}`),
-        reason: expect.stringContaining('SOURCE-PLUS-ADDITIONS'),
-      },
+  it('does not claim population identity from a target-only TAP baseline', async () => {
+    const briefPath = writeManifest('node --test');
+    const targetDir = join(root, 'target');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'TAP version 13\nok 1 - stable\n1..1\n' }));
+    const report = await runShipSetup(setupArgs(briefPath, targetDir), {
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
+      runValidationCommand: runner, globalDir: () => join(root, 'state'),
     });
-    expect(report.testPopulation?.source?.identities).toContain(`1:${named}`);
-    expect(report.testPopulation?.target?.identities).toContain(`1:${named}`);
-    expect(report.testPopulation?.source?.identities.every(
-      (identity) => report.testPopulation?.target?.identities.includes(identity),
-    )).toBe(true);
-  });
-
-  it('refuses a target missing one source test and names only that missing identity', async () => {
-    const report = await genericReport(['kept', 'dropped'], ['kept'], 'target-missing');
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        state: 'mismatched',
-        missingFromTarget: ['1:dropped'],
-        extraInTarget: [],
-      },
-      blockers: [expect.objectContaining({ reason: expect.stringContaining('missing from target: 1:dropped') })],
-    });
-  });
-
-  it('refuses a rename and names both the old missing and new extra identities', async () => {
-    const report = await genericReport(['kept', 'old name'], ['kept', 'new name'], 'target-rename');
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        state: 'mismatched',
-        missingFromTarget: ['1:old name'],
-        extraInTarget: ['1:new name'],
-      },
-      blockers: [expect.objectContaining({
-        reason: expect.stringMatching(/missing from target: 1:old name.*extra in target: 1:new name/),
-      })],
-    });
-  });
-
-  it('preserves duplicate identities when a differently named test is inserted', async () => {
-    const report = await genericReport(
-      ['same name', 'same name'],
-      ['unrelated', 'same name', 'same name'],
-      'target-duplicate-insertion',
-    );
-
-    expect(report).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        source: { identities: ['1:same name', '2:same name'] },
-        target: { identities: ['1:unrelated', '1:same name', '2:same name'] },
-        missingFromTarget: [],
-        extraInTarget: ['1:unrelated'],
-      },
-    });
-  });
-
-  it('refuses a dropped duplicate instead of collapsing equal names', async () => {
-    const report = await genericReport(
-      ['same name', 'same name'],
-      ['same name'],
-      'target-dropped-duplicate',
-    );
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        source: { identities: ['1:same name', '2:same name'] },
-        target: { identities: ['1:same name'] },
-        missingFromTarget: ['2:same name'],
-        extraInTarget: [],
-      },
-    });
+    expect(report).toMatchObject({ state: 'ready', testPopulation: { state: 'unverified' } });
+    expect(report.testPopulation?.source).toBeUndefined();
+    expect(report.testPopulation?.target).toBeUndefined();
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: targetDir }));
   });
 
   it('keeps the exact Vitest collector strict when the target adds a test file', async () => {
@@ -210,7 +87,7 @@ describe('population identity verification', () => {
     const baseline = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
 
     const report = await runShipSetup(setupArgs(briefPath, targetDir), {
-      createWorktree: genericWorktree(),
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); return { exitCode: 0 }; }),
       runTestCollectionCommand: collector,
       runValidationCommand: baseline,
       globalDir: () => join(root, 'state'),

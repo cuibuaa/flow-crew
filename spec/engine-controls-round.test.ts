@@ -1113,11 +1113,11 @@ describe('engine controls round replays', () => {
       },
     });
     expect(record.testPopulation.reason).toContain('Configured test runner "make test"');
-    expect(record.testPopulation.reason).toContain('output is not complete TAP (version line missing)');
+    expect(record.testPopulation.reason).toContain('could not be unwrapped safely from Make');
+    expect(record.testPopulation.reason).toContain('source tests are not executed for population evidence');
     expect(runnerCalls).toEqual([
       { side: 'source', role: 'test', display: 'make -n test' },
       { side: 'target', role: 'test', display: 'make -n test' },
-      { side: 'source', role: 'test', display: 'make test' },
       { side: 'target', role: 'test', display: 'make test' },
     ]);
     const members: PopulationMember[] = [{

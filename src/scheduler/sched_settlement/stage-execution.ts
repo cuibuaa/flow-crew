@@ -203,6 +203,7 @@ export async function executeSingleStage(
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
+      planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       resources: stage.resources,
       timeout_ms: prepared.budgetMs,
@@ -222,7 +223,7 @@ export async function executeSingleStage(
       criterionRefs: stage.criterion_refs,
       resumeSessionId: resumeSession?.sessionId,
       sessionOwnerStageId: resumeSession?.ownerStageId,
-      preserveSession: retries === 0 && shouldPreserveSession(stage, allStages, sessionReuseEnabled),
+      preserveSession: shouldPreserveSession(stage, allStages, sessionReuseEnabled),
       projectWriteScope: stage.scope ?? [],
       liveConstraintGuardFactory,
     });

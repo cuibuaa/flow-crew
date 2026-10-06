@@ -18,14 +18,14 @@ export function summarizeRunStateView(view: RunStateView): object {
   };
 }
 
-export function runStateContext(projectDir: string, runId: string): string {
+export function runStateContext(projectDir: string, runId: string, revision?: { revision: number; digest: string }): string {
   const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-  try {
-    const view = readRunStateView(projectDir, runId);
-    return `# Shared engine state\n${JSON.stringify(summarizeRunStateView(view))}\n\nQuery the same read-only view with flowcrew state --project ${shellQuote(projectDir)} --run ${shellQuote(runId)}. Add --prompts for immutable engine-supplied invocation bytes; legacy aliases are marked inexact. A snapshot is an observation, never a permission or a successful verdict.`;
-  } catch (error) {
-    return `# Shared engine state\nState query unavailable: ${error instanceof Error ? error.message : String(error)}. Retry the read-only flowcrew state query; unavailable state must not be interpreted as completed work.`;
-  }
+  // Prompt construction needs a locator and admission binding, not a scan of
+  // every artifact and immutable invocation. The explicit CLI retains that view.
+  return `# Engine state query\nRun binding: ${JSON.stringify({ runId })}.\n${revision ? `Admitted plan revision ${revision.revision}, digest ${revision.digest}.\n` : ''}`
+    + `Read current state with flowcrew state --project ${shellQuote(projectDir)} --run ${shellQuote(runId)}. `
+    + 'Use --summary for a bounded view or --prompts for immutable invocation bytes. '
+    + 'An observation grants no permission and is not a successful verdict.';
 }
 
 export function cmdState(args: string[], output: Pick<NodeJS.WriteStream, 'write'> = process.stdout, errors: Pick<NodeJS.WriteStream, 'write'> = process.stderr): number {

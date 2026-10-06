@@ -605,3 +605,50 @@ describe('live guidance and feasibility controls', () => {
     ]));
   });
 });
+
+
+describe('continuation at closed tool boundaries', () => {
+  it('keeps the stage UUID and all delivered guidance, with complete duties for a fresh fallback', async () => {
+    const created = makeRun(['work']);
+    const uuid = '123e4567-e89b-42d3-a456-426614174000';
+    const calls: Array<{ prompt: string; resume?: string; fresh?: string }> = [];
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      calls.push({ prompt, resume: opts.resumeSessionId, fresh: opts.freshSessionPrompt });
+      if (calls.length < 3) {
+        const id = `tool-${calls.length}`;
+        opts.onCommandLifecycle?.({ phase: 'started', id, timestamp: new Date().toISOString() });
+        appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: `Keep correction ${calls.length}.`, knownStageIds: ['work'] });
+        opts.onCommandLifecycle?.({ phase: 'completed', id, timestamp: new Date().toISOString() });
+      }
+      return { output: 'done', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: 1, sessionId: uuid };
+    } };
+    const result = await runStage(adapter, stageOptions(created));
+    expect(result.exitCode).toBe(0);
+    expect(calls.map((call) => call.resume)).toEqual([undefined, uuid, uuid]);
+    expect(calls[2].prompt).toContain('Keep correction 1.');
+    expect(calls[2].prompt).toContain('Keep correction 2.');
+    expect(calls[2].prompt).not.toContain('Do the fixture work.');
+    expect(calls[2].fresh).toContain('Do the fixture work.');
+    expect(calls[2].fresh).toContain('Keep correction 1.');
+    expect(calls[2].fresh).toContain('Keep correction 2.');
+    expect(calls[2].prompt).toContain('# Live guidance delivered at tool completion');
+    expect(calls[2].fresh).toContain('# Live guidance delivered at tool completion');
+    expect(calls[2].prompt).toContain('absolute deadline');
+  });
+
+  it('omits unchanged empty tool checks while retaining invocation checks and command lifecycle', async () => {
+    const created = makeRun(['work']);
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      for (let index = 0; index < 4; index++) {
+        const id = `tool-${index}`;
+        opts.onCommandLifecycle?.({ phase: 'started', id, timestamp: new Date().toISOString() });
+        opts.onCommandLifecycle?.({ phase: 'completed', id, timestamp: new Date().toISOString() });
+      }
+      return { output: 'done', exitCode: 0, duration_ms: 1 };
+    } };
+    expect((await runStage(adapter, stageOptions(created))).exitCode).toBe(0);
+    const ledger = events(created.runDirPath);
+    expect(ledger.filter((event) => event.type === 'guidance_delivery_checked').map((event) => event.boundary)).toEqual(['attempt_start', 'adapter_invocation']);
+    expect(ledger.filter((event) => event.type === 'stage_command_completed')).toHaveLength(4);
+  });
+});

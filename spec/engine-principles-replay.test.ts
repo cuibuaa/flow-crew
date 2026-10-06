@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { classifyDeclarationAdmissionChange, classifyRealityDeclarationChange, type ReplayDecision } from '../src/recorded-replay-policy.js';
+import { classifyDeclarationAdmissionChange, classifyRealityDeclarationChange, recordedReplayValue, withRecordedReplayClock, type ReplayDecision } from '../src/recorded-replay-policy.js';
 import { inspectDispatchAdmission, inspectRealityCheckReachability, StageConfigSchema } from '../src/scheduler.js';
 import { artifactDeclarationErrors } from '../src/artifact-declarations.js';
 
@@ -17,6 +17,17 @@ function admissionFixture() {
   return {baseline:returned(project(inspectDispatchAdmission(input))),candidate:returned(project(inspectDispatchAdmission({...input,dispatched:[{...work,artifact_contract:undefined}]}))),requiredErrors:[required]};
 }
 describe('recorded replay is a refusal guard', () => {
+  it('compares recorded timestamps while freezing only generated clocks and restoring the process clock', () => {
+    const original = Date;
+    const read = (checkedAt: string) => recordedReplayValue(withRecordedReplayClock(0, () => ({checkedAt,inspectedAt:'recorded',generated:new Date().toISOString(),root:'/private/run'})), '/private');
+    const baseline = read('2026-01-01T00:00:00.000Z');
+    const candidate = read('2026-01-02T00:00:00.000Z');
+    expect(baseline).toMatchObject({checkedAt:'2026-01-01T00:00:00.000Z',generated:'1970-01-01T00:00:00.000Z',root:'<owned-root>/run'});
+    expect(classifyDeclarationAdmissionChange({baseline:returned(baseline),candidate:returned(candidate),requiredErrors:[]})).toBe('ambiguous_unpredicted');
+    expect(Date).toBe(original);
+    expect(() => withRecordedReplayClock(0, () => { throw new Error('reader'); })).toThrow('reader');
+    expect(Date).toBe(original);
+  });
   it('explains only an added declaration error while retaining the actual topology refusal', () => {
     const fixture = admissionFixture();
     expect(fixture.baseline).toMatchObject({value:{pass:false,errors:expect.arrayContaining([expect.stringContaining('unknown')])}});

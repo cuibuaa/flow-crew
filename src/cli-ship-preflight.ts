@@ -38,11 +38,8 @@ import {
   type RpcResponse,
 } from './orchestrator-rpc.js';
 import {
-  discoverProjectValidation,
-  runValidationCommand,
   runProjectValidationBaseline,
   type ProjectValidationBaseline,
-  type ValidationProgressObserver,
   type ValidationCommandRunner,
   type ValidationRunRequest,
 } from './project-validation.js';
@@ -128,8 +125,6 @@ interface ResolvedDependencies {
   readGitCommonDir: (projectDir: string) => string;
   readCampaignEntries: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
-  runValidationCommand?: ValidationCommandRunner;
-  prepareValidationWriteGuard: (projectDir: string, packageRoot: string) => ValidationWriteGuard;
   inspectLiveRun: (runId: string, runPath: string) => boolean;
   findDistConsumers: (distDir: string) => DeployedDistConsumer[];
 }
@@ -287,8 +282,6 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     )),
     readCampaignEntries: overrides.readCampaignEntries ?? readCampaignEntries,
     probeDaemon: overrides.probeDaemon ?? probeRunningDaemon,
-    runValidationCommand: overrides.runValidationCommand,
-    prepareValidationWriteGuard: overrides.prepareValidationWriteGuard ?? prepareValidationWriteGuard,
     inspectLiveRun: overrides.inspectLiveRun
       ?? ((runId, runPath) => inspectRunScheduler(runId, runPath).kind === 'live'),
     findDistConsumers: overrides.findDistConsumers
@@ -366,72 +359,6 @@ function canonicalize(path: string, deps: ResolvedDependencies): { path: string;
 function containsPath(root: string, target: string): boolean {
   const path = relative(root, target);
   return path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path));
-}
-
-function pathsOverlap(first: string, second: string): boolean {
-  return containsPath(first, second) || containsPath(second, first);
-}
-
-function validationMayRebuildEngineDist(
-  project: { path: string; fallback: boolean },
-  deps: ResolvedDependencies,
-): boolean {
-  const engine = canonicalize(deps.packageRoot, deps);
-  // Failed identity resolution cannot establish independence. Ancestor and
-  // nested targets can dispatch the engine build, so both remain protected.
-  if (project.fallback || engine.fallback || pathsOverlap(project.path, engine.path)) return true;
-  const engineDistPath = join(engine.path, 'dist');
-  const engineDist = deps.exists(engineDistPath)
-    ? canonicalize(engineDistPath, deps)
-    : { path: engineDistPath, fallback: false };
-  if (engineDist.fallback) return true;
-  const projectDist = join(project.path, 'dist');
-  if (deps.exists(projectDist)) {
-    const output = canonicalize(projectDist, deps);
-    // A distinct checkout can still alias the deployed output directory.
-    if (output.fallback || pathsOverlap(output.path, engineDist.path)) return true;
-  }
-  return configuredValidationReferencesEngine(project.path, engine.path, engineDist.path, deps);
-}
-
-/** A fail-fast hint only. Transitive effects are protected by the child write guard. */
-function configuredValidationReferencesEngine(
-  projectDir: string,
-  engineDir: string,
-  engineDist: string,
-  deps: ResolvedDependencies,
-): boolean {
-  const discovery = discoverProjectValidation(projectDir, { exists: deps.exists, readText: deps.readText });
-  const configPaths = new Set(discovery.commands.flatMap(({ evidencePath }) => evidencePath ? [evidencePath] : []));
-  for (const configPath of configPaths) {
-    let recipes: string;
-    try {
-      const config = deps.readText(configPath);
-      // Include lifecycle hooks and script indirection, not just the three role names.
-      recipes = basename(configPath) === 'package.json'
-        ? Object.values(JSON.parse(config).scripts ?? {}).filter((value) => typeof value === 'string').join('\n')
-        : config;
-    } catch {
-      return true; // An unreadable declaration cannot establish independence.
-    }
-    // Inspect quoted strings both as complete paths and as command bodies.
-    // This preserves early diagnostics; neither tokenization proves safety.
-    const tokens = [...recipes.matchAll(/"([^"\n]*)"|'([^'\n]*)'|([^\s"'`;&|<>]+)/g),
-      ...recipes.matchAll(/([^\s"'`;&|<>]+)/g)];
-    for (const match of tokens) {
-      const token = (match[1] ?? match[2] ?? match[3]).replace(/^(?:--?)?[\w-]+=/, '');
-      if (!token || token.startsWith('-') || /[$`]/.test(token)) continue;
-      const destination = resolve(projectDir, token);
-      // Resolve an existing ancestor too: a new output can sit beneath a symlink.
-      let ancestor = destination;
-      while (!deps.exists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
-      const identity = canonicalize(ancestor, deps);
-      if (identity.fallback) return true;
-      const canonicalDestination = resolve(identity.path, relative(ancestor, destination));
-      if (pathsOverlap(canonicalDestination, engineDir) || pathsOverlap(canonicalDestination, engineDist)) return true;
-    }
-  }
-  return false;
 }
 
 export interface ValidationWriteGuard {
@@ -1041,25 +968,6 @@ function inspectOutputInventory(
   };
 }
 
-function validationProgressObserver(writer: Writer): ValidationProgressObserver {
-  return {
-    onCommandStart: (command) => {
-      writer.write(`Validation baseline: START ${command.role} — ${command.display}\n`);
-    },
-    onCommandOutput: (_command, _stream, chunk) => {
-      writer.write(chunk);
-      if (chunk.length > 0 && !chunk.endsWith('\n')) writer.write('\n');
-    },
-    onCommandHeartbeat: (command, elapsedMs) => {
-      writer.write(`Validation baseline: RUNNING ${command.role} — ${Math.floor(elapsedMs / 1_000)}s elapsed\n`);
-    },
-    onCommandFinish: (command, response) => {
-      const duration = response.durationMs === undefined ? '' : ` after ${(response.durationMs / 1_000).toFixed(1)}s`;
-      writer.write(`Validation baseline: FINISH ${command.role} — exit ${response.exitCode ?? 'none'}${duration}\n`);
-    },
-  };
-}
-
 export async function collectShipPreflight(
   args: string[],
   overrides: ShipPreflightDependencies = {},
@@ -1093,64 +1001,20 @@ export async function collectShipPreflight(
       })()
     : { state: 'not_requested' as const };
   if ((previousRun.liveMatchingRunIds?.length ?? 0) > 0) {
-    deps.stderr.write(
-      `WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. `
-      + (parsed.noBaseline
-        ? '--no-baseline is set, so preflight will not launch project commands.\n'
-        : 'Preflight will not launch validation commands while those runs are live.\n'),
-    );
-    if (!parsed.noBaseline) {
-      throw new Error(
-        `Validation baseline refused because verified live run(s) ${previousRun.liveMatchingRunIds!.join(', ')} `
-        + `share ${canonicalProject.path}. No project command was launched. Wait for the target to become idle, `
-        + 'use a different project directory, or pass --no-baseline to collect facts without executing build, test, or lint.',
-      );
-    }
+    deps.stderr.write(`WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. No project command was launched.\n`);
   }
-  if (liveDistConsumers.length > 0 && validationMayRebuildEngineDist(canonicalProject, deps)) {
-    const labels = liveDistConsumers.map(({ label }) => label).join(', ');
-    deps.stderr.write(
-      `WARNING: live process(es) ${labels} execute from this engine checkout's dist. `
-      + (parsed.noBaseline
-        ? '--no-baseline is set, so preflight will not launch project commands.\n'
-        : 'Preflight will not launch validation commands that could rebuild that dist while those consumers are live.\n'),
-    );
-    if (!parsed.noBaseline) {
-      throw new Error(
-        `Validation baseline refused because live process(es) ${labels} execute from ${distDir}. `
-        + 'No project command was launched. Wait for those consumers to stop, use an engine checkout they do not consume, '
-        + 'or pass --no-baseline to collect facts without executing build, test, or lint.',
-      );
-    }
+  if (liveDistConsumers.length > 0) {
+    deps.stderr.write(`WARNING: live process(es) ${liveDistConsumers.map(({ label }) => label).join(', ')} execute from ${distDir}. No project command was launched.\n`);
   }
-  const observer = validationProgressObserver(deps.stderr);
-  if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED by --no-baseline; no project command was launched.\n');
-  let writeGuard: ValidationWriteGuard | undefined;
-  if (!parsed.noBaseline && liveDistConsumers.length > 0) {
-    try {
-      writeGuard = deps.prepareValidationWriteGuard(canonicalProject.path, deps.packageRoot);
-      deps.stderr.write(`Validation baseline: WRITE CONFINEMENT — ${writeGuard.description ?? 'child write guard installed'}. File content writes, creation and removal outside these roots are denied.\n`);
-    } catch (error) {
-      throw new Error(
-        `Validation baseline refused because live process(es) ${liveDistConsumers.map(({ label }) => label).join(', ')} `
-        + `execute from ${distDir} and write confinement could not be installed: ${errorMessage(error)}. `
-        + 'No project command was launched. Use --no-baseline to collect facts, wait for the consumers to stop, '
-        + 'or use a separate engine checkout with supported write confinement.',
-        { cause: error },
-      );
-    }
-  }
-  let validationBaseline: ProjectValidationBaseline;
-  try {
-    const runner = deps.runValidationCommand ?? runValidationCommand;
-    validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
-      fs: { exists: deps.exists, readText: deps.readText },
-      runCommand: writeGuard ? (request) => runner(writeGuard!.wrap(request)) : runner,
-      observer,
-      skipExecution: parsed.noBaseline,
-    });
-  } finally {
-    writeGuard?.cleanup();
+  // Source discovery cannot establish the prepared target's baseline. The
+  // admitted setup record supplies it after target-only validation.
+  if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED; preflight discovers commands only. Run ship-setup to measure the prepared target.\n');
+  const validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
+    fs: { exists: deps.exists, readText: deps.readText },
+    skipExecution: true,
+  });
+  for (const result of validationBaseline.results) {
+    if (result.display) result.reason = 'Preflight discovers commands only; ship-setup measures the prepared target';
   }
 
   return {
@@ -1280,8 +1144,8 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
 export function shipPreflightUsage(): string {
   return [
     'Usage: flowcrew ship-preflight [--json] [--no-baseline] [--project <path>] [--campaign <name>] [--brief <path>]',
-    'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and the untouched validation baseline.',
-    'Validation output streams as commands run. --no-baseline skips every project build/test/lint command.',
+    'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and validation command declarations.',
+    'Runs no project build/test/lint commands. ship-setup measures the prepared target; --no-baseline is accepted for compatibility.',
   ].join('\n');
 }
 

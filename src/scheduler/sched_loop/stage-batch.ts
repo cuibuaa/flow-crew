@@ -10,9 +10,9 @@ import { log } from '../sched_admission/shared.js';
 import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { stageWithInheritedScope } from '../sched_scope/scope-revisions.js';
-import { enforceTemporalResearchTestContract, recordThrownStageAttempt, uniqueStructuredWriteOwners } from '../sched_scope/stage-group.js';
+import { enforceTemporalResearchTestContract, readmitScopeContinuation, recordThrownStageAttempt, settleScopeRevisionBoundary, uniqueStructuredWriteOwners } from '../sched_scope/stage-group.js';
 import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
-import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, suspendStageAttempt, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection } from '../../worker.js';
 import { executeOrdinaryStage } from './ordinary-stage.js';
 import { consumePlanRevisions, findAllReady, monitorApprovalRequests, monitorScopeRevisionRequests, reconcileCompletedStageAttempts, tryParkOnApprovalRequest, tryTerminateOnTerminalState } from './services.js';
@@ -106,9 +106,32 @@ export async function executeReadyBatch(
       iteration: state.currentIteration ?? 1,
       isComplete: () => ordinaryBatchComplete,
     });
-    const results = await Promise.all(toRun.map(async (stage) => {
+    const results = await Promise.all(toRun.map(async (initialStage) => {
+     let stage = initialStage;
      try {
-      return await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory);
+      while (true) {
+        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory);
+        await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+        await monitorScopeRevisionRequests({ selected: toRun, activeStageIds: activeScopeStageIds,
+          projectDir, runId, context: ordinaryScopeContext, isComplete: () => true });
+        const reconciled = reconcileCompletedStageAttempts({
+          stage, projectDir, runId, context: ordinaryScopeContext,
+          terminalDurableScope: admittedTerminalDurableScope(runDirPath, stage.id, state.terminalStates),
+        });
+        if (reconciled.violation || enforceTemporalResearchTestContract(projectDir, runId, stage.id).violation) {
+          item.result.exitCode = 1;
+          item.result.timeoutTerminationCause = 'failed';
+          return item;
+        }
+        if (!settleScopeRevisionBoundary({ stage, projectDir, runId, iteration: state.currentIteration ?? 1, reconciled })) return item;
+        item.result.suspended = true;
+        item.result.suspensionReason = 'scope_revision';
+        state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
+        if (isPausedRunStatus(readRunState(projectDir, runId).status)) return item;
+        const next = readmitScopeContinuation(stage, toRun, activeScopeStageIds, runDirPath, ordinaryScopeContext);
+        if (!next) return item;
+        stage = next;
+      }
      } catch (err) {
        // A stage that THROWS (e.g. missing/invalid agent yaml at runtime) must not
        // reject Promise.all and unwind out of the loop, which would leave run.json
@@ -134,41 +157,6 @@ export async function executeReadyBatch(
       results.map((item) => item.stage.id),
     );
     for (const item of results) {
-      const reconciled = reconcileCompletedStageAttempts({
-        stage: item.stage,
-        projectDir,
-        runId,
-        context: ordinaryScopeContext,
-        terminalDurableScope: admittedTerminalDurableScope(runDirPath, item.stage.id, state.terminalStates),
-      });
-      if (reconciled.violation) {
-        item.result.exitCode = 1;
-        item.result.timedOut = false;
-        item.result.timeoutTerminationCause = 'failed';
-      }
-      if (
-        item.result.exitCode === 0
-        && !reconciled.violation
-        && reconciled.acceptedRevisionDuringAttempt
-        && reconciled.attemptIndex !== undefined
-        && reconciled.status.attempts?.find(
-          (attempt) => attempt.index === reconciled.attemptIndex,
-        )?.exitCode === 0
-      ) {
-        suspendStageAttempt(projectDir, runId, item.stage.id, reconciled.attemptIndex);
-        item.result.suspended = true;
-        item.result.suspensionReason = 'scope_revision';
-        recordRunEvent(projectDir, runId, {
-          type: 'attempt_suspended',
-          runId,
-          timestamp: new Date().toISOString(),
-          iteration: state.currentIteration ?? 1,
-          stageId: item.stage.id,
-          attemptIndex: reconciled.attemptIndex,
-          detail: 'accepted scope revision requires re-dispatch of the same stage',
-          source: 'scheduler',
-        });
-      }
       const postControlStatus = readStageStatus(projectDir, runId, item.stage.id);
       if (
         postControlStatus.status === STAGE_STATUS.PENDING
