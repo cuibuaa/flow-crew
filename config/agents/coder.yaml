@@ -1,5 +1,6 @@
 name: coder
 description: 'Implements code changes. Can read, write, and execute shell commands. Use for: writing code, running scripts, modifying files, installing dependencies.'
+reasoning_effort: high
 tools:
 - read
 - write
