@@ -1,3 +1,4 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -20,10 +21,10 @@ import { beginStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatu
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 
 let root: string, project: string, previousStore: string, runId: string, directory: string;
-const empty = () => ArtifactContractSchema.parse({ version: 1, produces: [], reads: [] });
+const empty = () => ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [] });
 function write(path: string, text: string): void { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); }
 function stage(id: string, extra: Partial<StageConfig> = {}): StageConfig {
-  return StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Do the declared work.', artifact_contract: empty(), ...extra });
+  return StageConfigSchema.parse({ criterion_refs: [], id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Do the declared work.', artifact_contract: stageArtifacts(id, extra.is_gate === true), ...extra });
 }
 function agent(name = 'coder'): AgentConfig { return { name, description: name, model: 'fixture-unchanged-model', reasoning_effort: 'default', tools: [], prompt: 'Rendered system instructions.' }; }
 function configuredAgents(): Map<string, AgentConfig> {
@@ -44,17 +45,17 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true,
 describe('declared artifacts replace prose authority for versioned stages', () => {
   it('admits a framework read by its exact artifact key and confined location', () => {
     write(join(directory, 'task_brief.md'), 'The exact framework brief.');
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'task', root: 'run', path: 'task_brief.md', source: { kind: 'framework', artifact: 'task_brief' } }] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'task', root: 'run', path: 'task_brief.md', source: { kind: 'framework', artifact: 'task_brief' } }] });
     expect(inspectArtifactDeclarations({ stages: [stage('writer', { artifact_contract: artifactContract })], scopeOwns: () => true, projectDir: project, runDir: directory })).toEqual([]);
-    expect(() => ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'task', root: 'run', path: 'task_brief.md', source: { kind: 'framework', name: 'task_brief' } }] })).toThrow();
+    expect(() => ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'task', root: 'run', path: 'task_brief.md', source: { kind: 'framework', name: 'task_brief' } }] })).toThrow();
   });
   it('reproduces the either/or false failure and accepts the declared escalation branch', () => {
     const template = 'Write {run_dir}/success.json or {run_dir}/escalation.md.';
     const legacy = { stageId: 'writer', template, projectDir: project, runDir: directory };
     const before = captureStageArtifactContractPreimages(legacy);
     write(join(directory, 'escalation.md'), 'Escalation with evidence');
-    expect(inspectStageArtifactContract({ ...legacy, preimages: before }).violations.some((entry) => entry.path.endsWith('success.json'))).toBe(true);
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'success', root: 'run', path: 'success.json' }, { id: 'escalation', root: 'run', path: 'escalation.md' }], reads: [], groups: [{ id: 'outcome', mode: 'exactly_one', members: ['success', 'escalation'] }] });
+    expect(inspectStageArtifactContract({ ...legacy, preimages: before }).violations[0].reason).toContain('ARTIFACT_DECLARATION_REQUIRED');
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'success', root: 'run', path: 'success.json' }, { id: 'escalation', root: 'run', path: 'escalation.md' }], reads: [], groups: [{ id: 'outcome', mode: 'exactly_one', members: ['success', 'escalation'] }] });
     const v1 = { ...legacy, artifactContract };
     rmSync(join(directory, 'escalation.md'));
     const preimages = captureStageArtifactContractPreimages(v1);
@@ -65,7 +66,7 @@ describe('declared artifacts replace prose authority for versioned stages', () =
   });
 
   it.each(['missing', 'stale', 'decoy', 'empty'])('refuses %s declared output at its exact location', (kind) => {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] });
     if (kind === 'stale') write(join(project, 'docs/report.md'), 'old');
     const input = { stageId: 'writer', template: 'A report.', artifactContract, projectDir: project, runDir: directory };
     const preimages = captureStageArtifactContractPreimages(input);
@@ -75,46 +76,46 @@ describe('declared artifacts replace prose authority for versioned stages', () =
   });
 
   it('never fails on a prose mention or executes an undeclared published replay command', () => {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] });
     const input = { stageId: 'writer', template: 'Write {run_dir}/undeclared.json.', artifactContract, projectDir: project, runDir: directory };
     const preimages = captureStageArtifactContractPreimages(input);
     write(join(project, 'docs/report.md'), 'Replay command: node --test missing.test.mjs\n');
     const audit = inspectStageArtifactContract({ ...input, preimages });
     expect(audit.violations).toEqual([]); expect(audit.replayExecutions).toEqual([]);
-    expect(audit.advisories?.[0].reason).toContain('UNDECLARED_PROSE_MENTION');
+    expect(audit.advisories).toBeUndefined();
   });
 
   it('unknown conditional facts refuse; a known inactive branch is not owed', () => {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'result', root: 'project', path: 'docs/result.md', when: { stage: 'pending', field: 'exitCode', equals: 0 } }], reads: [] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'result', root: 'project', path: 'docs/result.md', when: { stage: 'pending', field: 'exitCode', equals: 0 } }], reads: [] });
     const input = { stageId: 'writer', template: '', artifactContract, projectDir: project, runDir: directory };
     expect(inspectStageArtifactContract(input).violations[0].reason).toContain('ARTIFACT_FACT_UNKNOWN');
     expect(inspectStageArtifactContract({ ...input, statuses: { pending: { status: 'failed', retries: 0, exitCode: 1 } } }).violations).toEqual([]);
   });
 
   it('refuses malformed versions, duplicate group members and traversal, including physical escapes', () => {
-    expect(() => ArtifactContractSchema.parse({ version: 2, produces: [], reads: [] })).toThrow();
-    expect(() => ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'a', root: 'run', path: 'a.md' }], reads: [], groups: [{ id: 'outcome', mode: 'exactly_one', members: ['a', 'a'] }] })).toThrow();
-    expect(() => ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'a', root: 'run', path: '../a.md' }], reads: [] })).toThrow();
+    expect(() => ArtifactContractSchema.parse({ replays: [], version: 2, produces: [], reads: [] })).toThrow();
+    expect(() => ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'a', root: 'run', path: 'a.md' }], reads: [], groups: [{ id: 'outcome', mode: 'exactly_one', members: ['a', 'a'] }] })).toThrow();
+    expect(() => ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'a', root: 'run', path: '../a.md' }], reads: [] })).toThrow();
     mkdirSync(join(root, 'outside')); symlinkSync(join(root, 'outside'), join(project, 'alias'));
     expect(() => resolveArtifactLocation({ root: 'project', path: 'alias/output.md' }, project, directory)).toThrow('ARTIFACT_PATH_ESCAPE');
   });
 
   it('admission refuses an unbound read and an output outside scope', () => {
-    const candidate = stage('writer', { scope: [], artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [{ id: 'input', root: 'project', path: 'docs/unowned.md', source: { kind: 'stage', stage: 'missing', artifact: 'report' } }] }) });
+    const candidate = stage('writer', { scope: [], artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [{ id: 'input', root: 'project', path: 'docs/unowned.md', source: { kind: 'stage', stage: 'missing', artifact: 'report' } }] }) });
     const report = inspectDispatchAdmission({ dispatched: [candidate], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(report.errors.some((entry) => entry.includes('ARTIFACT_OUTPUT_OUTSIDE_SCOPE'))).toBe(true);
     expect(report.errors.some((entry) => entry.includes('ARTIFACT_READ_UNBOUND'))).toBe(true);
-    expect(inspectArtifactDeclarations({ stages: [stage('old', { artifact_contract: undefined })], scopeOwns: () => true, requireContracts: true })[0]).toContain('ARTIFACT_DECLARATION_REQUIRED');
+    expect(inspectArtifactDeclarations({ stages: [stage('old', { artifact_contract: undefined })], scopeOwns: () => true })[0]).toContain('ARTIFACT_DECLARATION_REQUIRED');
   });
 
   it('refuses concurrent run-output owners and engine control outputs', () => {
-    const contract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'evidence', root: 'run', path: 'evidence.json' }], reads: [] });
+    const contract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'evidence', root: 'run', path: 'evidence.json' }], reads: [] });
     const parallel = [stage('first', { artifact_contract: contract }), stage('second', { artifact_contract: contract })];
     expect(inspectArtifactDeclarations({ stages: parallel, scopeOwns: () => true }).some((error) => error.includes('ARTIFACT_OUTPUT_CONCURRENT_OWNERS'))).toBe(true);
     parallel[1] = stage('second', { depends_on: ['first'], artifact_contract: contract });
     expect(inspectArtifactDeclarations({ stages: parallel, scopeOwns: () => true })).toEqual([]);
     for (const path of ['run.json', 'task_brief.md', 'signals/abort_peer.json', 'audit_findings/rejected.json']) {
-      const artifact_contract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'bad', root: 'run', path }], reads: [] });
+      const artifact_contract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'bad', root: 'run', path }], reads: [] });
       expect(inspectArtifactDeclarations({ stages: [stage('writer', { artifact_contract })], scopeOwns: () => true })[0]).toContain('ARTIFACT_FRAMEWORK_PATH');
     }
   });
@@ -189,7 +190,7 @@ describe('worker state, invocation capture and engine resources', () => {
   });
   it('refuses malformed resource paths, duplicate cards and empty declarations at admission', () => {
     for (const resources of [{ gpu_cards: [], disk: [] }, { gpu_cards: ['card', 'card'] }, { disk: [{ root: 'project', path: '../other', bytes: 1 }] }]) {
-      expect(() => StageConfigSchema.parse({ id: 'writer', role: 'coder', resources })).toThrow();
+      expect(() => StageConfigSchema.parse({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'writer', role: 'coder', resources })).toThrow();
     }
   });
   it('captures exact final role and user input, including adapter internal retries', async () => {
@@ -212,7 +213,7 @@ describe('worker state, invocation capture and engine resources', () => {
   it('refuses a read before calling the adapter', async () => {
     let called = false;
     const adapter: Adapter = { async run() { called = true; return { output: 'done', exitCode: 0, duration_ms: 1 }; } };
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'missing', root: 'project', path: 'docs/missing.md', source: { kind: 'input' } }] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'missing', root: 'project', path: 'docs/missing.md', source: { kind: 'input' } }] });
     const result = await runStage(adapter, { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: '', artifactContract, timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0 });
     expect(called).toBe(false); expect(result.exitCode).toBe(1); expect(result.output).toContain('ARTIFACT_READ_ABSENT');
   });
@@ -275,7 +276,7 @@ describe('real scheduler boundaries', () => {
     for (const suppress of [false, true]) {
       let owedCalls = 0;
       const first = stage('first', { scope: [] });
-      const owed = stage('owed', { scope: [], depends_on: ['first'], dependency_reasons: { first: 'Produce the admitted outcome after first settles.' }, artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'outcome', root: 'run', path: 'owed.txt' }], reads: [] }) });
+      const owed = stage('owed', { scope: [], depends_on: ['first'], dependency_reasons: { first: 'Produce the admitted outcome after first settles.' }, artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'outcome', root: 'run', path: 'owed.txt' }], reads: [] }) });
       const adapter: Adapter = { async run(_prompt, _role, opts) {
         const writes: string[] = [];
         if (opts.stageId === 'first') {
@@ -314,9 +315,9 @@ describe('real scheduler boundaries', () => {
 
   it('repairs a structured report finding inside the same iteration and exact scope', async () => {
     const agents = configuredAgents(); let writerCalls = 0, gateCalls = 0, repairCalls = 0;
-    const writer = stage('report', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] }) });
-    const gate = stage('audit', { role: 'qa', scope: [], depends_on: ['report'], dependency_reasons: { report: 'Audit report' }, is_gate: true, artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_audit.json' }], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', source: { kind: 'stage', stage: 'report', artifact: 'report' } }] }) });
-    const plan = stage('plan', { role: 'planner', scope: [], artifact_contract: undefined, dynamic_dispatch: true });
+    const writer = stage('report', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md' }], reads: [] }) });
+    const gate = stage('audit', { role: 'qa', scope: [], depends_on: ['report'], dependency_reasons: { report: 'Audit report' }, is_gate: true, artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_audit.json' }], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', source: { kind: 'stage', stage: 'report', artifact: 'report' } }] }) });
+    const plan = stage('plan', { role: 'planner', scope: [], artifact_contract: empty(), dynamic_dispatch: true });
     const adapter: Adapter = { async run(_prompt, _role, opts: RunOpts) {
       const writes: string[] = [];
       if (opts.stageId === 'plan') { write(join(opts.runDir, 'dispatch.yaml'), yaml([writer, gate])); writes.push('run:dispatch.yaml'); }

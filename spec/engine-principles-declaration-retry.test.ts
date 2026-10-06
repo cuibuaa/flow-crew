@@ -13,11 +13,11 @@ import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 let root:string,project:string,previous:string;
 beforeEach(()=>{root=mkdtempSync(join(tmpdir(),'flowcrew-declaration-retry-'));project=join(root,'project');mkdirSync(project);previous=fcGlobalDir();setFcGlobalDir(join(root,'store'));});
 afterEach(()=>{setFcGlobalDir(previous);rmSync(root,{recursive:true,force:true});});
-const contract={version:1,produces:[{id:'report',root:'project',path:'docs/final.md'}],reads:[]};
+const contract={version:1,produces:[{id:'report',root:'project',path:'docs/final.md'}],reads:[], replays: [] };
 const rawStage={id:'work',role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Write the declared report.'};
 describe('typed declaration refusals are repairable without unlocking passing components',()=>{
   it('keeps a declared unconditional existence check hard without demanding a conditional branch',()=>{
-    const check='## Reality checks\n```yaml\nchecks:\n - name: report\n   type: file-exists-nonempty\n   params: {paths: [docs/final.md]}\n```\n';
+    const check='## Reality checks\n```yaml\nchecks:\n - name: report\n   type: file-exists-nonempty\n   reads: [{id: report, root: project, path: docs/final.md, source: {kind: stage, stage: work, artifact: report}}]\n   params: {paths: [docs/final.md]}\n```\n';
     const plain=inspectRealityChecks('Produce verified evidence.',check);
     expect(plain.advisoryFindings.map((finding)=>finding.code)).toContain('undeclared_artifact_existence');
     const artifacts=ArtifactContractSchema.parse(contract);
@@ -30,6 +30,9 @@ describe('typed declaration refusals are repairable without unlocking passing co
     expect(planRetryRealityCheckName(`ARTIFACT_READ_UNREACHABLE: reality check ${JSON.stringify(name)}.report needs a producer`)).toBe(name);
     const requirement=planRetryRequirement('ARTIFACT_DECLARATION_REQUIRED: work.artifact_contract: declare it');
     expect(requirement.id).toBe('stage:work:artifact_contract');
+    const wrapped = 'work: invalid schema at ARTIFACT_DECLARATION_REQUIRED: work.artifact_contract: declare it';
+    expect(planRetryRequirement(wrapped)).toMatchObject({ id: requirement.id, detail: wrapped });
+    expect(planRetryRequirement(wrapped.replace(/^work:/, 'peer:')).id).toMatch(/^admission:/);
     const merged=mergePlanRetryPair({dispatch:stringify([rawStage])},{dispatch:stringify([{...rawStage,artifact_contract:contract,role:'foreign',scope:['foreign/**']}])},[requirement]);
     const document=parse(merged.pair.dispatch);const effective=(Array.isArray(document)?document:document.stages)[0];
     expect(effective.artifact_contract).toEqual(contract);expect(effective.role).toBe('coder');expect(effective.scope).toEqual(['docs/**']);
@@ -41,7 +44,7 @@ describe('typed declaration refusals are repairable without unlocking passing co
       const role:AgentConfig={name,description:name,model:'default',reasoning_effort:'default',tools:[],prompt:'Fixture instructions.'};roles.set(name,role);writeFileSync(join(agentsDir,`${name}.yaml`),stringify(role));
     }
     mkdirSync(join(project,'config'),{recursive:true});writeFileSync(join(project,'config/defaults.yaml'),stringify({default_timeout_ms:10000,default_max_iterations:1,default_stage_technical_retries:1,default_gate_retry_loops:1}));
-    const workflow=WorkflowConfigSchema.parse({name:'typed-repair',stages:[{id:'plan',role:'planner',scope:[],dynamic_dispatch:true,prompt_template:'Produce a declared plan.'}],defaults:{max_iterations:1}});
+    const workflow=WorkflowConfigSchema.parse({name:'typed-repair',stages:[{id:'plan',role:'planner',scope:[],dynamic_dispatch:true,prompt_template:'Produce a declared plan.',artifact_contract:{version:1,produces:[],reads:[],replays:[]}}],defaults:{max_iterations:1}});
     const calls:string[]=[],prompts:string[]=[];let plans=0;
     const adapter:Adapter={async run(prompt,_role,opts){calls.push(opts.stageId);const writes:string[]=[];
       if(opts.stageId==='plan'){

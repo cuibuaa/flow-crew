@@ -197,9 +197,11 @@ describe('malformed Reality-check admission', () => {
       'checks:',
       '  - name: present-first',
       '    type: file-exists-nonempty',
+      '    reads: [{id: present, root: project, path: artifacts/present.txt, source: {kind: input}}]',
       '    params: { paths: [artifacts/present.txt] }',
       '  - name: missing-second',
       '    type: file-exists-nonempty',
+      '    reads: [{id: missing, root: project, path: artifacts/missing.txt, source: {kind: input}}]',
       '    params: { paths: [artifacts/missing.txt] }',
     ].join('\n');
 
@@ -207,11 +209,13 @@ describe('malformed Reality-check admission', () => {
       {
         name: 'present-first',
         type: 'file-exists-nonempty',
+        reads: [{ id: 'present', root: 'project', path: 'artifacts/present.txt', kind: 'file', source: { kind: 'input' } }],
         params: { paths: ['artifacts/present.txt'] },
       },
       {
         name: 'missing-second',
         type: 'file-exists-nonempty',
+        reads: [{ id: 'missing', root: 'project', path: 'artifacts/missing.txt', kind: 'file', source: { kind: 'input' } }],
         params: { paths: ['artifacts/missing.txt'] },
       },
     ]);

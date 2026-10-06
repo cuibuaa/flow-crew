@@ -1,3 +1,4 @@
+import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { createBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
 import { readCampaignEntries } from '../src/campaigns.js';
 import {
@@ -32,7 +33,7 @@ import {
   writeCampaignEntry,
   type StageConfig,
 } from '../src/scheduler.js';
-import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
 import {
   campaignsRoot,
   createRun,
@@ -62,19 +63,16 @@ const appendFault = vi.hoisted(() => ({
   remaining: 0,
 }));
 
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+vi.mock('../src/append-boundary.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/append-boundary.js')>();
   return {
     ...actual,
-    appendFileSync(path: Parameters<typeof actual.appendFileSync>[0], data: string | Uint8Array, options?: unknown) {
-      const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf-8');
-      if (String(path) === appendFault.eventPath
-          && appendFault.remaining > 0
-          && text.includes(appendFault.needle)) {
+    appendTextRecord(path: string, record: string) {
+      if (path === appendFault.eventPath && appendFault.remaining > 0 && record.includes(appendFault.needle)) {
         appendFault.remaining -= 1;
         throw new Error('injected obligation append failure');
       }
-      return (actual.appendFileSync as (...args: unknown[]) => void)(path, data, options);
+      return actual.appendTextRecord(path, record);
     },
   };
 });
@@ -95,7 +93,7 @@ function write(path: string, body: string | Uint8Array): void {
 }
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     id: 'fixture',
     role: 'worker',
     prompt_template: 'bounded engine-self-collision fixture',
@@ -190,7 +188,7 @@ function seedCampaignMetric(
   state.campaignStorageKey = campaignStorageKey;
   state.campaignName = campaignStorageKey;
   state.research = { baseline: 0, policy: 'best_of_n' };
-  state.dispatchedStages = [stage({ id: 'qa', role: 'qa', is_gate: true })];
+  state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
   state.stages.qa = { status: 'complete', retries: 0 };
   write(join(created.runDirPath, 'stages', 'qa', 'metric.json'), `${JSON.stringify({
     hasMetric: true,
@@ -397,56 +395,51 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('4 — refuses a bare nested citation with the accepted form and keeps valid full citations bounded', () => {
+  it('4 — verifies exact declared replay targets and keeps report citations inert', async () => {
     const root = temporaryRoot('item-4');
     const projectDir = join(root, 'project');
-    const runDirectory = join(projectDir, 'run-fixture');
+    const runDirectory = join(root, 'run-fixture');
     const reportRelative = 'reports/published.md';
     write(join(runDirectory, 'stages', 'gate', 'evidence.json'), '{"evidence":true}\n');
     write(join(projectDir, reportRelative), '# Replay\n\n`node --test evidence.json`\n');
-    const bare = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    const message = bare.violations.find(({ mention }) => mention === 'evidence.json')?.reason;
-    expect(message).toBe(
-      'published replay command cites bare filename evidence.json; bare replay targets resolve at the project root, and no readable input file exists there. Cite a full project-relative path to a project-contained artifact, or remove the replay citation if no executable input is intended',
+    const contract = (path: string) => artifacts(
+      [{ id: 'report', root: 'project', path: reportRelative }],
+      [inputFile('test', path)],
+      [{ id: 'evidence', runner: 'node_test', targets: ['test'], argv: [], expected: { exit_code: 0, failures: [] } }],
     );
+    const inspect = (path: string) => verifyStageArtifactContract({
+      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir,
+      runDir: runDirectory, writes: [reportRelative], artifactContract: contract(path),
+    }, { remainingMs: () => 30_000 });
+    const bare = await inspect('evidence.json');
+    expect(bare.violations.some(({ reason }) => /ARTIFACT_READ_ABSENT|REPLAY_INPUT_ABSENT/.test(reason))).toBe(true);
+    expect(bare.replayExecutions[0]).toMatchObject({ status: 'not_run' });
 
     const validTarget = 'run-fixture/stages/gate/replay.test.cjs';
     write(join(projectDir, validTarget), [
       "const { test } = require('node:test');",
       "const assert = require('node:assert');",
-      "test('full citation', () => assert.equal(2 + 2, 4));",
-      '',
+      "test('full citation', () => assert.equal(2 + 2, 4));", '',
     ].join('\n'));
-    write(join(projectDir, reportRelative), `# Replay\n\n\`node --test ${validTarget}\`\n`);
-    const full = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
+    const full = await inspect(validTarget);
     expect(full.violations).toEqual([]);
-    expect(full.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode: 0 });
-
+    expect(full.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode: 0, executedTests: 1 });
     const missingTarget = 'run-fixture/stages/gate/missing.test.cjs';
-    write(join(projectDir, reportRelative), `# Missing replay\n\n\`node --test ${missingTarget}\`\n`);
-    const missingFull = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    expect(missingFull.violations.find(({ mention }) => mention === missingTarget)?.reason)
-      .toBe(`published replay command names ${missingTarget}, but no readable input file exists at that exact project-relative path`);
+    const missing = await inspect(missingTarget);
+    expect(missing.violations.some(({ reason }) => reason.includes('REPLAY_INPUT_ABSENT'))).toBe(true);
+    expect(missing.replayExecutions[0]).toMatchObject({ status: 'not_run' });
 
-    write(join(projectDir, reportRelative), '# No executable citation\n');
-    const omitted = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
+    const prose = inspectStageArtifactContract({
+      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir,
+      runDir: runDirectory, writes: [reportRelative],
+      artifactContract: artifacts([{ id: 'report', root: 'project', path: reportRelative }]),
     });
-    expect(omitted.violations).toEqual([]);
-
-    recordAfter(4, 'cite the nested artifact by bare filename, then use a full bounded citation and an omitted-citation control', {
-      bareMessage: message,
-      bareExecution: bare.replayExecutions[0],
-      fullExecution: full.replayExecutions[0],
-      fullViolations: full.violations,
-      missingFullPathViolation: missingFull.violations,
-      omittedViolations: omitted.violations,
+    expect(prose.violations).toEqual([]);
+    expect(prose.replayExecutions).toEqual([]);
+    recordAfter(4, 'declare missing bare, existing exact nested and missing full targets; keep report citation unchanged', {
+      bareRefused: bare.violations, bareExecution: bare.replayExecutions[0],
+      fullExecution: full.replayExecutions[0], fullViolations: full.violations,
+      missingFullRefused: missing.violations, inertProseExecutions: prose.replayExecutions,
     });
   });
 
@@ -562,7 +555,7 @@ describe('engine self-collision after-state replays and controls', () => {
     const wrong = [
       ...implementation,
       stage({ id: 'write_report', prompt_template: 'Write the final report.', scope: generatedScopes }),
-      stage({ id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
+      stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_gate.json" }], [], [], []), id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
       stage({ id: 'repair', prompt_template: 'Repair the gate and rerun npm test.', scope: generatedScopes }),
     ];
     const zeroScope = inspectDispatchAdmission({

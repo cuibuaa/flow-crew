@@ -1,3 +1,4 @@
+import { sourceFiles } from './test-support/engine-fixtures.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import ts from 'typescript';
@@ -97,13 +98,7 @@ function scanSource(sourceText: string, filePath: string): Violation[] {
   });
 }
 
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && path.endsWith('.ts') ? [path] : [];
-  });
-}
+
 
 function scanProjectSources(): Violation[] {
   return sourceFiles(SOURCE_ROOT)

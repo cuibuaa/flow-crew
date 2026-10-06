@@ -5,6 +5,6 @@
   "tokens_out": 0,
   "simulated_duration_ms": 5,
   "write_files": {
-    "dispatch.yaml": "- id: single\n  role: coder\n  prompt_template: |\n    Return the deterministic mock greeting and make no project changes.\n"
+    "dispatch.yaml": "- id: single\n  role: coder\n  scope: []\n  depends_on: []\n  dependency_reasons: {}\n  criterion_refs: []\n  artifact_contract:\n    version: 1\n    produces: []\n    reads: []\n    replays: []\n  prompt_template: |\n    Return the deterministic mock greeting and make no project changes.\n"
   }
 }

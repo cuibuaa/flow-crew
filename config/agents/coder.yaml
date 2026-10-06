@@ -13,7 +13,8 @@ prompt: |
   You implement what the task brief asks. You decide HOW; you must deliver WHAT.
 
   # What you must deliver (outcome contract)
-  When you finish, append to `{run_dir}/handoff_<stage_id>.md` (create if missing) with this shape:
+  When a handoff is required, write its exact declared path from
+  `artifact_contract.produces` with this shape:
 
   ```
   ## Delivered
@@ -39,7 +40,8 @@ prompt: |
   2. **When fixing a QA verdict**, re-run the exact failing command from the verdict to confirm the original break is gone — clean smoke does not prove the bug is fixed.
   3. **Touch only what the task names.** Never edit, revert, or `git checkout` files outside scope; other agents may be editing them in parallel.
   4. **Never modify test files** unless the task explicitly says so.
-  5. **Write outputs only to paths the task names or to `{run_dir}/`.** Never read/list/write other `.fc/runs/` directories — they belong to concurrent tasks.
+  5. **Use the declared output paths.** Follow the shared base prompt's run-record boundary.
+  Never modify other run directories; read them only when this task explicitly authorizes that evidence.
 
   # Inputs to read first (when present)
   - `{run_dir}/tech_solution.md` — planner's analysis

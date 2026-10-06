@@ -17,32 +17,21 @@ prompt: |
     1. {run_dir}/tech_solution.md — your analysis and approach
     2. {run_dir}/dispatch.yaml — the execution plan
 
-  Declare new dispatched stages' outputs and reads with `artifact_contract`
-  version 1. A declaration uses exact relative paths with root `project` or
-  `run`; the engine checks existence, kind, freshness and producer lineage.
-  Example (an explicitly empty list is meaningful):
-    artifact_contract:
-      version: 1
-      produces:
-        - id: report
-          root: project
-          path: docs/report.md
-      reads:
-        - id: task
-          root: run
-          path: task_brief.md
-          source: {kind: framework, artifact: task_brief}
+  Declare each stage's outputs, reads and replay commands with `artifact_contract`
+  version 1 using the schema below. Exact paths use root `project` or `run`.
+  Every contract includes `produces`, `reads` and `replays`, including explicit
+  empty lists. Prose and script text do not declare obligations or replay commands.
   A stage-produced read names `source: {kind: stage, stage: producer_id,
   artifact: producer_artifact_id}`. An existing input uses `source: {kind: input}`.
   Either/or outputs belong in `groups: [{id: outcome, mode: exactly_one,
   members: [success, escalation]}]`, with both artifact IDs declared in
   `produces`. A conditional output uses `when: {stage: ancestor_id,
   field: exitCode, equals: 0}` and waits for that ancestor's settled fact.
-  Reality checks declare the same `reads` list alongside `type` and
-  `params`; declare every file on which a script depends. For versioned
-  declarations, prose and script literals do not create additional duties.
-  New proposals missing either declaration are refused with a precise format
-  error. Already-admitted historical stages retain their recorded behavior.
+  Reality checks declare the same `reads` list alongside `type` and `params`;
+  declare every file on which a script depends. The engine verifies the declared
+  list and typed handler inputs; it cannot discover every dynamic script read.
+  Earlier records remain readable. An old generation may finish its admitted work;
+  the candidate refuses an undeclared launch or takeover at the migration boundary.
 
   Use the shared state query included in the stage input to inspect the current
   plan, output evidence, budgets, resources, findings and invocation records.
@@ -60,11 +49,9 @@ prompt: |
   its capable work or finalizer stage, and its downstream gate when ordinary
   work owns it. Copy those IDs into each stage's `criterion_refs`. Check that
   every criterion has both assignments where required before writing the plan.
-  Do not use `timeout_ms` or `timeout_total_ms` on any stage; only the project
-  default controls stage time. Perform this check on the first proposal rather
-  than waiting for admission feedback or operator guidance.
 
-  YOUR RUN DIRECTORY IS: {run_dir}. Write outputs to EXACTLY this path. NEVER browse other .fc/runs/ directories. Multiple tasks run concurrently — other run dirs belong to other tasks. The task brief is at {run_dir}/task_brief.md (and is also given as your input).
+  YOUR RUN DIRECTORY IS: {run_dir}. The task brief is at {run_dir}/task_brief.md
+  and is also given as your input. Follow the shared base prompt's run-record boundary.
 
   # Available Resources
   Available roles (use any combination — select whichever capabilities fit):
@@ -203,6 +190,17 @@ prompt: |
     dependency_reasons:            # REQUIRED; keys exactly match depends_on, {} when none
       <stage_id>: "<one sentence naming the predecessor output this stage consumes>"
     criterion_refs: [<criterion IDs from {run_dir}/brief_criteria.json>] # REQUIRED coverage mapping
+    artifact_contract:             # REQUIRED, even when every list is empty
+      version: 1
+      produces:
+        - {id: report, root: project, path: docs/report.md}
+      reads:
+        - id: task
+          root: run
+          path: task_brief.md
+          source: {kind: framework, artifact: task_brief}
+      groups: []                   # optional exactly_one output groups
+      replays: []                  # REQUIRED; use typed declarations for evidence to re-run
     is_gate: true                   # quality gate — agent writes a verdict file
     retry_to: [<gate_ids>]          # if listed gate fails, re-run THIS stage then re-check the gate
     condition: <stage.field op value>  # optional — run this stage only if the expr holds
@@ -211,6 +209,16 @@ prompt: |
 
   Gate verdict contract (write to {run_dir}/verdict_<stage_id>.json): {verdict_contract}
   Terminal run statuses the engine recognizes: {terminal_statuses}
+
+  A replay declaration uses `id`, `runner` (`node_test`, `vitest` or `pytest`),
+  `targets` (unconditional file IDs from this contract), `argv` and `expected`.
+  Successful evidence declares `expected: {exit_code: 0, failures: []}`. An expected
+  failing reproduction declares a nonzero direct exit and exact `{artifact, test}`
+  failure identities. Import errors, empty/all-skipped targets, mismatches, signals
+  and timeouts cannot verify that reproduction. Commands in report prose are not run.
+  See guide/engine-state-and-revisions.md for complete success/failure examples and
+  runner options. Optional replay `timeout_ms` is bounded by the configured validation
+  budget and remaining attempt deadline; it does not change the stage's deadline.
 
   # Task brief auto-injection (IMPORTANT — read this carefully)
   The scheduler **automatically prepends the full task brief to every stage's
@@ -240,7 +248,6 @@ prompt: |
       {project}/path/to/file.py with <specific changes>. Verify <criteria>.
 
   # Dispatch interface and planning judgement
-  Each stage supplies id, role, prompt_template, scope and artifact_contract.
   Include generated files in the project's write scope. Describe the predecessor
   output consumed and why it is needed in dependency_reasons. A gate uses
   is_gate: true and declares run:verdict_<stage_id>.json as an unconditional
@@ -284,7 +291,6 @@ prompt: |
   - **Preserve real data flow.** Independent, disjoint-scope subtasks stay dependency-free and run in parallel; only consumers wait for producers.
   - **One gate→fix loop per gate, not two.** The retry_to mechanism handles retries. Don't bake a second verify+fix pair.
   - **End at the goal gate.** No stages beyond the deliverable.
-  - **Stage attempts use the project-wide `config/defaults.yaml::default_timeout_ms`.** Do not put timeout fields in `dispatch.yaml`; operators change the attempt budget with one edit before launching a run. A timed-out technical retry receives a larger immutable attempt budget automatically.
 
   # Self-verifying coder pattern (preferred for implement stages with testable output)
 
@@ -336,11 +342,24 @@ prompt: |
   Example A — tiny bug fix, single stage:
   - id: fix_hash_mismatch
     role: coder
-    scope: [<implementation path>, <configured-collector test path>]
+    scope: [src/schema.ts, spec/schema.test.ts]
     depends_on: []
     dependency_reasons: {}
+    criterion_refs: []  # replace with this run's assigned canonical IDs
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: schema, root: project, path: src/schema.ts}
+        - {id: regression, root: project, path: spec/schema.test.ts}
+      reads: []
+      replays:
+        - id: regression
+          runner: vitest
+          targets: [regression]
+          argv: []
+          expected: {exit_code: 0, failures: []}
     prompt_template: |
-      Align the feature schema hash in {project}/scripts/foo.py with the assertion in
+      Align the feature schema hash in {project}/src/schema.ts with the assertion in
       the project test path that its configured collector actually lists. Add a shared helper
       that both call. Re-run that exact collected test with the configured test command and verify exit 0.
 
@@ -350,6 +369,14 @@ prompt: |
     scope: [src/thing.ts, spec/thing.test.ts]
     depends_on: []
     dependency_reasons: {}
+    criterion_refs: []  # replace with this run's assigned canonical IDs
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: implementation, root: project, path: src/thing.ts}
+        - {id: regression, root: project, path: spec/thing.test.ts}
+      reads: []
+      replays: []
     prompt_template: |
       Implement <specific change> by editing {project}/<file>. Keep changes additive.
   - id: verify_thing
@@ -359,6 +386,26 @@ prompt: |
     dependency_reasons:
       implement_thing: "Verification must inspect and exercise the implementation produced by implement_thing."
     is_gate: true
+    criterion_refs: []  # the same assigned IDs as implement_thing
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: verdict, root: run, path: verdict_verify_thing.json}
+      reads:
+        - id: implementation
+          root: project
+          path: src/thing.ts
+          source: {kind: stage, stage: implement_thing, artifact: implementation}
+        - id: regression
+          root: project
+          path: spec/thing.test.ts
+          source: {kind: stage, stage: implement_thing, artifact: regression}
+      replays:
+        - id: regression
+          runner: vitest
+          targets: [regression]
+          argv: []
+          expected: {exit_code: 0, failures: []}
     prompt_template: |
       Audit spec/thing.test.ts against <specific criteria>, run it, and inspect the
       implementation. Write verdict to {run_dir}/verdict_verify_thing.json.
@@ -369,9 +416,26 @@ prompt: |
     dependency_reasons:
       verify_thing: "The fix must consume verify_thing's verdict before correcting the rejected implementation."
     retry_to: [verify_thing]
+    criterion_refs: []  # the assigned IDs the repair addresses
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: implementation, root: project, path: src/thing.ts}
+        - {id: regression, root: project, path: spec/thing.test.ts}
+      reads:
+        - id: rejection
+          root: run
+          path: verdict_verify_thing.json
+          source: {kind: stage, stage: verify_thing, artifact: verdict}
+      replays:
+        - id: regression
+          runner: vitest
+          targets: [regression]
+          argv: []
+          expected: {exit_code: 0, failures: []}
     prompt_template: |
-      Read verdict {run_dir}/verdict_verify_thing.json and QA output
-      {run_dir}/stages/verify_thing/output.md. Fix the issues.
+      Read verdict {run_dir}/verdict_verify_thing.json and the supplied QA context.
+      Fix the issues in src/thing.ts and spec/thing.test.ts.
 
   Example C — research-led:
   - id: research_options
@@ -379,15 +443,32 @@ prompt: |
     scope: []
     depends_on: []
     dependency_reasons: {}
+    criterion_refs: []  # replace with this run's assigned canonical IDs
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: findings, root: run, path: research.md}
+      reads: []
+      replays: []
     prompt_template: |
-      Gather candidates for <X>. Write findings to {run_dir}/research.md and add
-      finding nodes to {run_dir}/knowledge_graph.json.
+      Gather candidates for <X>. Write findings to {run_dir}/research.md.
   - id: implement_chosen
     role: coder
     scope: [src/chosen_approach.ts]
     depends_on: [research_options]
     dependency_reasons:
       research_options: "Implementation must consume the evidence and selected candidate produced by research_options."
+    criterion_refs: []  # replace with this run's assigned canonical IDs
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: implementation, root: project, path: src/chosen_approach.ts}
+      reads:
+        - id: findings
+          root: run
+          path: research.md
+          source: {kind: stage, stage: research_options, artifact: findings}
+      replays: []
     prompt_template: |
       Read {run_dir}/research.md and pick the highest-evidence candidate. Implement it.
 

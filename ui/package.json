@@ -10,13 +10,9 @@
     "test-support",
     "index.html",
     "postcss.config.js",
-    "tailwind.config.d.ts",
-    "tailwind.config.js",
     "tailwind.config.ts",
     "tsconfig.json",
     "tsconfig.node.json",
-    "vite.config.d.ts",
-    "vite.config.js",
     "vite.config.ts",
     "vitest.config.ts"
   ],

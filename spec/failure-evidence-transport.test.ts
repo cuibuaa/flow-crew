@@ -52,6 +52,7 @@ function writeExecCheck(runId: string, name: string, command: string): void {
     'checks:',
     `  - name: ${name}`,
     '    type: exec-script-exit-zero',
+    '    reads: []',
     '    params:',
     '      script: |-',
     ...indentedCommand,

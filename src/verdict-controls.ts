@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadProjectDefaults } from './config.js';
-import { readOperatorCriterionRulings, type GuidanceEnvelope } from './guidance.js';
+import { readOperatorCriterionRulings } from './guidance.js';
 import { STAGE_STATUS } from './store.js';
 
 export interface StageAuthoredCheck {
@@ -664,11 +664,4 @@ export function validateGateControls(input: {
   const rulingViolation = validateRulingTreatments(input.runDir, input.criterionRefs, input.verdict);
   if (rulingViolation) return { violation: rulingViolation, conflicts: [] };
   return validateCheckAssessments(input.runDir, input.gateStageId, input.criterionRefs, input.verdict);
-}
-
-export function criterionRulingsFor(
-  runDir: string,
-  criterionRefs: readonly string[],
-): GuidanceEnvelope[] {
-  return readOperatorCriterionRulings(runDir, criterionRefs);
 }

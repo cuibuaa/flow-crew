@@ -1,3 +1,4 @@
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -198,11 +199,11 @@ function verifyCoreGuard(id: string): void {
   const project = join(root, 'project'); mkdirSync(project);
   const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   try {
-    const stage = (id: string, extra = {}) => StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false, id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',artifact_contract:{version:1,produces:[],reads:[]},...extra});
+    const stage = (id: string, extra = {}) => StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false, id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',artifact_contract:artifacts([], [], [], []),...extra});
     if (id === 'scope-required-for-every-stage') {
-      expect(() => parseDispatchedStageConfig({criterion_refs: [], dynamic_dispatch: false, id:'work',role:'coder',depends_on:[],dependency_reasons:{},prompt_template:'Work.'})).toThrow('scope');
+      expect(() => parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),criterion_refs: [], dynamic_dispatch: false, id:'work',role:'coder',depends_on:[],dependency_reasons:{},prompt_template:'Work.'})).toThrow('scope');
     } else if (id === 'writable-gate-scope') {
-      const gate = stage('gate', {role:'qa',is_gate:true,scope:[],artifact_contract:{version:1,produces:[{id:'probe',root:'project',path:'spec/qa.test.ts'}],reads:[]}});
+      const gate = stage('gate', {role:'qa',is_gate:true,scope:[],artifact_contract:artifacts([{id:'probe',root:'project',path:'spec/qa.test.ts'}], [], [], [])});
       expect(inspectDispatchAdmission({dispatched:[gate],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
     } else if (id === 'terminal-path-final-stage-only') {
       const terminalStates = parseBriefFrontmatter('---\nterminal_states:\n  complete:\n    paths: [docs/final.md]\n---\n').terminalStates;
@@ -230,13 +231,13 @@ function verifyCoreGuard(id: string): void {
 
 describe('planner dispatch contract', () => {
   it('names the invalid dispatch field and a repair action', () => {
-    const parsed = StageConfigSchema.safeParse({ id: 'work', role: 'coder', scope: 'src/**' });
+    const parsed = StageConfigSchema.safeParse({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', scope: 'src/**' });
     if (parsed.success) throw new Error('invalid dispatch fixture unexpectedly parsed');
 
     const message = formatDispatchStageSchemaFailure(parsed.error);
     expect(message).toContain('scope:');
     expect(message).toMatch(/fix the named fields.*regenerate dispatch\.yaml/i);
-    expect(() => StageConfigSchema.parse({ id: 'work', role: 'coder', timeout_ms: 1_000 }))
+    expect(() => StageConfigSchema.parse({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', timeout_ms: 1_000 }))
       .toThrow('config/defaults.yaml::default_timeout_ms');
     expect(readPlannerPrompt()).not.toMatch(/^\s+timeout_(?:total_)?ms:/m);
   });

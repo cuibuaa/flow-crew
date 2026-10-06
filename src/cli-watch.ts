@@ -1,3 +1,4 @@
+import { errorMessage, optionValue } from './source_services/cli-inputs.js';
 import { createWatchState, pollWatch, type WatchAlert, type WatchPollDependencies, type WatchPollResult } from './watch.js';
 import { formatRunDriftRow } from './run-drift.js';
 
@@ -18,19 +19,6 @@ export interface CliWatchDependencies extends WatchPollDependencies {
   stdout?: Writer;
   stderr?: Writer;
   sleep?: (milliseconds: number) => Promise<void>;
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const current = args[index];
-  const inlinePrefix = `${option}=`;
-  if (current.startsWith(inlinePrefix)) {
-    const value = current.slice(inlinePrefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseWatchArgs(args: string[]): ParsedWatchArgs {
@@ -170,10 +158,6 @@ export function formatWatchPoll(result: WatchPollResult): string[] {
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDependencies): Promise<number> {

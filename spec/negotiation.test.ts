@@ -1,4 +1,6 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { drainDueTimers } from './test-support/engine-fixtures.js';
+import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -91,13 +93,7 @@ function writeRoles(...names: string[]): string {
 }
 
 function prepareRun(config: WorkflowConfig, yaml: string) {
-  const created = createRun(projectDir, config.name, yaml, config.stages.map((stage) => stage.id));
-  writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
-  const state = readRunState(projectDir, created.runId);
-  state.autoApprove = true;
-  state.maxRetries = 2;
-  writeRunState(projectDir, created.runId, state);
-  return created;
+  return prepareFixtureRun(projectDir, config, yaml);
 }
 
 function summaryResult(opts: RunOpts): RunResult | undefined {
@@ -126,13 +122,7 @@ class ManualAttemptDeadlineClock implements AttemptDeadlineClock {
   advance(elapsedMs: number): void {
     this.monotonicMs += elapsedMs;
     this.wallMs += elapsedMs;
-    const due = [...this.timers.entries()]
-      .filter(([, timer]) => timer.deadlineMs <= this.monotonicMs)
-      .sort((left, right) => left[1].deadlineMs - right[1].deadlineMs);
-    for (const [timerId, timer] of due) {
-      this.timers.delete(timerId);
-      timer.callback();
-    }
+    drainDueTimers(this.timers, this.monotonicMs);
   }
 
 }
@@ -245,7 +235,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     return {
       yaml,
       config: {description: '', 
-        name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{criterion_refs: [], 
+        name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{ artifact_contract: fixtureArtifactContract('ordinary', false),criterion_refs: [], 
           id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture',
           max_retries: maxRetries, skills: [], dynamic_dispatch: false, is_gate: false,
         }],
@@ -264,8 +254,8 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     ].join('\n');
     const config: WorkflowConfig = {description: '', 
       name: 'e9-scope-gate', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-        {criterion_refs: [],  id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture', skills: [], dynamic_dispatch: false, is_gate: false },
-        {criterion_refs: [],  id: 'audit_gate', role: 'qa', depends_on: ['ordinary'], dependency_reasons: { ordinary: 'audit the implementation' }, scope: [], prompt_template: 'gate fixture', skills: [], dynamic_dispatch: false, is_gate: true },
+        { artifact_contract: fixtureArtifactContract('ordinary', false),criterion_refs: [],  id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture', skills: [], dynamic_dispatch: false, is_gate: false },
+        { artifact_contract: fixtureArtifactContract('audit_gate', true),criterion_refs: [],  id: 'audit_gate', role: 'qa', depends_on: ['ordinary'], dependency_reasons: { ordinary: 'audit the implementation' }, scope: [], prompt_template: 'gate fixture', skills: [], dynamic_dispatch: false, is_gate: true },
       ],
     };
     const created = prepareRun(config, yaml);
@@ -410,7 +400,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       'name: repair-scope-attempts', 'defaults:', '  max_iterations: 1', '  max_retries: 0',
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{criterion_refs: [], 
+    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
       id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
     }] };
     const created = prepareRun(config, yaml);
@@ -480,8 +470,8 @@ describe('approval attempt suspension', () => {
       name: 'approval-suspension',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [
-        {criterion_refs: [],  id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
-        {criterion_refs: [],  id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
+        { artifact_contract: fixtureArtifactContract('action', false),criterion_refs: [],  id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
+        { artifact_contract: fixtureArtifactContract('downstream', false),criterion_refs: [],  id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
       ],
     };
     const created = prepareRun(config, yaml);
@@ -566,9 +556,9 @@ describe('approval attempt suspension', () => {
 
 describe('gate verdict facts and repair eligibility', () => {
   it('normalizes retry targets and blocks ordinary dependents on an explicit negative verdict', () => {
-    const gate = StageConfigSchema.parse({ id: 'legacy_gate', role: 'qa', prompt_template: 'gate' });
-    const repair = StageConfigSchema.parse({ id: 'repair', role: 'coder', prompt_template: 'repair', retry_to: ['legacy_gate'] });
-    const downstream = StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false,  id: 'downstream', role: 'coder', prompt_template: 'down', depends_on: ['legacy_gate'] });
+    const gate = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('legacy_gate', false), id: 'legacy_gate', role: 'qa', prompt_template: 'gate' });
+    const repair = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('repair', false), id: 'repair', role: 'coder', prompt_template: 'repair', retry_to: ['legacy_gate'] });
+    const downstream = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('downstream', false),criterion_refs: [], dynamic_dispatch: false,  id: 'downstream', role: 'coder', prompt_template: 'down', depends_on: ['legacy_gate'] });
     normalizeRetryGateRelationships([gate, repair, downstream]);
     expect(gate.is_gate).toBe(true);
     expect(repair.depends_on).toContain('legacy_gate');
@@ -595,9 +585,9 @@ describe('gate verdict facts and repair eligibility', () => {
     // gate had already accepted the work ran fix → gate → fix → gate for another 46 minutes
     // and 20M input tokens, committing nothing. `gate_retry_loops` does not bound it: this is
     // not the retry loop. Rejection still reaches the fix, through that loop.
-    const gate = StageConfigSchema.parse({ id: 'passing_gate', role: 'qa', prompt_template: 'gate' });
-    const repair = StageConfigSchema.parse({ id: 'fix', role: 'coder', prompt_template: 'fix', retry_to: ['passing_gate'] });
-    const downstream = StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false,  id: 'after', role: 'coder', prompt_template: 'after', depends_on: ['passing_gate'] });
+    const gate = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('passing_gate', false), id: 'passing_gate', role: 'qa', prompt_template: 'gate' });
+    const repair = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('fix', false), id: 'fix', role: 'coder', prompt_template: 'fix', retry_to: ['passing_gate'] });
+    const downstream = StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('after', false),criterion_refs: [], dynamic_dispatch: false,  id: 'after', role: 'coder', prompt_template: 'after', depends_on: ['passing_gate'] });
     normalizeRetryGateRelationships([gate, repair, downstream]);
     expect(repair.depends_on).toContain('passing_gate');
 
@@ -623,7 +613,7 @@ describe('gate verdict facts and repair eligibility', () => {
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
     const config: WorkflowConfig = {description: '',  name: 'e9-gates', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-      {criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false },
+      { artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false },
     ] };
     const created = prepareRun(config, yaml);
     const calls: string[] = [];
@@ -698,6 +688,7 @@ describe('bounded timeout negotiation', () => {
     } };
 
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role,
       dependsOn: [],
@@ -755,7 +746,7 @@ describe('bounded timeout negotiation', () => {
         'name: resume-timeout', 'defaults:', '  max_iterations: 1', '  max_retries: 1', 'stages:',
         '  - id: work', '    role: coder', '    max_retries: 1', '    prompt_template: resume timeout',
       ].join('\n');
-      const config: WorkflowConfig = {description: '',  name: 'resume-timeout', defaults: { max_iterations: 1, max_retries: 1 }, stages: [{criterion_refs: [], 
+      const config: WorkflowConfig = {description: '',  name: 'resume-timeout', defaults: { max_iterations: 1, max_retries: 1 }, stages: [{ artifact_contract: fixtureArtifactContract('work', false),criterion_refs: [], 
         id: 'work', role: 'coder', depends_on: [], prompt_template: 'resume timeout',
         max_retries: 1, skills: [], dynamic_dispatch: false, is_gate: false,
       }] };
@@ -834,6 +825,7 @@ describe('bounded timeout negotiation', () => {
       return { output: 'cancelled', exitCode: 137, duration_ms: 600 };
     } };
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'finite', timeout_ms: 600,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
@@ -865,6 +857,7 @@ describe('bounded timeout negotiation', () => {
       return { output: 'first complete', exitCode: 0, duration_ms: 1 };
     } };
     await runStage(first, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'first', timeout_ms: 100,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
@@ -874,6 +867,7 @@ describe('bounded timeout negotiation', () => {
       return { output: 'second complete without request', exitCode: 0, duration_ms: 1 };
     } };
     await runStage(second, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'second', timeout_ms: 100,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
@@ -928,7 +922,7 @@ describe('bounded timeout negotiation', () => {
     const config = WorkflowConfigSchema.parse({description: '', 
       name: 'retry-after-timeout',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{ id: 'work', role: 'coder', max_retries: 1, prompt_template: 'finish the work' }],
+      stages: [{ artifact_contract: fixtureArtifactContract('work', false), id: 'work', role: 'coder', max_retries: 1, prompt_template: 'finish the work' }],
     });
     const created = prepareRun(config, yaml);
     const budgets: number[] = [];
@@ -973,7 +967,7 @@ describe('bounded timeout negotiation', () => {
       '    role: planner',
       '    dynamic_dispatch: true',
     ].join('\n');
-    const config = WorkflowConfigSchema.parse(parseYaml(yaml));
+    const config = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
     const created = prepareRun(config, yaml);
     const budgets: number[] = [];
     let workCalls = 0;
@@ -1049,6 +1043,7 @@ describe('bounded timeout negotiation', () => {
       });
     } };
     const result = await runStage(primary, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role: { ...role, adapter: 'primary' },
       dependsOn: [],
@@ -1098,6 +1093,7 @@ describe('bounded timeout negotiation', () => {
     } };
     const clock = new ManualAttemptDeadlineClock();
     const result = await runStage(primary, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role: { ...role, adapter: 'primary' }, dependsOn: [], promptTemplate: 'loader',
       timeout_ms: 60,
       deadlineClock: clock,
@@ -1132,6 +1128,7 @@ describe('bounded timeout negotiation', () => {
     } };
     const started = Date.now();
     await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'child close', timeout_ms: 40,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
@@ -1175,6 +1172,7 @@ describe('bounded timeout negotiation', () => {
       }
     } };
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'infinite', timeout_ms: initialBudgetMs,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });
@@ -1211,6 +1209,7 @@ describe('bounded timeout negotiation', () => {
       return { output: 'cancelled', exitCode: 137, duration_ms: 1 };
     } };
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId, role, dependsOn: [], promptTemplate: 'abort', timeout_ms: 200,
       projectDir, runId, runDir: runDirPath, retries: 0,
     });

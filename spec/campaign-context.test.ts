@@ -1,4 +1,5 @@
 import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   copyFileSync,
@@ -281,6 +282,7 @@ describe('campaign context production path', () => {
       '  - id: plan',
       '    role: planner',
       '    dynamic_dispatch: true',
+      '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: [], replays: []}',
     ].join('\n') + '\n', 'utf-8');
 
     const adapter = new PromptCaptureAdapter();
@@ -330,7 +332,7 @@ class PromptCaptureAdapter implements Adapter {
         '  dependency_reasons: {plan: "perform the newly planned implementation"}',
         '  scope: []',
         '  prompt_template: Perform the fresh implementation.',
-      ].join('\n') + '\n'), 'utf-8');
+      ].join('\n') + '\n', { implement: emptyArtifactContract() }), 'utf-8');
     }
     return { output: 'ok', exitCode: 0, duration_ms: 1 };
   }

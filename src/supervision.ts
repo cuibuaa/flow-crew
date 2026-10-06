@@ -266,10 +266,6 @@ export function recordLaunchRefusal(message: string): void {
   } satisfies LaunchRefusalRecord);
 }
 
-export function runningRecordBindsShim(record: SupervisionRunningRecord): boolean {
-  return runningRecordBindingStatus(record) === 'bound';
-}
-
 export type RunningRecordBindingStatus = 'bound' | 'unbound' | 'unreadable';
 
 export function runningRecordBindingStatus(record: SupervisionRunningRecord): RunningRecordBindingStatus {

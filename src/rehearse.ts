@@ -337,7 +337,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
       const terminalOutputs = [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))]
         .map((path, index) => ({ id: `terminal_${index}`, root: 'project' as const, path }));
-      const terminalContract = { version: 1, produces: terminalOutputs, reads: [], groups: terminalOutputs.length > 1
+      const terminalContract = { version: 1, produces: terminalOutputs, reads: [], replays: [], groups: terminalOutputs.length > 1
         ? [{ id: 'terminal_outcome', mode: 'exactly_one', members: terminalOutputs.map((output) => output.id) }] : [] };
       const criterionIds = extractBriefCriteria(brief).criteria.map((criterion) => criterion.id);
       mkdirSync(join(tempProject, dirname(resultRel)), { recursive: true });
@@ -407,7 +407,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               scope: [resultRel, `${resultRel}.no_candidate.json`],
               criterion_refs: criterionIds,
               prompt_template: `rehearsal round ${r.label}`,
-              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: resultRel }], reads: [] },
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: resultRel }], reads: [], replays: [] },
             },
           ];
           if (criterionIds.length > 0) {
@@ -420,7 +420,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               is_gate: true,
               criterion_refs: criterionIds,
               prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
-              artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [] },
+              artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [], replays: [] },
             });
           }
           stages.push({
@@ -592,7 +592,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               prompt_template: round.noCandidate
                 ? 'write the declared no-candidate sidecar with outcome, label, and reason'
                 : `rehearsal round ${round.label}`,
-              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: round.noCandidate ? `${resultRel}.no_candidate.json` : resultRel }], reads: [] },
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: round.noCandidate ? `${resultRel}.no_candidate.json` : resultRel }], reads: [], replays: [] },
             }];
             if (criterionIds.length > 0) {
               stages.push({
@@ -604,7 +604,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
                 is_gate: true,
                 criterion_refs: criterionIds,
                 prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
-                artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [] },
+                artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [], replays: [] },
               });
             }
             stages.push({
@@ -756,6 +756,3 @@ export async function rehearseBriefIsolated(
     render: false,
   });
 }
-
-/** Short alias for callers which already establish that generated rehearsal is isolated. */
-export const rehearseBrief = rehearseBriefIsolated;

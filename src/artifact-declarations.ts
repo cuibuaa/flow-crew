@@ -1,15 +1,16 @@
-import { existsSync, lstatSync, readlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
+import type { ArtifactLocation } from './artifact-location.js';
+export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
+export type { ArtifactLocation } from './artifact-location.js';
+import { DeclaredReplaySchema, DECLARED_REPLAY_LIMIT, inspectReplayBindings } from './declared-replay.js';
 import type { StageStatus } from './store.js';
-import { RUN_HISTORY_FILE, RUN_RESERVATION_FILE, RUN_STATE_LOCK_FILE, STAGE_STATUS } from './store.js';
+import { fcGlobalDir, STAGE_STATUS } from './store.js';
+import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isEngineOwnedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
-export const ArtifactPathSchema = z.string().min(1).refine((path) => (
-  !isAbsolute(path) && !path.includes('\\') && !path.includes('\0')
-  && !path.split('/').some((part) => !part || part === '.' || part === '..')
-  && !/[!*?{}[\]()]/.test(path)
-), 'declare an exact, confined relative path without glob characters');
 const location = z.object({ root: z.enum(['project', 'run']), path: ArtifactPathSchema });
 const when = z.object({
   stage: id,
@@ -32,10 +33,11 @@ export const ArtifactReadSchema = location.extend({
   ]),
   when: when.optional(),
 }).strict();
-export const ArtifactContractSchema = z.object({
+export const RecordedArtifactContractSchema = z.object({
   version: z.literal(1),
   produces: z.array(produced),
   reads: z.array(ArtifactReadSchema),
+  replays: z.array(DeclaredReplaySchema).max(DECLARED_REPLAY_LIMIT).optional(),
   groups: z.array(z.object({ id, mode: z.literal('exactly_one'), members: z.array(id).min(2) }).strict()).default([]),
 }).strict().superRefine((contract, context) => {
   const ids = new Set<string>();
@@ -61,53 +63,26 @@ export const ArtifactContractSchema = z.object({
     }
   }
 });
-export type ArtifactContract = z.infer<typeof ArtifactContractSchema>;
+// Only archived data may omit replay declarations. No production admission uses
+// this reader schema to authorize an execution.
+export const ArtifactContractSchema = RecordedArtifactContractSchema.safeExtend({
+  replays: z.array(DeclaredReplaySchema, { error: 'REPLAY_DECLARATION_REQUIRED: declare artifact_contract.replays: [] explicitly, or structured replay commands' }).max(DECLARED_REPLAY_LIMIT),
+}).superRefine((contract, context) => {
+  for (const message of inspectReplayBindings(contract)) context.addIssue({ code: 'custom', path: ['replays'], message });
+});
+export type ArtifactContract = z.infer<typeof RecordedArtifactContractSchema>;
+export function artifactDeclarationErrors(value: unknown, stageId: string): string[] {
+  if (!value) return [`ARTIFACT_DECLARATION_REQUIRED: ${stageId}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[], replays:[]} explicitly; prose cannot supply this contract`];
+  if (typeof value === 'object' && !('replays' in value)) {
+    const legacy = RecordedArtifactContractSchema.safeParse(value);
+    const missing = `REPLAY_DECLARATION_REQUIRED: ${stageId}.artifact_contract.replays: declare [] explicitly, or structured {id, runner, targets, argv, expected} replay commands`;
+    return legacy.success ? [missing] : [missing, `ARTIFACT_DECLARATION_INVALID: ${stageId}.artifact_contract: ${legacy.error.message}`];
+  }
+  const parsed = ArtifactContractSchema.safeParse(value);
+  return parsed.success ? [] : [`ARTIFACT_DECLARATION_INVALID: ${stageId}.artifact_contract: ${parsed.error.message}`];
+}
 export type ArtifactContractInput = z.input<typeof ArtifactContractSchema>;
 export type ArtifactRead = z.infer<typeof ArtifactReadSchema>;
-export type ArtifactLocation = { root: 'project' | 'run'; path: string };
-
-function contained(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\'));
-}
-
-/** Resolve components, including links whose final target does not yet exist.
- * Do not collapse a link's '..' before expanding preceding component links. */
-function prospectivePhysicalPath(path: string): string {
-  let cursor = parse(path).root;
-  let pending = path.slice(cursor.length).split(sep);
-  let links = 0;
-  while (pending.length) {
-    const component = pending.shift()!;
-    if (!component || component === '.') continue;
-    if (component === '..') { cursor = dirname(cursor); continue; }
-    const next = join(cursor, component);
-    let entry;
-    try { entry = lstatSync(next); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    if (entry?.isSymbolicLink()) {
-      if (++links > 40) throw new Error(`ARTIFACT_PATH_SYMLINK_LOOP: too many symbolic links resolving ${path}`);
-      const link = readlinkSync(next);
-      if (isAbsolute(link)) cursor = parse(link).root;
-      pending = [...link.slice(isAbsolute(link) ? cursor.length : 0).split(sep), ...pending];
-    } else {
-      if (entry && pending.length && !entry.isDirectory()) throw new Error(`ARTIFACT_PATH_NOT_DIRECTORY: ${next} is not a directory`);
-      cursor = next;
-    }
-  }
-  return cursor;
-}
-
-/** Both lexical and prospective physical confinement are required. */
-export function resolveArtifactLocation(location: ArtifactLocation, projectDir: string, runDir: string): string {
-  ArtifactPathSchema.parse(location.path);
-  const root = realpathSync(location.root === 'run' ? runDir : projectDir);
-  const target = resolve(root, location.path);
-  if (!contained(root, prospectivePhysicalPath(target))) throw new Error(`ARTIFACT_PATH_ESCAPE: ${location.root}:${location.path} resolves outside its root`);
-  return target;
-}
 
 export function artifactActivation(condition: ArtifactContract['produces'][number]['when'], statuses: Record<string, StageStatus>): 'active' | 'inactive' | 'unknown' {
   if (!condition) return 'active';
@@ -127,34 +102,20 @@ export interface ArtifactPlanStage {
   artifact_contract?: ArtifactContract;
 }
 
-/** One ownership predicate for lexical paths, prospective links and inode aliases.
- * Keep the incumbent prefix reservations; own output/request files and a gate's
- * own verdict remain stage capabilities. Engine publications are never outputs. */
-function frameworkOwnedRunPath(path: string, stage: ArtifactPlanStage): boolean {
-  if (!path || path === RUN_HISTORY_FILE || path.startsWith(`${RUN_HISTORY_FILE}/`)
-    || path === RUN_RESERVATION_FILE || path === RUN_STATE_LOCK_FILE) return true;
-  if (/^(?:run\.json|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta|dispatch_admission\.json|run_history\.jsonl|plan_history(?:\/|$)|audit_findings(?:\/|$)|signals(?:\/|$)|resource_leases|supervisor_state\.json|supervisor_usage\.json)/.test(path)) return true;
-  if (/^(?:stage_evidence|gate_reevaluation|dispatch_rejections|plan_retry|declared_outputs|guidance_history|supervisor_rejections|discarded|\.rollback-preimages)(?:\/|$)/.test(path)
-    || /^(?:iteration_log\.md|run_event_status\.json|attempt_summary_refresh\.json|criterion_discharges\.json|supervisor_guidance\.md|scheduler\.pid|scheduler-heartbeat\.json|scheduler-loop-stall\.json|\.reality-gate\.json|\.reality-gate\.failures\.md|approvals\.jsonl|user_input\.md|blockage_ledger\.json|repeated_blockage\.json|plan_retry_state\.json|rollback_change_journal\.jsonl|gate_contract\.json|supervisor_log\.md|summary\.md|progress\.md|verdict\.json)(?:\/|$)/.test(path)) return true;
-  if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|campaign_revision_request\.jsonl|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;
-  if (/^stages(?:\/|$)/.test(path)) {
-    if (!path.startsWith(`stages/${stage.id}/`)) return true;
-    if (/^stages\/[^/]+\/(?:status\.json|input\.md|invocations(?:\/|$)|attempt_generation\.json|plan_revision_decision_|scope_revision_decision_|approval_resolution|attempt_deadline_|constraint_audit|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live\.log|trace\.jsonl)/.test(path)) return true;
-  }
-  return /^verdict_/.test(path) && !(stage.is_gate && path === `verdict_${stage.id}.json`);
-}
 
-function producesFrameworkPath(artifact: ArtifactContract['produces'][number], stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string): boolean {
-  if (artifact.root === 'run' && frameworkOwnedRunPath(artifact.path, stage)) return true;
+export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces'][number], stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string): boolean {
+  if (artifact.root === 'run' && isEngineOwnedRunPath(artifact.path, stage)) return true;
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
   const root = artifact.root === 'run' ? runRoot : realpathSync(projectDirectory!);
   const output = resolve(root, artifact.path);
+  if (artifact.kind === 'directory' && containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir())) return true;
   const paths = [output], visitedDirectories = new Set<string>(), outputInodes = new Set<string>();
   while (paths.length) {
     const path = paths.pop()!, target = prospectivePhysicalPath(path);
     if (!contained(root, target)) throw new Error(`ARTIFACT_PATH_ESCAPE: ${artifact.root}:${artifact.path} contains an alias outside its root`);
-    if (contained(runRoot, target) && frameworkOwnedRunPath(relative(runRoot, target).split(sep).join('/'), stage)) return true;
+    if (contained(runRoot, target) && isEngineOwnedRunPath(relative(runRoot, target).split(sep).join('/'), stage)) return true;
+    if (isEngineOwnedGlobalPath(target, fcGlobalDir())) return true;
     let entry;
     try { entry = statSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (entry?.isFile()) outputInodes.add(`${entry.dev}:${entry.ino}`);
@@ -162,6 +123,14 @@ function producesFrameworkPath(artifact: ArtifactContract['produces'][number], s
       visitedDirectories.add(target);
       paths.push(...readdirSync(path).map((name) => join(path, name)));
     }
+  }
+  const globalCarriers = engineOwnedGlobalCarriers(fcGlobalDir());
+  for (const path of globalCarriers) {
+    try {
+      if (artifact.kind === 'directory' && contained(output, realpathSync(path))) return true;
+      const carrier = statSync(path);
+      if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   // Native hardlinks have no path target. Compare all existing declared members
   // against owned inodes, without following directory links in the store walk.
@@ -172,7 +141,7 @@ function producesFrameworkPath(artifact: ArtifactContract['produces'][number], s
     for (const entry of readdirSync(folder, { withFileTypes: true })) {
       const path = join(folder, entry.name);
       if (entry.isDirectory()) folders.push(path);
-      if (!frameworkOwnedRunPath(relative(runRoot, path).split(sep).join('/'), stage)) continue;
+      if (!isEngineOwnedRunPath(relative(runRoot, path).split(sep).join('/'), stage)) continue;
       try {
         const carrier = statSync(path);
         if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
@@ -188,7 +157,6 @@ export function inspectArtifactDeclarations(input: {
   scopeOwns: (stage: ArtifactPlanStage, path: string) => boolean;
   projectDir?: string;
   runDir?: string;
-  requireContracts?: boolean;
 }): string[] {
   const errors: string[] = [];
   const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
@@ -199,12 +167,13 @@ export function inspectArtifactDeclarations(input: {
   }
   for (const stage of input.stages) {
     if (!stage.artifact_contract) {
-      if (input.requireContracts) errors.push(`ARTIFACT_DECLARATION_REQUIRED: ${stage.id}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[]} explicitly; prose cannot supply this contract`);
+      errors.push(...artifactDeclarationErrors(undefined, stage.id));
       continue;
     }
-    const parsed = ArtifactContractSchema.safeParse(stage.artifact_contract);
+    const parsed = RecordedArtifactContractSchema.safeParse(stage.artifact_contract);
     if (!parsed.success) { errors.push(`ARTIFACT_DECLARATION_INVALID: ${stage.id}.artifact_contract: ${parsed.error.message}`); continue; }
     const contract = parsed.data;
+    errors.push(...artifactDeclarationErrors(stage.artifact_contract, stage.id));
     if (stage.is_gate && !contract.produces.some((artifact) => artifact.root === 'run' && artifact.path === `verdict_${stage.id}.json`
       && artifact.kind === 'file' && !artifact.when && !contract.groups.some((group) => group.members.includes(artifact.id)))) {
       errors.push(`ARTIFACT_GATE_VERDICT_REQUIRED: ${stage.id}.artifact_contract.produces must declare unconditional file run:verdict_${stage.id}.json`);
@@ -222,7 +191,7 @@ export function inspectArtifactDeclarations(input: {
     for (const artifact of contract.produces) {
       if (artifact.root === 'project' && !input.scopeOwns(stage, artifact.path)) errors.push(`ARTIFACT_OUTPUT_OUTSIDE_SCOPE: ${stage.id}.${artifact.id} ${artifact.path} is outside the declared project-write scope`);
       let frameworkOwned = false;
-      try { frameworkOwned = producesFrameworkPath(artifact, stage, input.runDir, input.projectDir); }
+      try { frameworkOwned = producesEngineOwnedArtifact(artifact, stage, input.runDir, input.projectDir); }
       catch (error) { errors.push(`${stage.id}.${artifact.id}: ${String(error)}`); }
       if (frameworkOwned) errors.push(`ARTIFACT_FRAMEWORK_PATH: ${stage.id}.${artifact.id} cannot produce engine-owned or another stage's evidence ${artifact.path}`);
       if (artifact.root === 'run') for (const other of input.stages) {

@@ -137,6 +137,7 @@ describe('unknown archived run status boundary', () => {
         id: 'work',
         role: 'worker',
         prompt_template: 'must not execute',
+        artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
         scope: ['src/**'],
       }],
     });

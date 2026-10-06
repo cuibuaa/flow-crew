@@ -1,6 +1,7 @@
+import { errorMessage, within, optionValue } from './source_services/cli-inputs.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
   createEngineTaskRunResolver,
   defaultFcTasksRoot,
@@ -300,28 +301,6 @@ function resolveDependencies(overrides: LandDependencies): ResolvedLandDependenc
     stdout: overrides.stdout ?? process.stdout,
     stderr: overrides.stderr ?? process.stderr,
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const argument = args[index];
-  const prefix = `${option}=`;
-  if (argument.startsWith(prefix)) {
-    const value = argument.slice(prefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseLandArgs(args: string[]): ParsedLandArgs {

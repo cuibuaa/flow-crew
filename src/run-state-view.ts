@@ -24,7 +24,6 @@ const ArtifactSchema = z.object({
   group: nonempty.optional(),
   source: nonempty.default('admitted_declaration'),
 }).strict();
-export type StateArtifactDeclaration = z.input<typeof ArtifactSchema>;
 const FindingSchema = z.object({
   id: nonempty,
   status: z.enum(['open', 'resolved']),

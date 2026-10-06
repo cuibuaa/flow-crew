@@ -33,12 +33,12 @@ describe('skill-consolidation release contract', () => {
     expect(plannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
     const stage = (id: string, extra = {}) => StageConfigSchema.parse({
       id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',
-      artifact_contract:{version:1,produces:[],reads:[]},...extra,
+      artifact_contract:{version:1,produces:[],reads:[],replays:[]},...extra,
     });
     const admit = (stages: ReturnType<typeof stage>[], extra = {}) => inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan',...extra});
     const writableGate = stage('gate',{role:'qa',is_gate:true,scope:[],artifact_contract:{version:1,produces:[
       {id:'verdict',root:'run',path:'verdict_gate.json'},{id:'probe',root:'project',path:'spec/probe.test.ts'},
-    ],reads:[]}});
+    ],reads:[],replays:[]}});
     expect(admit([writableGate]).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
     const terminalStates = {complete:{paths:['docs/final.md']}};
     expect(admit([stage('first'),stage('second')],{terminalStates}).errors.join(';')).toContain('expected exactly one scoped owner, found 2');

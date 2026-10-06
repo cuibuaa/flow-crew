@@ -23,8 +23,8 @@ beforeEach(() => { projectDir = join(tmpdir(), 'fc-loop-' + randomBytes(6).toStr
 afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
-  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
+  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
 };
 
 function writeRoles(): string {
@@ -70,6 +70,7 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
+          '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/research_round_result.json}, {id: sidecar, root: project, path: docs/research_round_result.json.no_candidate.json}], reads: [], replays: [], groups: [{id: outcome, mode: exactly_one, members: [result, sidecar]}]}',
         ].join('\n')));
         return ok('planned a round');
       }
@@ -140,6 +141,7 @@ describe('loop engine — research behavior (mock-driven)', () => {
             'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
             '    is_gate: true', '    task: close out',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_closeout.json}], reads: [], replays: []}',
           ].join('\n')));
           return ok('planned (no round)');
         }
@@ -167,7 +169,7 @@ describe('loop engine — research behavior (mock-driven)', () => {
     const agentsDir = writeRoles();
     const { adapter } = loopAdapter([2.0]); // beats 1.5 → would ship
     const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('shipped'); // confirm passed → ship stands
+    expect(final.status, final.failureReason).toBe('shipped'); // confirm passed → ship stands
   });
 
   it('DOWNGRADES ship → ceiling_hit when the confirm gate fails (non-zero exit)', async () => {

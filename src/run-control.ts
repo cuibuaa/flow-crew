@@ -17,9 +17,10 @@ import {
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
-  updateRunState,
+  updateRunStateAtPath,
   type StoreState,
 } from './store.js';
+import { requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
 import {
   invalidateRunLockCache,
   isLiveFlowcrewSchedulerForRun,
@@ -170,10 +171,6 @@ function defaultDelay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-function safeRunId(runId: string): boolean {
-  return runId.length > 0 && !runId.includes('..') && !runId.includes('/') && !runId.includes('\\');
-}
-
 function mutateCancelledRun(state: StoreState, completedAt: string): void {
   state.status = RUN_STATUS.STOPPED;
   state.failureReason = 'Cancelled by user';
@@ -237,11 +234,12 @@ export class RunCancellationCoordinator {
   cancelTask(taskId: number): Promise<CancellationResult> {
     const task = this.registry.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    return this.coordinate({ task, run: this.readRunTarget(task.run_id), runBinding: task.run_id });
+    const run = this.readRunTarget(task.run_id);
+    return this.coordinate({ task, run, runBinding: run?.binding ?? task.run_id });
   }
 
   cancelRun(runId: string, unit?: string): Promise<CancellationResult> {
-    if (!safeRunId(runId)) throw new Error(`Invalid run id: ${runId}`);
+    requireSafeRunId(runId);
     const run = this.readRunTarget(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
     const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
@@ -256,7 +254,7 @@ export class RunCancellationCoordinator {
   /** Read-only convergence check used after a client loses the mutating RPC
    * response. It never sends another stop signal. */
   async statusRun(runId: string, unit?: string): Promise<CancellationResult> {
-    if (!safeRunId(runId)) throw new Error(`Invalid run id: ${runId}`);
+    requireSafeRunId(runId);
     const run = this.readRunTarget(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
     const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
@@ -490,26 +488,9 @@ export class RunCancellationCoordinator {
     }
 
     if (!stoppedAfterRequest(observation)) {
-      this.recordObservationBudget(target, observation);
-      const message = this.observationMessage(
-        `cancellation still in progress${stopError ? `; ${stopError}` : ''}`,
-        observation,
-      );
-      if (task && !preserveTerminalTask) {
-        this.registry.update(task.id, { status: TASK_STATUS.CANCELLING, notes: message });
-        this.registry.appendTick(task.id, { status: TASK_STATUS.CANCELLING, message });
-      }
-      return {
-        ok: false,
-        status: 'cancelling',
-        ...(task ? { taskId: task.id } : {}),
-        ...(targetRunId ? { runId: targetRunId } : {}),
-        observation,
-        message,
-      };
+      return this.pendingCancellation(target, observation, stopError);
     }
 
-    this.clearObservationBudget(target);
     const completedAt = this.now().toISOString();
     let preservedRunStatus: string | undefined;
     let unrecognizedRunStatusReason: string | undefined;
@@ -526,10 +507,15 @@ export class RunCancellationCoordinator {
         } else if (isTerminalRunStatus(statusResolution.status)) {
           preservedRunStatus = latest.state.status;
         } else {
-          this.updateRun(latest, completedAt);
+          if (!this.updateRun(latest, completedAt, task)) {
+            observation = await this.observe(target);
+            signalLiveScheduler(observation);
+            return this.pendingCancellation(target, observation, 'stop barrier changed before locked cancellation commit');
+          }
         }
       }
     }
+    this.clearObservationBudget(target);
     const releaseProjectDir = latestRun?.projectDir ?? run?.projectDir ?? task?.projectDir;
     const releaseRunId = latestRun?.runId ?? targetRunId;
     if (releaseProjectDir && releaseRunId) releaseLaunchIntent(releaseProjectDir, releaseRunId);
@@ -566,6 +552,21 @@ export class RunCancellationCoordinator {
           ? `Cancellation confirmed: unit and scheduler process are stopped; run lifecycle was preserved because ${unrecognizedRunStatusReason}.`
           : 'Cancellation confirmed: unit and scheduler process are stopped.',
       ...(preservedRunStatus ? { preservedRunStatus } : {}),
+    };
+  }
+
+  private pendingCancellation(target: CancellationTarget, observation: CancellationObservation, reason?: string): CancellationResult {
+    this.recordObservationBudget(target, observation);
+    const message = this.observationMessage(`cancellation still in progress${reason ? `; ${reason}` : ''}`, observation);
+    const task = target.task ? (this.registry.get(target.task.id) ?? target.task) : undefined;
+    if (task && isActiveTaskStatus(task.status)) {
+      this.registry.update(task.id, { status: TASK_STATUS.CANCELLING, notes: message });
+      this.registry.appendTick(task.id, { status: TASK_STATUS.CANCELLING, message });
+    }
+    return {
+      ok: false, status: 'cancelling', ...(task ? { taskId: task.id } : {}),
+      ...(target.run ? { runId: target.run.runId } : task && this.taskRunId(task) ? { runId: this.taskRunId(task) } : {}),
+      observation, message,
     };
   }
 
@@ -795,37 +796,40 @@ export class RunCancellationCoordinator {
 
   private taskRunId(task: TaskEntry): string | undefined {
     if (!task.run_id) return undefined;
-    if (!isAbsolute(task.run_id)) return task.run_id;
-    return this.readRunTarget(task.run_id)?.runId ?? basename(task.run_id);
+    return this.readRunTarget(task.run_id)?.runId ?? (isAbsolute(task.run_id) ? basename(task.run_id) : task.run_id);
   }
 
   private readRunTarget(runIdOrPath: string | undefined): RunTarget | undefined {
     if (!runIdOrPath) return undefined;
-    const runPath = isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath);
+    if (!isAbsolute(runIdOrPath)) requireSafeRunId(runIdOrPath);
     try {
+      const identity = resolveRunIdentity(isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath), isAbsolute(runIdOrPath) ? undefined : this.runsDir);
+      const runPath = identity.directory;
       const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as StoreState;
       if (!state || typeof state.projectDir !== 'string' || typeof state.status !== 'string') return undefined;
-      const runId = typeof state.runId === 'string' && state.runId ? state.runId : basename(runPath);
-      return { runId, binding: runIdOrPath, runPath, projectDir: state.projectDir, state };
-    } catch {
+      const runId = identity.runId;
+      return { runId, binding: runPath, runPath, projectDir: state.projectDir, state };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('RUN_IDENTITY_')) throw error;
       return undefined;
     }
   }
 
-  private updateRun(run: RunTarget, completedAt: string): void {
-    const canonicalPath = resolve(join(runsRoot(), run.runId));
-    if (canonicalPath === resolve(run.runPath)) {
-      updateRunState(run.projectDir, run.runId, (state) => {
-        requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
-        if (!isTerminalRunStatus(state.status)) mutateCancelledRun(state, completedAt);
-      });
-      return;
-    }
-    const state = JSON.parse(readFileSync(join(run.runPath, 'run.json'), 'utf-8')) as StoreState;
-    requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
-    if (!isTerminalRunStatus(state.status)) {
-      mutateCancelledRun(state, completedAt);
-      atomicWrite(join(run.runPath, 'run.json'), JSON.stringify(state, null, 2));
-    }
+  private updateRun(run: RunTarget, completedAt: string, task?: TaskEntry): boolean {
+    let committed = false;
+    updateRunStateAtPath(run.runPath, (state) => {
+      committed = false;
+      requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
+      if (!isTerminalRunStatus(state.status)) {
+        // A scheduler claim is published under this same physical run lock.
+        // An earlier observation cannot authorize cancellation past that claim.
+        let pid: number | null = null;
+        try { pid = parseSchedulerPidMarker(readFileSync(join(run.runPath, 'scheduler.pid'), 'utf8')); } catch { /* no marker */ }
+        if ((pid !== null && this.isSchedulerPidAlive(pid, run.runId, run.runPath)) || (task && this.isLaunchInFlight(task.id))) return;
+        mutateCancelledRun(state, completedAt);
+      }
+      committed = true;
+    });
+    return committed;
   }
 }

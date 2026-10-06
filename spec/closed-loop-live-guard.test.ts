@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -71,7 +72,7 @@ function workflowFixture(scope: string[] = ['src/allowed.ts']): { config: Workfl
   const config: WorkflowConfig = {
     name: `closed-loop-live-guard-${scope.length > 0 ? 'nonempty' : 'empty'}`,
     defaults: { max_iterations: 1, max_retries: 0 },
-    stages: [{
+    stages: [{ artifact_contract: fixtureArtifactContract('writer', false),
       id: 'writer', role: 'coder', scope, depends_on: [],
       prompt_template: 'Write only the declared source path.', skills: [],
       dynamic_dispatch: false, is_gate: false,

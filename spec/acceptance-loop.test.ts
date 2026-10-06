@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -60,7 +60,7 @@ function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
     config: {description: '', 
       name: 'e7-acceptance-loop',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -282,7 +282,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
     expect(result.gateOpts[0].sessionOwnerStageId).toBeUndefined();
     expect(result.gateOpts[0].resumeSessionId).not.toBe(BUILDER_UUID);
-    expect(canResumeOwnGateSession({criterion_refs: [], dynamic_dispatch: false, 
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: ['plan'], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: BUILDER_UUID, ownerStageId: 'plan', capturedAt: '2026-08-01T00:00:00.000Z',
@@ -295,7 +295,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
     expect(existsSync(gateVerdictCorrectionPath(result.runDirPath, GATE_ID))).toBe(false);
-    expect(canResumeOwnGateSession({criterion_refs: [], dynamic_dispatch: false, 
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: [], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: GATE_UUID, ownerStageId: GATE_ID, capturedAt: '2026-08-01T00:00:00.000Z',

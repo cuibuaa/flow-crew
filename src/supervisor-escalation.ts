@@ -1,16 +1,8 @@
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { BriefPatch } from './campaign.js';
-import { readJsonlFile } from './jsonl.js';
+import { BriefPatchSchema, type BriefPatch } from './source_control/brief-patch.js';
+import { readOptionalJsonlFile as readJsonl } from './jsonl.js';
 import { runsRoot } from './store.js';
-
-const BriefPatchSchema = z.object({
-  type: z.literal('brief_patch'),
-  section: z.string().min(1),
-  op: z.enum(['append', 'replace_value', 'edit']),
-  value: z.string(),
-});
 
 const CampaignRevisionRequestSchema = z.object({
   ts: z.string().optional(),
@@ -29,11 +21,6 @@ export interface CampaignRevisionRequest {
   severity: 'low' | 'medium' | 'high';
   reason: string;
   proposedPatch?: BriefPatch;
-}
-
-function readJsonl(path: string): unknown[] {
-  if (!existsSync(path)) return [];
-  return readJsonlFile<unknown>(path);
 }
 
 export function readEscalations(runDir: string): CampaignRevisionRequest[] {

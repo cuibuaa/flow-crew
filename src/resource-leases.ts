@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { processStartToken, type ProcessStartToken } from './run-lock.js';
 import { fcGlobalDir } from './store.js';
+import { registerEngineOwnedSqlitePath, RESOURCE_LEASE_REGISTRY_FILENAME } from './engine-owned-carriers.js';
 
 const nonempty = z.string().min(1);
 const timestamp = nonempty.refine((value) => Number.isFinite(Date.parse(value)), 'expected an ISO timestamp');
@@ -104,7 +105,7 @@ function hash(value: unknown): string {
 }
 
 export function resourceLeaseRegistryPath(storeRoot = fcGlobalDir()): string {
-  return join(resolve(storeRoot), 'resource-leases.v1.sqlite');
+  return join(resolve(storeRoot), RESOURCE_LEASE_REGISTRY_FILENAME);
 }
 
 export function readHostBootId(): string | undefined {
@@ -183,6 +184,7 @@ function readSnapshot(db: DatabaseSync): ResourceLeaseSnapshot {
 /** No initialization, reconciliation or writes during a query. */
 export function readResourceLeaseRegistry(path: string): ResourceLeaseRegistryRead {
   const resolved = resolve(path);
+  registerEngineOwnedSqlitePath(resolved);
   if (!existsSync(resolved)) return { status: 'absent', path: resolved, reason: 'no engine resource registry has been recorded' };
   const db = new (sqliteConstructor())(resolved, { readOnly: true });
   try {
@@ -216,6 +218,7 @@ export class ResourceLeaseRegistry {
   constructor(private readonly options: ResourceLeaseRegistryOptions) {
     if (!isAbsolute(options.registryPath)) throw new ResourceLeaseError('RESOURCE_REGISTRY_PATH_REQUIRED', 'declare an absolute engine-store registryPath');
     this.path = resolve(options.registryPath);
+    registerEngineOwnedSqlitePath(this.path);
     this.now = options.now ?? (() => new Date().toISOString());
     this.observeOwner = options.observeOwner ?? observeResourceLeaseOwner;
     this.busyTimeoutMs = quantity.max(30_000).parse(options.busyTimeoutMs ?? 2_000);

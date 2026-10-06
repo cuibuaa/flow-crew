@@ -79,6 +79,10 @@ hard behavior at the terminal boundary.
 
 The heading is part of the contract. The parser only reads a `checks:` mapping
 inside a `## Reality checks` section (optionally wrapped in one YAML fence).
+Each check declares exact rooted `reads` with their sources, including `reads: []`
+for no file inputs. The examples below assume `docs/output.md` and `result.json`
+already exist. For future outputs, bind reads to an admitted stage's artifact as
+shown in [the declaration reference](engine-state-and-revisions.md).
 
 ## Reality checks
 
@@ -86,12 +90,16 @@ inside a `## Reality checks` section (optionally wrapped in one YAML fence).
 checks:
   - name: docs-generated
     type: file-exists-nonempty
+    reads:
+      - {id: document, root: project, path: docs/output.md, source: {kind: input}}
     params:
       paths:
         - docs/output.md
 
   - name: result-shape
     type: json-schema-match
+    reads:
+      - {id: result, root: project, path: result.json, source: {kind: input}}
     params:
       file: result.json
       schema:
@@ -102,19 +110,34 @@ checks:
           value: {type: number}
           evidence: {type: string}
 
-  - name: project-smoke
+  - name: result-value
     type: exec-script-exit-zero
+    reads:
+      - {id: result, root: project, path: result.json, source: {kind: input}}
     params:
-      script: npm run build
+      script: |
+        node <<'NODE'
+        const fs = require('node:fs');
+        const result = JSON.parse(fs.readFileSync('result.json', 'utf8'));
+        if (!Number.isFinite(result.value)) {
+          console.error('result.value must be a finite number');
+          process.exit(1);
+        }
+        NODE
 ```
 
 ## Example notes
 
 Here `schema`, not a top-level `required` parameter, supplies the JSON schema;
 `script`, not `command`, supplies shell text for `exec-script-exit-zero`.
+An omitted `reads` field is refused with `REALITY_READ_DECLARATION_REQUIRED`.
+Typed handler inputs must match a declared root; a same-basename file in another
+root cannot satisfy the check. The engine rechecks the declared reads before
+execution. It cannot prove an arbitrary script declared every computed or
+dynamic read, so authors must preserve that discipline.
 
 A `script` that runs `git archive` must declare every repository path it reads via
-`archive_paths`, verified against `archive_ref` (default `HEAD`) before the script runs.
+both `reads` and `archive_paths`, verified against `archive_ref` (default `HEAD`) before the script runs.
 This closes a real gap: without it, a check that rehearses against `git archive` output
 could be satisfied by a file that was never committed — present in the working tree,
 absent from the ref the check claims to verify.

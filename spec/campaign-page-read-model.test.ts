@@ -1,3 +1,4 @@
+import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,14 +33,7 @@ const RESEARCH_WORKFLOW = [
   '    is_gate: true',
 ].join('\n');
 
-function emptyInbox(): CampaignInboxOverviewLike {
-  return {
-    approvals: { status: 'complete', items: [] },
-    deferred: { status: 'complete', items: [] },
-    stale: { status: 'complete', items: [] },
-    patches: { status: 'complete', items: [], coverage: { succeeded: 1, failed: 0 } },
-  };
-}
+
 
 function runState(id: string, extra: Partial<StoreState> = {}): StoreState {
   return {

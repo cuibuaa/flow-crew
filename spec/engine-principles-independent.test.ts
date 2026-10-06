@@ -20,8 +20,8 @@ import { RUN_HISTORY_FILE, RUN_STATUS, beginStageAttempt, captureStageEvidence, 
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
 const startedAt = '2026-10-03T00:00:00.000Z';
-const contract = () => ArtifactContractSchema.parse({ version: 1, produces: [], reads: [] });
-const stage = (id: string, extra: Partial<StageConfig> = {}) => StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute the declared fixture.', artifact_contract: contract(), ...extra });
+const contract = () => ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [] });
+const stage = (id: string, extra: Partial<StageConfig> = {}) => StageConfigSchema.parse({ criterion_refs: [], id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute the declared fixture.', artifact_contract: contract(), ...extra });
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'flowcrew-independent-audit-'));
   project = join(root, 'project'); mkdirSync(project);
@@ -33,7 +33,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true,
 
 describe('independent declaration and decision controls', () => {
   it('rejects a wrong-kind exactly-one member even when the alternative is absent', () => {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'yes', root: 'run', path: 'yes.json' }, { id: 'no', root: 'run', path: 'no.md' }], reads: [], groups: [{ id: 'choice', mode: 'exactly_one', members: ['yes', 'no'] }] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'yes', root: 'run', path: 'yes.json' }, { id: 'no', root: 'run', path: 'no.md' }], reads: [], groups: [{ id: 'choice', mode: 'exactly_one', members: ['yes', 'no'] }] });
     const input = { stageId: 'writer', template: '', projectDir: project, runDir: directory, artifactContract };
     const preimages = captureStageArtifactContractPreimages(input);
     mkdirSync(join(directory, 'no.md'));
@@ -41,7 +41,7 @@ describe('independent declaration and decision controls', () => {
   });
 
   it('accepts an explicitly empty fresh output when its declaration allows empty content', () => {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'empty', root: 'run', path: 'empty.json', nonempty: false }], reads: [] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'empty', root: 'run', path: 'empty.json', nonempty: false }], reads: [] });
     const input = { stageId: 'writer', template: '', projectDir: project, runDir: directory, artifactContract };
     const preimages = captureStageArtifactContractPreimages(input);
     writeFileSync(join(directory, 'empty.json'), '');
@@ -50,26 +50,26 @@ describe('independent declaration and decision controls', () => {
 
   it('keeps an incomplete producer from satisfying a declared read through a stale file', () => {
     writeFileSync(join(project, 'old.md'), 'stale output');
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'old', root: 'project', path: 'old.md', source: { kind: 'stage', stage: 'pending', artifact: 'old' } }] });
+    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'old', root: 'project', path: 'old.md', source: { kind: 'stage', stage: 'pending', artifact: 'old' } }] });
     expect(inspectDeclaredStageReads({ artifactContract, projectDir: project, runDir: directory, statuses: { pending: { status: 'skipped', retries: 0 } } })[0]).toContain('ARTIFACT_READ_NOT_PRODUCED');
   });
 
   it('refuses an input that exists with the wrong filesystem kind at full admission', () => {
     mkdirSync(join(project, 'input.md'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'input', root: 'project', path: 'input.md', source: { kind: 'input' } }] }) });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'input', root: 'project', path: 'input.md', source: { kind: 'input' } }] }) });
     expect(inspectArtifactDeclarations({ stages: [writer], projectDir: project, runDir: directory, scopeOwns: () => true })[0]).toContain('ARTIFACT_INPUT_ABSENT');
   });
 
   it('does not let required-format classification hide a newly lost warning', () => {
     const before = { pass: true, errors: [], warnings: ['serialize overlapping writers'], terminalOwners: ['owner'] };
     const required = ['ARTIFACT_DECLARATION_REQUIRED: work'];
-    expect(classifyDeclarationAdmissionChange({ baseline: { status: 'returned', value: before }, compatibility: { status: 'returned', value: before }, candidate: { status: 'returned', value: { ...before, pass: false, errors: required, warnings: [] } }, requiredErrors: required })).toBe('ambiguous_unpredicted');
+    expect(classifyDeclarationAdmissionChange({ baseline: { status: 'returned', value: before }, candidate: { status: 'returned', value: { ...before, pass: false, errors: required, warnings: [] } }, requiredErrors: required })).toBe('ambiguous_unpredicted');
   });
 
   it('refuses a typed run output shared by two unordered directory and file writers', () => {
-    const a = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'dir', root: 'run', path: 'deliverables', kind: 'directory' }], reads: [] }) });
-    const b = stage('pending', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'file', root: 'run', path: 'deliverables/result.md' }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [a, b], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true });
+    const a = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'dir', root: 'run', path: 'deliverables', kind: 'directory' }], reads: [] }) });
+    const b = stage('pending', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'file', root: 'run', path: 'deliverables/result.md' }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [a, b], baseStages: [], dispatchStageId: 'plan' });
     expect(admission.errors.join(';')).toContain('ARTIFACT_OUTPUT_CONCURRENT_OWNERS');
   });
 
@@ -78,14 +78,14 @@ describe('independent declaration and decision controls', () => {
     updateRunState(project, runId, state => { state.stageEvidence = [evidence]; });
     const projection = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
     const historyPath = projection.stateFormat.history.path as string;
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: historyPath }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'history', root: 'run', path: historyPath }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(historyPath).toBe('run-history.v1.jsonl');
     expect(admission.pass).toBe(false);
     expect(admission.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
-    const ordinary = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'ordinary-history.jsonl' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [ordinary], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).pass).toBe(true);
+    const ordinary = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'history', root: 'run', path: 'ordinary-history.jsonl' }], reads: [] }) });
+    expect(inspectDispatchAdmission({ dispatched: [ordinary], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
   });
 
   it.each(['symlink', 'hardlink', 'container'])('refuses an existing %s alias to acknowledged history', kind => {
@@ -95,8 +95,8 @@ describe('independent declaration and decision controls', () => {
     const alias = join(directory, 'alias');
     if (kind === 'hardlink') linkSync(join(directory, RUN_HISTORY_FILE), alias);
     else symlinkSync(kind === 'container' ? directory : join(directory, RUN_HISTORY_FILE), alias);
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'alias', kind: kind === 'container' ? 'directory' : 'file' }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'history', root: 'run', path: 'alias', kind: kind === 'container' ? 'directory' : 'file' }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     expect(readFileSync(join(directory, RUN_HISTORY_FILE))).toEqual(before);
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
@@ -112,8 +112,8 @@ describe('independent declaration and decision controls', () => {
     symlinkSync(kind === 'absolute' ? join(directory, RUN_HISTORY_FILE)
       : kind === 'multihop' ? 'hop' : kind === 'parent' ? `parent/${RUN_HISTORY_FILE}`
         : kind === 'component_dotdot' ? `part/../${RUN_HISTORY_FILE}` : RUN_HISTORY_FILE, join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     const evidence = captureStageEvidence(project, runId, 1, 'writer', { status: 'complete', retries: 0 });
@@ -147,23 +147,23 @@ describe('independent declaration and decision controls', () => {
     'stages/work/output.md', 'verdict_other.json',
   ])('refuses a prospective symlink alias to engine carrier %s', carrier => {
     symlinkSync(join(directory, carrier), join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
   });
 
   it.each(['run.json', 'events.jsonl', 'stages/writer/input.md', 'stages/writer/invocations/one.json'])('refuses an existing hardlink alias to engine carrier %s', carrier => {
     const path = join(directory, carrier); mkdirSync(join(path, '..'), { recursive: true });
     if (!existsSync(path)) writeFileSync(path, 'Engine-owned bytes');
     const before = readFileSync(path); linkSync(path, join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).pass).toBe(false);
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(false);
     expect(readFileSync(path)).toEqual(before);
   });
 
   it.each(['cycle', 'escape'])('refuses a dangling alias with %s even without its final target', kind => {
     symlinkSync(kind === 'cycle' ? 'alias' : join(root, 'outside-future.md'), join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.join(';')).toContain(kind === 'cycle' ? 'ARTIFACT_PATH_SYMLINK_LOOP:' : 'ARTIFACT_PATH_ESCAPE:');
   });
@@ -171,10 +171,10 @@ describe('independent declaration and decision controls', () => {
   it('keeps a normal future alias and own stage request/output and gate verdict capabilities', () => {
     symlinkSync('future.md', join(directory, 'alias'));
     for (const path of ['alias', 'stages/writer/notes/report.md', 'stages/writer/scope_revision_request.json', 'stages/writer/plan_revision_request.json', 'stages/writer/approval_request.json']) {
-      const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path }], reads: [] }) });
-      expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).pass).toBe(true);
+      const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path }], reads: [] }) });
+      expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
     }
-    const gate = stage('writer', { role: 'qa', is_gate: true, artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_writer.json' }], reads: [] }) });
+    const gate = stage('writer', { role: 'qa', is_gate: true, artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_writer.json' }], reads: [] }) });
     expect(inspectArtifactDeclarations({ stages: [gate], scopeOwns: () => true, projectDir: project, runDir: directory })).toEqual([]);
   });
 
@@ -183,10 +183,10 @@ describe('independent declaration and decision controls', () => {
     const base = stage('work');
     writeStageStatus(project, runId, 'work', { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt, status: 'complete', exitCode: 0 }] });
     updateRunState(project, runId, state => { recordAdmittedPlan(state, [base], directory, 'Alias fixture', true, { pass: true, errors: [] }); });
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
     symlinkSync(RUN_HISTORY_FILE, join(directory, 'replacement')); renameSync(join(directory, 'replacement'), join(directory, 'alias'));
     const previousHistory = readRunState(project, runId).queryState!.planHistory;
-    const { decision } = applyPlanRevision({ projectDir: project, runId, request: { version: 1, requestId: 'replace_alias', runId, stageId: 'work', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: 0, baseDigest: planDigest([base]), reason: 'Exercise replacement under full admission', stages: [base, writer] }, parseStage: parseDispatchedStageConfig, scopeContained: (scope, capabilities) => capabilities.includes(scope), admit: (stages) => inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }) });
+    const { decision } = applyPlanRevision({ projectDir: project, runId, request: { version: 1, requestId: 'replace_alias', runId, stageId: 'work', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: 0, baseDigest: planDigest([base]), reason: 'Exercise replacement under full admission', stages: [base, writer] }, parseStage: parseDispatchedStageConfig, scopeContained: (scope, capabilities) => capabilities.includes(scope), admit: (stages) => inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }) });
     expect(decision.accepted).toBe(false);
     expect(decision.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     expect(readRunState(project, runId).queryState!.planHistory).toEqual(previousHistory);
@@ -198,8 +198,8 @@ describe('independent declaration and decision controls', () => {
     const notes = join(directory, 'notes'); mkdirSync(notes);
     if (kind === 'existing_hardlink') linkSync(join(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
     else symlinkSync(join(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     if (kind === 'dangling_symlink') evidence();
@@ -209,8 +209,8 @@ describe('independent declaration and decision controls', () => {
   it('allows an ordinary directory with a confined future member and a finite directory link', () => {
     mkdirSync(join(directory, 'notes')); symlinkSync('future.md', join(directory, 'notes/alias'));
     symlinkSync('.', join(directory, 'notes/self'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).pass).toBe(true);
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
+    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
   });
 
   it.each(['file', 'directory'])('refuses a project %s output hardlinked to acknowledged engine history', kind => {
@@ -219,8 +219,8 @@ describe('independent declaration and decision controls', () => {
     const before = readFileSync(join(directory, RUN_HISTORY_FILE));
     mkdirSync(join(project, 'docs'));
     linkSync(join(directory, RUN_HISTORY_FILE), join(project, 'docs/alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'project', path: kind === 'file' ? 'docs/alias' : 'docs', kind }], reads: [] }) });
-    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory });
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'project', path: kind === 'file' ? 'docs/alias' : 'docs', kind }], reads: [] }) });
+    const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     expect(readFileSync(join(directory, RUN_HISTORY_FILE))).toEqual(before);
@@ -228,8 +228,8 @@ describe('independent declaration and decision controls', () => {
   });
 
   it('allows an ordinary project output named run.json', () => {
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'project', path: 'docs/run.json' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }).pass).toBe(true);
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'project', path: 'docs/run.json' }], reads: [] }) });
+    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
   });
 });
 
@@ -244,7 +244,7 @@ describe('independent revision and exact-input controls', () => {
     return applyPlanRevision({ projectDir: project, runId,
       request: { version: 1, requestId, runId, stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: 0, baseDigest: planDigest(stages), reason: 'Independent outcome proposal', stages: proposed },
       parseStage: parseDispatchedStageConfig,
-      admit: candidate => inspectDispatchAdmission({ dispatched: candidate, baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true, projectDir: project, runDir: directory }),
+      admit: candidate => inspectDispatchAdmission({ dispatched: candidate, baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }),
       scopeContained: (scope, capabilities) => capabilities.includes(scope),
     });
   }
@@ -476,14 +476,15 @@ describe('independent restart crash-window falsifier', () => {
         fs.renameSync(ack + '.tmp', ack);
       `)};
       const wait = file => { const end = Date.now() + 7000; while (!fs.existsSync(file)) { if (Date.now() >= end) throw new Error('Cancellation barrier not reached: ' + file); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); } };
-      let hit = false, child, cancellationExit;
+      let hit = false, child, cancellationExit, eventHadRecoveryLock;
       function cancel(held) {
         if (hit) return; hit = true;
         const argv = ['--input-type=module', '-e', canceller, dist, project, fc, runId, ack, waiting];
         if (held) { child = spawn(process.execPath, argv, { stdio: 'ignore' }); wait(waiting); }
         else { const result = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 9000 }); cancellationExit = result.status; if (result.status !== 0) throw new Error('Native cancellation failed: ' + result.stderr); }
       }
-      const rename = fs.renameSync, unlink = fs.unlinkSync, open = fs.openSync, append = fs.appendFileSync;
+      const rename = fs.renameSync, unlink = fs.unlinkSync, open = fs.openSync, nativeWrite = fs.writeSync;
+      const descriptorPaths = new Map();
       function matches(file, record) {
         if (String(file) === join(directory, 'stages/work/status.json')) {
           return (point.startsWith('closed_ledger_') && record.status === 'failed') || (point.startsWith('pending_ledger_') && record.status === 'pending');
@@ -507,7 +508,9 @@ describe('independent restart crash-window falsifier', () => {
           const state = JSON.parse(fs.readFileSync(join(directory, 'run.json')));
           if (point === 'blocked_lock_before' || state.stages.work.status === 'pending') cancel(false);
         }
-        return open(file, ...args);
+        const descriptor = open(file, ...args);
+        descriptorPaths.set(descriptor, String(file));
+        return descriptor;
       };
       fs.unlinkSync = function(file) {
         const result = unlink(file);
@@ -525,11 +528,11 @@ describe('independent restart crash-window falsifier', () => {
         }
         return result;
       };
-      fs.appendFileSync = function(file, bytes, ...args) {
-        const event = String(file) === join(directory, 'events.jsonl') && String(bytes).includes('"type":"recovery_reconciled"');
-        if (!hit && event && point === 'event_before') cancel(true);
-        const result = append(file, bytes, ...args);
-        if (!hit && event && point === 'event_after') cancel(true);
+      fs.writeSync = function(descriptor, bytes, ...args) {
+        const event = descriptorPaths.get(descriptor) === join(directory, 'events.jsonl') && String(bytes).includes('"type":"recovery_reconciled"');
+        if (!hit && event && point === 'event_before') { eventHadRecoveryLock = fs.existsSync(lock); cancel(eventHadRecoveryLock); }
+        const result = nativeWrite(descriptor, bytes, ...args);
+        if (!hit && event && point === 'event_after') { eventHadRecoveryLock = fs.existsSync(lock); cancel(eventHadRecoveryLock); }
         return result;
       }; syncBuiltinESMExports();
       const store = await import(pathToFileURL(join(dist, 'store.js'))); store.setFcGlobalDir(fc);
@@ -545,7 +548,7 @@ describe('independent restart crash-window falsifier', () => {
       const ledgers = Object.fromEntries(Object.keys(final.stages).map(id => { const path = join(directory, 'stages', id, 'status.json'); return [id, fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : null]; }));
       const beforeRepeat = fs.readFileSync(join(directory, 'run.json'), 'utf8');
       recovery.reconcileHostInterruptedRun(project, runId, { currentBootId: 'boot_after', currentGeneration: 'fixture_generation' });
-      fs.writeFileSync(output, JSON.stringify({ hit, cancellationExit, acknowledged, final, ledgers, error, repeatUnchanged: beforeRepeat === fs.readFileSync(join(directory, 'run.json'), 'utf8') }));
+      fs.writeFileSync(output, JSON.stringify({ hit, cancellationExit, eventHadRecoveryLock, acknowledged, final, ledgers, error, repeatUnchanged: beforeRepeat === fs.readFileSync(join(directory, 'run.json'), 'utf8') }));
     `;
     const output = join(root, 'cancellation.json');
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', source, resolve('dist'), project, fcGlobalDir(), runId, point, output], { cwd: project, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'absent.sock') } });
@@ -561,6 +564,10 @@ describe('independent restart crash-window falsifier', () => {
     expect(observed.final.failureReason).toBe('Cancelled by user');
     expect(observed.final.completedAt).toBe(observed.acknowledged.state.completedAt);
     expect(observed.repeatUnchanged).toBe(true);
-    if ((point.endsWith('_before') && !point.endsWith('lock_before')) || point.endsWith('_after')) expect(observed.acknowledged.waitedOnRecoveryLock).toBe(true);
+    if (point.startsWith('event_')) {
+      expect(observed.eventHadRecoveryLock).toBe(true);
+      expect(observed.error).toBeUndefined();
+      expect(observed.acknowledged.waitedOnRecoveryLock).toBe(true);
+    } else if ((point.endsWith('_before') && !point.endsWith('lock_before')) || point.endsWith('_after')) expect(observed.acknowledged.waitedOnRecoveryLock).toBe(true);
   });
 });

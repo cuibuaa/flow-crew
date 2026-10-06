@@ -1,3 +1,4 @@
+import { errorMessage, optionValue, within } from './source_services/cli-inputs.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -465,10 +466,6 @@ export interface ShipSetupRefusedReport extends ShipSetupFacts {
 
 export type ShipSetupReport = ShipSetupReadyReport | ShipSetupRefusedReport;
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetupDependencies {
   const git = overrides.runGitCommand ?? runGitCommand;
   return {
@@ -488,19 +485,6 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
     stdout: overrides.stdout ?? process.stdout,
     stderr: overrides.stderr ?? process.stderr,
   };
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const current = args[index];
-  const prefix = `${option}=`;
-  if (current.startsWith(prefix)) {
-    const value = current.slice(prefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseShipSetupArgs(args: string[]): ParsedShipSetupArgs {
@@ -541,11 +525,6 @@ export function shipSetupUsage(): string {
     'Usage: flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]',
     'Creates the exact worktree, overlays missing declared-input descendants, records available test-population evidence, rechecks assertions, and records the validation baseline.',
   ].join('\n');
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function verificationBlockers(

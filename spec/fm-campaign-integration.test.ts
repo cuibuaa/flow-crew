@@ -1,8 +1,8 @@
+import { fixtureArtifactContract, declaredDispatch } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseYaml, stringifyYaml } from '../src/yaml-util.js';
 import { findAllReady, parseDispatchBlock, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
 import { summarizeCampaignPhaseProgress, readCampaignEntries, collapseEntriesForHealth } from '../src/campaigns.js';
 import type { StoreState, StageStatus } from '../src/store.js';
@@ -55,6 +55,13 @@ function makeRegistry(roles: string[]): Map<string, { name: string; description:
   const m = new Map<string, { name: string; description: string }>();
   for (const r of roles) m.set(r, { name: r, description: `${r} agent` });
   return m;
+}
+
+function declaredPlannerOutput(output: string, phaseOneReport = false): string {
+  return output.replace(/```yaml\n([\s\S]*?)```/, (_block, yaml: string) => '```yaml\n'
+    + declaredDispatch(yaml, phaseOneReport ? {
+      research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [], replays: [] },
+    } : {}) + '```');
 }
 
 const TASK_DESCRIPTION = `Foundation Model for Anomaly Detection (inspired by Chronos for forecasting)
@@ -127,7 +134,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutput, registry);
+      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutput, true), registry);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[2].is_gate).toBe(true);
@@ -138,9 +145,9 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 
     it('findAllReady correctly sequences Phase 1 stages', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'literature_survey', role: 'researcher', prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'research_report', role: 'coder', depends_on: ['literature_survey'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase1_gate', role: 'qa', depends_on: ['research_report'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('literature_survey', false), id: 'literature_survey', role: 'researcher', prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('research_report', false), id: 'research_report', role: 'coder', depends_on: ['literature_survey'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase1_gate', true), id: 'phase1_gate', role: 'qa', depends_on: ['research_report'], is_gate: true, prompt_template: 'x' }),
       ];
 
       const state = makeRunState({ stages: {
@@ -239,7 +246,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutput, registry);
+      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutput, true), registry);
       expect(stages).toHaveLength(3);
       expect(stages[0].id).toBe('implement_fm');
       // No research stages
@@ -321,7 +328,7 @@ Injecting research to explore alternative approaches.
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutputAfterPivot, registry);
+      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutputAfterPivot), registry);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[0].id).toBe('pivot_research');
@@ -331,10 +338,10 @@ Injecting research to explore alternative approaches.
   describe('Resume behavior within campaign iterations', () => {
     it('resume after implement_fm fails — keeps plan, retries from implement', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'plan', role: 'planner', dynamic_dispatch: true, prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'implement_fm', role: 'coder', depends_on: ['plan'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('plan', false), id: 'plan', role: 'planner', dynamic_dispatch: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('implement_fm', false), id: 'implement_fm', role: 'coder', depends_on: ['plan'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('run_benchmarks', false), id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
       ];
 
       // State after implement_fm fails
@@ -362,9 +369,9 @@ Injecting research to explore alternative approaches.
 
     it('resume after gate fails — retries gate only (no re-implementation)', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'implement_fm', role: 'coder', prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('implement_fm', false), id: 'implement_fm', role: 'coder', prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('run_benchmarks', false), id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
       ];
 
       const state = makeRunState({ stages: {

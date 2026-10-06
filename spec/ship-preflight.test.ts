@@ -28,7 +28,7 @@ import {
   extractBriefPathMentions,
   extractDeclaredBriefInputPaths,
   parseBriefInputs,
-  verifyBriefInputs,
+  verifyDeclaredBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runValidationCommand, type ValidationCommandRunner } from '../src/project-validation.js';
@@ -732,7 +732,7 @@ describe('ship-preflight declared brief inputs fact', () => {
     ].join('\n');
 
     expect(extractDeclaredBriefInputPaths(brief)).toEqual(['dependency_cache']);
-    const verification = verifyBriefInputs(brief, fixture.project);
+    const verification = verifyDeclaredBriefInputs(brief, fixture.project);
     expect(verification.inputs).toEqual([
       expect.objectContaining({ path: 'dependency_cache', exists: true, readable: true }),
     ]);
@@ -934,8 +934,8 @@ describe('ship-preflight declared brief inputs fact', () => {
     writeFileSync(path, content, 'utf-8');
     const digest = createHash('sha256').update(content).digest('hex');
 
-    const confirmed = verifyBriefInputs(
-      `# Inputs\nRead \`data/prices.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
+    const confirmed = verifyDeclaredBriefInputs(
+      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
       fixture.project,
     ).inputs[0];
     expect(confirmed.assertions.map(({ kind, state }) => ({ kind, state }))).toEqual([
@@ -944,8 +944,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       { kind: 'sha256', state: 'confirmed' },
     ]);
 
-    const refuted = verifyBriefInputs(
-      `# Inputs\nRead \`data/prices.csv\`; it has 3 rows, spans 2022-01-02 .. 2022-01-04, sha256: ${'0'.repeat(64)}.`,
+    const refuted = verifyDeclaredBriefInputs(
+      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 3 rows, spans 2022-01-02 .. 2022-01-04, sha256: ${'0'.repeat(64)}.`,
       fixture.project,
     ).inputs[0];
     expect(refuted.assertions.every((assertion) => assertion.state === 'refuted')).toBe(true);
@@ -961,12 +961,12 @@ describe('ship-preflight declared brief inputs fact', () => {
     const content = 'id,value\n1,a\n2,b\n';
     writeFileSync(join(fixture.project, 'data', 'manifest.csv'), content, 'utf-8');
     const digest = createHash('sha256').update(content).digest('hex');
-    const verification = verifyBriefInputs([
+    const verification = verifyDeclaredBriefInputs([
       '---',
-      'input_manifest:',
-      '  path: data/manifest.csv',
-      '  rows: 2',
-      `  sha256: ${digest}`,
+      'inputs:',
+      '  - path: data/manifest.csv',
+      '    rows: 2',
+      `    sha256: ${digest}`,
       'terminal_states:',
       '  complete:',
       '    paths: [docs/result.md]',
@@ -987,12 +987,12 @@ describe('ship-preflight declared brief inputs fact', () => {
     mkdirSync(join(fixture.project, 'archive', 'nested'), { recursive: true });
     writeFileSync(join(fixture.project, 'archive', 'one.txt'), 'one', 'utf-8');
     writeFileSync(join(fixture.project, 'archive', 'nested', 'two.txt'), 'two', 'utf-8');
-    const confirmed = verifyBriefInputs(
-      '# Inputs\nConsume `archive/`; it contains 2 files.',
+    const confirmed = verifyDeclaredBriefInputs(
+      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 2 files.',
       fixture.project,
     ).inputs[0].assertions[0];
-    const refuted = verifyBriefInputs(
-      '# Inputs\nConsume `archive/`; it contains 3 files.',
+    const refuted = verifyDeclaredBriefInputs(
+      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 3 files.',
       fixture.project,
     ).inputs[0].assertions[0];
     expect(confirmed).toMatchObject({ kind: 'file_count', state: 'confirmed', observed: 2 });
@@ -1003,8 +1003,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       'start_date,end_date\n2022-01-01,2022-01-02\n',
       'utf-8',
     );
-    const ambiguous = verifyBriefInputs(
-      '# Inputs\nRead `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-02.',
+    const ambiguous = verifyDeclaredBriefInputs(
+      '---\ninputs: [ambiguous.csv]\n---\n# Inputs\nRead `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-02.',
       fixture.project,
     ).inputs[0].assertions[0];
     expect(ambiguous).toMatchObject({
@@ -1013,8 +1013,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       reason: expect.stringContaining('unambiguous'),
     });
 
-    const unbound = verifyBriefInputs(
-      '# Inputs\nRead `first.csv` and `second.csv`; together they contain 2 rows.',
+    const unbound = verifyDeclaredBriefInputs(
+      '---\ninputs:\n  - paths: [first.csv, second.csv]\n    rows: 2\n---',
       fixture.project,
     );
     expect(unbound.inputs.every((input) => input.assertions.length === 0)).toBe(true);

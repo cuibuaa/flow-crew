@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync 
 import { join } from 'node:path';
 import { fcGlobalDir, runsRoot, type StoreState } from './store.js';
 import { TERMINAL_STATUSES } from './lifecycle-status.js';
+import { registerEngineOwnedSqlitePath, RUN_INDEX_FILENAME } from './engine-owned-carriers.js';
 
 const require = createRequire(import.meta.url);
 
@@ -56,7 +57,7 @@ function countRunDirs(projectDir: string): number {
 }
 
 function dbPath(_projectDir: string): string {
-  return join(fcGlobalDir(), 'run-index.sqlite');
+  return join(fcGlobalDir(), RUN_INDEX_FILENAME);
 }
 
 function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | null {
@@ -69,6 +70,7 @@ function loadSqlite(): { DatabaseSync: new (path: string) => DatabaseSync } | nu
 
 function openDb(projectDir: string): DatabaseSync | null {
   const path = dbPath(projectDir);
+  registerEngineOwnedSqlitePath(path);
   const cached = dbHandles.get(path);
   if (cached) return cached;
   const sqlite = loadSqlite();

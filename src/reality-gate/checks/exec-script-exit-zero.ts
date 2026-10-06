@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawnEngineChild, withEngineCommandBoundary } from '../../write-boundary.js';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join, posix } from 'node:path';
+import { isAbsolute, join, posix, resolve } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { CheckContext, CheckResult, RealityCheck, RealityGateExit } from '../types.js';
 import { classifyVersionedJsonShapeFailure } from '../versioned-json-admission.js';
@@ -38,6 +38,13 @@ function commandNotFound(stderr: string): string | undefined {
 export default class ExecScriptExitZeroCheck implements RealityCheck {
   static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Scripts that use `git archive` must declare every repository input in `archive_paths`; each path is verified in `archive_ref` (default `HEAD`) before the script runs. Exit 127 with a command-not-found diagnostic and narrowly recognized unbound multi-shape checks against versioned JSON are advisory with their failed execution preserved.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number, archive_paths?: string[] (required with git archive), archive_ref?: string (default HEAD)' };
   async run(raw: object, context: CheckContext) {
+    return withEngineCommandBoundary(context.commandBoundary ?? {
+      projectDir: context.projectDir,
+      runDir: resolve(context.taskDir) === resolve(context.projectDir) ? undefined : context.taskDir,
+      stageId: '_reality', authority: 'project-command',
+    }, () => this.runConfined(raw, context));
+  }
+  private async runConfined(raw: object, context: CheckContext) {
     const params = raw as Params;
     if (typeof params.script !== 'string') return result(false, '`params.script` must be provided; add a failure-capable script and rerun the check.');
     const args = Array.isArray(params.args) ? params.args : [];
@@ -208,11 +215,12 @@ function run(
   evidenceCommand = renderSpawnCommand(command, args),
 ): Promise<Execution> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { child, stop, boundaryError } = spawnEngineChild(command, args, { cwd });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let settled = false;
+    let spawnError: string | undefined;
     const finish = (code: number | null, signal: NodeJS.Signals | null, finalStderr = stderr) => {
       if (settled) return;
       settled = true;
@@ -230,17 +238,20 @@ function run(
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill('SIGTERM'); } catch { /* noop */ }
+      stop();
     }, timeoutMs);
     child.stdout?.setEncoding('utf-8');
     child.stderr?.setEncoding('utf-8');
     child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
     child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
     child.on('error', (err) => {
-      finish(1, null, stderr + String(err));
+      spawnError = String(err);
     });
     // `close` follows process exit only after the stdio streams have closed, so
     // the durable report cannot miss output that arrived at the exit boundary.
-    child.on('close', (code, signal) => finish(code, signal));
+    child.on('close', (code, signal) => {
+      const error = boundaryError() ?? spawnError;
+      finish(error ? code || 1 : code, signal, error ? `${stderr}\n${error}` : stderr);
+    });
   });
 }

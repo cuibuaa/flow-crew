@@ -1,3 +1,4 @@
+import { artifacts, inputFile, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -165,7 +166,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     expect(readdirSync(runDirectory).some((name) => /no_candidate_consumed\.json$/.test(name))).toBe(true);
   });
 
-  it('finishes a run from a completed producer that wrote the transposed sidecar', async () => {
+  it('finishes a declared run from a completed producer with the canonical no-candidate outcome', async () => {
     const root = temporaryRoot('malformed-round-finishes');
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
@@ -187,11 +188,13 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       `    paths: [${ceilingPath}]`,
       '---',
       '# Completed malformed round finish replay',
+      '## What the report must show',
+      '1. Recover the recorded no-candidate alias and finish at the ceiling.',
     ].join('\n');
     const workflow: WorkflowConfig = {description: '', 
       name: 'malformed-round-finishes',
       defaults: { max_iterations: 2 },
-      stages: [{
+      stages: [...coveredStages({ artifact_contract: artifacts([{ id: 'no_candidate', root: 'project', path: sidecar }]),
         id: 'measure',
         role: 'worker',
         depends_on: [],
@@ -202,14 +205,26 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
         skills: [],
         dynamic_dispatch: false,
         is_gate: false,
+      }, brief), {
+        artifact_contract: artifacts([{ id: 'ceiling', root: 'project', path: ceilingPath }]),
+        id: 'ceiling', role: 'worker', depends_on: ['fixture_audit'],
+        dependency_reasons: { fixture_audit: 'The admitted terminal sink follows the audited round.' },
+        scope: [ceilingPath], criterion_refs: [], prompt_template: 'Write the selected ceiling artifact.',
+        skills: [], dynamic_dispatch: false, is_gate: false,
+        condition: `research.terminalPath == ${ceilingPath}`,
       }],
     };
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(opts)) return { output: 'fixture audit settled', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === 'ceiling') {
+          write(join(projectDir, ceilingPath), 'Honest ceiling after the recovered no-candidate round.\n');
+          return { output: 'ceiling settled', exitCode: 0, duration_ms: 1, writes: [ceilingPath], writeAttribution: 'structured' };
+        }
         write(join(projectDir, sidecar), JSON.stringify({
           label: 'completed-dose-floor-round',
-          status: 'no_candidate',
+          outcome: 'no_candidate',
           reason: 'every measured candidate violated a hard constraint',
         }));
         return {
@@ -228,11 +243,8 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     );
     const runDirectory = runDir(projectDir, final.runId);
 
-    expect(final.status).toBe('ceiling_hit');
+    expect(final.status, JSON.stringify({ reason: final.failureReason, parked: final.parked, stages: final.stages })).toBe('ceiling_hit');
     expect(final.stages.measure).toMatchObject({ status: 'complete', duration_ms: 18_690_000 });
-    expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
-      kind: 'no_candidate_status_alias',
-    });
     expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
       expect.objectContaining({ label: 'completed-dose-floor-round', outcome: 'no_candidate' }),
     ]);
@@ -302,7 +314,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     const workflow: WorkflowConfig = {description: '', 
       name: 'malformed-round-replan',
       defaults: { max_iterations: 2 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'plan',
         role: 'worker',
         depends_on: [],
@@ -326,12 +338,12 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
           planPrompts.push(prompt);
           const stages = planCalls === 1
             ? [
-                {dynamic_dispatch: false, 
+                { artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
                   id: 'measure', role: 'worker', depends_on: [], dependency_reasons: {},
                   scope: [resultFile, sidecar], criterion_refs: [],
                   prompt_template: 'write exactly one research round artifact',
                 },
-                ...terminalPaths.map((path, index) => ({dynamic_dispatch: false, 
+                ...terminalPaths.map((path, index) => ({ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
                   id: ['write_ship', 'write_ceiling', 'write_escalation'][index],
                   role: 'worker',
                   depends_on: ['measure'],
@@ -342,7 +354,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
                   prompt_template: `write ${path} only when selected`,
                 })),
               ]
-            : [{dynamic_dispatch: false, 
+            : [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
                 id: `orphan_round_${planCalls}`,
                 role: 'worker',
                 depends_on: [],
@@ -463,7 +475,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
 
   it('enumerates terminal-owner cardinalities zero, one, and three through admission', () => {
     const terminalPaths = ['artifacts/ship.md', 'artifacts/ceiling.md', 'artifacts/escalation.md'];
-    const stage = (id: string, scope: string[]): StageConfig => ({
+    const stage = (id: string, scope: string[]): StageConfig => ({ artifact_contract: artifacts([], [], [], []),
       id,
       role: 'worker',
       depends_on: [],
@@ -523,7 +535,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
         '## Reality checks',
         '',
         stringifyYaml({
-          checks: [{
+          checks: [{ reads: [inputFile('file_0', '.fc/runs/prior/evidence.json')],
             name: 'historical-run-evidence',
             type: 'file-exists-nonempty',
             params: { paths: ['.fc/runs/prior/evidence.json'] },
@@ -536,6 +548,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     });
 
     expect(errors).toEqual([
+      expect.stringContaining('ARTIFACT_INPUT_ABSENT'),
       'reality check "historical-run-evidence" references absent .fc/runs/prior/evidence.json, but no admitted stage or framework emitter owns it',
     ]);
   });
@@ -544,7 +557,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     const root = temporaryRoot('retry-summary');
     const dispatchPath = join(root, 'dispatch.yaml');
     const dispatches = ['first', 'second', 'third'].map((label) => stringifyYaml({
-      stages: [{dynamic_dispatch: false, 
+      stages: [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
         id: `work_${label}`,
         role: 'worker',
         depends_on: [],
@@ -611,7 +624,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     const workflow: WorkflowConfig = {description: '', 
       name: 'planner-refusal-replay',
       defaults: { max_iterations: 1 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'plan',
         role: 'worker',
         depends_on: [],
@@ -630,7 +643,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
         if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
         if (opts.stageId !== 'plan') return { output: 'unexpected work stage', exitCode: 0, duration_ms: 1 };
         planCalls += 1;
-        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({dynamic_dispatch: false, 
+        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
           id,
           role: 'worker',
           depends_on: id === 'execute_round' ? ['repair_round', 'write_ship'] : [],
@@ -1168,7 +1181,7 @@ describe('5 — violation path at durable and human event layers', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'live-event-path-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'writer',
         role: 'worker',
         depends_on: [],
@@ -1252,8 +1265,8 @@ describe('5 — violation path at durable and human event layers', () => {
   }, 30_000);
 });
 
-describe('6 — prompt-named artifacts and report-published commands', () => {
-  it('extracts unquoted exact filenames and distinguishes fresh production from a stale preimage', () => {
+describe('6 — exact declared outputs and replay evidence', () => {
+  it('refuses stale or missing declarations and accepts a freshly produced exact output', () => {
     const root = temporaryRoot('artifact-production-provenance');
     const projectDir = join(root, 'project');
     const runDirectory = join(root, 'run');
@@ -1264,6 +1277,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const stale = inspectStageArtifactContract({
       stageId: 'stale',
       template: 'Write `reports.md`.',
+      artifactContract: artifacts([{ id: 'report', root: 'project', path: 'reports.md' }]),
       projectDir,
       runDir: runDirectory,
       writes: [],
@@ -1272,42 +1286,45 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     expect(stale.producedPromptArtifacts).toEqual([]);
     expect(stale.violations).toEqual([
       expect.objectContaining({
-        mention: 'reports.md',
-        reason: expect.stringContaining('predated the stage'),
+        mention: 'project:reports.md',
+        reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE'),
       }),
     ]);
 
     const unquoted = inspectStageArtifactContract({
       stageId: 'unquoted',
       template: 'Write evidence_before.md.',
+      artifactContract: artifacts([{ id: 'evidence', root: 'project', path: 'evidence_before.md' }]),
       projectDir,
       runDir: runDirectory,
       writes: [],
     });
     expect(unquoted.obligations).toEqual([
-      expect.objectContaining({ mention: 'evidence_before.md', kind: 'prompt_artifact' }),
+      expect.objectContaining({ mention: 'project:evidence_before.md', kind: 'declared_artifact' }),
     ]);
     expect(unquoted.violations).toHaveLength(1);
 
     const inputReference = inspectStageArtifactContract({
       stageId: 'input-reference',
       template: 'Write only the terminal path selected by research_decision.json.',
+      artifactContract: artifacts(),
       projectDir,
       runDir: runDirectory,
       writes: [],
     });
     expect(inputReference.obligations).toEqual([]);
 
+    const artifactContract = artifacts([{ id: 'fresh', root: 'project', path: 'fresh_evidence.json' }]);
     const freshTemplate = 'Write fresh_evidence.json.';
     const preimages = captureStageArtifactContractPreimages({
-      template: freshTemplate,
+      template: freshTemplate, artifactContract,
       projectDir,
       runDir: runDirectory,
     });
     write(join(projectDir, 'fresh_evidence.json'), '{"fresh":true}\n');
     const fresh = inspectStageArtifactContract({
       stageId: 'fresh',
-      template: freshTemplate,
+      template: freshTemplate, artifactContract,
       projectDir,
       runDir: runDirectory,
       preimages,
@@ -1325,7 +1342,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'artifact-stale-stage-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([{ id: 'report', root: 'project', path: 'reports.md' }]),
         id: 'capture',
         role: 'worker',
         depends_on: [],
@@ -1357,11 +1374,11 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
       error: expect.stringContaining('artifact contract violation'),
     });
     expect(audit.obligations).toEqual([
-      expect.objectContaining({ mention: 'reports.md' }),
+      expect.objectContaining({ mention: 'project:reports.md' }),
     ]);
     expect(audit.producedPromptArtifacts).toEqual([]);
     expect(audit.violations).toEqual([
-      expect.objectContaining({ reason: expect.stringContaining('predated the stage') }),
+      expect.objectContaining({ reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE') }),
     ]);
   }, 30_000);
 
@@ -1374,7 +1391,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
       name: 'artifact-promise-replay',
       defaults: { max_iterations: 1 },
       stages: [
-        {
+        { artifact_contract: artifacts([], [], [], []),
           id: 'plan',
           role: 'worker',
           depends_on: [],
@@ -1386,12 +1403,17 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
           dynamic_dispatch: false,
           is_gate: false,
         },
-        {
+        { artifact_contract: artifacts([
+            { id: 'before_md', root: 'run', path: 'evidence_before.md' },
+            { id: 'before_json', root: 'run', path: 'evidence_before.json' },
+            { id: 'report', root: 'project', path: 'reports/final.md' },
+            { id: 'test', root: 'project', path: 'spec/missing-replay.test.ts' },
+          ], [], [{ id: 'evidence', runner: 'node_test', targets: ['test'], argv: [], expected: { exit_code: 0, failures: [] } }]),
           id: 'capture',
           role: 'worker',
           depends_on: ['plan'],
           dependency_reasons: { plan: 'consume the planner-authored artifact contract' },
-          scope: ['reports/final.md'],
+          scope: ['reports/final.md', 'spec/missing-replay.test.ts'],
           criterion_refs: [],
           prompt_template: [
             'Write {run_dir}/evidence_before.md and {run_dir}/evidence_before.json.',
@@ -1457,14 +1479,14 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     expect(readJson(join(runDirectory, 'stages', 'capture', 'artifact_contract.json'))).toMatchObject({
       stageId: 'capture',
       obligations: expect.arrayContaining([
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.md` }),
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.json` }),
-        expect.objectContaining({ mention: 'spec/missing-replay.test.ts' }),
+        expect.objectContaining({ mention: 'run:evidence_before.md' }),
+        expect.objectContaining({ mention: 'run:evidence_before.json' }),
+        expect.objectContaining({ mention: 'project:spec/missing-replay.test.ts' }),
       ]),
       violations: expect.arrayContaining([
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.md` }),
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.json` }),
-        expect.objectContaining({ mention: 'spec/missing-replay.test.ts' }),
+        expect.objectContaining({ mention: 'run:evidence_before.md' }),
+        expect.objectContaining({ mention: 'run:evidence_before.json' }),
+        expect.objectContaining({ mention: 'project:spec/missing-replay.test.ts' }),
       ]),
     });
   }, 30_000);
@@ -1474,11 +1496,16 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
-    const replayPath = 'spec/existing-replay.test.ts';
+    const replayPath = 'spec/existing-replay.test.cjs';
     const workflow: WorkflowConfig = {description: '', 
       name: 'artifact-promise-control',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([
+          { id: 'before_md', root: 'run', path: 'evidence_before.md' },
+          { id: 'before_json', root: 'run', path: 'evidence_before.json' },
+          { id: 'report', root: 'project', path: 'reports/final.md' },
+          { id: 'test', root: 'project', path: replayPath },
+        ], [], [{ id: 'evidence', runner: 'node_test', targets: ['test'], argv: [], expected: { exit_code: 0, failures: [] } }]),
         id: 'capture',
         role: 'worker',
         depends_on: [],
@@ -1501,7 +1528,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
         if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
         write(join(opts.runDir, 'evidence_before.md'), '# exact\n');
         write(join(opts.runDir, 'evidence_before.json'), '{"exact":true}\n');
-        write(join(projectDir, replayPath), 'import { it } from "vitest"; it("exists", () => {});\n');
+        write(join(projectDir, replayPath), 'const { test } = require("node:test"); test("exists", () => {});\n');
         write(join(projectDir, 'reports', 'final.md'), `# Replay\n\n\`npm exec vitest -- run ${replayPath}\`\n`);
         return {
           output: 'published exact evidence and command',
@@ -1521,6 +1548,7 @@ describe('6 — prompt-named artifacts and report-published commands', () => {
 
     expect(final.status).toBe('complete');
     expect(audit.obligations).toHaveLength(4);
+    expect(audit.replayExecutions[0]).toMatchObject({ status: 'passed', executedTests: 1 });
     expect(audit.violations).toEqual([]);
     expect(existsSync(join(projectDir, 'reports', 'illustrative-only.md'))).toBe(false);
     expect(existsSync(join(projectDir, 'reports', 'optional-only.md'))).toBe(false);

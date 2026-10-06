@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -8,13 +9,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   cmdAuditReportWithDeps,
   extractAuditClaims,
-  parseDirectArgv,
   runAuditReport,
-  type AuditCommandRunner,
 } from '../src/cli-audit-report.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
@@ -87,64 +86,47 @@ function auditArgs(extra: string[] = []): string[] {
 }
 
 describe('flowcrew audit-report claim re-derivation', () => {
-  it('confirms line, recursive-file, Markdown-section, command, and JSON-field claims', async () => {
+  it('confirms line, recursive-file, Markdown-section, and JSON-field claims', async () => {
     writeReport([
       '# Final verification',
       '`docs/sample.md`: 4 lines.',
       '`artifacts` contains 2 files.',
       '`docs/sample.md`: 2 sections.',
-      'Validation command `npm test`: exit 0; 3 passed, 0 failed.',
       '`artifacts/metrics.json` field `series.percentile` = 97.',
     ]);
-    const runner = vi.fn<AuditCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: 'Tests  3 passed, 0 failed\n',
-    }));
 
-    const report = await runAuditReport(auditArgs(), { runCommand: runner });
+    const report = await runAuditReport(auditArgs(), {});
 
-    expect(report.totals).toEqual({ confirmed: 5, contradicted: 0, not_checkable: 0 });
+    expect(report.totals).toEqual({ confirmed: 4, contradicted: 0, not_checkable: 0 });
     expect(report.claims.map((claim) => [claim.kind, claim.classification, claim.observed])).toEqual([
       ['line_count', 'confirmed', 4],
       ['file_count', 'confirmed', 2],
       ['section_count', 'confirmed', 2],
-      ['validation_command', 'confirmed', { exitCode: 0, tallies: { passed: 3, failed: 0 } }],
       ['json_field', 'confirmed', 97],
     ]);
-    expect(runner).toHaveBeenCalledOnce();
-    expect(runner).toHaveBeenCalledWith({ command: 'npm', args: ['test'], cwd: fixture.project });
   });
 
-  it('contradicts falsified counts, validation evidence, and attributed JSON values and exits non-zero', async () => {
+  it('contradicts falsified counts and attributed JSON values and exits non-zero', async () => {
     writeReport([
       '# Falsified report',
       '`docs/sample.md`: 7 lines.',
-      'Validation command `npm test`: exit 0; 4 passed, 0 failed.',
       '`artifacts/metrics.json` field `/series/percentile` = 96.',
     ]);
-    const runner = vi.fn<AuditCommandRunner>(() => ({
-      exitCode: 1,
-      stdout: 'Tests  3 passed, 1 failed\n',
-    }));
     const stdout = new Capture();
     const stderr = new Capture();
 
     const code = await cmdAuditReportWithDeps(auditArgs(), {
-      runCommand: runner,
       stdout: stdout.writer,
       stderr: stderr.writer,
     });
-    const report = await runAuditReport(auditArgs(), { runCommand: runner });
+    const report = await runAuditReport(auditArgs(), {});
 
     expect(code).toBe(1);
     expect(stderr.value).toBe('');
     expect(stdout.value).toContain('CONTRADICTED claim-1');
     expect(stdout.value).toContain('CONTRADICTED claim-2');
-    expect(stdout.value).toContain('CONTRADICTED claim-3');
-    expect(report.totals).toEqual({ confirmed: 0, contradicted: 3, not_checkable: 0 });
-    expect(report.claims[1].reason).toContain('exit code expected 0, observed 1');
-    expect(report.claims[1].reason).toContain('passed expected 4, observed 3');
-    expect(report.claims[2]).toMatchObject({ expected: 96, observed: 97 });
+    expect(report.totals).toEqual({ confirmed: 0, contradicted: 2, not_checkable: 0 });
+    expect(report.claims[1]).toMatchObject({ expected: 96, observed: 97 });
   });
 
   it('keeps unsupported, ambiguous, missing-field, unsafe-command, and escaping-path claims not_checkable without a failing exit', async () => {
@@ -160,44 +142,28 @@ describe('flowcrew audit-report claim re-derivation', () => {
       'Validation command `npm test | tee output.log`: exit 0.',
       `\`${escaping}\` field \`value\` = 1.`,
     ]);
-    const runner = vi.fn<AuditCommandRunner>();
     const stdout = new Capture();
     const stderr = new Capture();
 
     const code = await cmdAuditReportWithDeps(auditArgs(), {
-      runCommand: runner,
       stdout: stdout.writer,
       stderr: stderr.writer,
     });
 
     expect(code).toBe(0);
     expect(stderr.value).toBe('');
-    expect(runner).not.toHaveBeenCalled();
     expect(stdout.value).toContain('Totals: confirmed=0 contradicted=0 not_checkable=5');
     expect(stdout.value).toContain('does not judge whether the measured quantity was the right one');
   });
 
-  it('supports a multiline validation heading and quoted argv without a shell', async () => {
-    writeReport([
-      '# Checks',
-      '### `node --test "spec/a file.test.js"`',
-      'Exit code: 0',
-      'Tallies: 2 passed, 0 failed',
-      '',
-    ]);
-    const runner = vi.fn<AuditCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: '2 passed, 0 failed\n',
-    }));
-
-    const report = await runAuditReport(auditArgs(), { runCommand: runner });
-
-    expect(report.totals.confirmed).toBe(1);
-    expect(runner).toHaveBeenCalledWith({
-      command: 'node',
-      args: ['--test', 'spec/a file.test.js'],
-      cwd: fixture.project,
-    });
+  it('does not execute inline or multiline report commands and names the replay declaration', async () => {
+    const marker = join(fixture.project, 'command-marker');
+    const command = `node -e "require('fs').writeFileSync('${marker}', 'executed')"`;
+    writeReport([`Validation command \`${command}\`: exit 0.`, `### \`${command}\``, 'Exit code: 0']);
+    const report = await runAuditReport(auditArgs());
+    expect(report.totals).toEqual({ confirmed: 0, contradicted: 0, not_checkable: 1 });
+    expect(report.claims[0].reason).toContain('stages[].artifact_contract.replays');
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('resolves project: and run: prefixes and JSON Pointer array segments', async () => {
@@ -207,7 +173,7 @@ describe('flowcrew audit-report claim re-derivation', () => {
       '`run:round.json` field `/rows/0/result` = -1.25.',
     ]);
 
-    const report = await runAuditReport(auditArgs(), { runCommand: vi.fn<AuditCommandRunner>() });
+    const report = await runAuditReport(auditArgs(), {});
 
     expect(report.totals).toEqual({ confirmed: 2, contradicted: 0, not_checkable: 0 });
   });
@@ -218,7 +184,7 @@ describe('flowcrew audit-report claim re-derivation', () => {
     symlinkSync(outside, join(fixture.project, 'artifacts', 'escape.json'));
     writeReport(['`artifacts/escape.json` field `value` = 9.']);
 
-    const report = await runAuditReport(auditArgs(), { runCommand: vi.fn<AuditCommandRunner>() });
+    const report = await runAuditReport(auditArgs(), {});
 
     expect(report.totals).toEqual({ confirmed: 0, contradicted: 0, not_checkable: 1 });
     expect(report.claims[0].reason).toContain('outside its allowed root');
@@ -235,7 +201,7 @@ describe('flowcrew audit-report claim re-derivation', () => {
     ].join('\n'), 'utf-8');
     writeReport(['`docs/fenced.md`: 2 sections.']);
 
-    const report = await runAuditReport(auditArgs(), { runCommand: vi.fn<AuditCommandRunner>() });
+    const report = await runAuditReport(auditArgs(), {});
 
     expect(report.claims[0]).toMatchObject({ classification: 'confirmed', observed: 2 });
   });
@@ -261,14 +227,5 @@ describe('audit-report claim/token parsers', () => {
     expect(claims).toEqual([
       expect.objectContaining({ kind: 'unsupported', line: 1 }),
     ]);
-  });
-
-  it('tokenizes quotes and escapes but rejects shell composition', () => {
-    expect(parseDirectArgv('npm test -- --name "two words"')).toEqual({
-      argv: ['npm', 'test', '--', '--name', 'two words'],
-    });
-    expect(parseDirectArgv('npm test | tee output.log')).toEqual({
-      reason: 'shell operator "|" is not argv-safe',
-    });
   });
 });

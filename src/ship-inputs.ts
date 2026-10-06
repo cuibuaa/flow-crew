@@ -988,16 +988,6 @@ function verifyParsedBriefInputs(
   };
 }
 
-/** Verify all legacy structured/prose input references. Retained for callers
- * whose contract explicitly treats prose as input evidence. */
-export function verifyBriefInputs(
-  brief: string,
-  projectRoot: string,
-  fs: ShipInputFileSystem = nodeShipInputFileSystem,
-): BriefInputVerification {
-  return verifyParsedBriefInputs(parseBriefInputs(brief), projectRoot, fs);
-}
-
 /** Verify only the launch-blocking frontmatter input declaration. */
 export function verifyDeclaredBriefInputs(
   brief: string,

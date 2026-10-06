@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
@@ -118,6 +119,7 @@ function waitThenReturnOnAbort(cleanDelayMs = 2_500): Adapter {
 
 function stageOptions() {
   return {
+      artifactContract: fixtureArtifactContract(stageId),
     stageId,
     role,
     dependsOn: [] as string[],

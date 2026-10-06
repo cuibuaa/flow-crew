@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,7 +49,7 @@ function workflow(maxIterations = 3): { config: WorkflowConfig; yaml: string } {
     config: {description: '', 
       name: 'default',
       defaults: { max_iterations: maxIterations },
-      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }

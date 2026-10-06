@@ -1,14 +1,15 @@
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
+import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
 import { CommandActivityTracker } from '../command-activity.js';
+import { engineChildAdapterHome, execEngineChildSync } from '../write-boundary.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -104,6 +105,7 @@ export interface ParsedCodexJsonl {
   output: string;
   /** Diagnostic from a terminal CLI event, separate from agent-authored text. */
   terminalError?: string;
+  providerFailure?: ProviderFailure;
   adapterFailureKind?: AdapterFailureKind;
   sessionId?: string;
   tokens_in?: number;
@@ -121,6 +123,7 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
   let sawTokensOut = false;
   const messages: string[] = [];
   let terminalError: string | undefined;
+  let providerFailure: ProviderFailure | undefined;
   const writes = new Set<string>();
 
   for (const line of output.split(/\r?\n/)) {
@@ -137,7 +140,10 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
     if (type === 'message' && event.role === 'assistant' && typeof event.content === 'string' && event.content.trim()) messages.push(event.content.trim());
     if (itemType === 'file_change' || type === 'file_change') collectFileChangePaths(item ?? event, writes, workDir);
 
-    if (type === 'turn.completed') terminalError = undefined;
+    if (type === 'turn.completed') {
+      terminalError = undefined;
+      providerFailure = undefined;
+    }
     if (type === 'error' || type === 'turn.failed' || itemType === 'error') {
       const nestedError = event.error && typeof event.error === 'object'
         ? event.error as Record<string, unknown>
@@ -148,6 +154,9 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
             : typeof item?.message === 'string' ? item.message
               : undefined;
       if (message?.trim()) terminalError = message.trim();
+      if (type === 'error' || type === 'turn.failed') {
+        providerFailure = providerFailureFromEvent('codex', event);
+      }
     }
 
     const usage = event.usage && typeof event.usage === 'object' ? event.usage as Record<string, unknown> : undefined;
@@ -165,6 +174,7 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
       ? [finalMessage, terminalError].filter(Boolean).join('\n')
       : (terminalError ?? finalMessage),
     ...(terminalError ? { terminalError } : {}),
+    ...(providerFailure ? { providerFailure } : {}),
     ...(adapterFailureKind ? { adapterFailureKind } : {}),
     sessionId,
     tokens_in: sawTokensIn ? tokensIn : undefined,
@@ -201,6 +211,14 @@ function syncCodexAuthFiles(codexHome: string): void {
   }
 }
 
+function isolateCodexCache(target: string, source: string): void {
+  try { if (lstatSync(target).isSymbolicLink()) unlinkSync(target); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (existsSync(target)) return;
+  if (existsSync(source)) cpSync(source, target, { recursive: true });
+  else mkdirSync(target, { recursive: true });
+}
+
 function linkSharedPluginsCache(codexHome: string): void {
   // Codex CLI clones a plugins repo into $CODEX_HOME/.tmp/plugins/ on first
   // run. Without intervention every per-stage codex_home re-clones it
@@ -209,6 +227,10 @@ function linkSharedPluginsCache(codexHome: string): void {
   // present and skips the clone.
   const sharedDir = process.env.CODEX_PLUGINS_CACHE
     || join(homedir(), '.codex-plugins-shared');
+  if (engineChildAdapterHome()) {
+    isolateCodexCache(join(codexHome, '.tmp', 'plugins'), sharedDir);
+    return;
+  }
   try {
     if (!existsSync(sharedDir)) mkdirSync(sharedDir, { recursive: true });
     const tmpDir = join(codexHome, '.tmp');
@@ -229,6 +251,10 @@ function linkSharedSkillsCache(codexHome: string): void {
   // stages re-use the bytes.
   const sharedDir = process.env.CODEX_SKILLS_CACHE
     || join(homedir(), '.codex-skills-shared');
+  if (engineChildAdapterHome()) {
+    isolateCodexCache(join(codexHome, 'skills'), sharedDir);
+    return;
+  }
   try {
     if (!existsSync(sharedDir)) mkdirSync(sharedDir, { recursive: true });
     const link = join(codexHome, 'skills');
@@ -317,16 +343,12 @@ export interface CodexCapabilityMemory {
 let cachedCodexVersion: string | undefined;
 
 function detectedCodexVersion(executable: string): string {
-  if (cachedCodexVersion !== undefined && executable === 'codex') return cachedCodexVersion;
+  const guarded = engineChildAdapterHome() !== undefined;
+  if (!guarded && cachedCodexVersion !== undefined && executable === 'codex') return cachedCodexVersion;
   let version = 'unknown';
-  try {
-    version = execFileSync(executable, ['--version'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-    }).trim() || 'unknown';
-  } catch { /* an unavailable CLI will fail normally when the adapter starts */ }
-  if (executable === 'codex') cachedCodexVersion = version;
+  const result = execEngineChildSync(executable, ['--version'], 2_000);
+  if (result.status === 0) version = result.stdout.trim() || 'unknown';
+  if (!guarded && executable === 'codex') cachedCodexVersion = version;
   return version;
 }
 
@@ -586,6 +608,7 @@ export class CodexAdapter implements Adapter {
           : classifyAdapterFailure(rawOutput);
         result.adapterError = kind !== undefined;
         result.adapterFailureKind = kind;
+        if (result.exitCode !== 125 && !result.spawnError) result.providerFailure = parsed.providerFailure;
       }
       delete result.stdout;
       delete result.stderr;

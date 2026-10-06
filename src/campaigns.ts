@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   campaignsRoot as storeCampaignsRoot,
@@ -487,11 +487,4 @@ export function summarizeCampaignPhaseProgress(entries: CampaignHistoryEntry[]):
     currentPhase,
     latest,
   };
-}
-
-export function campaignExists(projectDir: string, campaignId: string): boolean {
-  const storageKey = resolveCampaignStorageKey({ campaignId });
-  if (!storageKey) return false;
-  if (listCampaigns(projectDir).some((campaign) => campaign.storageKey === storageKey)) return true;
-  return existsSync(join(campaignsRoot(projectDir), `${storageKey}.jsonl`));
 }

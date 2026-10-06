@@ -97,8 +97,8 @@ describe('scheduler-proven parallel writer leases', () => {
       name: 'readonly-parallel',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [
-        { id: 'readonly_left', role: 'coder', depends_on: [], scope: [], prompt_template: 'inspect', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
-        { id: 'readonly_right', role: 'coder', depends_on: [], scope: [], prompt_template: 'inspect', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
+        { id: 'readonly_left', role: 'coder', depends_on: [], scope: [], prompt_template: 'inspect', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } },
+        { id: 'readonly_right', role: 'coder', depends_on: [], scope: [], prompt_template: 'inspect', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } },
       ],
     };
     const yaml = [
@@ -110,9 +110,11 @@ describe('scheduler-proven parallel writer leases', () => {
       '  - id: readonly_left',
       '    role: coder',
       '    scope: []',
+      '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
       '  - id: readonly_right',
       '    role: coder',
       '    scope: []',
+      '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
     ].join('\n');
     const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((stage) => stage.id));
     writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
@@ -226,6 +228,7 @@ describe('scheduler-proven parallel writer leases', () => {
       role: role(),
       dependsOn: [],
       promptTemplate: 'hold the same writer partition',
+      artifactContract: { version: 1 as const, produces: [], reads: [], replays: [] },
       timeout_ms: 5_000,
       projectDir,
       runId: created.runId,

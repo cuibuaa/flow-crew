@@ -1,3 +1,4 @@
+import { artifacts } from '../spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Engine terminal truthfulness contracts for budget, integrity, summary, and confirm state.
@@ -28,7 +29,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 6', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(): string {

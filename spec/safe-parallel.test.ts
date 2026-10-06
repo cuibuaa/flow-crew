@@ -1,3 +1,4 @@
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,11 +23,12 @@ import {
   type WriteAttribution,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
+import { writeKG } from '../src/knowledge-graph.js';
 
 let projectDir: string;
 
 function stage(input: Partial<StageConfig> & Pick<StageConfig, 'id'>): StageConfig {
-  return StageConfigSchema.parse({ role: 'coder', prompt_template: 'work', ...input });
+  return StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract(input.id, input.is_gate === true), role: 'coder', prompt_template: 'work', ...input });
 }
 
 function stateFor(stages: StageConfig[]): StoreState {
@@ -81,7 +83,7 @@ async function runStatic(
     '    role: coder',
     `    scope: ${JSON.stringify(scopes[1])}`,
   ].join('\n');
-  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
   writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   let active = 0;
@@ -125,8 +127,10 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
     '    role: coder',
     `    scope: ${JSON.stringify(scopes[1])}`,
   ].join('\n');
-  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
+  const now = new Date().toISOString();
+  writeKG(projectDir, created.runId, { nodes: [], edges: [], metadata: { createdAt: now, updatedAt: now } });
   writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   mkdirSync(join(projectDir, 'src'), { recursive: true });
 

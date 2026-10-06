@@ -106,7 +106,7 @@ describe('darwin branch, driven from any platform', () => {
     setPlatform('darwin');
     const marker = 'flowcrew-darwin-bind-probe';
     ownedChild = await spawnOwnedChild(marker);
-    const runPath = join(root, 'darwin-run');
+    const runPath = join(root, 'run-darwin');
     mkdirSync(runPath);
 
     writeSchedulerProcessIdentity(runPath, 'run-darwin', ownedChild.pid!);
@@ -116,7 +116,7 @@ describe('darwin branch, driven from any platform', () => {
   it('refuses to bind when the recorded run id does not match', async () => {
     setPlatform('darwin');
     ownedChild = await spawnOwnedChild('flowcrew-darwin-runid-probe');
-    const runPath = join(root, 'darwin-runid');
+    const runPath = join(root, 'run-darwin');
     mkdirSync(runPath);
 
     writeSchedulerProcessIdentity(runPath, 'run-darwin', ownedChild.pid!);
@@ -140,7 +140,7 @@ describe('darwin branch, driven from any platform', () => {
     setPlatform('darwin');
     ownedChild = await spawnOwnedChild('flowcrew-darwin-dead-probe');
     const pid = ownedChild.pid!;
-    const runPath = join(root, 'darwin-dead');
+    const runPath = join(root, 'run-darwin');
     mkdirSync(runPath);
     writeSchedulerProcessIdentity(runPath, 'run-darwin', pid);
 

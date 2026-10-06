@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -35,7 +35,7 @@ function workflow(maxIterations: number, dynamicDispatch = true): { config: Work
     config: {description: '', 
       name: 'replan-stage-obligation',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan',
         role: 'planner',
         depends_on: [],

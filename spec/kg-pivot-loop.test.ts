@@ -115,58 +115,6 @@ describe('Group A: Dead End Auto-Marking', () => {
   });
 });
 
-// ─── GROUP B: Research Injection ─────────────────────────────────────────────
-
-describe('Group B: Research Injection', () => {
-  function buildPlannerPrompt(basePrompt: string, researchInjection?: { alertType: string; message: string }): string {
-    let prompt = basePrompt;
-    if (researchInjection) {
-      prompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${researchInjection.alertType}. ${researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation. Check dead_end nodes in the knowledge graph to understand what has been tried and failed.\n\n` + prompt;
-    }
-    return prompt;
-  }
-
-  it('B1: researchInjection set → planner prompt contains pivot warning', () => {
-    const prompt = buildPlannerPrompt('Plan next steps', { alertType: 'plateau', message: '3 entries within ±5%' });
-    expect(prompt).toContain('PIVOT REQUIRED');
-  });
-
-  it('B2: pivot warning includes the alert type', () => {
-    const prompt = buildPlannerPrompt('Plan', { alertType: 'regression', message: 'scores declining' });
-    expect(prompt).toContain('regression');
-  });
-
-  it('B3: pivot warning includes the alert message', () => {
-    const prompt = buildPlannerPrompt('Plan', { alertType: 'plateau', message: '5 entries within ±5%' });
-    expect(prompt).toContain('5 entries within ±5%');
-  });
-
-  it('B4: planner prompt mentions research stage when pivot required', () => {
-    const prompt = buildPlannerPrompt('Plan', { alertType: 'plateau', message: 'stalled' });
-    expect(prompt).toContain('research stage');
-  });
-
-  it('B5: prompt mentions checking dead_end nodes', () => {
-    const prompt = buildPlannerPrompt('Plan', { alertType: 'repeated_failure', message: 'gate fails' });
-    expect(prompt).toContain('dead_end');
-  });
-
-  it('B6: without researchInjection, planner prompt has no pivot warning', () => {
-    const prompt = buildPlannerPrompt('Plan next steps');
-    expect(prompt).not.toContain('PIVOT REQUIRED');
-    expect(prompt).toBe('Plan next steps');
-  });
-
-  it('B7: research injection works across multiple consecutive iterations', () => {
-    const p1 = buildPlannerPrompt('Plan', { alertType: 'plateau', message: 'msg1' });
-    const p2 = buildPlannerPrompt('Plan', { alertType: 'regression', message: 'msg2' });
-    expect(p1).toContain('plateau');
-    expect(p1).toContain('msg1');
-    expect(p2).toContain('regression');
-    expect(p2).toContain('msg2');
-  });
-});
-
 // ─── GROUP C: Findings → Approach Pipeline ───────────────────────────────────
 
 describe('Group C: Findings → Approach Pipeline', () => {
@@ -281,23 +229,12 @@ describe('Group D: KG Metadata Score Tracking', () => {
 // ─── GROUP E: Full Loop Integration ──────────────────────────────────────────
 
 describe('Group E: Full Loop Integration', () => {
-  function buildPlannerPrompt(basePrompt: string, researchInjection?: { alertType: string; message: string }): string {
-    let prompt = basePrompt;
-    if (researchInjection) {
-      prompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${researchInjection.alertType}. ${researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation. Check dead_end nodes in the knowledge graph to understand what has been tried and failed.\n\n` + prompt;
-    }
-    return prompt;
-  }
-
-  it('end-to-end: approach fails → dead_end → research injection → findings → new approach', () => {
+  it('persists the KG chain from a dead approach through a finding to a new approach', () => {
     // Create goal + approach
     addNode(projectDir, runId, { type: 'goal', label: 'Improve accuracy to 90%' });
     const approach = addNode(projectDir, runId, { type: 'approach', label: 'Linear regression' });
     // Mark dead end
     markDeadEnd(projectDir, runId, approach.id, 'plateau: no improvement');
-    // Simulate research injection
-    const prompt = buildPlannerPrompt('Plan', { alertType: 'plateau', message: 'no improvement' });
-    expect(prompt).toContain('PIVOT REQUIRED');
     // Add findings
     const finding = addNode(projectDir, runId, { type: 'finding', label: 'Neural nets outperform linear models' });
     // Add new approach connected to finding
@@ -330,15 +267,6 @@ describe('Group E: Full Loop Integration', () => {
     const kg = readKG(projectDir, runId);
     expect(kg.nodes.filter(n => n.type === 'user_hint')).toHaveLength(1);
     expect(kg.nodes.filter(n => n.type === 'dead_end')).toHaveLength(1);
-  });
-
-  it('research injection does not interfere with normal prompts', () => {
-    const withInjection = buildPlannerPrompt('Base plan', { alertType: 'plateau', message: 'stalled' });
-    const without = buildPlannerPrompt('Base plan');
-    expect(withInjection).toContain('PIVOT REQUIRED');
-    expect(withInjection).toContain('Base plan');
-    expect(without).toBe('Base plan');
-    expect(without).not.toContain('PIVOT REQUIRED');
   });
 
   it('recovery — after successful pivot, campaign health resets', () => {

@@ -275,9 +275,9 @@ flowcrew audit-report --report <path> --run-dir <path> --json
 The report itself and every named artifact must resolve within the run or project root.
 Relative artifact paths are checked against both; if the same path exists in both, use
 `project:<path>` or `run:<path>` to make the attribution unambiguous. Symlinks and `..` cannot
-escape those roots. Validation commands are tokenized into direct argv and run in the project
-without a shell; shell operators, environment-prefix assignments, launch failures, and
-unparseable commands remain visible as `not_checkable`.
+escape those roots. Report prose never executes commands. Declare executable evidence in a
+stage’s `artifact_contract.replays` field; the stage replay audit executes every accepted declaration. Numeric
+command claims in prose remain `not_checkable` and name `stages[].artifact_contract.replays`.
 
 These sentence forms are checkable (punctuation around them is optional):
 
@@ -285,16 +285,14 @@ These sentence forms are checkable (punctuation around them is optional):
 `project:guide/cli.md`: 509 lines.
 `artifacts/evidence` contains 14 files.
 `project:guide/cli.md`: 20 sections.
-Validation command `npm test`: exit 0; 412 passed, 0 failed.
 `artifacts/result.json` field `metrics.percentile` = 97.
 `run:research_round_1.json` field `/series/0/mean` = -1.25.
 ```
 
 Line counts use logical text lines, recursive file counts include regular files, and section
 counts include Markdown ATX headings outside fenced examples. JSON fields accept dotted paths
-or JSON Pointers and must resolve to a scalar. A command claim compares its direct exit code
-and every stated passed/failed/skipped/error tally. Other numeric sentences that name a path
-are retained as `not_checkable` instead of being silently ignored.
+or JSON Pointers and must resolve to a scalar. Other numeric sentences that name a path are
+retained as `not_checkable` instead of being silently ignored.
 
 Each claim is `confirmed`, `contradicted`, or `not_checkable`. Only a contradiction makes the
 command exit non-zero. Confirmation proves that the report repeated the measured value

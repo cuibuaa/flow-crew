@@ -69,6 +69,7 @@ function stage(id: string, scope: string[], dependsOn: string[] = []): StageConf
     dependency_reasons: Object.fromEntries(dependsOn.map((dependency) => [dependency, `Consumes ${dependency}.`])),
     criterion_refs: [],
     prompt_template: 'work',
+    artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
   });
 }
 

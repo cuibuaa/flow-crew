@@ -1,8 +1,9 @@
-import { mkdirSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
-import { execWithTimeout, execWithStdin } from './base.js';
+import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
+import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 
 /** Parse token usage from claude output */
@@ -73,6 +74,7 @@ export class ClaudeAdapter implements Adapter {
     let resultReceived = false;
     let resultIsSuccess = false;
     let adapterDiagnostic: string | undefined;
+    let providerFailure: ProviderFailure | undefined;
     let childKill: (() => void) | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     const POST_RESULT_GRACE_MS = 5000;
@@ -85,6 +87,69 @@ export class ClaudeAdapter implements Adapter {
           onLifecycle: opts.onCommandLifecycle,
         })
       : undefined;
+    const consumeLine = (line: string): void => {
+      if (!line.trim()) return;
+      try {
+        const parsed = JSON.parse(line);
+        let text = '';
+        // Claude Code stream-json emits assistant text as message.content[] blocks
+        // (the canonical shape — same as the dashboard's parser). The legacy
+        // top-level-string / content_block_delta forms are kept as fallbacks.
+        if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+          for (const block of parsed.message.content) {
+            if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
+            if (block?.type === 'tool_use' && typeof block.id === 'string'
+              && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
+              const command = typeof block.input?.command === 'string'
+                ? block.input.command
+                : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
+              commandActivity?.started(block.id, command);
+            }
+          }
+        } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
+          for (const block of parsed.message.content) {
+            if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+              commandActivity?.completed(block.tool_use_id);
+            }
+          }
+        } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
+          text = parsed.content;
+        } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+          text = parsed.delta.text;
+        } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
+          text = parsed.result;
+        }
+        // Detect terminal result event: schedule a force-kill if the CLI
+        // doesn't exit gracefully within the grace period.
+        if (parsed.type === 'result' && !resultReceived) {
+          resultReceived = true;
+          resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
+          if (resultIsSuccess) {
+            adapterDiagnostic = undefined;
+            providerFailure = undefined;
+          }
+          else adapterDiagnostic = typeof parsed.error?.message === 'string'
+            ? parsed.error.message
+            : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
+          if (!resultIsSuccess) providerFailure = providerFailureFromEvent('claude', parsed);
+          if (!killTimer) {
+            killTimer = setTimeout(() => {
+              if (childKill) childKill();
+            }, POST_RESULT_GRACE_MS);
+          }
+        }
+        if (parsed.type === 'error') {
+          adapterDiagnostic = typeof parsed.message === 'string'
+            ? parsed.message
+            : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
+          providerFailure = providerFailureFromEvent('claude', parsed);
+        }
+        if (text) {
+          extractedText += text;
+          try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
+        }
+      } catch { /* non-JSON line, skip */ }
+    };
     let result: RunResult;
     try {
       opts.onInvocationInput?.({
@@ -100,72 +165,20 @@ export class ClaudeAdapter implements Adapter {
       onChild: ({ kill }) => { childKill = kill; },
       abortSignal: opts.abortSignal,
       onStdout: (chunk: string) => {
-        // Parse stream-json lines and extract text content for clean live output
         lineBuf += chunk;
         const lines = lineBuf.split('\n');
         lineBuf = lines.pop()!;
-        for (const line of lines) {
-          if (!line) continue;
-          try {
-            const parsed = JSON.parse(line);
-            let text = '';
-            // Claude Code stream-json emits assistant text as message.content[] blocks
-            // (the canonical shape — same as the dashboard's parser). The legacy
-            // top-level-string / content_block_delta forms are kept as fallbacks.
-            if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
-              for (const block of parsed.message.content) {
-                if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
-                if (block?.type === 'tool_use' && typeof block.id === 'string'
-                  && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
-                  const command = typeof block.input?.command === 'string'
-                    ? block.input.command
-                    : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
-                  commandActivity?.started(block.id, command);
-                }
-              }
-            } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
-              for (const block of parsed.message.content) {
-                if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-                  commandActivity?.completed(block.tool_use_id);
-                }
-              }
-            } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
-              text = parsed.content;
-            } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-              text = parsed.delta.text;
-            } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
-              text = parsed.result;
-            }
-            // Detect terminal result event: schedule a force-kill if the CLI
-            // doesn't exit gracefully within the grace period.
-            if (parsed.type === 'result' && !resultReceived) {
-              resultReceived = true;
-              resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
-              if (resultIsSuccess) adapterDiagnostic = undefined;
-              else adapterDiagnostic = typeof parsed.error?.message === 'string'
-                ? parsed.error.message
-                : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
-              if (!killTimer) {
-                killTimer = setTimeout(() => {
-                  if (childKill) childKill();
-                }, POST_RESULT_GRACE_MS);
-              }
-            }
-            if (parsed.type === 'error') {
-              adapterDiagnostic = typeof parsed.message === 'string'
-                ? parsed.message
-                : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
-            }
-            if (text) {
-              extractedText += text;
-              try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
-            }
-          } catch { /* non-JSON line, skip */ }
-        }
-        },
+        for (const line of lines) consumeLine(line);
+      },
       });
     } finally {
       commandActivity?.close();
+    }
+    // A final line without a newline still carries a native refusal. Preserve
+    // the established text/terminal-success/transport parser behavior here.
+    if (lineBuf.trim()) {
+      try { providerFailure = providerFailureFromEvent('claude', JSON.parse(lineBuf)); }
+      catch { /* incomplete/non-JSON tail cannot provide provenance */ }
     }
     if (killTimer) clearTimeout(killTimer);
 
@@ -186,6 +199,7 @@ export class ClaudeAdapter implements Adapter {
       exitCode: finalExitCode,
       adapterError: adapterFailureKind !== undefined,
       adapterFailureKind,
+      ...(finalExitCode !== 0 && ![124, 125, 137].includes(finalExitCode) && !result.spawnError && providerFailure ? { providerFailure } : {}),
       tokens_in: tokens.tokens_in,
       tokens_out: tokens.tokens_out,
     };

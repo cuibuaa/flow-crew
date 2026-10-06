@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +59,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline starvation fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
       runId: created.runId,
@@ -100,6 +102,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline-starved rejection fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
       runId: created.runId,
@@ -148,6 +151,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'starved supervisor ABORT fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,
       runId: created.runId,
@@ -193,6 +197,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline then supervisor ABORT fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,
       runId: created.runId,

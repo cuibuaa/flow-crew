@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ beforeEach(() => {
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 function options(registry?: ResourceLeaseRegistry, timeout_ms = 4000): StageOpts {
-  return { stageId: 'writer', role: { name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Synthetic resource fixture.' }, dependsOn: [], promptTemplate: 'Execute declared work.', artifactContract: { version: 1, produces: [], reads: [], groups: [] }, timeout_ms, projectDir: project, runId, runDir: directory, retries: 0, resources: { gpu_cards: ['synthetic-card'], disk: [] }, resourceRegistry: registry };
+  return { stageId: 'writer', role: { name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Synthetic resource fixture.' }, dependsOn: [], promptTemplate: 'Execute declared work.', artifactContract: emptyArtifactContract(), timeout_ms, projectDir: project, runId, runDir: directory, retries: 0, resources: { gpu_cards: ['synthetic-card'], disk: [] }, resourceRegistry: registry };
 }
 function expose(registry: ResourceLeaseRegistry) {
   updateRunState(project, runId, (state) => { state.queryState = { version: 1, resourceRegistryPath: registry.path }; });

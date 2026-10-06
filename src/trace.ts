@@ -1,6 +1,7 @@
-import { appendFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { runDir, stageDir } from './store.js';
+import { readOptionalJsonlFile } from './jsonl.js';
 
 export type TraceEventType = 'llm_call' | 'tool_use' | 'web_search' | 'file_read' | 'file_write' | 'kg_update';
 
@@ -28,13 +29,8 @@ export function appendTraceEvent(projectDir: string, runId: string, stageId: str
 }
 
 export function readTraceEvents(projectDir: string, runId: string, stageId: string): TraceEvent[] {
-  const p = tracePath(projectDir, runId, stageId);
-  if (!existsSync(p)) return [];
-  return readFileSync(p, 'utf-8')
-    .split('\n')
-    .filter(Boolean)
-    .map(line => { try { return JSON.parse(line); } catch { return null; } })
-    .filter((e): e is TraceEvent => e !== null);
+  return readOptionalJsonlFile<TraceEvent | null>(tracePath(projectDir, runId, stageId))
+    .filter((event): event is TraceEvent => event !== null);
 }
 
 export function readAllTraceEvents(projectDir: string, runId: string): TraceEvent[] {

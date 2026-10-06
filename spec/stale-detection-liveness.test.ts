@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { campaignSummary, schedulerIsAliveForRun } from '../src/dashboard.js';
@@ -63,7 +63,11 @@ describe('schedulerIsAliveForRun', () => {
 
   it('rejects a live process whose identity binds it to a different run — pid reuse', () => {
     writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
-    writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid);
+    expect(() => writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid)).toThrow('RUN_IDENTITY_BINDING');
+    writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
+    const identityPath = join(runPath, 'scheduler.identity.json');
+    const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
+    writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'some-other-run' }));
 
     expect(processIsAlive(process.pid)).toBe(true);
     expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(false);
@@ -112,7 +116,11 @@ describe('campaign stale status consults process liveness', () => {
   it('still goes stale when a live pid is bound to some other run', () => {
     writeQuietCampaign();
     writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
-    writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid);
+    expect(() => writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid)).toThrow('RUN_IDENTITY_BINDING');
+    writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
+    const identityPath = join(runPath, 'scheduler.identity.json');
+    const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
+    writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'some-other-run' }));
 
     expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('stale');
   });

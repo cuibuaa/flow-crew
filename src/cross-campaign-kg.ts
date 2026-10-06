@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readJsonlFile } from './jsonl.js';
+import { readOptionalJsonlFile } from './jsonl.js';
 import { fcGlobalDir } from './store.js';
 
 export interface KGNode {
@@ -114,18 +114,6 @@ export function ensureKGStore(): string {
   return root;
 }
 
-export function appendNode(node: KGNode): void {
-  const full = {
-    ...node,
-    id: node.id || nodeId(node.campaignId, node.type, node.metadata),
-  };
-  writeFileSync(nodesPath(), JSON.stringify(full) + '\n', { encoding: 'utf-8', flag: 'a' });
-}
-
-export function appendEdge(edge: KGEdge): void {
-  writeFileSync(edgesPath(), JSON.stringify({ ...edge, weight: clampWeight(edge.weight) }) + '\n', { encoding: 'utf-8', flag: 'a' });
-}
-
 // Batched appends: write a whole set of nodes/edges in ONE append so a multi-record
 // arc can't interleave with another process's concurrent append (which would tear
 // lines / corrupt the jsonl). One write() per set instead of per record.
@@ -154,7 +142,7 @@ function loadNodesCached(): KGNode[] {
   const key = fileCacheKey(nodesPath());
   if (_nodesCache && _nodesCache.key === key) return _nodesCache.data;
   const path = nodesPath();
-  const data = existsSync(path) ? readJsonlFile<KGNode>(path) : [];
+  const data = readOptionalJsonlFile<KGNode>(path);
   _nodesCache = { key, data };
   return data;
 }
@@ -163,7 +151,7 @@ function loadEdgesCached(): KGEdge[] {
   const key = fileCacheKey(edgesPath());
   if (_edgesCache && _edgesCache.key === key) return _edgesCache.data;
   const path = edgesPath();
-  const data = existsSync(path) ? readJsonlFile<KGEdge>(path) : [];
+  const data = readOptionalJsonlFile<KGEdge>(path);
   _edgesCache = { key, data };
   return data;
 }

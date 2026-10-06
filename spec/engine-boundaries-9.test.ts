@@ -1,3 +1,4 @@
+import { ArtifactContractSchema, type ArtifactContractInput } from '../src/artifact-declarations.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -43,14 +44,15 @@ const recorded = [
   }
 ];
 
-function fixture(template: string): StageArtifactContractInput {
+function fixture(template: string, produces: ArtifactContractInput['produces'] = []): StageArtifactContractInput {
   const root = mkdtempSync(join(tmpdir(), 'flowcrew-artifact-destination-'));
   roots.push(root);
   const projectDir = join(root, 'project');
   const runDir = join(root, 'run');
   mkdirSync(projectDir, { recursive: true });
   mkdirSync(runDir, { recursive: true });
-  return { stageId: 'destination', template, projectDir, runDir };
+  return { stageId: 'destination', template, projectDir, runDir,
+    artifactContract: ArtifactContractSchema.parse({ version: 1, produces, reads: [], replays: [] }) };
 }
 
 function put(path: string, content = 'Authored fixture without replay commands.\n'): void {
@@ -66,98 +68,58 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('prompt artifact destinations', () => {
-  it.each(recorded)('honors the recorded $stage destination through every contract phase', (record) => {
-    const input = fixture(record.template);
+describe('declared artifact destinations', () => {
+  it.each(recorded)('honors declared $stage destinations beside an inert recorded prompt', (record) => {
+    const input = fixture(record.template, record.names.map((name, index) => ({
+      id: `output_${index}`, root: 'run', path: record.directory ? `${record.directory}/${name}` : name,
+    })));
     const expected = record.names.map((name) => join(input.runDir, record.directory, name));
     const preimages = captureStageArtifactContractPreimages(input);
     expect(preimages.map((entry) => entry.path)).toEqual(expected);
     expect(paths(input)).toEqual(expected);
-    // The implementation prompt cites a pre-existing test input; it is not an output.
-    put(join(input.projectDir, 'spec/engine-boundaries-8.test.ts'), '// Inert replay input fixture.\n');
+    put(join(input.projectDir, 'spec/engine-boundaries-8.test.ts'), '// Inert recorded input fixture.\n');
     for (const path of expected) put(path);
     const deferred = captureDeferredStageArtifactContract({ ...input, preimages });
     expect(deferred.producedPromptArtifacts).toEqual([...expected].sort());
     const final = inspectStageArtifactContract({ ...input, preimages });
-    expect(final.obligations.filter((obligation) => obligation.kind === 'prompt_artifact')
-      .map((obligation) => obligation.path)).toEqual(expected);
+    expect(final.obligations.map((obligation) => obligation.path)).toEqual(expected);
     expect(final.producedPromptArtifacts).toEqual([...expected].sort());
     expect(final.violations).toEqual([]);
   });
 
-  it.each([
-    ['Write alpha.json in the run directory. Write beta.json.', ['run/alpha.json', 'project/beta.json']],
-    ['Write in this run directory alpha.json and beta.json.', ['run/alpha.json', 'run/beta.json']],
-    ["Write same.json in the project root and this run's same.json.", ['project/same.json', 'run/same.json']],
-    ['Write this run’s alpha.json and beta.json.', ['run/alpha.json', 'project/beta.json']],
-    ['Write {project}/reports/alpha.json and beta.json under {run_dir}/stages/publish.',
-      ['project/reports/alpha.json', 'run/stages/publish/beta.json']],
-    ['Write alpha.json and\n beta.json in\n {run_dir}/stages/publish.',
-      ['run/stages/publish/alpha.json', 'run/stages/publish/beta.json']],
-    ['Write alpha.json\nin the run directory.\n\nWrite beta.json.', ['run/alpha.json', 'project/beta.json']],
-    ['Write alpha.json\n- Read beta.json in the run directory.', ['project/alpha.json']],
-    ['Write alpha.json\nRead beta.json in the run directory.', ['project/alpha.json']],
-    ['Write alpha.json.\n\nIn the run directory, read beta.json.', ['project/alpha.json']],
-    ['Write alpha.json in the project root.\nWrite beta.json in the run directory.',
-      ['project/alpha.json', 'run/beta.json']],
-    ['Write alpha.v1.json under "{run_dir}/stages/publish.v1".', ['run/stages/publish.v1/alpha.v1.json']],
-    ['Write reports/using.md and ./alpha.json in the run directory.', ['project/reports/using.md', 'project/alpha.json']],
-    ['Write alpha.json under evidence/publish/.', ['project/evidence/publish/alpha.json']],
-    ['Write scripts under training/scripts/, invoke them, import corrected_gates.py.', ['project/corrected_gates.py']],
-    ['Save new results under training/results/ before editing master_task_summary.md.', ['project/master_task_summary.md']],
-    ['Write alpha.json in the run directory with direct citations and update its graph.json.',
-      ['run/alpha.json', 'project/graph.json']],
-    ['Write reports under training/reports/ with alpha.json, then update graph.json.',
-      ['project/training/reports/alpha.json', 'project/graph.json']],
-    // Recorded run_cascade template 2c01874b: an explicitly quoted prefix list.
-    ['Write the required round JSON files under `docs/guardrail_indomain_safe_research/`, including `round_result.json` and a detailed harness artifact referenced when possible.',
-      ['project/docs/guardrail_indomain_safe_research/round_result.json']],
-  ])('binds a destination only within its own directive: %s', (template, expected) => {
-    const input = fixture(template as string);
-    const root = dirname(input.projectDir);
-    const exact = (expected as string[]).map((path) => join(root, path));
-    expect(captureStageArtifactContractPreimages(input).map((entry) => entry.path)).toEqual(exact);
-    expect(paths(input)).toEqual(exact);
-    expect(inspectStageArtifactContract(input).violations.map((obligation) => obligation.path)).toEqual(exact);
+  it('refuses a prose-only obligation and does not infer duties beside an explicit empty contract', () => {
+    const input = fixture('Write alpha.json in the run directory. Read beta.json. Write optional.json if needed.');
+    const refused = inspectStageArtifactContract({ ...input, artifactContract: undefined });
+    expect(refused.violations).toEqual([expect.objectContaining({
+      reason: expect.stringContaining('ARTIFACT_DECLARATION_REQUIRED: destination.artifact_contract'),
+    })]);
+    expect(captureStageArtifactContractPreimages(input)).toEqual([]);
+    expect(paths(input)).toEqual([]);
+    expect(inspectStageArtifactContract(input).violations).toEqual([]);
   });
 
-  it('keeps comparison inputs separate while enforcing later output demands', () => {
-    const input = fixture('Write alpha.json in the run directory after comparing inputs/base.json and write beta.json. Then create gamma.json under {run_dir}/stages/publish using inputs/reference.json.');
-    expect(paths(input)).toEqual([
-      join(input.runDir, 'alpha.json'), join(input.projectDir, 'beta.json'),
-      join(input.runDir, 'stages/publish/gamma.json'),
+  it('retains exact missing-file enforcement beside explicit fenced prose', () => {
+    const input = fixture('The following are mandatory stage instructions:\n```text\nWrite {run_dir}/stages/delivery/required.json.\n```', [
+      { id: 'required', root: 'run', path: 'stages/delivery/required.json' },
     ]);
-  });
-
-  it('does not borrow a destination across a fence or from optional text', () => {
-    const input = fixture('Write alpha.json\n```text\nin the run directory, read example.json.\n```\nWrite optional.json if needed.\nWrite beta.json.');
-    expect(paths(input)).toEqual([join(input.projectDir, 'alpha.json'), join(input.projectDir, 'beta.json')]);
-  });
-
-  it('retains exact missing-file enforcement for explicit fenced instructions', () => {
-    const input = fixture('The following are mandatory stage instructions:\n```text\nWrite {run_dir}/stages/delivery/required.json.\n```');
     const demanded = join(input.runDir, 'stages/delivery/required.json');
     expect(paths(input)).toEqual([demanded]);
     expect(inspectStageArtifactContract(input).violations).toEqual([
-      expect.objectContaining({ path: demanded, reason: expect.stringContaining('no readable file exists') }),
+      expect.objectContaining({ path: demanded, reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE') }),
     ]);
   });
 
-  it.each([
-    'Write result.json under {run_dir}/../another-run.',
-    'Write result.json under {project}/../outside.',
-    'Write ../escape.json in the run directory.',
-    'Write {run_dir}/../another-run/result.json.',
-    "Write this run's ../project/escape.json.",
-    "Write this run's {project}/escape.json.",
-  ])('retains project/current-run containment for %s', (template) => {
-    const input = fixture(template);
-    expect(paths(input)).toEqual([]);
-    expect(captureStageArtifactContractPreimages(input)).toEqual([]);
+  it.each(['../escape.json', 'stages/../escape.json', '/outside/result.json', 'reports/**'])
+  ('refuses an unconfined or inexact declared path %s', (path) => {
+    expect(() => fixture('Write a report.', [{ id: 'escape', root: 'run', path }]))
+      .toThrow(/exact, confined relative path/);
   });
 
   it('accepts an authored output list in a named stage directory', () => {
-    const input = fixture('Write result.json and brief.md under {run_dir}/stages/publish.');
+    const input = fixture('Write result.json and brief.md under {run_dir}/stages/publish.', [
+      { id: 'result', root: 'run', path: 'stages/publish/result.json' },
+      { id: 'brief', root: 'run', path: 'stages/publish/brief.md' },
+    ]);
     const preimages = captureStageArtifactContractPreimages(input);
     const expected = ['result.json', 'brief.md'].map((name) => join(input.runDir, 'stages/publish', name));
     expect(paths(input)).toEqual(expected);
@@ -166,7 +128,10 @@ describe('prompt artifact destinations', () => {
   });
 
   it('refuses a missing nested demand despite a root decoy and another satisfied demand', () => {
-    const input = fixture('Write details.json under {run_dir}/stages/verify/nested.\nWrite reports/independent.md.');
+    const input = fixture('Write details.json under {run_dir}/stages/verify/nested.\nWrite reports/independent.md.', [
+      { id: 'details', root: 'run', path: 'stages/verify/nested/details.json' },
+      { id: 'independent', root: 'project', path: 'reports/independent.md' },
+    ]);
     const demanded = join(input.runDir, 'stages/verify/nested/details.json');
     const independent = join(input.projectDir, 'reports/independent.md');
     const decoy = join(input.projectDir, 'details.json');
@@ -177,24 +142,24 @@ describe('prompt artifact destinations', () => {
     const audit = inspectStageArtifactContract({ ...input, preimages, writes: [independent, decoy] });
     expect(audit.producedPromptArtifacts).toEqual([independent]);
     expect(audit.violations).toEqual([
-      expect.objectContaining({ mention: 'details.json', path: demanded, reason: expect.stringContaining('no readable file exists') }),
+      expect.objectContaining({ mention: 'run:stages/verify/nested/details.json', path: demanded,
+        reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE') }),
     ]);
   });
 
   it('still refuses a stale run artifact and preserves deferred attributable production', () => {
-    const input = fixture('Write result.json in the run directory.');
+    const input = fixture('Write result.json in the run directory.', [{ id: 'result', root: 'run', path: 'result.json' }]);
     const demanded = join(input.runDir, 'result.json');
     put(demanded, '{"preexisting":true}\n');
     const preimages = captureStageArtifactContractPreimages(input);
     expect(paths(input)).toEqual([demanded]);
     expect(captureDeferredStageArtifactContract({ ...input, preimages }).producedPromptArtifacts).toEqual([]);
     expect(inspectStageArtifactContract({ ...input, preimages }).violations).toEqual([
-      expect.objectContaining({ path: demanded, reason: expect.stringContaining('predated the stage') }),
+      expect.objectContaining({ path: demanded, reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE') }),
     ]);
     put(demanded, '{"updated":true}\n');
     const deferred = captureDeferredStageArtifactContract({ ...input, preimages });
     expect(deferred.producedPromptArtifacts).toEqual([demanded]);
-    const final = inspectStageArtifactContract({ ...input, priorProducedPromptArtifacts: deferred.producedPromptArtifacts });
-    expect(final.violations).toEqual([]);
+    expect(inspectStageArtifactContract({ ...input, priorProducedPromptArtifacts: deferred.producedPromptArtifacts }).violations).toEqual([]);
   });
 });

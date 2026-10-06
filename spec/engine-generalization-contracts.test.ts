@@ -1,3 +1,4 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -44,7 +45,7 @@ afterEach(() => {
 });
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     role: 'worker',
     prompt_template: 'bounded contract fixture',
     scope: [],
@@ -165,7 +166,7 @@ describe('engine generalization binding contracts', () => {
     mkdirSync(taskRunDir, { recursive: true });
     const criterionId = 'criterion_fixture';
     const work = stage({ id: 'work', criterion_refs: [criterionId] });
-    const gate = stage({
+    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
       id: 'qa', role: 'qa', is_gate: true, criterion_refs: [criterionId],
       depends_on: ['work'], dependency_reasons: { work: 'Judges the completed work.' },
     });

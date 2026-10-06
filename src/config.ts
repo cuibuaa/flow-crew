@@ -441,28 +441,6 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
   };
 }
 
-// --- Public API: Path Helpers ---
-
-export function getAgentsDir(projectDir?: string): string {
-  const d = loadProjectDefaults(projectDir);
-  return join(projectDir ?? process.cwd(), d.paths.agents);
-}
-
-export function getWorkflowsDir(projectDir?: string): string {
-  const d = loadProjectDefaults(projectDir);
-  return join(projectDir ?? process.cwd(), d.paths.workflows);
-}
-
-export function getSkillsDir(projectDir?: string): string {
-  const d = loadProjectDefaults(projectDir);
-  return join(projectDir ?? process.cwd(), d.paths.skills);
-}
-
-export function getDocsDir(projectDir: string): string {
-  const d = loadProjectDefaults(projectDir);
-  return join(projectDir, d.paths.docs);
-}
-
 export function resetConfigCache(): void {
   _cache = null;
   _cacheMtime = 0;

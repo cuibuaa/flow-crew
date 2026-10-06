@@ -4,13 +4,11 @@ import type {
   CampaignRunPage,
   SourceResult,
 } from "./types";
+import { isRecord, isNonNegativeInteger as isCount } from "../../lib/source-validation";
+import { isRunStatus } from "../../lib/run-status";
 
 const BASE = "/api/campaigns";
 const SOURCE_STATUSES = new Set(["complete", "partial", "unavailable"]);
-const RUN_STATUSES = new Set([
-  "pending", "running", "parked", "complete", "failed", "awaiting_approval", "shipped",
-  "ceiling_hit", "escalated", "reality_gate_failed", "phase_complete", "stopped", "incomplete",
-]);
 const EVIDENCE_STATES = new Set(["present", "absent", "unknown"]);
 const CLASSIFICATION_KINDS = new Set(["research", "engineering", "mixed", "unknown"]);
 const DIRECTIONS = new Set(["higher", "lower", "unknown"]);
@@ -20,10 +18,6 @@ export class CampaignPageRequestError extends Error {
     super(message);
     this.name = "CampaignPageRequestError";
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isString(value: unknown): value is string {
@@ -36,10 +30,6 @@ function isNullableString(value: unknown): value is string | null {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
-}
-
-function isCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -124,7 +114,7 @@ function isActivityItem(value: unknown): boolean {
     && isString(value.runId)
     && isString(value.shortName)
     && isString(value.fullTitle)
-    && RUN_STATUSES.has(String(value.status))
+    && isRunStatus(String(value.status))
     && isString(value.statusExplanation)
     && (value.durationMs === null || (isFiniteNumber(value.durationMs) && value.durationMs >= 0))
     && typeof value.durationPartial === "boolean"
@@ -177,7 +167,7 @@ function isResearch(value: unknown): boolean {
     && Array.isArray(value.otherMetrics) && value.otherMetrics.every(isMetricGroup)
     && isCount(value.acceptedPointCount)
     && isStringArray(value.confirmNotes)
-    && (value.latestCanonicalStatus === null || RUN_STATUSES.has(String(value.latestCanonicalStatus))));
+    && (value.latestCanonicalStatus === null || isRunStatus(String(value.latestCanonicalStatus))));
 }
 
 function isDelivery(value: unknown): boolean {
@@ -185,7 +175,7 @@ function isDelivery(value: unknown): boolean {
     && isString(value.runId)
     && isString(value.shortName)
     && isString(value.fullTitle)
-    && RUN_STATUSES.has(String(value.status))
+    && isRunStatus(String(value.status))
     && isString(value.statusExplanation)
     && isString(value.conclusion)
     && isStringArray(value.commits)
@@ -205,7 +195,7 @@ function isRunRow(value: unknown): boolean {
     && isString(value.runId)
     && isString(value.shortName)
     && isString(value.fullTitle)
-    && RUN_STATUSES.has(String(value.status))
+    && isRunStatus(String(value.status))
     && isString(value.statusExplanation)
     && isString(value.conclusion)
     && (value.durationMs === null || (isFiniteNumber(value.durationMs) && value.durationMs >= 0))
@@ -237,7 +227,7 @@ function isIndexRow(value: unknown): boolean {
     && isCount(value.activity.running) && isCount(value.activity.waiting)
     && isString(value.activity.summary) && typeof value.activity.needsIntervention === "boolean"
     && SOURCE_STATUSES.has(String(value.recent.status))
-    && (value.recent.runStatus === null || RUN_STATUSES.has(String(value.recent.runStatus)))
+    && (value.recent.runStatus === null || isRunStatus(String(value.recent.runStatus)))
     && isNullableString(value.recent.statusExplanation)
     && isString(value.recent.conclusion)
     && isString(value.href);

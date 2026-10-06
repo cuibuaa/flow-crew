@@ -1,3 +1,5 @@
+import { coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
+import { stringify as stringifyYaml } from 'yaml';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,6 +37,7 @@ const WORKFLOW = [
   '  - id: work',
   '    role: worker',
   '    prompt_template: work',
+  '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
   '',
 ].join('\n');
 
@@ -335,10 +338,14 @@ describe('Dashboard admission handshake', () => {
   });
 
   it('keeps the captured brief through the scheduler instead of rereading a changed sidecar', async () => {
-    const brief = '# Goal\nUse the captured scheduler input marker.\n';
-    const changed = '# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n';
+    const brief = '# Goal\nUse the captured scheduler input marker.\n## What the report must show\n1. Preserve the captured scheduler input.\n';
+    const changed = '# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n## What the report must show\n1. Preserve the captured scheduler input.\n';
     const admission = explicitAdmission(brief);
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
+    const scheduler = await import('../src/scheduler.js');
+    const { config } = scheduler.loadWorkflow(join(projectDir, 'config', 'workflows', 'default.yaml'));
+    config.stages = coveredStages(config.stages[0], brief);
+    const raw = stringifyYaml(config);
+    const { runId } = createRun(projectDir, 'default', raw, config.stages.map(({ id }) => id));
     const state = readRunState(projectDir, runId);
     state.status = 'pending';
     state.taskDescription = brief;
@@ -348,7 +355,8 @@ describe('Dashboard admission handshake', () => {
 
     const prompts: string[] = [];
     const adapter: Adapter = {
-      async run(prompt) {
+      async run(prompt, _role, options) {
+        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         prompts.push(prompt);
         return { output: 'completed', exitCode: 0, duration_ms: 1 };
       },
@@ -361,10 +369,9 @@ describe('Dashboard admission handshake', () => {
       tools: [],
       prompt: 'Execute the supplied task.',
     };
-    const scheduler = await import('../src/scheduler.js');
-    const { config, raw } = scheduler.loadWorkflow(join(projectDir, 'config', 'workflows', 'default.yaml'));
-
-    await scheduler.runWorkflow(
+    mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
+    writeFileSync(join(projectDir, 'config', 'agents', 'worker.yaml'), stringifyYaml(worker));
+    const final = await scheduler.runWorkflow(
       config,
       raw,
       projectDir,
@@ -381,7 +388,7 @@ describe('Dashboard admission handshake', () => {
       admission,
     );
 
-    expect(prompts.join('\n')).toContain('captured scheduler input marker');
+    expect(prompts.join('\n'), JSON.stringify({ status: final.status, reason: final.failureReason, stages: final.stages })).toContain('captured scheduler input marker');
     expect(prompts.join('\n')).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
   });
 

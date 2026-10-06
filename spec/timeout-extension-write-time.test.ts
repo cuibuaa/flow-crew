@@ -1,3 +1,5 @@
+import { drainDueTimers } from './test-support/engine-fixtures.js';
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -56,13 +58,7 @@ class ManualAttemptDeadlineClock implements AttemptDeadlineClock {
   advance(elapsedMs: number): void {
     this.monotonicMs += elapsedMs;
     this.wallMs += elapsedMs;
-    const due = [...this.timers.entries()]
-      .filter(([, timer]) => timer.deadlineMs <= this.monotonicMs)
-      .sort((left, right) => left[1].deadlineMs - right[1].deadlineMs);
-    for (const [timerId, timer] of due) {
-      this.timers.delete(timerId);
-      timer.callback();
-    }
+    drainDueTimers(this.timers, this.monotonicMs);
   }
 }
 
@@ -164,6 +160,7 @@ describe('legacy timeout-extension write-time policy', () => {
       role,
       dependsOn: [],
       promptTemplate: 'accounting fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 50,
       deadlineClock: clock,
       projectDir,

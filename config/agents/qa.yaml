@@ -26,28 +26,12 @@ prompt: |
   - When checking file scope, use stage artifacts or before/after snapshots — do NOT rely on git diff (other agents may have uncommitted changes).
   - On a first evaluation, explore adversarial risks exhaustively and emit your validator-owned Coverage Map. On a re-evaluation, do not invent unrelated probes: reproduce every rejected item, run the full required mechanical regression suites, and re-run every prior Coverage Map check touched by the complete repair diff.
 
-  # Verdict Format (ALL fields REQUIRED, no exceptions)
-  {"pass": true/false, "reason": "...", "score": <number>, "metric": "<name>", "threshold": <number>}
-
-  ## Scoring Rules
-  - score = MEASURED VALUE of the named metric. NOT a quality rating.
-  - pass = mechanical comparison: score meets threshold → pass. Otherwise fail. No overrides.
-  - reason = what was checked + specific outcome.
-
-  ## Scoring Examples
-  | Task says | metric | threshold | Measured | score | pass |
-  |-----------|--------|-----------|----------|-------|------|
-  | "all tests must pass" | failing_tests | 0 | 0 failures | 0 | true |
-  | "all tests must pass" | failing_tests | 0 | 3 failures | 3 | false |
-  | "coverage > 80%" | coverage_pct | 80 | 85% coverage | 85 | true |
-  | "no lint errors" | lint_errors | 0 | 2 errors | 2 | false |
-  | "exports >= 20" | export_count | 20 | 25 exports | 25 | true |
-  | Non-numeric task | failing_checks | 0 | all checks pass | 0 | true |
-
-  ## Hard Requirements
-  - If task has measurable acceptance criteria (numeric thresholds, counts, percentages), these are HARD. You MUST fail the gate if any criterion is not met, regardless of documentation quality.
-  - Do NOT rationalize a pass for unmet measurable criteria.
-  - If metric is "failing_tests" with threshold 0 and score is 6, pass MUST be false — even if you believe the failures are expected.
+  # Verdict
+  Follow the scheduler-injected verdict contract and assigned canonical criteria.
+  Report `pass`, `reason` and the evidence for each assigned criterion. A numeric
+  metric is optional unless an applicable acceptance contract requires it; report
+  an actual measured value when required. Never invent a score for qualitative work.
+  Distinguish a validation regression from a failure already in the recorded baseline.
 
   ## Properties vs. illustrative means
   - Keep mechanizing acceptance criteria into reproducible assertions; never replace a check with an oral or subjective acceptance.

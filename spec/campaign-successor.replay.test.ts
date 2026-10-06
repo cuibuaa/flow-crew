@@ -22,7 +22,7 @@ import { rehearseBriefIsolated } from '../src/rehearse.js';
 import type { IsolatedRehearsalResult } from '../src/rehearse.js';
 import type { TaskCreateInput, TaskEntry } from '../src/task-registry.js';
 import { renderGuidanceEnvelope } from '../src/guidance.js';
-import { fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
+import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { loadClosedLoopCampaignEvidence } from './test-support/closed-loop-campaign-evidence.js';
 
 const tempDirectories: string[] = [];
@@ -300,19 +300,25 @@ describe('frozen contract and ordinary launch pipeline', () => {
         budget: { maxRuns: 1, usedRuns: 0 },
         noProgress: { metricId: 'result', direction: 'increase', rounds: 2, tolerance: 0 },
       });
-      const runId = `goal-met-run-${randomBytes(4).toString('hex')}`;
-      const runPath = join(runsRoot(), runId);
       const launchPath = join(projectDir, 'launch.sh');
-      writeFileSync(launchPath, `#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p ${JSON.stringify(runPath)}\nprintf '%s\\n' '${JSON.stringify({
-        runId,
-        workflowName: 'goal-met-test',
-        projectDir,
-        status: 'complete',
-        stages: {},
-        startedAt: '2026-09-04T12:00:00.000Z',
-        result: 1.5,
-      })}' > ${JSON.stringify(join(runPath, 'run.json'))}\n`);
+      // The launch child requests work; only the canonical engine publisher writes run history.
+      writeFileSync(launchPath, '#!/usr/bin/env bash\nset -euo pipefail\nprintf ready > launch-started\nwhile [ ! -f launch-acknowledged ]; do sleep 0.01; done\n');
       chmodSync(launchPath, 0o755);
+      let publicationError: unknown;
+      let published = false;
+      const publication = setInterval(() => {
+        if (!existsSync(join(projectDir, 'launch-started'))) return;
+        clearInterval(publication);
+        try {
+          const created = createRun(projectDir, 'goal-met-test', 'name: goal-met-test', []);
+          const state = readRunState(projectDir, created.runId);
+          state.status = 'complete';
+          Object.assign(state, { result: 1.5 });
+          writeRunState(projectDir, created.runId, state);
+          published = true;
+        } catch (error) { publicationError = error; }
+        writeFileSync(join(projectDir, 'launch-acknowledged'), 'settled\n');
+      }, 5);
       const cfg: CampaignConfig = {
         id: contract.campaignId,
         briefPath,
@@ -323,19 +329,22 @@ describe('frozen contract and ordinary launch pipeline', () => {
         launch: { systemdUnit: 'unused.service', launchScript: launchPath },
       };
       let collectCalls = 0;
-      const result = await runCampaign(cfg, {
-        successor: {
-          contract,
-          parentAdmission,
-          collectEvidence() {
-            collectCalls += 1;
-            throw new Error('goal-met run must not derive a successor');
+      try {
+        const result = await runCampaign(cfg, {
+          successor: {
+            contract,
+            parentAdmission,
+            collectEvidence() {
+              collectCalls += 1;
+              throw new Error('goal-met run must not derive a successor');
+            },
           },
-        },
-      });
-
-      expect(result.status).toBe('goal_met');
-      expect(collectCalls).toBe(0);
+        });
+        expect(publicationError).toBeUndefined();
+        expect(published).toBe(true);
+        expect(result.status).toBe('goal_met');
+        expect(collectCalls).toBe(0);
+      } finally { clearInterval(publication); }
     } finally {
       setFcGlobalDir(previousStateDir);
     }

@@ -1,5 +1,15 @@
 import { parse, stringify } from 'yaml';
-import type { ArtifactContractInput } from '../../src/artifact-declarations.js';
+import { ArtifactContractSchema, type ArtifactContractInput } from '../../src/artifact-declarations.js';
+
+/** A synthetic control with no product duties; gates explicitly own their verdict. */
+export function fixtureArtifactContract(stageId: string, isGate = false) {
+  return ArtifactContractSchema.parse({
+    version: 1,
+    produces: isGate ? [{ id: 'verdict', root: 'run', path: `verdict_${stageId}.json` }] : [],
+    reads: [],
+    replays: [],
+  });
+}
 
 /**
  * Explicitly authored synthetic dispatches used by existing engine scenarios.
@@ -15,11 +25,7 @@ export function declaredDispatch(text: string, contracts: Record<string, Artifac
   if (!Array.isArray(stages)) return text;
   for (const stage of stages) {
     if (!stage || typeof stage !== 'object' || typeof stage.id !== 'string' || 'artifact_contract' in stage) continue;
-    stage.artifact_contract = contracts[stage.id] ?? {
-      version: 1,
-      produces: stage.is_gate === true ? [{ id: 'verdict', root: 'run', path: `verdict_${stage.id}.json` }] : [],
-      reads: [],
-    };
+    stage.artifact_contract = contracts[stage.id] ?? fixtureArtifactContract(stage.id, stage.is_gate === true);
   }
   return stringify(parsed);
 }

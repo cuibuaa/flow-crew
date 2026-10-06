@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -96,7 +96,7 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
     config: {description: '', 
       name: 'e18-gate-retry-entry',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [],
         scope: ['src/scheduler.ts', 'spec/e18-gate-retry-entry.test.ts', 'docs/task_summary.md'],
         prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,

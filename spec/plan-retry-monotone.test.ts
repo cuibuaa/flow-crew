@@ -1,3 +1,5 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
+import { inputFile } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -138,7 +140,10 @@ function parsedStages(markdown: string): StageConfig[] {
     : parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).stages)
       ? (parsed as { stages: unknown[] }).stages
       : [];
-  const stages = items.map((item) => parseDispatchedStageConfig(item));
+  const stages = items.map((item) => {
+    const fixtureStage = item as { id: string; is_gate?: boolean };
+    return parseDispatchedStageConfig({ ...fixtureStage, artifact_contract: stageArtifacts(fixtureStage.id, fixtureStage.is_gate) });
+  });
   resolveDispatchDependencies(stages, 'plan');
   return stages;
 }
@@ -253,13 +258,25 @@ describe('after-change historical replay', () => {
     expect(replayAdmission('owner-criterion', repaired.pair.dispatch, 1)).toMatchObject({ pass: true, errors: [] });
     const reachabilityRoot = mkdtempSync(join(tmpdir(), 'fc-retry-reachability-'));
     try {
+      const oldFormat = inspectRealityCheckReachability({
+        markdown: repaired.pair.realityChecks!, projectDir: reachabilityRoot,
+        stages: parsedStages(repaired.pair.dispatch),
+        terminalStates: fixtureConfig['owner-criterion'].terminalStates,
+        research: fixtureConfig['owner-criterion'].research,
+      });
+      expect(oldFormat.join('\n')).toContain('REALITY_READ_DECLARATION_REQUIRED');
+      const declaredManifest = '## Reality checks\n' + stringifyYaml({ checks: [{
+        name: 'declared post-consumption manifest', type: 'file-exists-nonempty',
+        reads: [inputFile('manifest', 'docs/happymj_explore6/run_manifest.json')], params: { paths: ['docs/happymj_explore6/run_manifest.json'] },
+      }] });
       expect(inspectRealityCheckReachability({
-        markdown: repaired.pair.realityChecks!,
+        markdown: declaredManifest,
         projectDir: reachabilityRoot,
         stages: parsedStages(repaired.pair.dispatch),
         terminalStates: fixtureConfig['owner-criterion'].terminalStates,
         research: fixtureConfig['owner-criterion'].research,
       })).toEqual([
+        expect.stringContaining('ARTIFACT_INPUT_ABSENT'),
         expect.stringContaining('references post-consumption framework manifest'),
       ]);
     } finally {
@@ -281,13 +298,25 @@ describe('after-change historical replay', () => {
     expect(replayAdmission('check-escape', repaired.pair.dispatch, 1).pass).toBe(true);
     const reachabilityRoot = mkdtempSync(join(tmpdir(), 'fc-retry-reachability-'));
     try {
+      const oldFormat = inspectRealityCheckReachability({
+        markdown: repaired.pair.realityChecks!, projectDir: reachabilityRoot,
+        stages: parsedStages(repaired.pair.dispatch),
+        terminalStates: fixtureConfig['check-escape'].terminalStates,
+        research: fixtureConfig['check-escape'].research,
+      });
+      expect(oldFormat.join('\n')).toContain('REALITY_READ_DECLARATION_REQUIRED');
+      const declaredManifest = '## Reality checks\n' + stringifyYaml({ checks: [{
+        name: 'declared post-consumption manifest', type: 'file-exists-nonempty',
+        reads: [inputFile('manifest', 'docs/happymj_incumbent/run_manifest.json')], params: { paths: ['docs/happymj_incumbent/run_manifest.json'] },
+      }] });
       expect(inspectRealityCheckReachability({
-        markdown: repaired.pair.realityChecks!,
+        markdown: declaredManifest,
         projectDir: reachabilityRoot,
         stages,
         terminalStates: fixtureConfig['check-escape'].terminalStates,
         research: fixtureConfig['check-escape'].research,
       })).toEqual([
+        expect.stringContaining('ARTIFACT_INPUT_ABSENT'),
         expect.stringContaining('references post-consumption framework manifest'),
       ]);
     } finally {
@@ -310,12 +339,12 @@ describe('after-change historical replay', () => {
     const escapedScript = String.raw`sed -n 's/^\([a-z][a-z]*\)$/\1/p' docs/input.txt`;
     const incumbentChecks = stringifyYaml({
       checks: [
-        {
+        { reads: [inputFile('file_0', 'docs/happymj_incumbent/round_result.json')],
           name: 'broken_optional_result_check',
           type: 'file-exists-nonempty',
           params: { paths: ['docs/happymj_incumbent/round_result.json'] },
         },
-        {
+        { reads: [],
           name: 'passing_escaped_check',
           type: 'exec-script-exit-zero',
           params: { script: escapedScript },
@@ -324,12 +353,12 @@ describe('after-change historical replay', () => {
     });
     const proposalChecks = stringifyYaml({
       checks: [
-        {
+        { reads: [inputFile('file_0', 'docs/happymj_incumbent/run_manifest.json')],
           name: 'broken_optional_result_check',
           type: 'file-exists-nonempty',
           params: { paths: ['docs/happymj_incumbent/run_manifest.json'] },
         },
-        {
+        { reads: [],
           name: 'passing_escaped_check',
           type: 'exec-script-exit-zero',
           params: { script: 'regressed slash-parenthesis capture bytes' },
@@ -354,7 +383,7 @@ describe('after-change historical replay', () => {
   });
 
   it('permits an explicitly named duplicate terminal owner to be removed', () => {
-    const owner = (id: string) => ({dynamic_dispatch: false, 
+    const owner = (id: string) => ({ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
       id,
       role: 'coder',
       depends_on: [],
@@ -397,7 +426,7 @@ describe('bounded refusal and cycle mechanics', () => {
 
   function candidate(label: string): string {
     return stringifyYaml({
-      stages: [{dynamic_dispatch: false, 
+      stages: [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
         id: 'work',
         role: 'coder',
         depends_on: [],
@@ -498,7 +527,7 @@ describe('bounded refusal and cycle mechanics', () => {
     const scopeFailure = planRetryRequirement('work.scope.0: invalid scope syntax');
     const dependencyFailure = planRetryRequirement('work.depends_on: unknown stage "missing"');
     const firstCandidate = stringifyYaml({
-      stages: [{dynamic_dispatch: false, 
+      stages: [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: [], dependency_reasons: {},
         scope: ['bad scope'], criterion_refs: [], prompt_template: 'first',
       }],
@@ -506,7 +535,7 @@ describe('bounded refusal and cycle mechanics', () => {
     expect(refuse(runRoot, 1, firstCandidate, 4, scopeFailure).stop).toBe(false);
 
     const secondCandidate = stringifyYaml({
-      stages: [{dynamic_dispatch: false, 
+      stages: [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: ['missing'],
         dependency_reasons: { missing: 'latent topology defect' },
         scope: ['docs/work.md'], criterion_refs: [], prompt_template: 'second',
@@ -518,7 +547,7 @@ describe('bounded refusal and cycle mechanics', () => {
     expect(second.state.satisfied.map((requirement) => requirement.id)).toContain(scopeFailure.id);
 
     const thirdCandidate = stringifyYaml({
-      stages: [{dynamic_dispatch: false, 
+      stages: [{ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
         id: 'work', role: 'coder', depends_on: [], dependency_reasons: {},
         scope: ['bad scope'], criterion_refs: [], prompt_template: 'third',
       }],
@@ -586,7 +615,7 @@ describe('scheduler integration', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'monotone-retry-integration',
       defaults: { max_iterations: 1 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'plan',
         role: 'planner',
         depends_on: [],
@@ -608,7 +637,7 @@ describe('scheduler integration', () => {
           planCalls += 1;
           planPrompts.push(prompt);
           const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as BriefCriteriaArtifact;
-          const work = {dynamic_dispatch: false, 
+          const work = { artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
             id: 'work',
             role: 'coder',
             depends_on: [],
@@ -617,7 +646,7 @@ describe('scheduler integration', () => {
             criterion_refs: artifact.criteria.map((criterion) => criterion.id),
             prompt_template: 'write the work evidence',
           };
-          const finalize = {dynamic_dispatch: false, 
+          const finalize = { artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
             id: 'finalize',
             role: 'coder',
             depends_on: ['work'],
@@ -626,7 +655,7 @@ describe('scheduler integration', () => {
             criterion_refs: [],
             prompt_template: 'write the final report',
           };
-          const audit = {dynamic_dispatch: false, 
+          const audit = { artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_audit.json" }], [], [], []),dynamic_dispatch: false, 
             id: 'audit',
             role: 'qa',
             depends_on: ['work'],
@@ -721,7 +750,7 @@ describe('scheduler integration', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'schema-retry-integration',
       defaults: { max_iterations: 1 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'plan', role: 'planner', depends_on: [], prompt_template: 'plan the work',
         dynamic_dispatch: true, is_gate: false, skills: [], criterion_refs: [],
       }],
@@ -739,7 +768,7 @@ describe('scheduler integration', () => {
         const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as BriefCriteriaArtifact;
         const refs = artifact.criteria.map((criterion) => criterion.id);
         // Attempt 1 carries both a removed field and no gate for its criterion.
-        const work = {dynamic_dispatch: false, 
+        const work = { artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
           id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
           criterion_refs: refs, prompt_template: 'write the work', timeout_ms: 900000,
         };
@@ -780,7 +809,7 @@ describe('scheduler integration', () => {
       const workflow: WorkflowConfig = {description: '', 
         name: `archived-${fixture}-scheduler-replay`,
         defaults: { max_iterations: 1 },
-        stages: [{
+        stages: [{ artifact_contract: artifacts([], [], [], []),
           id: 'plan',
           role: 'planner',
           depends_on: [],

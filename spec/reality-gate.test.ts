@@ -1,3 +1,4 @@
+import { inputFile } from './spec_contracts/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -63,8 +64,8 @@ describe('reality gate check types', () => {
   it('checks http reachability positive and negative cases', async () => {
     const server = await localServer(204);
     try {
-      const pass = await runAllChecks([{ name: 'ok', type: 'http-reachability', params: { url: server.url, status: 204 } }], context());
-      const fail = await runAllChecks([{ name: 'bad', type: 'http-reachability', params: { url: server.url, status: 200 } }], context());
+      const pass = await runAllChecks([{ reads: [], name: 'ok', type: 'http-reachability', params: { url: server.url, status: 204 } }], context());
+      const fail = await runAllChecks([{ reads: [], name: 'bad', type: 'http-reachability', params: { url: server.url, status: 200 } }], context());
       expect(pass.pass).toBe(true);
       expect(fail.pass).toBe(false);
       expect(fail.results[0].details).toContain(server.url);
@@ -77,8 +78,8 @@ describe('reality gate check types', () => {
 
   it('checks file existence and nonempty positive and negative cases', async () => {
     write('exists.txt', 'x');
-    const pass = await runAllChecks([{ name: 'files', type: 'file-exists-nonempty', params: { paths: ['exists.txt'] } }], context());
-    const fail = await runAllChecks([{ name: 'files', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } }], context());
+    const pass = await runAllChecks([{ reads: [inputFile('file_0', 'exists.txt')], name: 'files', type: 'file-exists-nonempty', params: { paths: ['exists.txt'] } }], context());
+    const fail = await runAllChecks([{ reads: [inputFile('file_0', 'missing.txt')], name: 'files', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('missing.txt');
@@ -88,8 +89,8 @@ describe('reality gate check types', () => {
   it('checks JSON schema positive and negative cases', async () => {
     write('data.json', JSON.stringify({ name: 'x', count: 2 }));
     const schema = { type: 'object', required: ['name'], properties: { count: { type: 'number', minimum: 1 } } };
-    const pass = await runAllChecks([{ name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema } }], context());
-    const fail = await runAllChecks([{ name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema: { ...schema, required: ['missing'] } } }], context());
+    const pass = await runAllChecks([{ reads: [inputFile('file', 'data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema } }], context());
+    const fail = await runAllChecks([{ reads: [inputFile('file', 'data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema: { ...schema, required: ['missing'] } } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('$.missing');
@@ -105,7 +106,7 @@ describe('reality gate check types', () => {
     const schema = { type: 'object', properties: { blocked_reason: { type: ['string', 'null'] } } };
     const run = async (body: object) => {
       write('u.json', JSON.stringify(body));
-      return runAllChecks([{ name: 'union', type: 'json-schema-match', params: { file: 'u.json', schema } }], context());
+      return runAllChecks([{ reads: [inputFile('file', 'u.json')], name: 'union', type: 'json-schema-match', params: { file: 'u.json', schema } }], context());
     };
     // Both union members must pass — testing only one would not have caught the old bug.
     expect((await run({ blocked_reason: null })).pass).toBe(true);
@@ -118,15 +119,15 @@ describe('reality gate check types', () => {
 
   it('treats an empty union as no type constraint', async () => {
     write('e.json', JSON.stringify({ anything: 7 }));
-    const checks = [{ name: 'empty', type: 'json-schema-match', params: { file: 'e.json', schema: { type: 'object', properties: { anything: { type: [] } } } } }];
+    const checks = [{ reads: [inputFile('file', 'e.json')], name: 'empty', type: 'json-schema-match', params: { file: 'e.json', schema: { type: 'object', properties: { anything: { type: [] } } } } }];
     expect((await runAllChecks(checks, context())).pass).toBe(true);
   });
 
   it('checks variance floor positive and negative cases', async () => {
     write('scores.json', JSON.stringify({ rows: [{ score: 1 }, { score: 2 }, { score: 3 }] }));
     write('flat.json', JSON.stringify({ rows: [{ score: 1 }, { score: 1 }, { score: 1 }] }));
-    const pass = await runAllChecks([{ name: 'variance', type: 'variance-floor', params: { file: 'scores.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
-    const fail = await runAllChecks([{ name: 'variance', type: 'variance-floor', params: { file: 'flat.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
+    const pass = await runAllChecks([{ reads: [inputFile('file', 'scores.json')], name: 'variance', type: 'variance-floor', params: { file: 'scores.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
+    const fail = await runAllChecks([{ reads: [inputFile('file', 'flat.json')], name: 'variance', type: 'variance-floor', params: { file: 'flat.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('flat.json');
@@ -137,8 +138,8 @@ describe('reality gate check types', () => {
   it('checks static scan positive and negative cases', async () => {
     write('src/a.ts', 'const ok = 1;\n');
     write('src/b.ts', 'const bad = "forbidden";\n');
-    const pass = await runAllChecks([{ name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'not-present' } }], context());
-    const fail = await runAllChecks([{ name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } }], context());
+    const pass = await runAllChecks([{ reads: [{ id: 'source', root: 'project', path: 'src', kind: 'directory', source: { kind: 'input' } }], name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'not-present' } }], context());
+    const fail = await runAllChecks([{ reads: [{ id: 'source', root: 'project', path: 'src', kind: 'directory', source: { kind: 'input' } }], name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toMatch(/src\/b\.ts:\d+/);
@@ -150,7 +151,7 @@ describe('reality gate check types', () => {
     write('spec/cli-fc-tasks.test.ts', 'const otherFocused = "clean";\n');
     write('spec/unrelated.test.ts', 'const unrelated = "forbidden";\n');
     write('spec/nested/fc-tasks.test.ts', 'const nested = "forbidden";\n');
-    const declaration = {
+    const declaration = { reads: [{ id: 'subject', root: 'project', path: "spec", kind: 'directory', source: { kind: 'input' } }],
       name: 'focused scan',
       type: 'static-ast-scan',
       params: {
@@ -185,18 +186,19 @@ describe('reality gate check types', () => {
 
     const absentBase = await runAllChecks([{
       ...declaration,
+      reads: [{ id: 'absent', root: 'project', path: 'absent', kind: 'directory', source: { kind: 'input' } }],
       params: { ...declaration.params, glob: 'absent/**/*.ts' },
     }], context());
     expect(absentBase.pass).toBe(false);
-    expect(absentBase.results[0].details).toMatch(/matched no files.*fix the glob/iu);
-    expect(absentBase.results[0].evidence).toMatchObject({ filesScanned: 0, findings: [] });
+    expect(absentBase.results[0].details).toContain('ARTIFACT_READ_ABSENT');
+    expect(absentBase.results[0].evidence).toBeUndefined();
   });
 
   it('checks script exit positive and negative cases', async () => {
     const script = write('check.sh', '#!/usr/bin/env bash\nexit "${1:-0}"\n');
     chmodSync(script, 0o755);
-    const pass = await runAllChecks([{ name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['0'] } }], context());
-    const fail = await runAllChecks([{ name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['1'] } }], context());
+    const pass = await runAllChecks([{ reads: [], name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['0'] } }], context());
+    const fail = await runAllChecks([{ reads: [], name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['1'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('check.sh');
@@ -233,37 +235,37 @@ describe('reality gate check types', () => {
       }> = [
         {
           label: 'file existence',
-          check: { name: 'files', type: 'file-exists-nonempty', params: { paths: missingPaths } },
+          check: { reads: missingPaths.map((path, index) => inputFile(`missing_${index}`, path)), name: 'files', type: 'file-exists-nonempty', params: { paths: missingPaths } },
           element: /missing-0-a+/, action: /Create each missing file/i,
           omitted: true,
         },
         {
           label: 'static scan',
-          check: { name: 'scan', type: 'static-ast-scan', params: { glob: 'src\/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } },
+          check: { reads: [{ id: 'source', root: 'project', path: 'src', kind: 'directory', source: { kind: 'input' } }], name: 'scan', type: 'static-ast-scan', params: { glob: 'src\/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } },
           element: /src\/segment-0-b+/, action: /Remove or change each named match/i,
           omitted: true,
         },
         {
           label: 'JSON schema',
-          check: { name: 'schema', type: 'json-schema-match', params: { file: 'schema-data.json', schema: { type: 'object', required: requiredKeys } } },
+          check: { reads: [inputFile('file', 'schema-data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'schema-data.json', schema: { type: 'object', required: requiredKeys } } },
           element: /\$\.missing_0_a+/, action: /Add or fix the named JSON values/i,
           omitted: true,
         },
         {
           label: 'HTTP reachability',
-          check: { name: 'http', type: 'http-reachability', params: { url: { json_file: 'urls.json', from_field: 'urls[*]' }, status: 200 } },
+          check: { reads: [inputFile('urls', 'urls.json')], name: 'http', type: 'http-reachability', params: { url: { json_file: 'urls.json', from_field: 'urls[*]' }, status: 200 } },
           element: /127\.0\.0\.1/, action: /Check the endpoint, network, and expected status/i,
           omitted: true,
         },
         {
           label: 'variance floor',
-          check: { name: 'variance', type: 'variance-floor', params: { file: variancePath, field_path: varianceField, min_stddev: 0.1 } },
+          check: { reads: [inputFile('file', variancePath)], name: 'variance', type: 'variance-floor', params: { file: variancePath, field_path: varianceField, min_stddev: 0.1 } },
           element: /variance-d+/, action: /Add valid observations or fix the file\/field path/i,
           omitted: false,
         },
         {
           label: 'silent script',
-          check: {
+          check: { reads: [],
             name: 'silent',
             type: 'exec-script-exit-zero',
             params: { script: `long_silent_condition="${'g'.repeat(620)}"\ntest "$long_silent_condition" = expected` },
@@ -293,7 +295,7 @@ describe('reality gate check types', () => {
     // path is absent from HEAD — that would state more than the evidence
     // supports about a file that may well be committed elsewhere.
     writeFileSync(join(projectDir, 'present.txt'), 'exists on disk\n', 'utf-8');
-    const outcome = await runAllChecks([{
+    const outcome = await runAllChecks([{ reads: [inputFile('archive', 'present.txt')],
       name: 'clean-archive',
       type: 'exec-script-exit-zero',
       params: { script: 'git archive HEAD >/dev/null', archive_paths: ['present.txt'] },
@@ -305,7 +307,7 @@ describe('reality gate check types', () => {
   });
 
   it('rejects a clean-archive script that omits its committed-input manifest', async () => {
-    const report = await runAllChecks([{
+    const report = await runAllChecks([{ reads: [],
       name: 'clean-archive',
       type: 'exec-script-exit-zero',
       params: { script: 'git archive HEAD >/dev/null' },
@@ -328,13 +330,14 @@ describe('reality gate parser and aggregation', () => {
       'checks:',
       '  - name: artifact',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
       '    params:',
       '      paths: ["artifact.txt"]',
       '```',
       '## Next',
       'text',
     ].join('\n'));
-    expect(parseChecksFromBrief(brief)).toEqual([{ name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
+    expect(parseChecksFromBrief(brief)).toEqual([{ reads: [inputFile('file_0', 'artifact.txt')], name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
   });
 
   it('preserves only an explicitly boolean advisory declaration and defaults all others to hard', () => {
@@ -343,29 +346,32 @@ describe('reality gate parser and aggregation', () => {
       'checks:',
       '  - name: advisory',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: a, source: {kind: input}}]',
       '    advisory: true',
       '    params: { paths: ["a"] }',
       '  - name: default-hard',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: b, source: {kind: input}}]',
       '    params: { paths: ["b"] }',
       '  - name: string-is-hard',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: c, source: {kind: input}}]',
       '    advisory: "true"',
       '    params: { paths: ["c"] }',
     ].join('\n'));
 
     expect(parseChecksFromBrief(brief)).toEqual([
-      { name: 'advisory', type: 'file-exists-nonempty', advisory: true, params: { paths: ['a'] } },
-      { name: 'default-hard', type: 'file-exists-nonempty', params: { paths: ['b'] } },
-      { name: 'string-is-hard', type: 'file-exists-nonempty', params: { paths: ['c'] } },
+      { reads: [inputFile('file_0', 'a')], name: 'advisory', type: 'file-exists-nonempty', advisory: true, params: { paths: ['a'] } },
+      { reads: [inputFile('file_0', 'b')], name: 'default-hard', type: 'file-exists-nonempty', params: { paths: ['b'] } },
+      { reads: [inputFile('file_0', 'c')], name: 'string-is-hard', type: 'file-exists-nonempty', params: { paths: ['c'] } },
     ]);
   });
 
   it('aggregates multiple checks', async () => {
     write('artifact.txt', 'x');
     const decls: CheckDecl[] = [
-      { name: 'pass', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
-      { name: 'fail', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } },
+      { reads: [inputFile('file_0', 'artifact.txt')], name: 'pass', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
+      { reads: [inputFile('file_0', 'missing.txt')], name: 'fail', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } },
     ];
     const report = await runAllChecks(decls, context());
     expect(report.pass).toBe(false);
@@ -376,7 +382,7 @@ describe('reality gate parser and aggregation', () => {
     const report = await runAllChecks([
       { kind: 'invalid', name: 'broken declaration', type: '__invalid-reality-check-declaration__', diagnostic: 'Reality check item #1 must have a string type' },
       { name: 'unknown handler', type: 'does-not-exist', params: {} },
-      { name: 'missing JSON input', type: 'json-schema-match', params: { file: 'absent.json', schema: { type: 'object' } } },
+      { reads: [inputFile('file', 'absent.json')], name: 'missing JSON input', type: 'json-schema-match', params: { file: 'absent.json', schema: { type: 'object' } } },
     ], context());
 
     expect(report.results[0].details).toMatch(/item #1.*fix|fix.*item #1/i);
@@ -411,6 +417,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: unavailable-tool',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       `      script: ${missingCommand}`,
     ].join('\n'), 'utf-8');
@@ -454,6 +461,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: genuine-failure',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: exit 1',
     ].join('\n'), 'utf-8');
@@ -478,6 +486,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: deleted-log-failure',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: |',
       '        clean_root="$(mktemp -d)"',
@@ -509,6 +518,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: required-build-proof',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: echo "artifact checksum mismatch" >&2; exit 3',
     ].join('\n'), 'utf-8');
@@ -543,6 +553,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: noisy-check',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: |',
       "        printf '\\033[31mstdout-start\\033[0m'",
@@ -580,6 +591,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: unexplained-127',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: exit 127',
     ].join('\n'), 'utf-8');
@@ -605,6 +617,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: authentication-wording',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    advisory: true',
       '    params:',
       '      script: grep -Eqi "logged in|authenticated" README.md',
@@ -642,6 +655,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: optional-environment-check',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    advisory: true',
       '    params:',
       '      script: printf "optional tool unavailable" >&2; exit 6',
@@ -681,10 +695,12 @@ describe('store integration', () => {
       'checks:',
       '  - name: optional-wording',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: optional.txt, source: {kind: input}}]',
       '    advisory: true',
       '    params: { paths: ["optional.txt"] }',
       '  - name: required-artifact',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: required.txt, source: {kind: input}}]',
       '    params: { paths: ["required.txt"] }',
     ].join('\n'), 'utf-8');
     const state = readRunState(projectDir, created.runId);
@@ -704,6 +720,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: missing',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: missing.txt, source: {kind: input}}]',
       '    params:',
       '      paths: ["missing.txt"]',
     ].join('\n'), 'utf-8');
@@ -723,6 +740,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: artifact',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
       '    params:',
       '      paths: ["artifact.txt"]',
     ].join('\n'), 'utf-8');

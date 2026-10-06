@@ -8,6 +8,7 @@ import { appendGuidanceEnvelope, guidanceForStageFromText } from '../src/guidanc
 import { runProjectValidationBaseline } from '../src/project-validation.js';
 import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { ArtifactContractSchema, type ArtifactContract } from '../src/artifact-declarations.js';
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
 import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, type StoreState } from '../src/store.js';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryAdvanceResearch } from '../src/scheduler.js';
@@ -57,7 +58,7 @@ describe('engine boundaries from recorded runs', () => {
         const confirmation = JSON.parse(readFileSync(join(runDirPath, 'research_confirm.json'), 'utf8'));
         const manifest = JSON.parse(readFileSync(join(projectDir, 'research/run_manifest.json'), 'utf8'));
         const consumed = JSON.parse(readFileSync(join(runDirPath, 'research_round_1_consumed.json'), 'utf8'));
-        expect(terminal?.status).toBe(expected);
+        expect(terminal?.status, JSON.stringify(confirmation)).toBe(expected);
         expect(confirmation.pass).toBe(caseName === 'confirmed');
         expect(manifest.rounds[0].evidence).toBe(evidencePath);
         expect(consumed.evidence === undefined).toBe(caseName === 'confirmed');
@@ -90,7 +91,7 @@ describe('engine boundaries from recorded runs', () => {
       });
       writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline }));
       const readable = await recordGateValidationDelta(projectDir, runId, 'qa_readonly');
-      expect(readable?.pass).toBe(true);
+      expect(readable?.pass, JSON.stringify(readable)).toBe(true);
       expect(readable?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
 
       writeFileSync(join(projectDir, 'test.cjs'), "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');\n");
@@ -166,9 +167,9 @@ describe('engine boundaries from recorded runs', () => {
       writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' }, devDependencies: { vitest: 'fixture' } }));
       const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
       const runCase = async (stageIds: string[], writePath: string, declaredInput = false) => {
-        const stages = stageIds.map((id) => ({ id, role: 'coder', depends_on: [], scope: [], prompt_template: 'fixture', skills: [], dynamic_dispatch: false, is_gate: false }));
+        const stages = stageIds.map((id) => ({ id, role: 'coder', depends_on: [], scope: [], prompt_template: 'fixture', skills: [], dynamic_dispatch: false, is_gate: false, artifact_contract: { version: 1 as const, produces: [], reads: [], replays: [] } }));
         const config = { name: `vite-${stageIds.length}`, defaults: { max_iterations: 1, max_retries: 0 }, stages };
-        const yaml = `name: ${config.name}\nstages:\n${stageIds.map((id) => `  - id: ${id}\n    role: coder\n    scope: []\n    prompt_template: fixture\n`).join('')}`;
+        const yaml = `name: ${config.name}\nstages:\n${stageIds.map((id) => `  - id: ${id}\n    role: coder\n    scope: []\n    prompt_template: fixture\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n`).join('')}`;
         const created = createRun(projectDir, config.name, yaml, stageIds);
         if (declaredInput) {
           writeFileSync(join(projectDir, writePath), 'protected input');
@@ -222,7 +223,8 @@ describe('engine boundaries from recorded runs', () => {
   it('names an empty downstream gate field while still refusing a plan with no downstream gate', () => {
     const criterionId = 'criterion_report_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'fixture', criteria: [{ id: criterionId, text: 'Audit the work', line: 1, section: 'Report' }] };
-    const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({ prompt_template: 'fixture', skills: [], criterion_refs: [], scope: [], is_gate: false, depends_on: [], dependency_reasons: {}, ...raw });
+    const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({ prompt_template: 'fixture', skills: [], criterion_refs: [], scope: [], is_gate: false, depends_on: [], dependency_reasons: {}, ...raw,
+      artifact_contract: { version: 1, produces: raw.is_gate ? [{ id: 'verdict', root: 'run', path: `verdict_${raw.id}.json` }] : [], reads: [], replays: [] } });
     const work = stage({ id: 'work', role: 'coder', criterion_refs: [criterionId], scope: ['src/**'] });
     const gate = stage({ id: 'verify', role: 'qa', is_gate: true, depends_on: ['work'], dependency_reasons: { work: 'audits work' } });
     const missingRefs = inspectDispatchAdmission({ dispatched: [work, gate], baseStages: [], dispatchStageId: 'plan', criteria });
@@ -241,7 +243,7 @@ describe('engine boundaries from recorded runs', () => {
       mkdirSync(projectDir, { recursive: true });
       const report = join(projectDir, 'report.md');
       writeFileSync(report, 'The measured value is 0.1825625.\n');
-      const checks = "## Reality checks\n```yaml\nchecks:\n  - name: numeric text\n    type: exec-script-exit-zero\n    params:\n      script: |\n        grep '0\\.1826' report.md >/dev/null || exit 1\n```\n";
+      const checks = "## Reality checks\n```yaml\nchecks:\n  - name: numeric text\n    type: exec-script-exit-zero\n    reads: [{id: report, root: project, path: report.md, source: {kind: input}}]\n    params:\n      script: |\n        grep '0\\.1826' report.md >/dev/null || exit 1\n```\n";
       const displayBrief = 'The reported measurement is 0.1826 for this checkpoint.';
       expect(inspectRealityChecks(displayBrief, checks).refusingFindings.map((entry) => entry.code))
         .toContain('numeric_display_literal_proxy');
@@ -254,7 +256,7 @@ describe('engine boundaries from recorded runs', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('treats a backticked filename as prose but still refuses an explicit unsupported replay command', () => {
+  it('keeps report commands inert and refuses an unsupported declared replay', () => {
     const root = fixture('artifact');
     try {
       const projectDir = join(root, 'project');
@@ -264,13 +266,18 @@ describe('engine boundaries from recorded runs', () => {
       mkdirSync(runDir, { recursive: true });
       writeFileSync(join(projectDir, 'vitest.setup.ts'), 'export {};\n');
       writeFileSync(report, 'The setup file is `vitest.setup.ts`.\n');
-      const prose = inspectStageArtifactContract({ stageId: 'writer', template: 'Write reports/report.md.', projectDir, runDir, writes: ['reports/report.md'] });
+      const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'reports/report.md' }], reads: [], replays: [] });
+      const inspect = (contract: ArtifactContract = artifactContract) => inspectStageArtifactContract({ stageId: 'writer', template: 'Write reports/report.md.', projectDir, runDir, writes: ['reports/report.md'], artifactContract: contract });
+      const prose = inspect();
       expect(prose.replayExecutions).toEqual([]);
       expect(prose.violations).toEqual([]);
       writeFileSync(report, 'Replay command: `sh unsafe.sh`\n');
-      const explicit = inspectStageArtifactContract({ stageId: 'writer', template: 'Write reports/report.md.', projectDir, runDir, writes: ['reports/report.md'] });
-      expect(explicit.replayExecutions[0]).toMatchObject({ runner: 'unsupported', status: 'not_run' });
-      expect(explicit.violations.join(' ')).not.toBe('');
+      expect(inspect().replayExecutions).toEqual([]);
+      expect(inspect().violations).toEqual([]);
+      const explicit = inspect({ ...artifactContract, replays: [{ id: 'shell', runner: 'unsupported', targets: ['report'], argv: ['sh', 'unsafe.sh'], expected: { exit_code: 0, failures: [] } }] } as unknown as ArtifactContract);
+      expect(explicit.replayExecutions).toEqual([]);
+      expect(explicit.violations[0].reason).toContain('ARTIFACT_DECLARATION_INVALID');
+      expect(explicit.violations[0].reason).toContain('runner');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

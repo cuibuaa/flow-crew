@@ -313,6 +313,7 @@ describe('partial failure evidence audit', () => {
       'checks:',
       '  - name: project validation remains acceptable',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: fixture-test',
       '```',

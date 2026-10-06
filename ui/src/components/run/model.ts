@@ -1,26 +1,7 @@
 import type { RunDetailData, RunEvent, RunStage, RunStageAttempt } from "../../types";
 
-export const NON_TERMINAL_RUN_STATUSES = [
-  "pending",
-  "running",
-  "parked",
-  "awaiting_approval",
-] as const;
-
-export const TERMINAL_RUN_STATUSES = [
-  "complete",
-  "failed",
-  "shipped",
-  "ceiling_hit",
-  "escalated",
-  "reality_gate_failed",
-  "phase_complete",
-  "stopped",
-  "incomplete",
-] as const;
-
-const SUCCESSFUL_RUN_STATUSES = new Set<string>(["complete", "shipped", "ceiling_hit"]);
-const TERMINAL_RUN_STATUS_SET = new Set<string>(TERMINAL_RUN_STATUSES);
+import { isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
+export { NON_TERMINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES, isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
 
 const STATUS_DESCRIPTIONS: Record<string, string> = {
   pending: "Registered and waiting to start.",
@@ -38,20 +19,12 @@ const STATUS_DESCRIPTIONS: Record<string, string> = {
   incomplete: "The budget ended while useful work was still in progress.",
 };
 
-export function isTerminalRunStatus(status: string): boolean {
-  return TERMINAL_RUN_STATUS_SET.has(status);
-}
-
-export function isSuccessfulRunStatus(status: string): boolean {
-  return SUCCESSFUL_RUN_STATUSES.has(status);
-}
-
 export function runStatusDescription(status: string): string {
   return STATUS_DESCRIPTIONS[status] ?? "This lifecycle status is unknown to this dashboard build.";
 }
 
 export function runStatusTone(status: string): "success" | "error" | "warning" | "active" | "neutral" {
-  if (SUCCESSFUL_RUN_STATUSES.has(status)) return "success";
+  if (isSuccessfulRunStatus(status)) return "success";
   if (["failed", "reality_gate_failed", "incomplete", "escalated"].includes(status)) return "error";
   if (["parked", "awaiting_approval", "stopped", "ceiling_hit"].includes(status)) return "warning";
   if (status === "running") return "active";

@@ -287,12 +287,13 @@ the scope machinery in full.
 
 ### Every hand-off is a checkable artifact, not a message
 
-Agents in FlowCrew never pass each other free-form prose. Every hand-off — the plan, the work,
-a verdict, a scope request, an approval — is a typed artifact at a known path in the run
-directory, with one producer and one consumer, and a malformed one is refused rather than
-interpreted. The [brief contract](guide/brief-contract.md) lists them.
-
-A stage that writes outside its declared paths has those files **restored to their pre-stage contents**.
+The planner declares each stage's outputs, reads and evidence commands. The engine checks
+the exact artifact paths and producer bindings, and re-runs every declared replay. Reports
+explain the result; their prose does not create obligations or executable commands.
+Verdicts, scope requests and approvals also use typed artifacts at known paths.
+The [brief contract](guide/brief-contract.md) lists the interfaces; the
+[declaration reference](guide/engine-state-and-revisions.md) includes replay examples and
+the boundary for earlier runs.
 
 ### Knowing when to stop is a rule, not a judgement call
 

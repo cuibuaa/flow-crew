@@ -1,5 +1,6 @@
 import { realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, resolve } from 'node:path';
+import { within } from './source_services/cli-inputs.js';
 import { isTerminalRunStatus } from './store.js';
 
 export interface TerminalArtifactStatusMismatch {
@@ -41,11 +42,6 @@ function matchingStatusesForArtifact(
     }
   }
   return matchingStatuses;
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function safeDeclaredCandidate(root: string, declaredPath: string): string | undefined {

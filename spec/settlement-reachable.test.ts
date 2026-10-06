@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { emptyArtifactContract, gateArtifactContract } from './spec_presentation/declared-fixtures.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -9,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   deriveCriterionDischarges,
   inspectDispatchAdmission,
@@ -98,6 +100,7 @@ function stage(raw: Record<string, unknown>) {
     skills: [],
     is_gate: false,
     criterion_refs: [],
+    artifact_contract: raw.is_gate === true ? gateArtifactContract(String(raw.id)) : emptyArtifactContract(),
     ...raw,
   });
 }
@@ -365,12 +368,23 @@ describe('admitted check reuse boundary', () => {
     for (const name of ['ship_report.md', 'ceiling_report.md', 'escalation_note.md']) {
       writeFileSync(join(dirname(manifest), name), 'terminal fixture\n', 'utf8');
     }
-    expect(inspectRealityCheckReachability({
+    const errors = inspectRealityCheckReachability({
       markdown: checks,
       projectDir,
       stages: [],
       terminalStates: recorded.terminalStates,
       research: recorded.research,
-    })).toEqual([]);
+    });
+    expect(errors).toHaveLength(2);
+    expect(errors.every((error) => error.includes('REALITY_READ_DECLARATION_REQUIRED'))).toBe(true);
+    // Historical admitted bytes stay exact; a new proposal authors its reads.
+    const document = parseYaml(checks.split('```yaml\n')[1].split('```')[0]);
+    document.checks[0].reads = ['ship_report.md', 'ceiling_report.md', 'escalation_note.md'].map((name, index) => ({
+      id: `terminal_${index}`, root: 'project', path: `docs/happymj_incumbent/${name}`, source: { kind: 'input' },
+    }));
+    document.checks[1].reads = [{ id: 'manifest', root: 'project',
+      path: 'docs/happymj_incumbent/run_manifest.json', source: { kind: 'input' } }];
+    expect(inspectRealityCheckReachability({ markdown: stringifyYaml(document), projectDir, stages: [],
+      terminalStates: recorded.terminalStates, research: recorded.research })).toEqual([]);
   });
 });

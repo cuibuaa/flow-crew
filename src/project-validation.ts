@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { errorMessage } from './source_services/cli-inputs.js';
+import { spawnEngineChild, withEngineCommandBoundary, engineCommandDirectory, withEngineWriteBoundaryDirectory } from './write-boundary.js';
 import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, type Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
@@ -48,6 +49,8 @@ export interface ValidationDiscovery {
 
 export interface ValidationRunRequest extends ValidationCommand {
   cwd: string;
+  /** Parent-supplied run anchor; pre-admission validation uses a private one. */
+  runDir?: string;
   env?: NodeJS.ProcessEnv;
   observer?: ValidationProgressObserver;
 }
@@ -312,10 +315,6 @@ export function validationPathImpacts(
   return impacts.filter((impact, index, all) => all.findIndex((candidate) => (
     candidate.path === impact.path && candidate.role === impact.role && candidate.command === impact.command
   )) === index);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function packageRunnerFromField(value: unknown): PackageRunner | undefined {
@@ -777,23 +776,21 @@ export function outwardProjectSymlinks(projectDir: string): OutwardProjectSymlin
   return outward;
 }
 
-/** Compatibility probe used by diagnostics and existing callers. */
-export function outwardProjectSymlink(projectDir: string): string | undefined {
-  return outwardProjectSymlinks(projectDir)[0]?.path;
-}
 
-export const runValidationCommand: ValidationCommandRunner = (request) => new Promise((resolveResult) => {
+export const runValidationCommand: ValidationCommandRunner = (request) => withEngineCommandBoundary({
+  projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
+}, () => {
+  const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
-  const child = spawn(request.command, request.args, {
+  const { child, stop, boundaryError } = spawnEngineChild(request.command, request.args, {
     cwd: request.cwd,
     env: request.env ?? process.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
   let stderr = '';
   let settled = false;
   let timedOut = false;
+  let spawnError: string | undefined;
   // A project's suite grows as rounds add tests, and ship-setup runs it twice.
   // Hardcoding this meant the refusal named the timeout while the cause was the
   // suite's size plus whatever else the machine was doing.
@@ -804,7 +801,7 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
   } catch { /* fall back to the built-in when the project has no defaults file */ }
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    stop();
   }, timeoutMs);
   timeout.unref();
   const heartbeat = setInterval(() => {
@@ -836,10 +833,13 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
     stderr = boundedOutput(stderr + value, 256 * 1024);
     try { request.observer?.onCommandOutput?.(request, 'stderr', value); } catch { /* display callbacks cannot change validation */ }
   });
-  child.once('error', (error) => { settle(null, null, error.message); });
+  child.once('error', (error) => { spawnError = error.message; });
   child.once('close', (code, signal) => {
-    settle(code, signal);
+    settle(code, signal, boundaryError() ?? spawnError);
   });
+  });
+  const directory = engineCommandDirectory(request);
+  return directory ? withEngineWriteBoundaryDirectory(directory, launch) : launch();
 });
 
 interface FailureFacts {

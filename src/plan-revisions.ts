@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { canonicalJson, sha256Canonical } from './runtime-negotiation.js';
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -20,13 +21,7 @@ export interface PlanControl {
   stages: StageConfig[];
   capabilities: string[];
 }
-
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, canonical(value)]));
-  return value;
-}
-export function planDigest(stages: readonly StageConfig[]): string { return createHash('sha256').update(JSON.stringify(canonical(stages))).digest('hex'); }
+export function planDigest(stages: readonly StageConfig[]): string { return sha256Canonical(stages); }
 
 function publishImmutable(path: string, content: string): void {
   if (existsSync(path)) {
@@ -74,7 +69,7 @@ export function applyPlanRevision(input: {
   scopeContained: (scope: string, capabilities: readonly string[]) => boolean;
 }): { state: StoreState; decision: PlanRevisionDecision; stages?: StageConfig[] } {
   const request = PlanRevisionRequestSchema.parse(input.request);
-  const requestDigest = createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex');
+  const requestDigest = sha256Canonical(request);
   const directory = runDir(input.projectDir, input.runId);
   const decisionPath = join(directory, 'stages', request.stageId, `plan_revision_decision_${request.requestId}.json`);
   let decision: PlanRevisionDecision = { version: 1, requestId: request.requestId, accepted: false, at: new Date().toISOString(), baseRevision: request.baseRevision, requestDigest, errors: [] };
@@ -109,7 +104,7 @@ export function applyPlanRevision(input: {
       candidate = request.stages.map((raw) => {
         const id = raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined;
         const previous = typeof id === 'string' ? original.get(id) : undefined;
-        if (previous && JSON.stringify(canonical(raw)) === JSON.stringify(canonical(previous))) return previous;
+        if (previous && canonicalJson(raw) === canonicalJson(previous)) return previous;
         return input.parseStage(raw);
       });
       const ids = new Set(candidate.map((stage) => stage.id));
@@ -119,7 +114,7 @@ export function applyPlanRevision(input: {
         if (!next) { fail(`PLAN_REVISION_OBLIGATION_REMOVED: retain existing stage ${previous.id}`); continue; }
         const executed = (state.stages[previous.id]?.attempts?.length ?? 0) > 0 || [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, STAGE_STATUS.RUNNING, 'suspended'].includes(state.stages[previous.id]?.status ?? '');
         if (executed && planDigest([previous]) !== planDigest([next])) fail(`PLAN_REVISION_EXECUTED_STAGE: ${previous.id} identity, duties and history are immutable`);
-        if (JSON.stringify(canonical(previous.artifact_contract)) !== JSON.stringify(canonical(next.artifact_contract))) fail(`PLAN_REVISION_DUTIES_CHANGED: retain admitted artifact duties for ${previous.id}`);
+        if (canonicalJson(previous.artifact_contract) !== canonicalJson(next.artifact_contract)) fail(`PLAN_REVISION_DUTIES_CHANGED: retain admitted artifact duties for ${previous.id}`);
         if (previous.condition !== next.condition) fail(`PLAN_REVISION_EXECUTION_CHANGED: retain admitted execution condition for ${previous.id}; a changed predicate can suppress existing artifact duties`);
         if (!previous.artifact_contract && previous.prompt_template !== next.prompt_template) fail(`PLAN_REVISION_LEGACY_DUTIES: ${previous.id} has no explicit contract; migrate at a new initial-plan boundary before changing its text`);
       }

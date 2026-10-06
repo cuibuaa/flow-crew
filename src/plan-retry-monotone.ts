@@ -132,8 +132,10 @@ export function planRetryRequirement(
   if (structuredId) return { id: structuredId, detail, source };
   const check = planRetryRealityCheckName(detail);
   if (check !== undefined) return { id: `reality-check:${boundedSlug(check)}`, detail, source };
-  const artifactStage = /^ARTIFACT_[A-Z_]+:\s+([a-z][a-z0-9_]*)\./i.exec(detail);
-  if (artifactStage) return {id:`stage:${boundedSlug(artifactStage[1])}:artifact_contract`,detail,source};
+  const artifactStage = /^(?:([a-z][a-z0-9_]*): invalid schema at )?(?:ARTIFACT|REPLAY)_[A-Z_]+:\s+([a-z][a-z0-9_]*)\./i.exec(detail);
+  if (artifactStage && (!artifactStage[1] || artifactStage[1] === artifactStage[2])) {
+    return { id: `stage:${boundedSlug(artifactStage[2])}:artifact_contract`, detail, source };
+  }
   const terminalPath = /^terminal_states path\s+(.+?):/i.exec(detail);
   if (terminalPath) return { id: `terminal-owner:${boundedSlug(terminalPath[1])}`, detail, source };
   const criterion = /^criterion\s+(\S+):/i.exec(detail);

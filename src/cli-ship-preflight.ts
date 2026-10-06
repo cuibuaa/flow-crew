@@ -1,3 +1,5 @@
+import { errorMessage } from './source_services/cli-inputs.js';
+import { bindEngineCommandDirectory } from './write-boundary.js';
 import {
   accessSync,
   constants,
@@ -253,10 +255,6 @@ const DAEMON_CAVEAT = 'Daemon freshness compares the running daemon with dist, n
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDependencies {
@@ -609,7 +607,7 @@ export function prepareValidationWriteGuard(projectDir: string, packageRoot: str
       encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000,
     })) as { abi: number };
     return {
-      wrap: (request) => ({ ...request, command: 'python3', args: [...args, request.command, ...request.args] }),
+      wrap: (request) => bindEngineCommandDirectory({ ...request, command: 'python3', args: [...args, request.command, ...request.args] }, scratch),
       cleanup: () => rmSync(scratch, { recursive: true, force: true }),
       description: `Linux Landlock ABI ${abi}; writes confined to ${projectDir} and isolated temporary cache/state ${scratch}; HOME/configuration reads preserved`,
     };

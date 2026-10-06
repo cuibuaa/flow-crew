@@ -32,6 +32,6 @@ export function buildScopedRepair(gate: StageConfig, finding: AuditFinding): Sta
     scope: [...finding.paths], depends_on: [gate.id], dependency_reasons: { [gate.id]: `Repair scoped finding ${finding.id} from this gate` },
     prompt_template: `Repair audit finding ${finding.id} only within these project files: ${JSON.stringify(finding.paths)}.\nReason: ${finding.reason}\nRead the retained rejected verdict and audit evidence for ${gate.id}. Produce fresh corrected files, verify the repair, and return to that gate. Do not broaden the task or write outside the declared scope.`,
     skills: [], criterion_refs: [...finding.criterion_ids], is_gate: false, dynamic_dispatch: false, retry_to: [gate.id],
-    artifact_contract: ArtifactContractSchema.parse({ version: 1, reads: [], produces: finding.paths.map((path, index) => ({ id: `repaired_${index}`, root: 'project', path })) }),
+    artifact_contract: ArtifactContractSchema.parse({ version: 1, reads: [], replays: [], produces: finding.paths.map((path, index) => ({ id: `repaired_${index}`, root: 'project', path })) }),
   };
 }

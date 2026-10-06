@@ -12,6 +12,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runAllChecks } from '../src/reality-gate/index.js';
+import { inputFile } from './spec_contracts/declared-fixtures.js';
+import type { ArtifactRead } from '../src/artifact-declarations.js';
 import type { CheckContext, CheckDecl } from '../src/reality-gate/types.js';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,10 +53,13 @@ function write(root: string, relativePath: string, text: string): string {
   return path;
 }
 
-function declaration(glob: string, forbidPattern = 'forbidden'): CheckDecl {
+const sourceReads: ArtifactRead[] = [{ id: 'source', root: 'project', path: 'src', kind: 'directory', source: { kind: 'input' } }];
+const specReads: ArtifactRead[] = [{ id: 'spec', root: 'project', path: 'spec', kind: 'directory', source: { kind: 'input' } }];
+function declaration(glob: string, reads: ArtifactRead[], forbidPattern = 'forbidden'): CheckDecl {
   return {
     name: `scan ${glob}`,
     type: 'static-ast-scan',
+    reads,
     params: { glob, language: 'typescript', forbid_pattern: forbidPattern },
   };
 }
@@ -64,7 +69,7 @@ describe('bounded static scan traversal regressions', () => {
     write(projectDir, 'spec/fc-tasks.test.ts', 'const clean = true;\n');
     symlinkSync(join(projectDir, 'spec'), join(projectDir, 'spec', 'unrelated-loop'), 'dir');
 
-    const result = await runAllChecks([declaration('spec/*fc-tasks*.test.ts')], context());
+    const result = await runAllChecks([declaration('spec/*fc-tasks*.test.ts', specReads)], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
   });
@@ -78,24 +83,27 @@ describe('bounded static scan traversal regressions', () => {
     symlinkSync(outside, join(projectDir, 'src', 'linked-outside'), 'dir');
     symlinkSync(join(outside, 'file-target.ts'), join(projectDir, 'src', 'linked-file.ts'), 'file');
 
-    const result = await runAllChecks([declaration('src/**/*.ts')], context());
+    const result = await runAllChecks([declaration('src/**/*.ts', sourceReads)], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
   });
 
-  it('F09 resolves an exact top-level task artifact through project-first task fallback', async () => {
+  it('F09 scans the exact declared run artifact even when a wrong-kind project namesake exists', async () => {
     mkdirSync(join(projectDir, 'verification.md'));
     write(taskDir, 'verification.md', 'verified and clean\n');
 
-    const result = await runAllChecks([declaration('verification.md')], context());
+    const result = await runAllChecks([declaration('verification.md', [inputFile('verification', 'verification.md', 'run')])], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
+    const wrongRoot = await runAllChecks([declaration('verification.md', [inputFile('verification', 'verification.md')])], context());
+    expect(wrongRoot.pass).toBe(false);
+    expect(wrongRoot.results[0].details).toContain('ARTIFACT_READ_ABSENT');
   });
 
   it('F12 uses the matcher grammar when deriving the root for a question-mark glob', async () => {
     write(projectDir, 'src/a/file.ts', 'const clean = true;\n');
 
-    const result = await runAllChecks([declaration('src/?/file.ts')], context());
+    const result = await runAllChecks([declaration('src/?/file.ts', sourceReads)], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
   });
@@ -103,7 +111,7 @@ describe('bounded static scan traversal regressions', () => {
   it('QA04 uses the matcher grammar when an extglob appears in a directory component', async () => {
     write(projectDir, 'src/a/file.ts', 'const clean = true;\n');
 
-    const result = await runAllChecks([declaration('src/@(a|b)/*.ts')], context());
+    const result = await runAllChecks([declaration('src/@(a|b)/*.ts', sourceReads)], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
   });
@@ -112,7 +120,7 @@ describe('bounded static scan traversal regressions', () => {
     write(projectDir, 'src/a/b/file.ts', 'const clean = true;\n');
 
     const result = await runAllChecks([
-      declaration('src/{a/b,c}/file.ts'),
+      declaration('src/{a/b,c}/file.ts', sourceReads),
     ], context());
     expect(result.pass).toBe(true);
     expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
@@ -122,9 +130,9 @@ describe('bounded static scan traversal regressions', () => {
     const outside = mkdtempSync(join(tmpdir(), 'static-scan-wip-explicit-outside-'));
     cleanupRoots.push(outside);
     const escaped = write(outside, 'escaped.ts', 'const secret = "forbidden";\n');
-    const absolute = await runAllChecks([declaration(escaped)], context());
+    const absolute = await runAllChecks([declaration(escaped, [])], context());
     const relativeEscape = await runAllChecks([
-      declaration(join('..', basename(outside), 'escaped.ts')),
+      declaration(join('..', basename(outside), 'escaped.ts'), []),
     ], context());
 
     for (const result of [absolute, relativeEscape]) {
@@ -140,7 +148,7 @@ describe('bounded static scan traversal regressions', () => {
     mkdirSync(unreadable);
     chmodSync(unreadable, 0);
     try {
-      const result = await runAllChecks([declaration('spec/*.test.ts')], context());
+      const result = await runAllChecks([declaration('spec/*.test.ts', specReads)], context());
       expect(result.pass).toBe(true);
       expect(result.results[0].evidence).toMatchObject({ filesScanned: 1, findings: [] });
     } finally {
@@ -280,7 +288,7 @@ describe('bounded static scan traversal regressions', () => {
   it('QA12 refuses an oversized candidate before allocating the whole file', async () => {
     write(projectDir, 'src/oversized.ts', 'x'.repeat(1024 * 1024 + 1));
 
-    const result = await runAllChecks([declaration('src/*.ts')], context());
+    const result = await runAllChecks([declaration('src/*.ts', sourceReads)], context());
     expect(result.pass).toBe(false);
     expect(result.results[0].details).toMatch(/oversized|too large|byte limit/iu);
     expect(result.results[0].evidence).toMatchObject({ findings: [] });

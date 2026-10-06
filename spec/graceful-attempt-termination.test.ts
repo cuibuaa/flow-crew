@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import {
   existsSync,
   mkdirSync,
@@ -456,6 +457,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
         try {
           const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
             stageId,
             role: FIXTURE_ROLE,
             dependsOn: [],
@@ -557,6 +559,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
     try {
       const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
         stageId,
         role: FIXTURE_ROLE,
         dependsOn: [],

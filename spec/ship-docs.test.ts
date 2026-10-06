@@ -160,10 +160,7 @@ describe('ship skill semantic contract', () => {
     ]) {
       expect(normalized, bar).toContain(bar);
     }
-    expect(normalized).toContain('both result and baseline');
-    expect(normalized).toContain('planner owns planner-created stages');
-    expect(normalized).toContain('reserve every declared terminal path');
-    expect(normalized).toContain('complete writable scope');
+    expect(normalized).toContain('guide/brief-contract.md');
     expect(normalized).toContain('Declare `terminal_states` only for an artifact whose appearance should end the entire run');
     expect(normalized).toContain('Omit it for an intermediate or mid-pipeline output');
     expect(normalized).toContain('skip pending verification and repair');
@@ -228,7 +225,7 @@ describe('ship skill semantic contract', () => {
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
     // Update both values together when the guidance changes: the digest names the bytes the
     // stamp describes, so a mismatch means one of them was left behind.
-    expect({ revision: stamp, digest }).toEqual({ revision: '16', digest: '71dcf6b4a5d3' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '17', digest: 'eac6cdf65d23' });
   });
 
   it('contains no private measured case studies', () => {

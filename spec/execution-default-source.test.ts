@@ -57,6 +57,7 @@ async function launchWithoutOverrides(): Promise<{ timeoutMs: number; maxIterati
     '  - id: work',
     '    role: coder',
     '    scope: []',
+    '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
     '',
   ].join('\n');
   const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));

@@ -11,6 +11,7 @@
  * the CLI (`flowcrew campaign-loop`) supplies the production launcher/reader.
  */
 import type { Adapter, AgentConfig, RunOpts } from './adapters/base.js';
+import { withEngineCommandBoundary } from './write-boundary.js';
 import {
   type ResearchConfig,
   requireKnownRunStatus,
@@ -103,7 +104,9 @@ export async function scoutDirections(opts: ScoutOpts): Promise<string[]> {
     .replace(/\{context_inventory\}/g, summarizeContext(opts.projectDir, opts.objective.contextRoots ?? ['data']))
     + (opts.briefContext ? `\n\n--- CAMPAIGN TASK (goal, gates, ledger, data) ---\n${opts.briefContext}` : '')
     + `\n\nWrite literature_scan.md under report dir: ${opts.objective.reportDir ?? 'docs'}.`;
-  const res = await opts.adapter.run(prompt, opts.scoutRole, opts.runOpts);
+  const res = await withEngineCommandBoundary({ projectDir: opts.projectDir, runDir: opts.runOpts.runDir,
+    stageId: '_campaign_scout', attemptIndex: opts.runOpts.attemptIndex },
+    () => opts.adapter.run(prompt, opts.scoutRole, opts.runOpts));
   if (res.exitCode !== 0) return [];
   return parseScoutDirections(res.output);
 }
@@ -180,7 +183,9 @@ export function createLiveCampaignDeps(opts: LiveCampaignDepsOpts): CampaignLoop
         + `\n\nAlready tried this campaign (do NOT repeat): ${tried.length ? tried.join(', ') : '(none)'}`
         + `\nCampaign objective: baseline ${opts.objective.baseline}, target ${opts.objective.stop?.beat ?? 'n/a'}.`
         + (opts.briefContext ? `\n\n--- CAMPAIGN BRIEF (goal, gates, and the FULL ledger of directions already tried/dead — do NOT re-propose anything it lists as tried or dead) ---\n${opts.briefContext}` : '');
-      const res = await opts.adapter.run(prompt, opts.proposeRole, opts.proposeRunOpts);
+      const res = await withEngineCommandBoundary({ projectDir: opts.projectDir, runDir: opts.proposeRunOpts.runDir,
+        stageId: '_campaign_proposer', authority: 'observer', attemptIndex: opts.proposeRunOpts.attemptIndex },
+        () => opts.adapter.run(prompt, opts.proposeRole, opts.proposeRunOpts));
       // A proposer that CRASHED (non-zero exit) must NOT masquerade as a frontier: returning null
       // here would make the outer loop conclude "no new direction" when really the call errored
       // (e.g. a model 400). Throw so the campaign aborts loudly instead of a false negative.

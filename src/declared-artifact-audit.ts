@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import { ArtifactContractSchema, artifactActivation, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
+import { ArtifactContractSchema, RecordedArtifactContractSchema, artifactActivation, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { compareLiveConstraintContentIdentities, readLiveConstraintContentIdentity } from './live-constraint-guard.js';
 import type { StageArtifactContractAudit, StageArtifactContractInput, StageArtifactContractPreimage, StageArtifactObligation } from './stage-artifact-contract.js';
 import { STAGE_STATUS, type StageStatus } from './store.js';
@@ -14,7 +14,7 @@ export function declaredArtifactPreimages(input: Pick<StageArtifactContractInput
 }
 
 export function inspectDeclaredStageReads(input: { artifactContract: ArtifactContract; projectDir: string; runDir: string; statuses?: Record<string, StageStatus> }): string[] {
-  const contract = ArtifactContractSchema.parse(input.artifactContract);
+  const contract = RecordedArtifactContractSchema.parse(input.artifactContract);
   return contract.reads.flatMap((read) => {
     const activation = artifactActivation(read.when, input.statuses ?? {});
     if (activation === 'inactive') return [];

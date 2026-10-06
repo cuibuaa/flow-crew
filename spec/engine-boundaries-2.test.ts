@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { mergePlanRetryPair } from '../src/plan-retry-monotone.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { inspectRealityCheckReachability, runWorkflow, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
@@ -39,11 +40,12 @@ async function scopeBoundaryCase(deliverToolBoundary: boolean): Promise<{
     const stage: StageConfig = {
       id: 'work', role: 'coder', depends_on: [], scope: ['src/declared.txt'],
       prompt_template: 'fixture', skills: [], dynamic_dispatch: false, is_gate: false,
+      artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
     };
     const config: WorkflowConfig = {
       name: 'scope-boundary', defaults: { max_iterations: 1, max_retries: 0 }, stages: [stage],
     };
-    const yaml = 'name: scope-boundary\ndefaults:\n  max_iterations: 1\n  max_retries: 0\nstages:\n  - id: work\n    role: coder\n    scope: [src/declared.txt]\n    prompt_template: fixture\n';
+    const yaml = 'name: scope-boundary\ndefaults:\n  max_iterations: 1\n  max_retries: 0\nstages:\n  - id: work\n    role: coder\n    scope: [src/declared.txt]\n    prompt_template: fixture\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n';
     const created = createRun(project, config.name, yaml, ['work']);
     put(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const state = readRunState(project, created.runId);
@@ -117,16 +119,18 @@ async function ignoredFileCase(writeKind: 'none' | 'known-tree' | 'ignored-tree'
       'name: coder\ndescription: fixture\nmodel: default\nreasoning_effort: low\ntools: []\nprompt: fixture\n');
     const stage: StageConfig = { id: 'reader', role: 'coder', depends_on: [],
       scope: ['.venv/.build*/**'], prompt_template: 'Read and finish.',
-      skills: [], dynamic_dispatch: false, is_gate: false };
+      skills: [], dynamic_dispatch: false, is_gate: false,
+      artifact_contract: { version: 1, produces: [], reads: [], replays: [] } };
     const peer: StageConfig = { id: 'peer', role: 'coder', depends_on: [],
       scope: ['src/peer-owned.ts'], prompt_template: 'Write a fixture file.',
-      skills: [], dynamic_dispatch: false, is_gate: false };
+      skills: [], dynamic_dispatch: false, is_gate: false,
+      artifact_contract: { version: 1, produces: [], reads: [], replays: [] } };
     const selectedStages = writeKind === 'peer-writes' ? [stage, peer] : [stage];
     const config: WorkflowConfig = { name: 'ignored-file',
       defaults: { max_iterations: 1, max_retries: 0 }, stages: selectedStages };
-    const yaml = 'name: ignored-file\ndefaults:\n  max_iterations: 1\n  max_retries: 0\nstages:\n  - id: reader\n    role: coder\n    scope: [.venv/.build*/**]\n    prompt_template: Read and finish.\n'
+    const yaml = 'name: ignored-file\ndefaults:\n  max_iterations: 1\n  max_retries: 0\nstages:\n  - id: reader\n    role: coder\n    scope: [.venv/.build*/**]\n    prompt_template: Read and finish.\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n'
       + (writeKind === 'peer-writes'
-        ? '  - id: peer\n    role: coder\n    scope: [src/peer-owned.ts]\n    prompt_template: Write a fixture file.\n'
+        ? '  - id: peer\n    role: coder\n    scope: [src/peer-owned.ts]\n    prompt_template: Write a fixture file.\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n'
         : '');
     const created = createRun(project, config.name, yaml, selectedStages.map((item) => item.id));
     const state = readRunState(project, created.runId);
@@ -201,14 +205,19 @@ describe('engine boundary promises', () => {
     expect(repaired[1].scope).toEqual(['docs/cache.json']);
     const reachabilityRoot = mkdtempSync(join(tmpdir(), 'fc-boundary-b-reachability-'));
     try {
-      const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    params:\n      paths: [docs/report.md]\n```\n';
+      const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    reads: [{id: report, root: project, path: docs/report.md, source: {kind: stage, stage: write_report, artifact: report}}]\n    params:\n      paths: [docs/report.md]\n```\n';
       const asStages = (value: Array<Record<string, unknown>>): StageConfig[] => value.map((entry) => ({
         ...entry, id: String(entry.id), role: String(entry.role),
         scope: entry.scope as string[], condition: entry.condition as string | undefined,
         depends_on: [], is_gate: false,
+        artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: entry.id === 'write_report' ? [{ id: 'report', root: 'project', path: 'docs/report.md' }] : [], reads: [], replays: [] }),
       }));
-      expect(inspectRealityCheckReachability({ markdown, projectDir: reachabilityRoot,
-        stages: asStages(stages(incumbent.dispatch)) })).toEqual([expect.stringContaining('every producer is conditional')]);
+      const before = inspectRealityCheckReachability({ markdown, projectDir: reachabilityRoot,
+        stages: asStages(stages(incumbent.dispatch)) });
+      expect(before).toEqual([
+        expect.stringContaining('ARTIFACT_READ_UNREACHABLE'),
+        expect.stringContaining('every producer is conditional'),
+      ]);
       expect(inspectRealityCheckReachability({ markdown, projectDir: reachabilityRoot,
         stages: asStages(repaired) })).toEqual([]);
     } finally { rmSync(reachabilityRoot, { recursive: true, force: true }); }
@@ -218,23 +227,28 @@ describe('engine boundary promises', () => {
     expect(unrelated[1].scope).toEqual(['docs/cache.json']);
   });
 
-  it('resolves an expressly run-local prompt file there and keeps ordinary project obligations', () => {
+  it('binds declared run and project outputs independently of prompt wording', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-boundary-c-'));
     try {
       const project = join(root, 'project');
       const runDir = join(root, 'run');
+      mkdirSync(project);
       put(join(runDir, 'validation_final.json'), '{"passed":true}\n');
       const contextual = inspectStageArtifactContract({ stageId: 'write_report',
         template: "Write this run's validation_final.json.", projectDir: project, runDir,
-        writes: ['run:validation_final.json'] });
+        writes: ['run:validation_final.json'],
+        artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'validation', root: 'run', path: 'validation_final.json' }], reads: [], replays: [] }) });
       expect(contextual.violations).toEqual([]);
       expect(contextual.obligations[0].path).toBe(join(runDir, 'validation_final.json'));
       const ordinary = inspectStageArtifactContract({ stageId: 'write_report',
         template: 'Write validation_final.json.', projectDir: project, runDir,
-        writes: ['run:validation_final.json'] });
-      expect(ordinary.violations).toEqual([expect.objectContaining({
-        path: join(project, 'validation_final.json'), reason: expect.stringContaining('no readable file'),
-      })]);
+        writes: ['run:validation_final.json'],
+        artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'validation', root: 'project', path: 'validation_final.json' }], reads: [], replays: [] }) });
+      expect(ordinary.violations).toContainEqual(expect.objectContaining({
+        path: join(project, 'validation_final.json'), reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE'),
+      }));
+      const missing = inspectStageArtifactContract({ stageId: 'write_report', template: "Write this run's validation_final.json.", projectDir: project, runDir, writes: ['run:validation_final.json'] });
+      expect(missing.violations[0].reason).toContain('ARTIFACT_DECLARATION_REQUIRED');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

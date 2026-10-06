@@ -5,6 +5,7 @@ import { formatDuration, formatTokens, statusClass } from "./format";
 import { BriefHistoryDisclosure, ResearchKnowledgeSummary } from "./LazyEvidence";
 import RunTitleDisclosure from "./RunTitleDisclosure";
 import SourceNotice, { IssueNotice } from "./SourceNotice";
+import { simulationSource } from "../../lib/simulation-source";
 import type {
   CampaignAttentionItem,
   CampaignOperatorView,
@@ -41,10 +42,6 @@ function RunConclusion({ value }: { value: string }) {
       <p>{value}</p>
     </details>
   );
-}
-
-function simulationSource(source: string | undefined): boolean {
-  return Boolean(source && /(?:^|[:/_.-])(?:mock|test|fixture|simulation|simulated)(?:$|[:/_.-])/iu.test(source));
 }
 
 function AttentionItem({ item, expanded = false }: { item: CampaignAttentionItem; expanded?: boolean }) {

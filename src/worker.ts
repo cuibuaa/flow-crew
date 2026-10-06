@@ -1,12 +1,14 @@
 // Module: worker
+import { withEngineWriteBoundary } from './write-boundary.js';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { recordInvocationInput } from './run-state-view.js';
 import { runStateContext } from './run-state-access.js';
+import { providerFailureDetail } from './provider-result.js';
 import { inspectDeclaredStageReads } from './declared-artifact-audit.js';
 import { captureResourceLeaseOwner, ResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseHandle } from './resource-leases.js';
 import { engineGeneration } from './restart-recovery.js';
-import { ArtifactPathSchema, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
+import { ArtifactPathSchema, resolveArtifactLocation, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
@@ -66,9 +68,10 @@ import {
 import {
   captureDeferredStageArtifactContract,
   captureStageArtifactContractPreimages,
-  inspectStageArtifactContract,
+  verifyStageArtifactContract,
   writeStageArtifactContractAudit,
 } from './stage-artifact-contract.js';
+import { readRecordedArtifactContract } from './recorded-artifact-contract.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -119,6 +122,7 @@ export interface StageOpts {
   ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
+  dynamicDispatch?: boolean;
   researchOutcomeGate?: boolean;
   criterionRefs?: string[];
   resumeSessionId?: string;
@@ -599,12 +603,14 @@ async function runStageWithWriterLease(
     } catch { /* non-critical */ }
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
+    resolvedSystemPrompt += '\n\nEvery dispatched stage must declare artifact_contract {version:1, produces:[], reads:[], groups:[], replays:[]}. Replay entries declare id, runner (node_test, vitest or pytest), target artifact IDs, argv, and expected {exit_code, failures:[{artifact,test}]}. Declare an empty replay list when no command is claimed. Exact test files must be unconditional produces/reads declarations. Report prose is never executed. A nonzero reproduction must declare the exact failing test identities. Optional replay timeout_ms cannot exceed the project validation budget or extend the immutable attempt deadline.';
     const policies = renderPlannerPolicies(loadProjectDefaults(opts.projectDir).planner_policies ?? []);
     if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
   prompt += `\n\n${runStateContext(opts.projectDir, opts.runId)}`;
+  if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract, null, 2)}`;
 
   const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
@@ -619,15 +625,10 @@ async function runStageWithWriterLease(
       })
     : [];
   let priorProducedPromptArtifacts: string[] = [];
-  try {
-    const prior = JSON.parse(readFileSync(artifactContractPath, 'utf-8')) as {
-      producedPromptArtifacts?: unknown;
-    };
-    if (Array.isArray(prior.producedPromptArtifacts) && (!opts.artifactContract || priorAttempt?.status === 'suspended')) {
-      priorProducedPromptArtifacts = prior.producedPromptArtifacts
-        .filter((path): path is string => typeof path === 'string');
-    }
-  } catch { /* first attempt, or no prior artifact contract */ }
+  const priorAudit = readRecordedArtifactContract(artifactContractPath);
+  if (priorAudit.status === 'readable' && priorAttempt?.status === 'suspended') {
+    priorProducedPromptArtifacts = priorAudit.record.producedPromptArtifacts.filter((path): path is string => typeof path === 'string');
+  }
 
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
@@ -962,6 +963,8 @@ async function runStageWithWriterLease(
     return {
       output: '',
       exitCode: approvalSuspended ? 0 : timedOut ? 124 : 137,
+      ...(telemetry?.processExitCode !== undefined ? { processExitCode: telemetry.processExitCode } : {}),
+      ...(telemetry?.processSignal !== undefined ? { processSignal: telemetry.processSignal } : {}),
       duration_ms: Math.round(attemptElapsedMs()),
       timedOut,
       ...(approvalSuspended ? {
@@ -1202,7 +1205,10 @@ async function runStageWithWriterLease(
         }
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
-      selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
+      withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
+        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!, attemptIndex,
+        sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined },
+      () => selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,
         runDir: opts.runDir,
@@ -1215,7 +1221,7 @@ async function runStageWithWriterLease(
         abortSignal: invocationAbortSignal,
         onCommandLifecycle,
         onInvocationInput: (input) => captureInput(input, 'model'),
-      }).then(
+      })).then(
         (value) => {
           liveMonitor?.observePaths(value.writes ?? []);
           lastChildClosedAt = new Date().toISOString();
@@ -1305,6 +1311,7 @@ async function runStageWithWriterLease(
             exitCode: 0,
             timedOut: false,
             adapterError: false,
+            providerFailure: undefined,
             output: `${combined.output}${combined.output ? '\n\n' : ''}Accepted scope revision ended this attempt at the control boundary.`,
           };
         }
@@ -1357,6 +1364,7 @@ async function runStageWithWriterLease(
           timedOut: false,
           adapterError: false,
           friendlyError: live.monitorFailure.reason,
+          providerFailure: undefined,
         };
       }
       const incidents = live?.incidents ?? [];
@@ -1369,6 +1377,7 @@ async function runStageWithWriterLease(
           timedOut: false,
           adapterError: false,
           friendlyError: `live constraint rollback failed; ${instructions.join(' ')}`,
+          providerFailure: undefined,
         };
       }
       if (liveReinvocations >= LIVE_CONSTRAINT_MAX_REINVOCATIONS || aggregateAbortSignal.aborted) {
@@ -1377,6 +1386,7 @@ async function runStageWithWriterLease(
           exitCode: aggregateAbortSignal.aborted ? combined.exitCode : 1,
           timedOut: aggregateAbortSignal.aborted ? combined.timedOut : false,
           adapterError: false,
+          providerFailure: undefined,
           friendlyError: aggregateAbortSignal.aborted
             ? combined.friendlyError
             : `scope_violation: repeated live constraint violation after same-attempt correction; ${instructions.join(' ')}`,
@@ -1404,10 +1414,11 @@ async function runStageWithWriterLease(
   let result: RunResult;
   let resourceHandle: ResourceLeaseHandle | undefined;
   const resourceRegistry = opts.resources ? opts.resourceRegistry ?? new ResourceLeaseRegistry({ registryPath: resourceLeaseRegistryPath() }) : undefined;
-  // Abort and legacy-extension polling live through adapter backoff and
-  // fallback so every phase remains governed by this attempt's one deadline.
+  // Adapter work and declared replay share one immutable attempt boundary.
   try {
-    const preflightErrors = opts.artifactContract ? inspectDeclaredStageReads({ artifactContract: opts.artifactContract, projectDir: opts.projectDir, runDir: opts.runDir, statuses: opts.artifactStatuses }) : [];
+  try {
+    const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
+    if (!preflightErrors.length) preflightErrors.push(...inspectDeclaredStageReads({ artifactContract: opts.artifactContract!, projectDir: opts.projectDir, runDir: opts.runDir, statuses: opts.artifactStatuses }));
     if (opts.resources && resourceRegistry && preflightErrors.length === 0) {
       const disk = opts.resources.disk.map((entry) => ({
         path: entry.path === '.' ? (entry.root === 'run' ? opts.runDir : opts.projectDir)
@@ -1496,26 +1507,13 @@ async function runStageWithWriterLease(
     observeAdapterSettlement();
     if (!aggregateAbortSignal.aborted) throw error;
     result = cancelledResult();
-  } finally {
-    pollAbortSignal();
-    clearInterval(abortPollTimer);
-    clearInterval(commandInterruptPollTimer);
-    clearInterval(extensionPollTimer);
-    for (const watcher of requestWatchers) watcher.close();
-    cleanupAbortSignalAtExit();
-    cleanupCommandInterruptSignalAtExit();
-    // The execution attempt ends when adapter/fallback child settlement ends.
-    // A blocked event loop can settle after the immutable boundary before its
-    // timer callback runs, so observe monotonic expiry before disposal.
-    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
-    // Dispose here as well on thrown adapter errors so no long deadline timer
-    // survives this invocation and keeps the worker process alive.
-    attemptDeadline.dispose();
   }
 
-  if (result.exitCode === 0 && (opts.artifactContract || opts.artifactObligationTemplate?.trim())) {
+  if (result.exitCode === 0) {
     try {
       const artifactInput = {
+        attemptIndex,
+        isGate: opts.isGate,
         stageId: opts.stageId,
         template: opts.artifactObligationTemplate ?? '',
         projectDir: opts.projectDir,
@@ -1526,9 +1524,36 @@ async function runStageWithWriterLease(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = scopeRevisionBoundaryReached
-        ? captureDeferredStageArtifactContract(artifactInput)
-        : inspectStageArtifactContract(artifactInput);
+      const replayAbort = new AbortController();
+      const replayMonitor = !scopeRevisionBoundaryReached && opts.artifactContract?.replays?.length
+        ? liveConstraintGuard?.beginInvocation(++invocationIndex, (reason) => replayAbort.abort(reason)) : undefined;
+      let audit: Awaited<ReturnType<typeof verifyStageArtifactContract>>;
+      try {
+        audit = scopeRevisionBoundaryReached
+          ? captureDeferredStageArtifactContract(artifactInput)
+          : await verifyStageArtifactContract(artifactInput, {
+            remainingMs: () => attemptDeadline.remainingMs(),
+            abortSignal: AbortSignal.any([aggregateAbortSignal, replayAbort.signal]),
+            onCommandLifecycle: (event) => {
+              if (event.phase === 'started') replayMonitor?.commandStarted(event.id, event.command);
+              else {
+                lastChildClosedAt = event.timestamp;
+                replayMonitor?.commandCompleted(event.id);
+              }
+            },
+          });
+      } finally {
+        if (replayMonitor) latestLiveConstraintResult = await replayMonitor.finish();
+      }
+      if (replayMonitor && latestLiveConstraintResult) {
+        const live = latestLiveConstraintResult;
+        if (live.validationGeneratedPaths.length) result.validationGeneratedWrites = [...new Set([...(result.validationGeneratedWrites ?? []), ...live.validationGeneratedPaths])];
+        const reasons = [...live.incidents.map((incident) => `REPLAY_SCOPE_VIOLATION: ${incident.path}: ${incident.scopeRevisionInstruction}`), ...(live.monitorFailure ? [live.monitorFailure.reason] : [])];
+        if (reasons.length) {
+          audit.replayVerification = 'refused';
+          audit.violations.push(...reasons.map((reason) => ({ kind: 'declared_replay' as const, source: 'declaration' as const, mention: 'artifact_contract.replays', path: opts.projectDir, reason })));
+        }
+      }
       if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
       if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
         const detail = audit.violations.map((violation) => violation.reason).join('; ');
@@ -1536,6 +1561,7 @@ async function runStageWithWriterLease(
         result.timedOut = false;
         result.adapterError = false;
         result.adapterFailureKind = undefined;
+        result.providerFailure = undefined;
         result.friendlyError = `artifact contract violation: ${detail}`;
         result.output = `${result.output}${result.output ? '\n\n' : ''}Artifact contract refused completion: ${detail}`;
         recordRunEvent(opts.projectDir, opts.runId, {
@@ -1556,8 +1582,25 @@ async function runStageWithWriterLease(
       result.timedOut = false;
       result.adapterError = false;
       result.adapterFailureKind = undefined;
+      result.providerFailure = undefined;
       result.friendlyError = `artifact contract could not be checked: ${error instanceof Error ? error.message : String(error)}`;
     }
+  }
+  } finally {
+    pollAbortSignal();
+    clearInterval(abortPollTimer);
+    clearInterval(commandInterruptPollTimer);
+    clearInterval(extensionPollTimer);
+    for (const watcher of requestWatchers) watcher.close();
+    cleanupAbortSignalAtExit();
+    cleanupCommandInterruptSignalAtExit();
+    // The execution attempt ends after adapter and declared replay settlement.
+    // A blocked event loop can settle after the immutable boundary before its
+    // timer callback runs, so observe monotonic expiry before disposal.
+    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
+    // Dispose here as well on thrown adapter errors so no long deadline timer
+    // survives this invocation and keeps the worker process alive.
+    attemptDeadline.dispose();
   }
 
   if (attemptDeadline.signal.aborted && !supervisorAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
@@ -1591,6 +1634,7 @@ async function runStageWithWriterLease(
     terminationCause ??= 'failed';
   }
   if (supervisorAborted) result.output = renderSupervisorAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
+  if (approvalSuspended || timedOut || supervisorAborted || result.exitCode === 0) result.providerFailure = undefined;
   result.effectiveTimeoutMs = effectiveBudgetMs;
   result.timeoutTerminationCause = terminationCause;
 
@@ -1630,12 +1674,16 @@ async function runStageWithWriterLease(
   let final = completeStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, {
     exitCode: result.exitCode,
     duration_ms: result.duration_ms,
+    processExitCode: result.processExitCode,
+    processSignal: result.processSignal,
+    providerFailure: result.providerFailure,
     artifacts,
     completedAt: new Date().toISOString(),
     error: result.exitCode !== 0
       ? (
         supervisorAborted
           ? (abortReason ? `aborted by supervisor: ${abortReason}` : 'aborted by supervisor')
+          : result.providerFailure ? providerFailureDetail(result.exitCode, result.providerFailure)
           : result.adapterError ? `upstream adapter failure (${result.adapterFailureKind ?? 'unclassified'})`
           : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
@@ -1670,6 +1718,9 @@ async function runStageWithWriterLease(
     status: final.status,
     exitCode: result.exitCode,
     adapterFailure: result.adapterError === true,
+    ...(result.processExitCode !== undefined ? { processExitCode: result.processExitCode } : {}),
+    ...(result.processSignal !== undefined ? { processSignal: result.processSignal } : {}),
+    ...(result.providerFailure ? { providerFailure: result.providerFailure } : {}),
     ...(result.adapterFailureKind ? { adapterFailureKind: result.adapterFailureKind } : {}),
     ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
     ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),

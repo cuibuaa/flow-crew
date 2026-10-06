@@ -1,4 +1,7 @@
-import { spawn } from 'node:child_process';
+import { BriefPatchSchema, type BriefPatch } from './source_control/brief-patch.js';
+export { BriefPatchSchema, type BriefPatch } from './source_control/brief-patch.js';
+import { spawnEngineChild, withEngineCommandBoundary } from './write-boundary.js';
+import { loadProjectDefaults } from './config.js';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -166,13 +169,6 @@ export interface DiagnosisRule {
   approval?: 'auto' | 'human';
 }
 
-export interface BriefPatch {
-  type: 'brief_patch';
-  section: string;
-  op: 'append' | 'replace_value' | 'edit';
-  value: string;
-}
-
 export interface DiagnosisContext {
   rejections: Record<string, number>;
   decision: any;
@@ -214,13 +210,6 @@ const CAMPAIGN_OUTCOME_STATUS = {
   COMPLETE: RUN_STATUS.COMPLETE,
   VALID_SHIP: 'valid_ship',
 } as const;
-
-export const BriefPatchSchema = z.object({
-  type: z.literal('brief_patch'),
-  section: z.string().min(1),
-  op: z.enum(['append', 'replace_value', 'edit']),
-  value: z.string(),
-});
 
 const CampaignConfigSchema = z.object({
   id: z.string().min(1),
@@ -454,7 +443,10 @@ async function evaluateLlmDiagnosis(rule: DiagnosisRule, context: DiagnosisConte
     ? join(campaignDir(campaignId), 'llm-diagnosis', `iter-${context.iteration}`)
     : join(projectDir, '.fc', 'llm-diagnosis', `iter-${context.iteration}`);
   mkdirSync(llmDir, { recursive: true });
-  const result = await adapter.run(prompt, {
+  const result = await withEngineCommandBoundary({ projectDir,
+    runDir: context.runId ? runDir(projectDir, context.runId) : undefined,
+    stageId: '_campaign_diagnosis', authority: 'observer',
+  }, () => adapter.run(prompt, {
     name: 'llm-diagnosis',
     description: 'Campaign diagnosis supervisor',
     model: 'default',
@@ -467,7 +459,7 @@ async function evaluateLlmDiagnosis(rule: DiagnosisRule, context: DiagnosisConte
     workDir: projectDir,
     runDir: llmDir,
     stageId: 'llm_diagnosis',
-  });
+  }));
   if (result.exitCode !== 0) {
     console.warn(`LLM diagnosis adapter exited ${result.exitCode}`);
     return null;
@@ -653,21 +645,30 @@ function latestRunIdAfter(previous: Set<string>, projectDir: string): string | n
 async function launchRun(cfg: CampaignConfig): Promise<string> {
   mkdirSync(runsRoot(), { recursive: true });
   const before = new Set(readdirSync(runsRoot()).filter((id) => existsSync(join(runsRoot(), id, 'run.json'))));
-  await new Promise<void>((resolveLaunch, reject) => {
-    const child = spawn('bash', [cfg.launch.launchScript], {
+  const timeoutMs = loadProjectDefaults(cfg.projectDir).timeout_ms;
+  await withEngineCommandBoundary({ projectDir: cfg.projectDir, runDir: campaignDir(cfg.id),
+    stageId: '_campaign_launch',
+  }, () => new Promise<void>((resolveLaunch, reject) => {
+    const { child, stop, boundaryError } = spawnEngineChild('bash', [cfg.launch.launchScript], {
       cwd: cfg.projectDir,
       env: { ...process.env, FC_CAMPAIGN_ID: cfg.id },
-      stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';
-    child.stdout.on('data', (chunk) => { output += String(chunk); });
-    child.stderr.on('data', (chunk) => { output += String(chunk); });
-    child.on('error', reject);
+    child.stdout?.on('data', (chunk) => { output += String(chunk); });
+    child.stderr?.on('data', (chunk) => { output += String(chunk); });
+    let spawnError: Error | undefined, timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+    child.on('error', (error) => { spawnError = error; });
     child.on('close', (code) => {
-      if (code !== 0) reject(new Error(`Launch script exited ${code}: ${output.trim()}`));
+      clearTimeout(timer);
+      const refusal = boundaryError();
+      if (refusal) reject(new Error(refusal));
+      else if (spawnError) reject(spawnError);
+      else if (timedOut) reject(new Error(`Campaign launch timed out after ${timeoutMs}ms`));
+      else if (code !== 0) reject(new Error(`Launch script exited ${code}: ${output.trim()}`));
       else resolveLaunch();
     });
-  });
+  }));
   const runId = latestRunIdAfter(before, cfg.projectDir);
   if (!runId) throw new Error('Launch script completed but no new FlowCrew run was found');
   return runId;

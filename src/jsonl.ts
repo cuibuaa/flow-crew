@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 export interface JsonlReadDiagnostics<T> {
   rows: T[];
@@ -30,4 +30,9 @@ export function readJsonlFileWithDiagnostics<T>(path: string): JsonlReadDiagnost
 
 export function readJsonlFile<T>(path: string): T[] {
   return readJsonlFileWithDiagnostics<T>(path).rows;
+}
+
+/** Optional carriers use the same parser while preserving read errors. */
+export function readOptionalJsonlFile<T>(path: string): T[] {
+  return existsSync(path) ? readJsonlFile<T>(path) : [];
 }

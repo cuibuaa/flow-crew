@@ -1,3 +1,4 @@
+import { artifacts } from '../spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — regression contracts for two grounded engine failures
@@ -41,7 +42,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const planWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: plan-only', 'defaults:', '  max_iterations: 4', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(roles: string[]): string {

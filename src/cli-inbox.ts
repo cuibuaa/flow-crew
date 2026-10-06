@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
 import { isPausedRunStatus, readRunState, runsRoot } from './store.js';
 import { claimLaunchIntent, releaseLaunchIntent } from './run-lock.js';
+import { canonicalRunId } from './cancellation-policy.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
 import {
   formatBriefPreflightReport,
@@ -97,6 +98,7 @@ function resumeRun(
   out: NodeJS.WriteStream,
   spawnProcess: ResumeSpawner,
 ): void {
+  runId = canonicalRunId(runsRoot(), runId);
   const claim = claimLaunchIntent(projectDir, runId);
   if (!claim.claimed) {
     throw new Error(`Project launch already in progress (${claim.blockingOwnerRunId ?? 'unknown'})`);

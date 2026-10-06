@@ -512,6 +512,22 @@ registered role and has a unique ID:
   dependency_reasons:
     inspect_code: The implementation uses the inspected call graph.
   criterion_refs: [criterion_4d142ca0]
+  artifact_contract:
+    version: 1
+    produces:
+      - {id: implementation, root: project, path: src/search/query.ts}
+      - {id: regression, root: project, path: spec/search/query.test.ts}
+    reads:
+      - id: analysis
+        root: run
+        path: stages/inspect_code/analysis.md
+        source: {kind: stage, stage: inspect_code, artifact: analysis}
+    replays:
+      - id: regression
+        runner: vitest
+        targets: [regression]
+        argv: []
+        expected: {exit_code: 0, failures: []}
   prompt_template: |
     Implement the accepted design and add focused tests.
   skills: []
@@ -521,7 +537,7 @@ registered role and has a unique ID:
 ```
 
 Every dynamically emitted stage requires `id`, `role`, `depends_on`, `scope`,
-and `dependency_reasons`; `prompt_template` defaults to empty, and `task` is a
+`dependency_reasons` and `artifact_contract`; `prompt_template` defaults to empty, and `task` is a
 compatibility alias. IDs are snake_case and at most 20 characters. Dependency
 reasons must have exactly one non-empty entry per dependency edge. Optional
 fields are `condition`, `skills`, `dynamic_dispatch`, `is_gate`, `retry_to`,
@@ -538,7 +554,10 @@ edge, cycle, incoherent repair/gate edge, unowned terminal path, or criterion
 coverage gap rejects the whole proposal before any proposed stage runs. Older
 dynamic plans that relied on omitted scope/dependency metadata or silent
 partial admission are therefore intentionally incompatible; static workflow
-configuration continues to use the compatibility schema.
+configuration and historical artifacts remain readable with the recorded schema.
+That reader is not execution authority: the new generation refuses an undeclared
+static launch or historical takeover before work, with
+`DECLARED_INPUT_MIGRATION_REQUIRED`.
 
 At run start the scheduler extracts explicitly numbered or named criteria from
 the admitted brief into `brief_criteria.json`. Each criterion must be assigned
@@ -569,19 +588,20 @@ and the conditional stage is recorded `skipped`. Dynamically dispatched
 conditions are also persisted in `workflow.yaml`, so the recorded DAG matches
 the one the scheduler evaluated.
 
-The generic stage schema has no list of arbitrary project artifacts promised in
-prose. For an ordinary stage, `complete` therefore proves successful process
-completion, not that every prose-named file exists. When downstream safety
-depends on a machine-checkable output, express it through an existing typed
-contract (a gate verdict, research result, or terminal artifact) instead of
-relying only on prose.
+`artifact_contract` is the machine-checkable output, read and replay interface.
+Its version 1 `produces`, `reads` and `replays` lists are explicit, even when
+empty. An ordinary stage cannot settle successfully with a missing or stale
+declared output or an unverified declared replay. Prose and report commands
+create no additional duties. Exact paths and producer bindings remove filename
+guessing: "write X/a.json and b.md" does not declare either path. Declare
+`X/a.json` and `X/b.md` separately when those are the intended locations.
+See [declared artifacts and replay commands](engine-state-and-revisions.md) for
+rooted sources, output groups, expected failing reproductions and budget limits.
 
 ### `scope`: the paths a stage may write
 
 ```yaml
-- id: implement_change
-  role: coder
-  scope: ["src/search/**", "spec/search/**"]
+scope: ["src/search/**", "spec/search/**"]
 ```
 
 `scope` is a list of project-relative paths or globs. A write outside the stage's
@@ -719,8 +739,13 @@ contract:
 checks:
   - name: result-shape
     type: json-schema-match
+    reads:
+      - id: summary
+        root: project
+        path: artifacts/evaluation/summary.json
+        source: {kind: input}
     params:
-      file: artifacts/evaluation/round_result.json
+      file: artifacts/evaluation/summary.json
       schema:
         type: object
         required: [label, result]
@@ -736,10 +761,13 @@ bound to the canonical target and exact brief bytes; when it records a red
 `no_regression_from_baseline` criterion, compare current failure identities with
 that record or omit the redundant validation check.
 
-Before dispatch admission, every literal path in a hard planner check must
-already exist, be a framework-owned research/terminal path, or be owned by an
-admitted stage. This prevents a check from requiring an artifact that no stage
-can create before the check runs. Terminal candidates are materialized before
+Every check declares `reads`, including `reads: []` when it has no file inputs.
+The example above assumes an existing summary, separate from the research
+protocol's own round-result schema check. A future input instead names its
+exact declared stage producer. Admission and execution validate these rooted
+declarations and the handler's typed path parameters; script text is not
+parsed to discover dependencies. Authors must still name dynamic script reads,
+which the engine cannot exhaustively verify. Terminal candidates are materialized before
 their final reality checks and quarantined into the run directory if rejected.
 For research runs, the mutable latest-round `result_file` is not automatically
 a safe hard-check target: it is consumed and may be absent when the check runs.

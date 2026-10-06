@@ -1,16 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { z } from 'zod';
-import type { BriefPatch } from './campaign.js';
-import { readJsonlFile } from './jsonl.js';
+import { BriefPatchSchema, type BriefPatch } from './source_control/brief-patch.js';
+import { readOptionalJsonlFile } from './jsonl.js';
 import { campaignsRoot } from './store.js';
-
-const BriefPatchSchema = z.object({
-  type: z.literal('brief_patch'),
-  section: z.string().min(1),
-  op: z.enum(['append', 'replace_value', 'edit']),
-  value: z.string(),
-});
 
 export interface PendingReviewEntry {
   ts: string;
@@ -80,8 +72,7 @@ function normalizeEntry(raw: unknown, campaignId: string): PendingReviewEntry | 
 
 export function readPendingReviews(campaignId: string): PendingReviewEntry[] {
   const path = pendingReviewPath(campaignId);
-  if (!existsSync(path)) return [];
-  return readJsonlFile<unknown>(path)
+  return readOptionalJsonlFile<unknown>(path)
     .map((entry) => normalizeEntry(entry, campaignId))
     .filter((entry): entry is PendingReviewEntry => !!entry);
 }

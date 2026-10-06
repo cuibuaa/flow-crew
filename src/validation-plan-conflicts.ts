@@ -1,3 +1,4 @@
+import { normalizedProjectPath } from './scheduler/sched_admission/scope-services.js';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, type Dirent } from 'node:fs';
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
@@ -41,13 +42,6 @@ export interface ValidationPlanConflictInspection {
   truncated: boolean;
   assertions: LiteralNegativePathAssertion[];
   conflicts: ValidationPlanConflict[];
-}
-
-function normalizedProjectPath(value: string): string | undefined {
-  const normalized = posix.normalize(value.trim().replace(/\\/g, '/').replace(/^\.\//, ''));
-  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')
-      || isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized)) return undefined;
-  return normalized;
 }
 
 function extension(path: string): string {

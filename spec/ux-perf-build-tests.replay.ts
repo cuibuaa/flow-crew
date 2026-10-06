@@ -93,7 +93,7 @@ describe('transactional build and truthful fast-test contracts', () => {
       `const gate = await import(${JSON.stringify(indexUrl)});`,
       `fs.renameSync(${JSON.stringify(join(copiedGate, 'checks'))}, ${JSON.stringify(join(copiedGate, 'checks.previous'))});`,
       'const types = await gate.listCheckTypes();',
-      `const report = await gate.runAllChecks([{ name: 'terminal', type: 'file-exists-nonempty', params: { paths: [${JSON.stringify(terminalPath)}] } }], { projectDir: ${JSON.stringify(root)}, taskDir: ${JSON.stringify(root)} });`,
+      `const report = await gate.runAllChecks([{ name: 'terminal', type: 'file-exists-nonempty', reads: [{ id: 'terminal', root: 'project', path: 'terminal.json', source: { kind: 'input' } }], params: { paths: ['terminal.json'] } }], { projectDir: ${JSON.stringify(root)}, taskDir: ${JSON.stringify(root)} });`,
       `fs.writeFileSync(${JSON.stringify(terminalPath)}, JSON.stringify({ status: report.results.length === 1 ? 'complete' : 'failed' }));`,
       'process.stdout.write(JSON.stringify({ types: types.map(({ type }) => type), checksRun: report.checksRun }));',
     ].join('\n');
@@ -267,8 +267,9 @@ describe('transactional build and truthful fast-test contracts', () => {
       `const gate = await import(${JSON.stringify(gateIndex)});`,
       `fs.writeFileSync(${JSON.stringify(readyPath)}, 'ready');`,
       `while (!fs.existsSync(${JSON.stringify(releasePath)})) await delay(5);`,
-      `const report = await gate.runAllChecks([{ name: 'terminal', type: 'file-exists-nonempty', params: { paths: [${JSON.stringify(terminalPath)}] } }], { projectDir: ${JSON.stringify(root)}, taskDir: ${JSON.stringify(root)} });`,
+      `const report = await gate.runAllChecks([{ name: 'terminal', type: 'file-exists-nonempty', reads: [{ id: 'terminal', root: 'project', path: 'terminal.json', source: { kind: 'input' } }], params: { paths: ['terminal.json'] } }], { projectDir: ${JSON.stringify(root)}, taskDir: ${JSON.stringify(root)} });`,
       `fs.writeFileSync(${JSON.stringify(terminalPath)}, JSON.stringify({ status: report.pass ? 'complete' : 'failed', checksRun: report.checksRun }));`,
+      'process.stdout.write(JSON.stringify(report));',
     ].join('\n');
     writeFileSync(terminalPath, '{"status":"candidate"}\n');
     const environment = isolatedEnvironment(root);
@@ -327,7 +328,7 @@ describe('transactional build and truthful fast-test contracts', () => {
       expect(missingObserved).toBe(false);
       expect(buildOutput).toContain('WARNING: deployed dist is live');
       expect(buildOutput).toContain('affected run item12-live-build-replay');
-      expect(JSON.parse(readFileSync(terminalPath, 'utf-8'))).toEqual({
+      expect(JSON.parse(readFileSync(terminalPath, 'utf-8')), gateOutput).toEqual({
         status: 'complete',
         checksRun: 1,
       });

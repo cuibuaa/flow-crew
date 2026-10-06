@@ -22,6 +22,8 @@ import type {
 } from "../types";
 import { BriefPreflightPanel } from "./NewRunModal";
 import { showToast } from "./Toast";
+import { simulationSource } from "../lib/simulation-source";
+import { isRecord, isNonNegativeInteger } from "../lib/source-validation";
 
 const POLL_MS = 15_000;
 const SOURCE_KEYS = ["approvals", "deferred", "stale", "patches"] as const;
@@ -90,19 +92,11 @@ function patchPreview(item: InboxPatchItem): string {
   ].join("\n");
 }
 
-function simulationSource(source: string | undefined): boolean {
-  return Boolean(source && /(?:^|[:/_.-])(?:mock|test|fixture|simulation|simulated)(?:$|[:/_.-])/iu.test(source));
-}
-
 function diffVersions(item: InboxPatchItem): { from: string; to: string } | null {
   const from = item.fromVersion ?? item.from_version ?? item.briefVersion;
   const explicitTo = item.toVersion ?? item.to_version;
   const to = explicitTo ?? (item.latestVersion && item.latestVersion !== from ? item.latestVersion : undefined);
   return from && to && from !== to ? { from, to } : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -111,10 +105,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
-}
-
-function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isEnumString<T extends string>(value: unknown, allowed: readonly T[]): value is T {

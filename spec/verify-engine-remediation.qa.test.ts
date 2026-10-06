@@ -1,3 +1,4 @@
+import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import {
   existsSync,
   mkdirSync,
@@ -176,13 +177,14 @@ describe('independent engine-remediation verification', () => {
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     write(readyPath, `${JSON.stringify(ready, null, 2)}\n`);
     let gatePrompt = '';
-    const qa = stage({ id: 'qa', role: 'qa', is_gate: true });
+    const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true });
     const final = await runWorkflow(
-      { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: [qa] },
+      { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: coveredStages(qa, brief) },
       'name: validation-wire-qa',
       projectDir,
       { async run(prompt, _role, options) {
         if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         gatePrompt = prompt;
         write(join(options.runDir, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted' }));
         return { output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
@@ -263,12 +265,13 @@ describe('independent engine-remediation verification', () => {
       {
         name: 'plain-output-archive',
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [stage({ id: 'work', role: 'worker', scope: [outputPath] })],
+        stages: coveredStages(stage({ artifact_contract: artifacts([{ id: 'report', root: 'project', path: outputPath }]), id: 'work', role: 'worker', scope: [outputPath] }), brief),
       },
       'name: plain-output-archive',
       projectDir,
       { async run(_prompt, _role, options) {
         if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         write(join(projectDir, outputPath), 'plain completion report\n');
         return { output: 'report complete', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' };
       } },
@@ -419,9 +422,9 @@ describe('independent engine-remediation verification', () => {
   });
 
   it('does not redispatch a completed producer when the gate says no measurement is missing', () => {
-    const measure = stage({ id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
-    const gate = stage({ id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
-    const repair = stage({ id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
+    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
+    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
+    const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
     const selected = findGateRecoveryStages(
       [measure, gate, repair],
       ['qa'],
@@ -479,15 +482,17 @@ describe('independent engine-remediation verification', () => {
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const requestedPath = 'docs/report.md';
-    const work = stage({ id: 'work', role: 'worker', scope: [] });
+    const brief = '# Goal\n## What the report must show\n1. Exercise ordinary scope negotiation.\n';
+    const work = stage({ artifact_contract: artifacts([]), id: 'work', role: 'worker', scope: [] });
     let calls = 0;
     let decisionPath = '';
     const final = await runWorkflow(
-      { name: 'ordinary-scope-control', defaults: { max_iterations: 1, max_retries: 0 }, stages: [work] },
+      { name: 'ordinary-scope-control', defaults: { max_iterations: 1, max_retries: 0 }, stages: coveredStages(work, brief) },
       'name: ordinary-scope-control',
       projectDir,
       { async run(prompt, _role, options) {
         if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         calls += 1;
         if (calls === 1) {
           const directory = join(options.runDir, 'stages', options.stageId);
@@ -510,7 +515,7 @@ describe('independent engine-remediation verification', () => {
         return { output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' };
       } },
       new Map(), undefined, agentsDir, undefined,
-      '# Goal\n## What the report must show\n1. Exercise ordinary scope negotiation.\n', true,
+      brief, true,
     );
     const decision = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
     expect(final.status).toBe('complete');
@@ -581,7 +586,7 @@ describe('independent engine-remediation verification', () => {
     state.campaignId = 'lower-is-better';
     state.campaignStorageKey = 'lower-is-better';
     state.research = { baseline: 30, policy: 'best_of_n', higherIsBetter: false };
-    state.dispatchedStages = [stage({ id: 'qa', role: 'qa', is_gate: true })];
+    state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
     state.stages.qa = { status: 'complete', retries: 0 };
     write(join(created.runDirPath, 'stages', 'qa', 'metric.json'), JSON.stringify({
       hasMetric: true,

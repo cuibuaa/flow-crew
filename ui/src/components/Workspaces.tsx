@@ -25,6 +25,7 @@ import NewRunModal, { type NewRunDraft } from "./NewRunModal";
 import RunsList from "./panels/RunsList";
 import Workspace from "./Workspace";
 import { showToast } from "./Toast";
+import { isRunStatus } from "../lib/run-status";
 
 const CAMPAIGN_FILTER_STORAGE_KEY = "fc.campaignFilter";
 const SIDEBAR_CAMPAIGNS_PER_PAGE = 24;
@@ -33,10 +34,6 @@ const FILTER_WINDOWS: Record<Exclude<CampaignFilterValue, "all">, number> = {
   active: 14 * DAY_MS,
   recent: 30 * DAY_MS,
 };
-const RUN_STATUSES = new Set<RunStatus>([
-  "pending", "running", "parked", "complete", "failed", "awaiting_approval", "shipped",
-  "ceiling_hit", "escalated", "reality_gate_failed", "phase_complete", "stopped", "incomplete",
-]);
 
 function normalizeStandaloneResult(value: { runs: WorkspaceRun[]; total: number } | WorkspaceRun[]): { runs: WorkspaceRun[]; total: number } {
   if (Array.isArray(value)) return { runs: value, total: value.length };
@@ -65,7 +62,7 @@ function indexRowMatchesFilter(campaign: CampaignIndexRow, filter: CampaignFilte
 }
 
 function campaignStatus(value: string | undefined): RunStatus | null {
-  return value && RUN_STATUSES.has(value as RunStatus) ? value as RunStatus : null;
+  return value && isRunStatus(value) ? value : null;
 }
 
 function legacyIndex(campaigns: Campaign[]): CampaignOperatorIndex {

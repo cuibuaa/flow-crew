@@ -36,7 +36,7 @@ const workflowYaml = [
   'stages:',
   '  - id: plan',
   '    role: planner',
-  '    dynamic_dispatch: true',
+  '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
 ].join('\n');
 
 const workflow: WorkflowConfig = {description: '', 
@@ -48,6 +48,7 @@ const workflow: WorkflowConfig = {description: '',
     depends_on: [],
     prompt_template: '',
     dynamic_dispatch: true,
+    artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
     is_gate: false,
     skills: [],
   }],
@@ -77,7 +78,7 @@ function dispatch(workId: string, gateId: string, declareReport = false): string
     '    depends_on: [plan]',
     '    dependency_reasons: {plan: "execute this iteration"}',
     '    scope: [docs/final.md]',
-    ...(declareReport ? ['    artifact_contract: {version: 1, produces: [{id: report, root: project, path: docs/final.md}], reads: []}'] : []),
+    ...(declareReport ? ['    artifact_contract: {version: 1, produces: [{id: report, root: project, path: docs/final.md}], reads: [], replays: []}'] : ['    artifact_contract: {version: 1, produces: [], reads: [], replays: []}']),
     '    task: produce non-empty implementation evidence',
     `  - id: ${gateId}`,
     '    role: qa',
@@ -86,6 +87,7 @@ function dispatch(workId: string, gateId: string, declareReport = false): string
     '    scope: []',
     '    is_gate: true',
     '    task: decide whether to re-plan',
+    `    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_${gateId}.json}], reads: [], replays: []}`, 
   ].join('\n');
 }
 

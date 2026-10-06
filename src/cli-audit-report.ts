@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { errorMessage, within, optionValue } from './source_services/cli-inputs.js';
 import {
   existsSync,
   readFileSync,
@@ -6,7 +6,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -15,26 +15,8 @@ export type AuditClaimKind =
   | 'line_count'
   | 'file_count'
   | 'section_count'
-  | 'validation_command'
   | 'json_field'
   | 'unsupported';
-
-export interface AuditCommandRequest {
-  command: string;
-  args: string[];
-  cwd: string;
-}
-
-export interface AuditCommandResponse {
-  exitCode: number | null;
-  stdout?: string;
-  stderr?: string;
-  error?: string;
-}
-
-export type AuditCommandRunner = (
-  request: AuditCommandRequest,
-) => Promise<AuditCommandResponse> | AuditCommandResponse;
 
 export interface AuditFileSystem {
   exists(path: string): boolean;
@@ -47,7 +29,6 @@ export interface AuditFileSystem {
 export interface AuditReportDependencies {
   cwd?: string;
   fs?: AuditFileSystem;
-  runCommand?: AuditCommandRunner;
   stdout?: Writer;
   stderr?: Writer;
 }
@@ -55,7 +36,6 @@ export interface AuditReportDependencies {
 interface ResolvedAuditDependencies {
   cwd: string;
   fs: AuditFileSystem;
-  runCommand: AuditCommandRunner;
   stdout: Writer;
   stderr: Writer;
 }
@@ -73,17 +53,6 @@ interface ExtractedCountClaim {
   source: string;
   path: string;
   expected: number;
-}
-
-interface ExtractedCommandClaim {
-  kind: 'validation_command';
-  line: number;
-  source: string;
-  command: string;
-  expected: {
-    exitCode: number;
-    tallies: Record<string, number>;
-  };
 }
 
 interface ExtractedJsonClaim {
@@ -104,7 +73,6 @@ interface ExtractedUnsupportedClaim {
 
 export type ExtractedAuditClaim =
   | ExtractedCountClaim
-  | ExtractedCommandClaim
   | ExtractedJsonClaim
   | ExtractedUnsupportedClaim;
 
@@ -119,7 +87,6 @@ export interface AuditedClaim {
   path?: string;
   resolvedPath?: string;
   field?: string;
-  command?: string;
   reason: string;
 }
 
@@ -140,76 +107,13 @@ const nodeAuditFileSystem: AuditFileSystem = {
   stat: (path) => statSync(path),
 };
 
-function bounded(value: string, maximum = 8 * 1024 * 1024): string {
-  const bytes = Buffer.from(value, 'utf-8');
-  if (bytes.length <= maximum) return value;
-  return bytes.subarray(bytes.length - maximum).toString('utf-8');
-}
-
-const runAuditCommand: AuditCommandRunner = (request) => new Promise((settle) => {
-  const child = spawn(request.command, request.args, {
-    cwd: request.cwd,
-    env: process.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10 * 60 * 1_000,
-  });
-  let stdout = '';
-  let stderr = '';
-  let launchError: string | undefined;
-  let settled = false;
-  child.stdout?.on('data', (chunk: Buffer | string) => {
-    stdout = bounded(stdout + chunk.toString());
-  });
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr = bounded(stderr + chunk.toString());
-  });
-  child.once('error', (error) => {
-    launchError = error.message;
-  });
-  child.once('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    settle({
-      exitCode: code,
-      stdout,
-      stderr,
-      ...(launchError ? { error: launchError } : {}),
-      ...(!launchError && signal ? { error: `command ended by signal ${signal}` } : {}),
-    });
-  });
-});
-
 function resolveDependencies(overrides: AuditReportDependencies): ResolvedAuditDependencies {
   return {
     cwd: resolve(overrides.cwd ?? process.cwd()),
     fs: overrides.fs ?? nodeAuditFileSystem,
-    runCommand: overrides.runCommand ?? runAuditCommand,
     stdout: overrides.stdout ?? process.stdout,
     stderr: overrides.stderr ?? process.stderr,
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const argument = args[index];
-  const prefix = `${option}=`;
-  if (argument.startsWith(prefix)) {
-    const value = argument.slice(prefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseAuditReportArgs(args: string[]): ParsedAuditReportArgs {
@@ -249,6 +153,7 @@ export function auditReportUsage(): string {
   return [
     'Usage: flowcrew audit-report --report <path> --run-dir <path> [--json]',
     'Re-derives supported numeric/path claims and reports confirmed, contradicted, or not_checkable.',
+    'Command evidence must be declared in stages[].artifact_contract.replays; report prose never executes commands.',
   ].join('\n');
 }
 
@@ -281,36 +186,6 @@ function scalarValue(raw: string): string | number | boolean | null | undefined 
     return value.slice(1, -1);
   }
   return undefined;
-}
-
-function normalizeTally(label: string): string | undefined {
-  const normalized = label.toLowerCase();
-  if (normalized === 'pass' || normalized === 'passed' || normalized === 'passing') return 'passed';
-  if (normalized === 'fail' || normalized === 'failed' || normalized === 'failing') return 'failed';
-  if (normalized === 'skip' || normalized === 'skipped') return 'skipped';
-  if (normalized === 'error' || normalized === 'errors') return 'errors';
-  return undefined;
-}
-
-export function extractTallies(text: string): Record<string, number> {
-  const tallies: Record<string, number> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const found: Array<{ label: string; value: number; index: number }> = [];
-    const numberFirst = /\b(\d+)\s+(pass(?:ed|ing)?|fail(?:ed|ing)?|skipped?|errors?)\b/gi;
-    for (const match of line.matchAll(numberFirst)) {
-      found.push({ label: match[2], value: Number(match[1]), index: match.index ?? 0 });
-    }
-    const labelFirst = /\b(pass(?:ed|ing)?|fail(?:ed|ing)?|skipped?|errors?)(?:\s*[:=]\s*|\s+)(\d+)\b/gi;
-    for (const match of line.matchAll(labelFirst)) {
-      found.push({ label: match[1], value: Number(match[2]), index: match.index ?? 0 });
-    }
-    found.sort((left, right) => left.index - right.index);
-    for (const item of found) {
-      const label = normalizeTally(item.label);
-      if (label) tallies[label] = item.value;
-    }
-  }
-  return tallies;
 }
 
 function parseCountClaim(line: string, lineNumber: number): ExtractedCountClaim | undefined {
@@ -363,58 +238,6 @@ function parseJsonClaim(line: string, lineNumber: number): ExtractedJsonClaim | 
   return undefined;
 }
 
-function exitCodeFrom(text: string): number | undefined {
-  const match = /\bexit(?:\s+code)?\s*(?:was|is|=|:)?\s*`?(-?\d+)`?/i.exec(text);
-  return match ? Number(match[1]) : undefined;
-}
-
-function commandFromLine(line: string): string | undefined {
-  const explicit = /\b(?:validation\s+)?command\s*(?:is|=|:)?\s*`([^`]+)`/i.exec(line);
-  if (explicit) return explicit[1].trim();
-  const heading = /^\s{0,3}#{1,6}\s+`([^`]+)`/.exec(line);
-  if (heading) return heading[1].trim();
-  const bullet = /^\s*[-*+]\s+`([^`]+)`\s*:?\s*$/.exec(line);
-  if (bullet) return bullet[1].trim();
-  const beforeExit = /`([^`]+)`[^`]*\bexit(?:\s+code)?\b/i.exec(line);
-  return beforeExit?.[1].trim();
-}
-
-function commandBlock(lines: string[], index: number): {
-  command: string;
-  expectedExit: number;
-  tallies: Record<string, number>;
-  source: string;
-  usedThrough: number;
-} | undefined {
-  const own = lines[index];
-  const command = commandFromLine(own);
-  if (!command) return undefined;
-  const inlineExit = exitCodeFrom(own);
-  if (inlineExit !== undefined) {
-    return {
-      command,
-      expectedExit: inlineExit,
-      tallies: extractTallies(own),
-      source: own,
-      usedThrough: index,
-    };
-  }
-  const gathered = [own];
-  let expectedExit: number | undefined;
-  let usedThrough = index;
-  for (let lookahead = index + 1; lookahead < Math.min(lines.length, index + 12); lookahead += 1) {
-    const next = lines[lookahead];
-    if (/^\s{0,3}#{1,6}\s+/.test(next)) break;
-    gathered.push(next);
-    usedThrough = lookahead;
-    expectedExit ??= exitCodeFrom(next);
-    if (expectedExit !== undefined && next.trim() === '' && lookahead > index + 2) break;
-  }
-  if (expectedExit === undefined) return undefined;
-  const source = gathered.join('\n');
-  return { command, expectedExit, tallies: extractTallies(source), source, usedThrough };
-}
-
 function unsupportedCandidate(line: string): boolean {
   if (!/[-+]?\d/.test(line)) return false;
   const ticks = [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
@@ -450,18 +273,7 @@ export function extractAuditClaims(report: string): ExtractedAuditClaim[] {
       used.add(index);
       continue;
     }
-    const command = commandBlock(lines, index);
-    if (command) {
-      claims.push({
-        kind: 'validation_command',
-        line: index + 1,
-        source: command.source,
-        command: command.command,
-        expected: { exitCode: command.expectedExit, tallies: command.tallies },
-      });
-      for (let covered = index; covered <= command.usedThrough; covered += 1) used.add(covered);
-      index = command.usedThrough;
-    }
+
   }
   lines.forEach((line, index) => {
     if (!used.has(index) && unsupportedCandidate(line)) {
@@ -469,7 +281,7 @@ export function extractAuditClaims(report: string): ExtractedAuditClaim[] {
         kind: 'unsupported',
         line: index + 1,
         source: line,
-        reason: 'numeric/path-bearing sentence does not use a supported unambiguous claim form',
+        reason: 'numeric/path-bearing sentence does not use a supported unambiguous claim form; command evidence must be declared in stages[].artifact_contract.replays',
       });
     }
   });
@@ -592,61 +404,6 @@ function recursiveFileCount(
   return count;
 }
 
-interface ParsedArgv {
-  argv?: string[];
-  reason?: string;
-}
-
-/** A deliberately small POSIX-like tokenizer; shell operators are rejected, never emulated. */
-export function parseDirectArgv(command: string): ParsedArgv {
-  const argv: string[] = [];
-  let token = '';
-  let quote: "'" | '"' | undefined;
-  let escaping = false;
-  let tokenStarted = false;
-  for (const character of command.trim()) {
-    if (escaping) {
-      token += character;
-      tokenStarted = true;
-      escaping = false;
-      continue;
-    }
-    if (character === '\\' && quote !== "'") {
-      escaping = true;
-      tokenStarted = true;
-      continue;
-    }
-    if (quote) {
-      if (character === quote) quote = undefined;
-      else token += character;
-      tokenStarted = true;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      tokenStarted = true;
-      continue;
-    }
-    if (/\s/.test(character)) {
-      if (tokenStarted) {
-        argv.push(token);
-        token = '';
-        tokenStarted = false;
-      }
-      continue;
-    }
-    if (/[|&;<>()>`]/.test(character)) return { reason: `shell operator ${JSON.stringify(character)} is not argv-safe` };
-    token += character;
-    tokenStarted = true;
-  }
-  if (escaping) return { reason: 'command ends with an incomplete escape' };
-  if (quote) return { reason: 'command has an unterminated quote' };
-  if (tokenStarted) argv.push(token);
-  if (argv.length === 0 || !argv[0]) return { reason: 'command is empty' };
-  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) return { reason: 'environment assignments require a shell and are not checkable' };
-  return { argv };
-}
-
 function fieldSegments(field: string): string[] | undefined {
   if (!field) return undefined;
   if (field.startsWith('/')) {
@@ -706,55 +463,6 @@ async function auditOne(
 ): Promise<AuditedClaim> {
   if (claim.kind === 'unsupported') {
     return audited(claim, 'not_checkable', claim.reason);
-  }
-  if (claim.kind === 'validation_command') {
-    const parsed = parseDirectArgv(claim.command);
-    if (!parsed.argv) {
-      return audited(claim, 'not_checkable', parsed.reason ?? 'command cannot be tokenized', {
-        command: claim.command,
-        expected: claim.expected,
-      });
-    }
-    let response: AuditCommandResponse;
-    try {
-      response = await deps.runCommand({ command: parsed.argv[0], args: parsed.argv.slice(1), cwd: roots.project });
-    } catch (error) {
-      return audited(claim, 'not_checkable', `command runner threw: ${errorMessage(error)}`, {
-        command: claim.command,
-        expected: claim.expected,
-      });
-    }
-    if (response.exitCode === null || response.error) {
-      return audited(claim, 'not_checkable', response.error ?? 'command ended without an exit code', {
-        command: claim.command,
-        expected: claim.expected,
-      });
-    }
-    const tallies = extractTallies(`${response.stdout ?? ''}\n${response.stderr ?? ''}`);
-    const observed = { exitCode: response.exitCode, tallies };
-    const contradictions: string[] = [];
-    if (response.exitCode !== claim.expected.exitCode) {
-      contradictions.push(`exit code expected ${claim.expected.exitCode}, observed ${response.exitCode}`);
-    }
-    const missing: string[] = [];
-    for (const [label, expected] of Object.entries(claim.expected.tallies)) {
-      const actual = tallies[label];
-      if (actual === undefined) missing.push(label);
-      else if (actual !== expected) contradictions.push(`${label} expected ${expected}, observed ${actual}`);
-    }
-    if (contradictions.length > 0) {
-      return audited(claim, 'contradicted', contradictions.join('; '), {
-        command: claim.command, expected: claim.expected, observed,
-      });
-    }
-    if (missing.length > 0) {
-      return audited(claim, 'not_checkable', `command output did not expose claimed tallies: ${missing.join(', ')}`, {
-        command: claim.command, expected: claim.expected, observed,
-      });
-    }
-    return audited(claim, 'confirmed', 'exit code and every claimed tally match', {
-      command: claim.command, expected: claim.expected, observed,
-    });
   }
 
   const resolution = resolveClaimPath(claim.path, roots, deps.fs);
@@ -864,20 +572,17 @@ export async function runAuditReport(
   return { version: 1, reportPath, runDir, projectDir, claims, totals };
 }
 
-function displayExpected(value: unknown): string {
-  return typeof value === 'string' ? JSON.stringify(value) : JSON.stringify(value);
-}
-
 function renderAuditHuman(report: AuditReportResult, writer: Writer): void {
   writer.write(`Audit report: ${report.reportPath}\n`);
   for (const claim of report.claims) {
-    const subject = claim.path ?? claim.command ?? claim.kind;
+    const subject = claim.path ?? claim.kind;
     writer.write(`  ${claim.classification.toUpperCase()} ${claim.id} line ${claim.line} ${JSON.stringify(subject)}: ${claim.reason}`);
-    if (claim.expected !== undefined) writer.write(`; expected=${displayExpected(claim.expected)}`);
-    if (claim.observed !== undefined) writer.write(`; observed=${displayExpected(claim.observed)}`);
+    if (claim.expected !== undefined) writer.write(`; expected=${JSON.stringify(claim.expected)}`);
+    if (claim.observed !== undefined) writer.write(`; observed=${JSON.stringify(claim.observed)}`);
     writer.write('\n');
   }
   writer.write(`Totals: confirmed=${report.totals.confirmed} contradicted=${report.totals.contradicted} not_checkable=${report.totals.not_checkable}\n`);
+  writer.write('Command evidence must be declared in stages[].artifact_contract.replays; report prose never executes commands.\n');
   writer.write('This command checks claim arithmetic and attribution; it does not judge whether the measured quantity was the right one.\n');
 }
 

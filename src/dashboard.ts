@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { readRunStateView } from './run-state-view.js';
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
+import { canonicalRunId } from './cancellation-policy.js';
 import fastifyStatic from "@fastify/static";
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, unlinkSync, renameSync, openSync, readSync, closeSync } from "node:fs";
 import { join, extname, dirname, resolve } from "node:path";
@@ -31,6 +32,7 @@ import {
   runsRoot,
   STAGE_STATUS,
   writeRunState,
+  updateRunState,
 } from "./store.js";
 import type { RunStatus, StageAttempt, StoreState, SupervisorAttempt } from "./store.js";
 import { countStandaloneRunsFromIndex, deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex, listRunningRunIdsFromIndex, getMaxUpdatedAt } from './run-index.js';
@@ -95,7 +97,7 @@ import {
   type InboxItem,
 } from './inbox.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
-import { readJsonlFile as readTolerantJsonlFile } from './jsonl.js';
+import { readOptionalJsonlFile as readJsonlFile } from './jsonl.js';
 import { z } from "zod";
 import pino from "pino";
 import type { KGNodeType, KGEdgeType } from './knowledge-graph.js';
@@ -293,9 +295,6 @@ function isTaskListCacheValid(runsDir: string): boolean {
   return true;
 }
 
-// --- Performance: SSE mtime tracking (P0) ---
-const _sseRunMtimes = new Map<string, number>();
-
 function parseTailBytes(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return DEFAULT_STAGE_OUTPUT_TAIL_BYTES;
   if (value === 'full' || value === '0') return undefined;
@@ -432,6 +431,7 @@ export function hasLiveDirectRunner(
  */
 export function hasLiveScheduler(_projectDir: string, runId: string): boolean {
   try {
+    runId = canonicalRunId(runsRoot(), runId);
     const pidPath = join(runsRoot(), runId, 'scheduler.pid');
     if (!existsSync(pidPath)) return false;
     const pid = readFileSync(pidPath, 'utf-8').trim();
@@ -454,7 +454,7 @@ export function hasLiveScheduler(_projectDir: string, runId: string): boolean {
 
 function markDetachedRunFailed(projectDir: string, runId: string, reason: string): void {
   try {
-    const state = readRunState(projectDir, runId);
+    updateRunState(projectDir, runId, (state) => {
     if (!isRunningRunStatus(state.status)) return;
     state.status = RUN_STATUS.FAILED;
     state.failureReason = reason;
@@ -462,7 +462,7 @@ function markDetachedRunFailed(projectDir: string, runId: string, reason: string
     for (const [, stage] of Object.entries(state.stages)) {
       if (isRunningStageStatus(stage.status)) stage.status = STAGE_STATUS.FAILED;
     }
-    writeRunState(projectDir, runId, state);
+    });
   } catch (err) {
     log.warn({ err, runId, reason }, 'Could not mark detached scheduler run failed');
   }
@@ -491,6 +491,7 @@ type DetachedRunStarter = () => void;
 type DetachedRunSpawner = (opts: DetachedRunOptions) => DetachedRunStarter | void;
 
 function spawnDetachedRun(opts: DetachedRunOptions): DetachedRunStarter {
+  opts = { ...opts, runId: canonicalRunId(runsRoot(), opts.runId) };
   const verification = verifyBriefAdmission(opts.exactBrief, opts.briefAdmission);
   if (verification.status !== 'valid') {
     throw new Error(
@@ -592,13 +593,17 @@ export function performStartupRecovery(projectDir: string, limit = 50): void {
           if (hasLiveDirectRunner(projectDir, id)) continue;
           if (hasLiveScheduler(projectDir, id)) continue;
           if (state.engineCheckpoint) { reconcileHostInterruptedRun(state.projectDir, id); continue; }
-          state.status = RUN_STATUS.FAILED;
-          state.failureReason = 'Scheduler process gone while task was running (orphan reconciled)';
-          state.completedAt = new Date().toISOString();
-          for (const [, s] of Object.entries(state.stages)) {
+          updateRunState(state.projectDir, id, (current) => {
+          if (!isRunningRunStatus(current.status)) return;
+          if (current.engineCheckpoint) throw new Error('RECOVERY_STATE_CHANGED: a checkpoint appeared before orphan publication; reconcile its authenticated interruption first');
+          if (hasLiveDirectRunner(current.projectDir, id) || hasLiveScheduler(current.projectDir, id)) return;
+          current.status = RUN_STATUS.FAILED;
+          current.failureReason = 'Scheduler process gone while task was running (orphan reconciled)';
+          current.completedAt = new Date().toISOString();
+          for (const [, s] of Object.entries(current.stages)) {
             if (isRunningStageStatus(s.status)) s.status = STAGE_STATUS.FAILED;
           }
-          writeRunState(projectDir, id, state);
+          });
         }
       } catch { /* skip unreadable runs (e.g. dir deleted) */ }
     }
@@ -962,11 +967,6 @@ function readJsonFile(filePath: string): Record<string, unknown> | null {
   } catch { /* non-critical */
     return null;
   }
-}
-
-function readJsonlFile(filePath: string): unknown[] {
-  if (!existsSync(filePath)) return [];
-  return readTolerantJsonlFile<unknown>(filePath);
 }
 
 function formatDuration(startIso?: string, endIso?: string): string {

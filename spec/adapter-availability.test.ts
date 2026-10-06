@@ -24,6 +24,7 @@ import {
 } from '../src/adapters/availability.js';
 import { normalizeAdapterName } from '../src/adapters/loader.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
+import { extractBriefCriteria } from '../src/brief-criteria.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const fixtureRoots: string[] = [];
@@ -360,12 +361,17 @@ describe('CLI adapter behavior', () => {
     const workflowDir = join(fixture.project, 'config', 'workflows');
     const agentsDir = join(fixture.project, 'config', 'agents');
     const mockDir = join(fixture.root, 'mock');
+    const brief = structuredBrief();
+    const criterionRefs = extractBriefCriteria(brief).criteria.map((criterion) => criterion.id);
     for (const path of [workflowDir, agentsDir, mockDir]) mkdirSync(path, { recursive: true });
     writeFileSync(join(workflowDir, 'failure.yaml'), [
       'name: failure',
       'stages:',
       '  - id: work',
       '    role: worker',
+      '    scope: [docs/result.md]',
+      `    criterion_refs: ${JSON.stringify(criterionRefs)}`,
+      '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/result.md}], reads: [], replays: []}',
       '',
     ].join('\n'), 'utf-8');
     writeFileSync(join(agentsDir, 'worker.yaml'), [
@@ -382,7 +388,6 @@ describe('CLI adapter behavior', () => {
       exit_code: 1,
     }), 'utf-8');
 
-    const brief = structuredBrief();
     writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
     const result = runCli(fixture, [
       'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'failure',
@@ -391,7 +396,7 @@ describe('CLI adapter behavior', () => {
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.status).toBe(1);
-    expect(output).toContain('work: failed');
+    expect(output, output).toContain('work: failed');
     expect(output).toContain('Failure reason:');
     expect(output).toContain('Failed stage work:');
   });

@@ -1,3 +1,5 @@
+import { ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -206,6 +208,7 @@ describe('engine-discrimination post-change constructions and controls', () => {
         adapterFailureKind: parsed.adapterFailureKind,
       }; } };
       const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract('work'),
         stageId: 'work', role, dependsOn: [], promptTemplate: 'fixture', timeout_ms: 1_000,
         technicalRetry: { delaysMs: [] }, projectDir, runId: created.runId, runDir: created.runDirPath, retries: 0,
       });
@@ -224,6 +227,7 @@ describe('engine-discrimination post-change constructions and controls', () => {
         output: quoted.output, exitCode: 1, duration_ms: 1, adapterError: false,
       }; } };
       const semantic = await runStage(semanticAdapter, {
+      artifactContract: fixtureArtifactContract('work'),
         stageId: 'work', role, dependsOn: [], promptTemplate: 'fixture', timeout_ms: 1_000,
         technicalRetry: { delaysMs: [] }, projectDir, runId: semanticRun.runId, runDir: semanticRun.runDirPath, retries: 0,
       });
@@ -372,14 +376,15 @@ describe('engine-discrimination post-change constructions and controls', () => {
   it('item 7 refuses a current-round gate dependency on the post-consumption manifest', () => {
     const projectDir = temporaryRoot('research-order');
     const research = { baseline: 0, policy: 'greedy_stack' as const, resultFile: 'docs/round_result.json', reportDir: 'docs', stop: { maxRounds: 2 } };
-    const check = (path: string) => [
+    const check = (path: string, source: { kind: 'input' } | { kind: 'stage'; stage: string; artifact: string } = { kind: 'input' }) => [
       '## Reality checks', '```yaml', 'checks:', '  - name: temporal_check', '    type: file-exists-nonempty',
+      `    reads: [{id: subject, root: project, path: ${path}, source: ${JSON.stringify(source)}}]`,
       '    params:', `      paths: [${path}]`, '```',
     ].join('\n');
     const refused = inspectRealityCheckReachability({ markdown: check('docs/run_manifest.json'), projectDir, stages: [], research });
     const ordinary = inspectRealityCheckReachability({
-      markdown: check('docs/report.json'), projectDir, research,
-      stages: [{ id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
+      markdown: check('docs/report.json', { kind: 'stage', stage: 'writer', artifact: 'report' }), projectDir, research,
+      stages: [{ artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.json' }], reads: [], replays: [] }), id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
     });
     const prompt = appendResearchTemporalPathContract('confirm the round', research, undefined);
     console.log(`POST_ITEM_7=${JSON.stringify({ refused, ordinary, promptLine: prompt.split('\n').find((line) => line.includes('manifest:')) })}`);

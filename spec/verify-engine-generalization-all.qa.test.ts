@@ -12,7 +12,7 @@ const CASES = [
   { id: 5, file: "engine-generalization-contracts.test.ts", anchor: "5 — rejects terminal condition sets" },
   { id: 6, file: "engine-generalization-brief.test.ts", anchor: "recorded already-crossed target" },
   { id: 7, file: "engine-generalization-setup.test.ts", anchor: "refuses before the first command" },
-  { id: 8, file: "engine-generalization-artifacts.test.ts", anchor: "recorded exit-zero replay" },
+  { id: 8, file: "engine-generalization-artifacts.test.ts", anchor: "refuses a selector that exercises no test even though the direct exit is zero" },
   { id: 9, file: "engine-generalization-runtime.test.ts", anchor: "9 — routes authored/effective rejection facts" },
   { id: 10, file: "engine-generalization-runtime.test.ts", anchor: "10 — binds a versioned-shape advisory" },
   { id: 11, file: "engine-generalization-contracts.test.ts", anchor: "11 — intersects exact, tree, glob, alias" },
@@ -23,7 +23,7 @@ const CASES = [
   { id: 16, file: "engine-generalization-runtime.test.ts", anchor: "16 — names a proven configured-command intersection" },
   { id: 17, file: "engine-generalization-runtime.test.ts", anchor: "17 — carries the exact no-candidate shape" },
   { id: 18, file: "engine-generalization-setup.test.ts", anchor: "portable existing-worktree inventory" },
-  { id: 19, file: "engine-generalization-artifacts.test.ts", anchor: "lexical suffixes are not promoted" },
+  { id: 19, file: "engine-generalization-artifacts.test.ts", anchor: "creates no duties or replay from prompt syntax, regexes, suffixes or inline command results" },
 ] as const;
 
 describe("engine-generalization QA replay inventory", () => {

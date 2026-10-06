@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { sha256Canonical as digest } from './runtime-negotiation.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
 import { processStartToken, type ProcessStartToken } from './run-lock.js';
@@ -7,6 +7,8 @@ import { readHostBootId } from './resource-leases.js';
 import { RUN_STATUS, STAGE_STATUS, completedStageAttemptStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { planDigest } from './plan-revisions.js';
+import { canonicalRunId } from './cancellation-policy.js';
+import { runsRoot } from './store.js';
 
 export interface EngineCheckpoint {
   version: 1; runId: string; projectDir: string; bootId?: string; generation?: string;
@@ -38,15 +40,6 @@ const RecoveryIntentSchema = z.object({
   }
 });
 export type RecoveryIntent = z.infer<typeof RecoveryIntentSchema>;
-
-function digest(value: unknown): string {
-  function canonical(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(canonical);
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, canonical(value)]));
-    return value;
-  }
-  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
-}
 function binding(state: StoreState): RecoveryIntent['binding'] {
   const revision = state.queryState?.planRevision;
   return {
@@ -78,11 +71,13 @@ export function engineGeneration(): string | undefined {
   return (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
 }
 export function captureEngineCheckpoint(projectDir: string, runId: string): EngineCheckpoint {
+  runId = canonicalRunId(runsRoot(projectDir), runId);
   return { version: 1, runId, projectDir: resolve(projectDir), bootId: readHostBootId(), generation: engineGeneration(), pid: process.pid, processStart: processStartToken(process.pid), at: new Date().toISOString() };
 }
 
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string } = {}): StoreState {
+  runId = canonicalRunId(runsRoot(projectDir), runId);
   let state = readRunState(projectDir, runId);
   if (state.status !== RUN_STATUS.RUNNING || (!state.engineCheckpoint && !state.recoveryIntent)) return state;
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || state.engineCheckpoint.version !== 1 || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');

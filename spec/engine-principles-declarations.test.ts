@@ -21,14 +21,14 @@ function stage(id: string, depends_on: string[], artifact_contract?: unknown) {
   return StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on, dependency_reasons: Object.fromEntries(depends_on.map((id) => [id, 'Consumes the declared predecessor outcome.'])), prompt_template: 'Execute declared work.', artifact_contract });
 }
 function conditionalStages(readerWhen: unknown = fact) {
-  const producer = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md', when: fact }], reads: [] });
-  const reader = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', when: readerWhen, source: { kind: 'stage', stage: 'producer', artifact: 'report' } }] });
-  return [stage('choice', [], { version: 1, produces: [], reads: [] }), stage('producer', ['choice'], producer), stage('reader', ['producer'], reader)];
+  const producer = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md', when: fact }], reads: [], replays: [] });
+  const reader = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', when: readerWhen, source: { kind: 'stage', stage: 'producer', artifact: 'report' } }], replays: [] });
+  return [stage('choice', [], { version: 1, produces: [], reads: [], replays: [] }), stage('producer', ['choice'], producer), stage('reader', ['producer'], reader)];
 }
 
 describe('declarations are explicit at new admission boundaries', () => {
   it.each(['plan_history', 'audit_findings', 'signals', 'stages', 'stages/writer/invocations'])('protects the %s controller directory as well as its children', (path) => {
-    const contract = { version: 1, produces: [{ id: 'evidence', root: 'run', path, kind: 'directory' }], reads: [] };
+    const contract = { version: 1, produces: [{ id: 'evidence', root: 'run', path, kind: 'directory' }], reads: [], replays: [] };
     const writer = stage('writer', [], contract);
     expect(inspectArtifactDeclarations({ stages: [writer], scopeOwns: () => true }).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH');
     writer.artifact_contract!.produces[0].path = 'plan_history_notes';
@@ -45,43 +45,43 @@ describe('declarations are explicit at new admission boundaries', () => {
       ...(kind === 'directory' ? { kind: 'directory' } : {}),
       ...(kind === 'conditional' ? { when: fact } : {}),
     }, ...(kind === 'alternative' ? [{ id: 'other', root: 'run', path: 'alternative.json' }] : [])];
-    const contract = { version: 1, produces, reads: [], groups: kind === 'alternative' ? [{ id: 'outcome', mode: 'exactly_one', members: ['verdict', 'other'] }] : [] };
+    const contract = { version: 1, produces, reads: [], groups: kind === 'alternative' ? [{ id: 'outcome', mode: 'exactly_one', members: ['verdict', 'other'] }] : [], replays: [] };
     const gate = { ...stage('audit', ['choice'], contract), is_gate: true };
-    const choice = stage('choice', [], { version: 1, produces: [], reads: [] });
+    const choice = stage('choice', [], { version: 1, produces: [], reads: [], replays: [] });
     expect(inspectArtifactDeclarations({ stages: [choice, gate], scopeOwns: () => true }).join(';')).toContain('ARTIFACT_GATE_VERDICT_REQUIRED');
-    gate.artifact_contract = ArtifactContractSchema.parse({ version: 1, produces: [verdict], reads: [] });
+    gate.artifact_contract = ArtifactContractSchema.parse({ version: 1, produces: [verdict], reads: [], replays: [] });
     expect(inspectArtifactDeclarations({ stages: [choice, gate], scopeOwns: () => true })).toEqual([]);
   });
 
   it('keeps engine decision projections outside stage production authority',()=>{
-    const product=stage('writer',[],{version:1,produces:[{id:'decision',root:'run',path:'stages/writer/plan_revision_decision_example.json'}],reads:[]});
-    expect(inspectDispatchAdmission({dispatched:[product],baseStages:[],dispatchStageId:'plan',requireArtifactContracts:true}).errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH');
-    const request=stage('writer',[],{version:1,produces:[{id:'request',root:'run',path:'stages/writer/plan_revision_request.json'}],reads:[]});
-    expect(inspectDispatchAdmission({dispatched:[request],baseStages:[],dispatchStageId:'plan',requireArtifactContracts:true}).pass).toBe(true);
+    const product=stage('writer',[],{version:1,produces:[{id:'decision',root:'run',path:'stages/writer/plan_revision_decision_example.json'}],reads:[], replays: [] });
+    expect(inspectDispatchAdmission({dispatched:[product],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH');
+    const request=stage('writer',[],{version:1,produces:[{id:'request',root:'run',path:'stages/writer/plan_revision_request.json'}],reads:[], replays: [] });
+    expect(inspectDispatchAdmission({dispatched:[request],baseStages:[],dispatchStageId:'plan'}).pass).toBe(true);
   });
   it('refuses a missing stage contract by format with the same error for both prompt texts', () => {
     const untyped = stage('writer', []);
-    const admit = (prompt_template: string) => inspectDispatchAdmission({ dispatched: [{ ...untyped, prompt_template }], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true });
+    const admit = (prompt_template: string) => inspectDispatchAdmission({ dispatched: [{ ...untyped, prompt_template }], baseStages: [], dispatchStageId: 'plan' });
     const first = admit('Write {run_dir}/success.json or {run_dir}/escalation.md.');
     expect(first.pass).toBe(false); expect(first.errors.join(';')).toContain('ARTIFACT_DECLARATION_REQUIRED: writer.artifact_contract');
     expect(admit('No path words.').errors).toEqual(first.errors);
-    expect(inspectDispatchAdmission({ dispatched: [stage('writer', [], { version: 1, produces: [], reads: [] })], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true }).pass).toBe(true);
+    expect(inspectDispatchAdmission({ dispatched: [stage('writer', [], { version: 1, produces: [], reads: [], replays: [] })], baseStages: [], dispatchStageId: 'plan' }).pass).toBe(true);
   });
 
   it('names the missing reality reads without extracting escaped messages or references', () => {
     const markdown = (script: string) => '## Reality checks\n```yaml\nchecks:\n - name: script\n   type: exec-script-exit-zero\n   params:\n     script: ' + JSON.stringify(script) + '\n```\n';
-    const inspect = (script: string) => inspectRealityCheckReachability({ markdown: markdown(script), projectDir: project, runDir: directory, stages: [], requireDeclaredReads: true });
+    const inspect = (script: string) => inspectRealityCheckReachability({ markdown: markdown(script), projectDir: project, runDir: directory, stages: [] });
     expect(inspect('echo "message\\nmissing.md"')).toEqual(inspect('true'));
     expect(inspect('true')[0]).toContain('REALITY_READ_DECLARATION_REQUIRED');
     const typed = markdown('true').replace('   params:', '   reads: []\n   params:');
-    expect(inspectRealityCheckReachability({ markdown: typed, projectDir: project, runDir: directory, stages: [], requireDeclaredReads: true })).toEqual([]);
+    expect(inspectRealityCheckReachability({ markdown: typed, projectDir: project, runDir: directory, stages: [] })).toEqual([]);
   });
 });
 
 describe('conditional declared reads bind the same admitted fact', () => {
   it('refuses a status predicate the runtime cannot emit as a settled stage', () => {
-    const choice = stage('choice', [], { version: 1, produces: [], reads: [] });
-    const producer = stage('producer', ['choice'], { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md', when: { stage: 'choice', field: 'status', equals: 'cancelled' } }], reads: [] });
+    const choice = stage('choice', [], { version: 1, produces: [], reads: [], replays: [] });
+    const producer = stage('producer', ['choice'], { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.md', when: { stage: 'choice', field: 'status', equals: 'cancelled' } }], reads: [], replays: [] });
     expect(inspectArtifactDeclarations({ stages: [choice, producer], scopeOwns: () => true }).join(';')).toContain('ARTIFACT_FACT_INVALID');
     producer.artifact_contract!.produces[0].when!.equals = 'skipped';
     expect(inspectArtifactDeclarations({ stages: [choice, producer], scopeOwns: () => true })).toEqual([]);
@@ -117,7 +117,7 @@ describe('reality checks verify their declared reads at execution', () => {
   it('refuses an input removed after admission without invoking a successful script', async () => {
     const markdown = '## Reality checks\n```yaml\nchecks:\n - name: read\n   type: exec-script-exit-zero\n   reads:\n    - {id: input, root: project, path: input.md, source: {kind: input}}\n   params: {script: "touch executed.txt"}\n```\n';
     writeFileSync(join(project, 'input.md'), 'Existing admitted input');
-    expect(inspectRealityCheckReachability({ markdown, projectDir: project, runDir: directory, stages: [], requireDeclaredReads: true })).toEqual([]);
+    expect(inspectRealityCheckReachability({ markdown, projectDir: project, runDir: directory, stages: [] })).toEqual([]);
     rmSync(join(project, 'input.md'));
     const report = await runAllChecks(parseChecksFromMarkdown(markdown), { projectDir: project, taskDir: directory });
     expect(report.pass).toBe(false); expect(report.results[0].details).toContain('ARTIFACT_READ_ABSENT');
@@ -126,7 +126,7 @@ describe('reality checks verify their declared reads at execution', () => {
 
   it('refuses an unsettled producer despite an existing file, then executes after settlement', async () => {
     mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Existing file alone is insufficient.');
-    const reads = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', source: { kind: 'stage', stage: 'producer', artifact: 'report' } }] }).reads;
+    const reads = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'report', root: 'project', path: 'docs/report.md', source: { kind: 'stage', stage: 'producer', artifact: 'report' } }], replays: [] }).reads;
     const decl = { name: 'report', type: 'exec-script-exit-zero', reads, params: { script: 'touch executed.txt' } };
     updateRunState(project, runId, (state) => { state.stages.producer = { status: 'running', retries: 0 }; });
     const first = await runAllChecks([decl], { projectDir: project, taskDir: directory });

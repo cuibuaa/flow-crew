@@ -1,3 +1,4 @@
+import { valueAfter } from './source_services/cli-inputs.js';
 import {
   closeSync,
   existsSync,
@@ -277,11 +278,6 @@ function printTask(
 
 function socketFromArgs(args: string[]): string {
   return valueAfter(args, '--port') ?? valueAfter(args, '--socket') ?? process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
-}
-
-function valueAfter(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx >= 0 ? args[idx + 1] : undefined;
 }
 
 function parseId(raw: string | undefined): number {

@@ -1,3 +1,4 @@
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -242,7 +243,7 @@ describe.sequential('five-instrument independent QA', () => {
     ])).toMatchObject({ verified: true, mode: 'delivered_opportunities' });
   });
 
-  it('suppresses regex spellings at both path sites while retaining explicit files', () => {
+  it('keeps script and prompt mentions inert while enforcing exact declarations', () => {
     const root = temporaryRoot('audit-five-paths-');
     const projectDir = join(root, 'project');
     const runDir = join(root, 'run');
@@ -254,6 +255,7 @@ describe.sequential('five-instrument independent QA', () => {
       'checks:',
       '  - name: probe',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       `      script: ${JSON.stringify(script)}`,
       '```',
@@ -271,6 +273,7 @@ describe.sequential('five-instrument independent QA', () => {
     const patternAudit = inspectStageArtifactContract({
       stageId: 'probe',
       template: String.raw`Compare \`input\.md\` and \`docs\/report\.md\`.`,
+      artifactContract: artifacts(),
       projectDir,
       runDir,
       writes: [],
@@ -278,16 +281,17 @@ describe.sequential('five-instrument independent QA', () => {
     const literalAudit = inspectStageArtifactContract({
       stageId: 'probe',
       template: 'Write `docs/report.md`.',
+      artifactContract: artifacts([{ id: 'report', root: 'project', path: 'docs/report.md' }]),
       projectDir,
       runDir,
       writes: [],
     });
     expect(escaped).toEqual([]);
-    expect(explicit).toEqual([
-      'reality check "probe" references absent docs/report.json, but no admitted stage or framework emitter owns it',
-    ]);
+    expect(explicit).toEqual([]);
+    const declared = markdown('test -s docs/report.json').replace('reads: []', 'reads: [{id: report, root: project, path: docs/report.json, source: {kind: stage, stage: absent, artifact: report}}]');
+    expect(inspectRealityCheckReachability({ markdown: declared, projectDir, stages: [] }).join(';')).toContain('ARTIFACT_READ_UNREACHABLE');
     expect(patternAudit.obligations).toEqual([]);
-    expect(literalAudit.obligations.map((row) => row.mention)).toEqual(['docs/report.md']);
+    expect(literalAudit.obligations.map((row) => row.mention)).toEqual(['project:docs/report.md']);
   });
 
   it('derives the campaign default boundary from the full recent window', () => {
@@ -362,10 +366,10 @@ describe.sequential('five-instrument independent QA', () => {
       timestamp: '2026-08-01T05:31:00.000Z',
     };
     const stages: StageConfig[] = [
-      { id: 'work', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
-      { id: 'other', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
-      { id: 'unrelated_gate', role: 'qa', depends_on: ['other'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
-      { id: 'related_gate', role: 'qa', depends_on: ['work'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
+      { artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
+      { artifact_contract: artifacts([], [], [], []), id: 'other', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
+      { artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_unrelated_gate.json" }], [], [], []), id: 'unrelated_gate', role: 'qa', depends_on: ['other'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
+      { artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_related_gate.json" }], [], [], []), id: 'related_gate', role: 'qa', depends_on: ['work'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
     ];
     const wrongAttempt: RunEvent = {
       type: 'stage_complete', runId: 'run', timestamp: '2026-08-01T05:40:00.000Z',

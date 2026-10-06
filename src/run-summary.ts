@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
 import { recordInvocationInput } from './run-state-view.js';
+import { withEngineCommandBoundary } from './write-boundary.js';
 import {
   resolveRunStatus,
   readRunState,
@@ -445,7 +446,8 @@ ${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatc
   try {
     updateRunState(projectDir, runId, (current) => { current.auxiliaryAttempts ??= {}; current.auxiliaryAttempts._summary ??= []; current.auxiliaryAttempts._summary.push({ index: attemptIndex, startedAt, status: 'running' }); });
     capture({ systemPrompt: summaryAgent.prompt, userPrompt: prompt }, 'adapter');
-    const result = await adapter.run(prompt, summaryAgent, {
+    const result = await withEngineCommandBoundary({ projectDir, runDir, stageId: '_summary',
+      authority: 'observer', attemptIndex }, () => adapter.run(prompt, summaryAgent, {
       timeout_ms: 30000,
       workDir: projectDir,
       runDir,
@@ -453,7 +455,7 @@ ${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatc
       attemptIndex,
       attemptStartedAt: startedAt,
       onInvocationInput: (input) => capture(input, 'model'),
-    });
+    }));
     finish(result);
     if (result.exitCode !== 0 || !result.output.trim()) {
       log.warn({ runId, exitCode: result.exitCode }, 'Narrative generation failed');

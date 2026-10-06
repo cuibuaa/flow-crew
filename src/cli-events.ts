@@ -1,3 +1,4 @@
+import { optionValue } from './source_services/cli-inputs.js';
 import {
   closeSync,
   existsSync,
@@ -505,18 +506,6 @@ export interface CliEventsDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   followPollMs?: number;
   maxFollowPolls?: number;
-}
-
-function optionValue(args: string[], index: number, name: string): { value: string; consumed: number } {
-  const current = args[index];
-  if (current.startsWith(`${name}=`)) {
-    const value = current.slice(name.length + 1);
-    if (!value) throw new Error(`${name} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`);
-  return { value, consumed: 2 };
 }
 
 function safeRunId(value: string): boolean {

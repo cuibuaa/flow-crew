@@ -75,7 +75,7 @@ async function run(
   return { state, guidance, adapter };
 }
 
-const dispatch = (id: string, scope = ['docs/task_summary.md']) => ({
+const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs/task_summary.md']) => ({
   runFiles: {
     'dispatch.yaml': declaredDispatch([
       `- id: ${id}`,
@@ -84,6 +84,7 @@ const dispatch = (id: string, scope = ['docs/task_summary.md']) => ({
       '  dependency_reasons: {plan: "execute the planned terminal work"}',
       `  scope: [${scope.join(', ')}]`,
       '  prompt_template: do the work',
+      `  artifact_contract: ${JSON.stringify({ version: 1, produces: outputs.map((path, index) => ({ id: `output_${index}`, root: 'project', path })), reads: [], replays: [] })}`,
     ].join('\n') + '\n'),
   },
 });
@@ -161,7 +162,7 @@ ${stageGlobLine}    floor:
 # Glob freshness fixture
 `, {
       plan: {
-        ...dispatch('refresh_verdicts', ['docs/task_summary.md', ...Object.keys(verdicts)]),
+        ...dispatch('refresh_verdicts', ['docs/task_summary.md', ...Object.keys(verdicts)], ['docs/task_summary.md', ...Object.keys(verdicts)]),
         projectFiles: { 'docs/task_summary.md': '# terminal artifact written by plan\n' },
       },
       refresh_verdicts: {
@@ -190,7 +191,7 @@ terminal_states:
 ---
 # Bug 7 regression fixture
 `, {
-      plan: dispatch('deliver', ['docs/task_summary.md', 'docs/stage_1_verdict.md']),
+      plan: dispatch('deliver', ['docs/task_summary.md', 'docs/stage_1_verdict.md'], ['docs/task_summary.md', 'docs/stage_1_verdict.md']),
       deliver: {
         projectFiles: {
           'docs/task_summary.md': '# legitimate terminal result\n',
@@ -216,7 +217,7 @@ terminal_states:
 ---
 # Isolated freshness guard fixture
 `, {
-      plan: dispatch('implement'),
+      plan: dispatch('implement', ['docs/task_summary.md'], []),
       implement: { output: 'completed real work without touching the stale artifact' },
     });
 

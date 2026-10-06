@@ -1,3 +1,4 @@
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 type AdmissionInput = Parameters<typeof inspectDispatchAdmission>[0];
 
 const makeStage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
+  artifact_contract: fixtureArtifactContract(String(raw.id), raw.is_gate === true),
   prompt_template: 'independent QA probe',
   skills: [],
   is_gate: false,
@@ -35,7 +37,7 @@ function fixture(name: string): { raw: string; input: AdmissionInput } {
   return {
     raw,
     input: {
-      dispatched: (parseYaml(raw) as unknown[]).map((stage) => parseDispatchedStageConfig(stage)),
+      dispatched: (parseYaml(declaredDispatch(raw)) as unknown[]).map((stage) => parseDispatchedStageConfig(stage)),
       baseStages: [],
       dispatchStageId: 'plan',
       terminalStates: context.terminalStates,

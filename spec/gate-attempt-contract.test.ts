@@ -1,3 +1,4 @@
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -52,7 +53,7 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
     config: {description: '', 
       name: 'gate-attempt-contract',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -61,7 +62,7 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
 }
 
 function dispatchYaml(includeRepair: boolean): string {
-  return [
+  return declaredDispatch([
     'stages:',
     `  - id: ${GATE_ID}`,
     '    role: qa',
@@ -79,7 +80,7 @@ function dispatchYaml(includeRepair: boolean): string {
       `    retry_to: [${GATE_ID}]`,
       '    prompt_template: Repair the product defect named by the gate.',
     ] : []),
-  ].join('\n');
+  ].join('\n'));
 }
 
 interface ScenarioOptions {

@@ -191,8 +191,8 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
   afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
   const planWorkflow: { config: WorkflowConfig; yaml: string } = {
-    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
+    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
   };
   const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
@@ -223,6 +223,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
             'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
             '    is_gate: true', '    task: gate',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_check.json}], reads: [], replays: []}',
           ].join('\n')));
           return ok('planned a gate');
         }

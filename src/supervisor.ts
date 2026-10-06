@@ -3,6 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { recordInvocationInput } from './run-state-view.js';
 import { runStateContext } from './run-state-access.js';
+import { providerFailureDetail } from './provider-result.js';
+import { withEngineWriteBoundary } from './write-boundary.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import {
@@ -1547,6 +1549,9 @@ export class Supervisor {
       status: exitCode === 0 && verdict ? 'complete' : 'failed',
       duration_ms: durationMs,
       exitCode,
+      processExitCode: result?.processExitCode,
+      processSignal: result?.processSignal,
+      providerFailure: result?.providerFailure,
       tokens_in: result?.tokens_in,
       tokens_out: result?.tokens_out,
       trigger,
@@ -2073,6 +2078,7 @@ export class Supervisor {
         event.type === 'attempt_failed'
         && (
           event.adapterFailure === true
+          || event.providerFailure?.kind === 'refusal'
           || /adapter(?: connection)? (?:failed|failure|error)|connection (?:failed|failure|error)/i.test(event.detail ?? '')
         )
       ) {
@@ -2091,6 +2097,9 @@ export class Supervisor {
             failedAttemptIndex: event.attemptIndex,
             failedExitCode: event.exitCode,
             failureDetail: event.detail,
+            ...(event.providerFailure ? { providerFailure: event.providerFailure } : {}),
+            ...(event.processExitCode !== undefined ? { processExitCode: event.processExitCode } : {}),
+            ...(event.processSignal !== undefined ? { processSignal: event.processSignal } : {}),
           },
         });
       }
@@ -2816,7 +2825,10 @@ export class Supervisor {
     let result: RunResult;
     try {
       capture({ systemPrompt: agentConfig.prompt, userPrompt: prompt }, 'adapter');
-      result = await this.adapter.run(prompt, agentConfig, {
+      result = await withEngineWriteBoundary({
+        projectDir: this.projectDir, runDir: this.runDir(), stageId: '_supervisor', attemptIndex,
+        authority: 'observer', artifactContract: { version: 1, produces: [], reads: [], groups: [], replays: [] },
+      }, () => this.adapter.run(prompt, agentConfig, {
         timeout_ms: 30000,
         workDir: this.projectDir,
         runDir: this.runDir(),
@@ -2824,7 +2836,7 @@ export class Supervisor {
         attemptIndex,
         attemptStartedAt: startedAt,
         onInvocationInput: (input) => capture(input, 'model'),
-      });
+      }));
     } catch (err) {
       this.recordAssessmentUsage(startedAt, undefined, null, trigger, err instanceof Error ? err.message : String(err));
       log.warn({ err }, 'Supervisor assessment call failed');
@@ -2832,8 +2844,9 @@ export class Supervisor {
     }
 
     if (result.exitCode !== 0) {
-      this.recordAssessmentUsage(startedAt, result, null, trigger, `adapter exit ${result.exitCode}`);
-      log.warn({ exitCode: result.exitCode }, 'Supervisor assessment returned non-zero');
+      this.recordAssessmentUsage(startedAt, result, null, trigger, result.providerFailure
+        ? providerFailureDetail(result.exitCode, result.providerFailure) : `adapter exit ${result.exitCode}`);
+      log.warn({ exitCode: result.exitCode, providerFailure: result.providerFailure }, 'Supervisor assessment returned non-zero');
       return null;
     }
 

@@ -1,4 +1,5 @@
 import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,6 +52,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
     '  - id: plan',
     '    role: planner',
     '    dynamic_dispatch: true',
+    '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: [], replays: []}',
   ].join('\n');
   return {
     yaml,
@@ -60,6 +62,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
       stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [],
+        artifact_contract: planArtifactContract(),
       }],
     },
   };
@@ -99,7 +102,7 @@ describe('repair-stage retry ledger reevaluation', () => {
             '    retry_to: [release_gate]',
             '    max_retries: 1',
             '    task: repair release',
-          ].join('\n')));
+          ].join('\n'), { release_gate: gateArtifactContract('release_gate'), fix_release: emptyArtifactContract() }));
           return { output: 'planned', exitCode: 0, duration_ms: 10 };
         }
         if (opts.stageId === 'release_gate') {

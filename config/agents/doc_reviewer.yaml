@@ -58,4 +58,5 @@ prompt: |
   - Scan-length/readability: a single row or line must not become long enough to prevent scanning; complete detail needs a reachable disclosure.
   - Label-content truthfulness: labels must accurately describe the content and outcome they introduce.
   - Uninterrupted primary reading flow: empty or secondary sections must not break the main operator decision path.
-  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+  - Write output to its exact declared path. Follow the shared base prompt's run-record boundary.
+  - Never modify other run directories; read them only when this task explicitly authorizes that evidence.

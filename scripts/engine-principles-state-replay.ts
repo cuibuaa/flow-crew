@@ -1,18 +1,19 @@
 /** Read-only recorded-state comparison. No recovery or run repair is performed. */
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { FrozenReplayCorpus, parseReplayArguments, sha256 } from './engine-principles-inputs.js';
 const args = process.argv.slice(2);
 if (args.includes('--help')) { console.log('Usage: node --import tsx scripts/engine-principles-state-replay.ts --census <frozen census> --store <read-only store> --baseline-dist <copied dist> --candidate-dist <copied dist> --out <evidence directory> [--reconstruct <comma-separated run IDs>]'); process.exit(0); }
-function option(flag: string): string { const i = args.indexOf(flag); if (i < 0 || !args[i + 1]) throw new Error(`missing ${flag}`); return resolve(args[i + 1]); }
-const census = option('--census'), store = option('--store'), baseline = option('--baseline-dist'), candidate = option('--candidate-dist'), out = option('--out');
-const reconstructIndex = args.indexOf('--reconstruct');
-const reconstruct = new Set((reconstructIndex < 0 ? '' : args[reconstructIndex + 1] ?? '').split(',').filter(Boolean));
+const options = parseReplayArguments(args, ['--census', '--store', '--baseline-dist', '--candidate-dist', '--out'], ['--reconstruct']);
+const census = resolve(options['--census']), store = resolve(options['--store']), baseline = resolve(options['--baseline-dist']);
+const candidate = resolve(options['--candidate-dist']), out = resolve(options['--out']);
+const reconstruct = new Set((options['--reconstruct'] ?? '').split(',').filter(Boolean));
+if ([...reconstruct].some(id => !/^[a-zA-Z0-9_-]+$/.test(id))) throw new Error('Invalid --reconstruct run ID');
 mkdirSync(out, { recursive: true });
-const corpusBytes = readFileSync(join(census, 'corpus.json'));
-const population = JSON.parse(corpusBytes.toString()).files.filter((entry: any) => entry.readable && entry.relative_path === 'run.json');
-writeFileSync(join(out, 'state_replay_selection_before.json'), JSON.stringify({ at: new Date().toISOString(), corpusSha256: createHash('sha256').update(corpusBytes).digest('hex'), expected: population.length, rule: 'Every frozen readable run.json identity, queried read-only at the recorded observation below. Mutable original carriers are not claimed frozen. Original raw projection is read before and after the view; changed observations are explicitly ambiguous.' }, null, 2));
+const corpus = new FrozenReplayCorpus(census);
+const population = corpus.files.filter(entry => entry.readable && entry.relative_path === 'run.json');
+writeFileSync(join(out, 'state_replay_selection_before.json'), JSON.stringify({ at: new Date().toISOString(), corpusSha256: corpus.sources['corpus.json'].sha256, expected: population.length, rule: 'Every frozen readable run.json identity, queried read-only at the recorded observation below. Mutable original carriers are not claimed frozen. Original raw projection is read before and after the view; changed observations are explicitly ambiguous.' }, null, 2));
 process.env.FC_HOME = store;
 const load = (dist: string, file: string) => import(pathToFileURL(join(dist, file)).href);
 const beforeStore = await load(baseline, 'store.js'), afterStore = await load(candidate, 'store.js'), { readRunStateView } = await load(candidate, 'run-state-view.js');
@@ -22,11 +23,14 @@ const stablePart = (state: any) => JSON.stringify({ runId: state.runId, projectD
 for (const member of population) {
   const row: any = { runId: member.run_id, frozenSha256: member.sha256, observedAt: new Date().toISOString() };
   try {
+    if (typeof member.run_id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(member.run_id)) {
+      throw new Error(`Invalid frozen run identity ${JSON.stringify(member.run_id)}`);
+    }
     const before = beforeStore.readArchivedRunState('', member.run_id).state;
-    row.before = { status: before.status, stages: Object.keys(before.stages ?? {}).length, digest: createHash('sha256').update(stablePart(before)).digest('hex') };
+    row.before = { status: before.status, stages: Object.keys(before.stages ?? {}).length, digest: sha256(stablePart(before)) };
     const view = readRunStateView(before.projectDir, member.run_id, { observedAt: row.observedAt });
     const after = afterStore.readArchivedRunState('', member.run_id).state;
-    row.after = { status: view.run.status, stages: Object.keys(view.stages).length, digest: createHash('sha256').update(stablePart(after)).digest('hex'), projectionSha256: view.snapshot.runStateSha256 };
+    row.after = { status: view.run.status, stages: Object.keys(view.stages).length, digest: sha256(stablePart(after)), projectionSha256: view.snapshot.runStateSha256 };
     row.classification = row.before.digest !== row.after.digest ? 'ambiguous_concurrent_carrier_change' : view.run.status !== before.status || JSON.stringify(view.stages) !== JSON.stringify(before.stages) ? 'regression' : 'unchanged';
     row.prompts = { coverage: view.prompts.coverage, completeness: view.prompts.completeness, invocations: view.prompts.invocations.length, aliases: view.prompts.legacyInputs.length, missingAttemptInputs: view.prompts.missingAttemptInputs.length };
     row.diagnostics = view.diagnostics.map((entry: any) => entry.code);

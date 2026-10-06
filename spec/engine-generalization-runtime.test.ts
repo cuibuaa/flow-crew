@@ -1,3 +1,4 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { createHash } from 'node:crypto';
 import {
@@ -86,7 +87,7 @@ function seedProject(label: string, ...roles: string[]): { projectDir: string; a
 }
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     role: 'worker',
     prompt_template: 'runtime fixture',
     scope: [],
@@ -198,7 +199,7 @@ afterEach(() => {
 describe('engine generalization runtime bindings', () => {
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {
     const measure = stage({ id: 'measure', scope: ['artifacts/round.json'] });
-    const gate = stage({
+    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
       id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'],
       dependency_reasons: { measure: 'audit measured work' },
     });
@@ -248,7 +249,7 @@ describe('engine generalization runtime bindings', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'typed-gate-recovery',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
+      stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
     };
     const created = createRun(projectDir, workflow.name, 'name: typed-gate-recovery', ['plan']);
     writeFileSync(join(created.runDirPath, 'gate_contract.json'), JSON.stringify({
@@ -331,6 +332,7 @@ describe('engine generalization runtime bindings', () => {
       'checks:',
       '  - name: produced JSON shape',
       '    type: exec-script-exit-zero',
+      '    reads: [{id: result, root: project, path: output/result.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      script: |',
       ...script.split('\n').map((line) => `        ${line}`),
@@ -343,8 +345,9 @@ describe('engine generalization runtime bindings', () => {
     expect(parseChecksFromMarkdown(rewrite.markdown)[0]).not.toMatchObject({ advisory: true });
 
     writeFileSync(artifactPath, JSON.stringify({ artifact: 'generic.summary.v2', expected_one: true }));
+    const isolatedRun = join(dirname(projectDir), 'run'); mkdirSync(isolatedRun, { recursive: true });
     const producedInvalid = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(producedInvalid).toMatchObject({
       pass: false,
@@ -356,13 +359,13 @@ describe('engine generalization runtime bindings', () => {
       artifact: 'generic.summary.v2', expected_one: true, expected_two: { rows: [] },
     }));
     const compatible = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(compatible).toMatchObject({ pass: true, results: [{ pass: true }] });
 
     writeFileSync(artifactPath, oldBytes);
     const unchangedPreflightBytes = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(unchangedPreflightBytes).toMatchObject({
       pass: true,
@@ -579,7 +582,7 @@ describe('engine generalization runtime bindings', () => {
       readText: () => misleadingConfig,
     })).toEqual([]);
 
-    const work = stage({ id: 'measure', role: 'worker', scope: ['src/declared.ts'] });
+    const work = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'worker', scope: ['src/declared.ts'] });
     const workflow: WorkflowConfig = {description: '', 
       name: 'scope-consequence',
       defaults: { max_iterations: 1, max_retries: 0 },
@@ -668,7 +671,7 @@ describe('engine generalization runtime bindings', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'round-shape-paths',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
+      stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
     };
     let initialPrompt = '';
     let repairPrompt = '';

@@ -1,5 +1,5 @@
 import { declaredDispatch } from './test-support/declared-dispatch.js';
-import { execFileSync } from 'node:child_process';
+import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,8 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { appendGuidanceEnvelope, readGuidanceForStage } from '../src/guidance.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, validateVerdictAgainstMetricFile, type WorkflowConfig } from '../src/scheduler.js';
-import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { runDir } from '../src/store.js';
 import { plannerCriterionAssignmentContext } from '../src/worker.js';
 
@@ -23,16 +24,6 @@ function temporaryRoot(): string {
 function write(path: string, content: string): void {
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, content);
-}
-function pytestAvailable(project: string): boolean {
-  const script = "import { spawnSync } from 'node:child_process'; const result = spawnSync('python3', ['-m', 'pytest', '--version'], { stdio: 'ignore' }); process.exit(result.status ?? 1);";
-  try {
-    execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-      cwd: project, env: { ...process.env, HOME: project, FC_HOME: project },
-      stdio: 'ignore', timeout: 15_000,
-    });
-    return true;
-  } catch { return false; }
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -55,7 +46,7 @@ describe('planning and reality declaration admission', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'first-proposal-admission', defaults: { max_iterations: 1 },
       stages: [{ id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: 'Plan the work.',
-        dynamic_dispatch: true, is_gate: false, skills: [], criterion_refs: [] }],
+        dynamic_dispatch: true, is_gate: false, skills: [], criterion_refs: [], artifact_contract: planArtifactContract() }],
     };
     let planAttempts = 0;
     const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
@@ -71,10 +62,10 @@ describe('planning and reality declaration admission', () => {
           write(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [
             {dynamic_dispatch: false,  id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
               prompt_template: 'Write docs/work.md.', criterion_refs: refs,
-              artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[]} },
+              artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[],replays:[]} },
             {dynamic_dispatch: false,  id: 'gate', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Check the work.' },
               scope: [], is_gate: true, prompt_template: 'Check all criteria.', criterion_refs: refs },
-          ] })));
+          ] }), { gate: gateArtifactContract('gate') }));
           write(join(opts.runDir, 'reality_checks.md'), [
             '## Reality checks', '```yaml', 'checks:', '  - name: work artifact',
             '    reads: [{id: work, root: project, path: docs/work.md, source: {kind: stage, stage: work, artifact: work}}]',
@@ -128,11 +119,13 @@ describe('planning and reality declaration admission', () => {
     const work = parseDispatchedStageConfig({dynamic_dispatch: false, 
       id: 'work', role: 'coder', scope: ['src/**'], depends_on: [], dependency_reasons: {},
       prompt_template: 'Implement the brief.', criterion_refs: refs,
+      artifact_contract: emptyArtifactContract(),
     });
     const gate = parseDispatchedStageConfig({dynamic_dispatch: false, 
       id: 'gate', role: 'qa', scope: [], depends_on: ['work'],
       dependency_reasons: { work: 'The gate checks the work output.' },
       is_gate: true, prompt_template: 'Check all criteria.', criterion_refs: refs,
+      artifact_contract: gateArtifactContract('gate'),
     });
     expect(inspectDispatchAdmission({ dispatched: [work, gate], baseStages: [], dispatchStageId: 'plan', criteria }).pass).toBe(true);
     expect(() => parseDispatchedStageConfig({ ...work, timeout_ms: 1000 })).toThrow();
@@ -157,9 +150,11 @@ describe('planning and reality declaration admission', () => {
       const stages = [
         {dynamic_dispatch: false,  id: 'work', role: 'coder', scope: ['docs/work.md'], depends_on: [],
           dependency_reasons: {}, prompt_template: 'Write docs/work.md.',
+          artifact_contract: emptyArtifactContract(),
           criterion_refs: covered ? refs : [] },
         {dynamic_dispatch: false,  id: 'gate', role: 'qa', scope: [], depends_on: ['work'],
           dependency_reasons: { work: 'Check the work.' }, is_gate: true,
+          artifact_contract: gateArtifactContract('gate'),
           prompt_template: 'Check all criteria.', criterion_refs: covered ? refs : [] },
       ];
       return covered ? stages : stages.map((stage) => ({ ...stage, timeout_ms: 60_000 }));
@@ -194,11 +189,13 @@ describe('planning and reality declaration admission', () => {
   it('parses a closed YAML fence followed by explanation and still rejects broken declarations', () => {
     const fenced = [
       '## Reality checks', '```yaml', 'checks:', '  - name: artifact',
+      '    reads: [{id: artifact, root: project, path: artifact.txt, source: {kind: input}}]',
       '    type: file-exists-nonempty', '    params: { paths: [artifact.txt] }', '```',
       'The stage will cite this check in its report.',
     ].join('\n');
     expect(parseChecksFromMarkdown(fenced)).toEqual([
-      { name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
+      { name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] },
+        reads: [{ id: 'artifact', root: 'project', path: 'artifact.txt', kind: 'file', source: { kind: 'input' } }] },
     ]);
     const invalid = ['## Reality checks', '```yaml', 'checks:', '  - name: broken', '     type: file-exists-nonempty'].join('\n');
     expect(parseChecksFromMarkdown(invalid)).toEqual([expect.objectContaining({ kind: 'invalid', diagnostic: expect.stringContaining('YAML parsing failed') })]);
@@ -246,24 +243,27 @@ describe('bounded Makefile pytest replay', () => {
     if (previousPythonUserBase === undefined) delete process.env.PYTHONUSERBASE;
     else process.env.PYTHONUSERBASE = previousPythonUserBase;
   });
-  function audit(projectDir: string, command: string) {
-    const report = 'reports/replay.md';
-    write(join(projectDir, report), `# Replay\n\nReplay command: \`${command}\`\n`);
-    return inspectStageArtifactContract({ stageId: 'work', template: `Write ${report}.`, projectDir,
-      runDir: temporaryRoot(), writes: [report] });
+  function audit(projectDir: string, argv: string[]) {
+    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [],
+      reads: [{ id: 'target', root: 'project', path: 'tests/test_ok.py', source: { kind: 'input' } }],
+      replays: [{ id: 'evidence', runner: 'pytest', targets: ['target'], argv,
+        expected: { exit_code: 0, failures: [] } }],
+    });
+    return verifyStageArtifactContract({ stageId: 'work', template: 'Verify the declared test.', projectDir,
+      runDir: temporaryRoot(), artifactContract }, { remainingMs: () => 30_000 });
   }
 
-  it('verifies the exact target through a statically configured Makefile runner', () => {
+  it('verifies the exact declared target through a statically configured Makefile runner', async () => {
     const project = temporaryRoot();
-    if (!pytestAvailable(project)) throw new Error('pytest is required to verify Makefile replay; a missing runner cannot pass this test');
     write(join(project, 'Makefile'), 'PY ?= python3\n\n.PHONY: test\ntest:\n\tPYTHONPATH=. PYTEST_ADDOPTS=-p\\ no:cacheprovider $(PY) -m pytest tests/ -q\n');
     write(join(project, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    const bare = audit(project, 'pytest tests/test_ok.py -q');
-    expect(bare.replayExecutions[0]).toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, executedTests: 1 });
-    const module = audit(project, 'python -m pytest tests/test_ok.py -q -p no:cacheprovider');
+    const bare = await audit(project, ['-q']);
+    expect(bare.replayExecutions[0], JSON.stringify(bare.violations)).toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, collectedTests: 1, executedTests: 1 });
+    const module = await audit(project, ['-q', '-p', 'no:cacheprovider']);
     expect(module.replayExecutions[0]).toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, executedTests: 1 });
     write(join(project, 'Makefile'), 'test:\n\tPYTHONPATH=.. python3 -m pytest tests/ -q\n\tpython3 -m pytest tests/ -q\n');
-    const untrusted = audit(project, 'pytest tests/test_ok.py -q');
-    expect(untrusted.replayExecutions[0]).toMatchObject({ runner: 'unsupported', status: 'not_run' });
+    const untrusted = await audit(project, ['-q']);
+    expect(untrusted.replayExecutions[0]).toMatchObject({ runner: 'pytest', status: 'not_run' });
+    expect(untrusted.violations[0].reason).toContain('DECLARED_REPLAY_REFUSED');
   });
 });

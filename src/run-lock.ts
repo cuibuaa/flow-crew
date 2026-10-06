@@ -1,3 +1,4 @@
+import { RUN_STATUS } from './store.js';
 /**
  * Project-level run liveness — the single-in-flight probe, extracted so the
  * DAEMON can ask "is this project busy?" before launching a unit, without
@@ -35,8 +36,9 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { getItem, isPendingInboxItemState } from './inbox.js';
-import { fcGlobalDir, isPausedRunStatus, runsRoot } from './store.js';
+import { fcGlobalDir, isPausedRunStatus, runsRoot, updateRunState } from './store.js';
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
+import { cancelledRunPublicationError, canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
 
 // Process identity is a control-plane primitive and must not disappear when a
@@ -74,6 +76,7 @@ export function readLaunchIntent(
   selfOwnerRunId?: string,
   nowMs = Date.now(),
 ): LaunchIntent | null {
+  if (selfOwnerRunId) selfOwnerRunId = canonicalRunId(runsRoot(), selfOwnerRunId);
   const path = launchIntentPath(projectDir);
   let raw: unknown;
   try {
@@ -116,7 +119,7 @@ export function readLaunchIntent(
     try { unlinkSync(path); } catch { /* already removed */ }
     return null;
   }
-  if (parsed.ownerRunId === selfOwnerRunId) return null;
+  if (canonicalRunId(runsRoot(), parsed.ownerRunId!) === selfOwnerRunId) return null;
   return parsed as LaunchIntent;
 }
 
@@ -129,6 +132,19 @@ export function claimLaunchIntent(
   ownerRunId: string,
   nowMs = Date.now(),
 ): { claimed: boolean; blockingOwnerRunId?: string } {
+  ownerRunId = canonicalRunId(runsRoot(), ownerRunId);
+  if (existsSync(join(runsRoot(), ownerRunId, 'run.json'))) {
+    let result: { claimed: boolean; blockingOwnerRunId?: string } = { claimed: false };
+    updateRunState(projectDir, ownerRunId, (state) => {
+      if (state.status === RUN_STATUS.STOPPED) throw cancelledRunPublicationError(ownerRunId);
+      result = claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
+    });
+    return result;
+  }
+  return claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
+}
+
+function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs: number): { claimed: boolean; blockingOwnerRunId?: string } {
   const normalized = normalizedProjectDir(projectDir);
   const path = launchIntentPath(normalized);
   mkdirSync(launchIntentDir(), { recursive: true });
@@ -148,7 +164,7 @@ export function claimLaunchIntent(
         const existing = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LaunchIntent>;
         const existingAt = typeof existing.claimedAt === 'string' ? Date.parse(existing.claimedAt) : NaN;
         if (
-          existing.ownerRunId === ownerRunId &&
+          typeof existing.ownerRunId === 'string' && canonicalRunId(runsRoot(), existing.ownerRunId) === ownerRunId &&
           existing.projectDir === normalized &&
           Number.isFinite(existingAt) &&
           existingAt <= nowMs + 5_000 &&
@@ -166,10 +182,11 @@ export function claimLaunchIntent(
 }
 
 export function releaseLaunchIntent(projectDir: string, ownerRunId: string): void {
+  ownerRunId = canonicalRunId(runsRoot(), ownerRunId);
   const path = launchIntentPath(projectDir);
   try {
     const existing = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LaunchIntent>;
-    if (existing.ownerRunId !== ownerRunId) return;
+    if (typeof existing.ownerRunId !== 'string' || canonicalRunId(runsRoot(), existing.ownerRunId) !== ownerRunId) return;
     unlinkSync(path);
   } catch { /* absent, malformed, or already released */ }
 }
@@ -456,11 +473,16 @@ function schedulerIdentityPath(runPath: string): string {
 }
 
 function indexedRunId(runPath: string): string | undefined {
-  return resolve(dirname(runPath)) === resolve(runsRoot()) ? basename(runPath) : undefined;
+  runPath = canonicalRunDirectory(runPath);
+  return dirname(runPath) === canonicalRunDirectory(runsRoot()) ? basename(runPath) : undefined;
 }
 
 /** Record the scheduler/run binding after scheduler.pid has been claimed. */
 export function writeSchedulerProcessIdentity(runPath: string, runId: string, pid = process.pid): void {
+  const identityPath = resolveRunIdentity(runPath);
+  if (runId !== identityPath.runId && runId !== basename(resolve(runPath))) throw new Error('RUN_IDENTITY_BINDING: scheduler identity does not name this run directory');
+  runPath = identityPath.directory;
+  runId = identityPath.runId;
   if (!processIsAlive(pid)) throw new Error(`Cannot identify non-live scheduler pid ${pid}`);
   const startToken = processStartToken(pid);
   const command = processCommandSnapshot(pid);
@@ -479,6 +501,7 @@ export function writeSchedulerProcessIdentity(runPath: string, runId: string, pi
 
 /** Remove only this process's identity, unless an unconditional stale cleanup is requested. */
 export function removeSchedulerProcessIdentity(runPath: string, expectedPid?: number): void {
+  runPath = canonicalRunDirectory(runPath);
   const path = schedulerIdentityPath(runPath);
   if (expectedPid !== undefined) {
     try {
@@ -556,6 +579,14 @@ export type RunSchedulerObservation =
  * corrupt or unreadable identity evidence remains fail-closed.
  */
 export function inspectRunScheduler(runId: string, runPath: string): RunSchedulerObservation {
+  try {
+    const identity = resolveRunIdentity(runPath);
+    if (runId !== identity.runId && runId !== basename(resolve(runPath))) return { kind: 'corrupt', detail: 'scheduler identity does not name this run directory' };
+    runPath = identity.directory;
+    runId = identity.runId;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { kind: 'corrupt', detail: error instanceof Error ? error.message : String(error) };
+  }
   let marker: string;
   try {
     marker = readFileSync(join(runPath, 'scheduler.pid'), 'utf-8');
@@ -585,16 +616,18 @@ export function inspectRunScheduler(runId: string, runPath: string): RunSchedule
     : { kind: 'reused', pid };
 }
 
-export function isLiveFlowcrewSchedulerPid(pid: number): boolean {
-  return processIsAlive(pid) && commandLooksLikeFlowcrewScheduler(pid);
-}
-
 /**
  * Process- and run-authoritative ownership. New schedulers carry a start-time
  * identity beside scheduler.pid. Exact legacy CLI bindings remain accepted;
  * an older direct launch is additionally tied to its project and start window.
  */
 export function isLiveFlowcrewSchedulerForRun(pid: number, runId: string, runPath: string): boolean {
+  try {
+    const identity = resolveRunIdentity(runPath);
+    if (runId !== identity.runId && runId !== basename(resolve(runPath))) return false;
+    runPath = identity.directory;
+    runId = identity.runId;
+  } catch { return false; }
   if (!processIsAlive(pid)) return false;
   const identity = identityBindsSchedulerToRun(pid, runId, runPath);
   // Once an identity file exists it is authoritative. In particular, a v2
@@ -660,18 +693,11 @@ function scanLiveRunOwners(): LiveRunOwner[] {
  * ignored; only a validated live scheduler PID owns the worktree.
  */
 export function findLiveRunOwnerForProject(projectDir: string, selfRunId?: string): LiveRunOwner | null {
+  if (selfRunId) selfRunId = canonicalRunId(runsRoot(), selfRunId);
   const normalized = normalizedProjectDir(projectDir);
   return scanLiveRunOwners().find((owner) => (
     owner.projectDir === normalized && (!selfRunId || owner.runId !== selfRunId)
   )) ?? null;
-}
-
-/**
- * Returns the runId of a live run for `projectDir`, or null when the project is
- * free. `selfRunId` (when given) is excluded so a run can probe for siblings.
- */
-export function findActiveRunForProject(projectDir: string, selfRunId?: string): string | null {
-  return findLiveRunOwnerForProject(projectDir, selfRunId)?.runId ?? null;
 }
 
 // The probe walks every run directory (hundreds on a long-lived install), and

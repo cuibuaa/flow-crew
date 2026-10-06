@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { confineEngineChild, observeEngineChildBoundary, type EngineChildBoundaryReceipt } from '../write-boundary.js';
+import type { ProviderFailure } from '../provider-result.js';
 
 export type { ChildProcess } from 'node:child_process';
 
@@ -17,7 +19,13 @@ export type AdapterFailureKind =
 
 export interface RunResult {
   output: string;
+  writeBoundary?: EngineChildBoundaryReceipt;
   exitCode: number;
+  /** Direct child close facts, before timeout/control/adapter outcome overrides. */
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  /** Provider-owned refusal attribution; does not enable transport retries. */
+  providerFailure?: ProviderFailure;
   duration_ms: number;
   timedOut?: boolean;
   adapterError?: boolean;
@@ -261,12 +269,19 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
-    const child = spawn(cmd, args, {
+    const launch = confineEngineChild(cmd, args);
+    const child = spawn(launch.command, launch.args, {
       cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: launch.receiptPath ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       shell: false,
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
+    });
+    let writeBoundary: EngineChildBoundaryReceipt | undefined;
+    let boundarySpawnError: RunResult['spawnError'];
+    observeEngineChildBoundary(child, launch.receiptPath, (receipt) => {
+      writeBoundary = receipt;
+      if (receipt.kind === 'spawn_error') boundarySpawnError = receipt;
     });
     const terminator = createChildTerminator(child, opts.terminationTiming);
     const chunks: Buffer[] = [];
@@ -288,33 +303,40 @@ function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResu
       else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
     }
 
-    const finish = (code: number | null, output?: string) => {
+    const finish = (code: number | null, output?: string, signal?: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       void terminator.settleAfterChildClose().then(() => {
+        const boundaryUnverified = launch.receiptPath && !writeBoundary;
+        const boundaryRefused = writeBoundary?.kind === 'refused';
+        const boundaryDiagnostic = boundaryUnverified ? '\nENGINE_WRITE_BOUNDARY_UNVERIFIED: launcher closed without enforcement receipt; child fate is unknown\n'
+          : writeBoundary?.kind === 'refused' && writeBoundary.message.startsWith('ENGINE_WRITE_BOUNDARY_UNVERIFIED') ? `\n${writeBoundary.message}\n` : '';
         if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
         resolve({
           output: aborted
             ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage cancelled by control plane]\n')
-            : (output ?? Buffer.concat(chunks).toString('utf-8')),
-          exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
+            : (output ?? Buffer.concat(chunks).toString('utf-8')) + boundaryDiagnostic,
+          exitCode: aborted ? 137 : timedOut ? 124 : boundaryUnverified || boundaryRefused ? 125 : boundarySpawnError ? 1 : code ?? 1,
+          ...(output === undefined && !boundarySpawnError ? { processExitCode: code, processSignal: signal ?? null } : {}),
           duration_ms: Date.now() - start,
           timedOut,
+          ...(writeBoundary ? { writeBoundary } : {}),
+          ...(boundarySpawnError ? { spawnError: boundarySpawnError } : {}),
         });
       });
     };
 
-    child.stdout.on('data', (d: Buffer) => {
+    child.stdout!.on('data', (d: Buffer) => {
       chunks.push(d);
       opts.onStdout?.(d.toString('utf-8'));
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
     });
-    child.stderr.on('data', (d: Buffer) => {
+    child.stderr!.on('data', (d: Buffer) => {
       chunks.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
     });
-    child.on('close', (code) => finish(code));
+    child.on('close', (code, signal) => finish(code, undefined, signal));
     child.on('error', (error) => {
       const msg = error.message.includes('ENOENT')
         ? `Command not found: ${cmd}. Install the adapter CLI and try again.`
@@ -359,12 +381,19 @@ export function execWithStdin(
     let settled = false;
     let timedOut = false;
     let aborted = false;
-    const child = spawn(cmd, args, {
+    const launch = confineEngineChild(cmd, args);
+    const child = spawn(launch.command, launch.args, {
       cwd: opts.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: launch.receiptPath ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
       shell: false,
       detached: process.platform !== 'win32',
       env: { ...process.env, ...opts.env },
+    });
+    let writeBoundary: EngineChildBoundaryReceipt | undefined;
+    let boundarySpawnError: RunResult['spawnError'];
+    observeEngineChildBoundary(child, launch.receiptPath, (receipt) => {
+      writeBoundary = receipt;
+      if (receipt.kind === 'spawn_error') boundarySpawnError = receipt;
     });
     const terminator = createChildTerminator(child, opts.terminationTiming);
     // This handle is used after Claude's separate post-result grace, so it
@@ -399,17 +428,24 @@ export function execWithStdin(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let spawnError: RunResult['spawnError'];
-    const finish = (code: number | null) => {
+    const finish = (code: number | null, signal?: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       void terminator.settleAfterChildClose().then(() => {
+        const boundaryUnverified = launch.receiptPath && !writeBoundary;
+        const boundaryRefused = writeBoundary?.kind === 'refused';
+        const boundaryDiagnostic = boundaryUnverified ? '\nENGINE_WRITE_BOUNDARY_UNVERIFIED: launcher closed without enforcement receipt; child fate is unknown\n'
+          : writeBoundary?.kind === 'refused' && writeBoundary.message.startsWith('ENGINE_WRITE_BOUNDARY_UNVERIFIED') ? `\n${writeBoundary.message}\n` : '';
         if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
         resolve({
-          output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
-          exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
+          output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : '') + boundaryDiagnostic,
+          exitCode: aborted ? 137 : timedOut ? 124 : boundaryUnverified || boundaryRefused ? 125 : boundarySpawnError ? 1 : code ?? 1,
+          ...(!spawnError && !boundarySpawnError ? { processExitCode: code, processSignal: signal ?? null } : {}),
           duration_ms: Date.now() - start,
           timedOut,
+          ...(writeBoundary ? { writeBoundary } : {}),
+          ...(boundarySpawnError ? { spawnError: boundarySpawnError } : {}),
           ...(opts.captureStreams ? {
             stdout: Buffer.concat(stdout).toString('utf-8'),
             stderr: Buffer.concat(stderr).toString('utf-8'),
@@ -418,18 +454,18 @@ export function execWithStdin(
         });
       });
     };
-    child.stdout.on('data', (d: Buffer) => {
+    child.stdout!.on('data', (d: Buffer) => {
       chunks.push(d);
       if (opts.captureStreams) stdout.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
       opts.onStdout?.(d.toString('utf-8'));
     });
-    child.stderr.on('data', (d: Buffer) => {
+    child.stderr!.on('data', (d: Buffer) => {
       chunks.push(d);
       if (opts.captureStreams) stderr.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
     });
-    child.on('close', (code) => finish(code));
+    child.on('close', (code, signal) => finish(code, signal));
     child.on('error', (error: NodeJS.ErrnoException & { path?: string }) => {
       spawnError = {
         message: error.message,

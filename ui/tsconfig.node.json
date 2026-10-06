@@ -5,10 +5,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "skipLibCheck": true,
-    "composite": true,
-    "noEmit": false,
-    "declaration": true,
-    "declarationMap": true
+    "noEmit": true
   },
   "include": ["vite.config.ts", "tailwind.config.ts"]
 }

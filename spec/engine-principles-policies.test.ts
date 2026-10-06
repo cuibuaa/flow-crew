@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,7 +47,7 @@ describe('project policy selection is explicit and does not replace core admissi
     const runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['plan', 'coder']).runId;
     const directory = runDir(project, runId); const received: Record<string, string> = {};
     const adapter = { async run(_prompt: string, role: { prompt: string }, opts: { stageId: string }) { received[opts.stageId] = role.prompt; return { output: 'done', exitCode: 0, duration_ms: 1 }; } };
-    for (const role of ['planner', 'coder']) await runStage(adapter, { stageId: role === 'planner' ? 'plan' : 'coder', role: { name: role, description: role, model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Execute the fixture.' }, dependsOn: [], promptTemplate: 'Work.', timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0, artifactContract: { version: 1, produces: [], reads: [], groups: [] } });
+    for (const role of ['planner', 'coder']) await runStage(adapter, { stageId: role === 'planner' ? 'plan' : 'coder', role: { name: role, description: role, model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Execute the fixture.' }, dependsOn: [], promptTemplate: 'Work.', timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0, artifactContract: emptyArtifactContract() });
     expect(received.plan).toContain('# Project planning policies'); expect(received.plan).toContain('method_was_not_adjusted_to_match_expectation');
     expect(received.coder).toBe('Execute the fixture.');
     const view = readRunStateView(project, runId, { includePromptText: true });

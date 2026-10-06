@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
@@ -648,6 +650,7 @@ describe('operator dashboard vocabulary', () => {
     };
     const role: AgentConfig = { name: 'fixture', description: 'fixture', tools: [], prompt: 'system' };
     await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role,
       dependsOn: [],
@@ -698,6 +701,7 @@ describe('operator dashboard vocabulary', () => {
     };
     const role: AgentConfig = { name: 'fixture', description: 'fixture', tools: [], prompt: 'system' };
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role,
       dependsOn: [],

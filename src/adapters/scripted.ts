@@ -79,7 +79,3 @@ export class ScriptedAdapter implements Adapter {
     };
   }
 }
-
-export function createAdapter(): Adapter {
-  return new ScriptedAdapter({});
-}

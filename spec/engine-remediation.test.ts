@@ -1,3 +1,4 @@
+import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import {
   appendFileSync,
   existsSync,
@@ -442,15 +443,16 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     const plain = await runWorkflow(
       {
         name: 'plain-output-after', defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [{
+        stages: coveredStages({ artifact_contract: artifacts([{ id: 'report', root: 'project', path: outputPath }]),
           id: 'work', role: 'worker', scope: [outputPath], depends_on: [], prompt_template: 'write report',
-          skills: [], dynamic_dispatch: false, is_gate: false,
-        }],
+          skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [],
+        }, plainBrief),
       },
       'name: plain-output-after',
       plainProject,
       { run: async (_prompt, _role, options) => {
         if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         write(join(plainProject, outputPath), 'plain completion report\n');
         return { output: 'done', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' };
       } },
@@ -607,7 +609,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     setFcGlobalDir(join(root, 'fc-home'));
     const dependencyPath = ['node_modules', 'fixture-package', 'pre-existing.js'].join('/');
     write(join(projectDir, dependencyPath), 'operator preimage\n');
-    const escapedStage: StageConfig = {
+    const escapedStage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'writer', role: 'writer', scope: [], depends_on: [], prompt_template: 'write fixture',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
@@ -643,13 +645,13 @@ describe('engine remediation after-state, controls, and reach counts', () => {
   });
 
   it('8 — rejects condition literals outside runtime domains', () => {
-    const impossible: StageConfig = {
+    const impossible: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'conditional', role: 'worker', depends_on: ['producer'],
       condition: 'producer.status == status_that_does_not_exist', prompt_template: 'never',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
     const possible: StageConfig = { ...impossible, condition: 'producer.status == complete' };
-    const producer: StageConfig = {
+    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'producer', role: 'worker', depends_on: [], prompt_template: 'produce', skills: [], dynamic_dispatch: false, is_gate: false,
     };
     const rejected = inspectDispatchAdmission({ dispatched: [producer, impossible], baseStages: [], dispatchStageId: 'plan' });
@@ -830,7 +832,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     const admission = createBriefAdmission(inspectBrief(brief), {
       kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
     });
-    const stage: StageConfig = {
+    const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'worker', role: 'worker', depends_on: [], prompt_template: 'work', skills: [], dynamic_dispatch: false, is_gate: false,
     };
     let calls = 0;
@@ -960,14 +962,14 @@ describe('engine remediation after-state, controls, and reach counts', () => {
   });
 
   it('16 — redispatches the owning producer only for missing-outcome rejection', () => {
-    const producer: StageConfig = {
+    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'measure', role: 'worker', scope: ['docs/result.json'], depends_on: [], prompt_template: 'measure',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
-    const gate: StageConfig = {
+    const gate: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
       id: 'qa', role: 'qa', depends_on: ['measure'], prompt_template: 'audit', skills: [], dynamic_dispatch: false, is_gate: true,
     };
-    const repair: StageConfig = {
+    const repair: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'repair_report', role: 'worker', depends_on: ['qa'], retry_to: ['qa'], prompt_template: 'repair',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
@@ -1001,16 +1003,23 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const terminalPath = 'docs/escalation.md';
-    const stage: StageConfig = {
+    const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'repair', role: 'worker', scope: [], depends_on: [], prompt_template: 'request terminal',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
     let decisionPath = '';
     let calls = 0;
     const final = await runWorkflow(
-      { name: 'terminal-owner-after', defaults: { max_iterations: 1, max_retries: 0 }, stages: [stage] },
+      { name: 'terminal-owner-after', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
+        ...coveredStages(stage, '# Goal\n## What the report must show\n1. Exercise terminal ownership refusal.\n'),
+        { ...stage, id: 'finalizer', scope: [terminalPath], depends_on: ['fixture_audit'],
+          dependency_reasons: { fixture_audit: 'Publish the admitted terminal artifact after the audit.' },
+          artifact_contract: artifacts([{ id: 'terminal', root: 'project', path: terminalPath }]),
+        },
+      ] },
       'name: terminal-owner-after', projectDir, { async run(_prompt, _role, opts) {
         if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (settleCoverageFixture(opts) || opts.stageId === 'finalizer') return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         calls += 1;
         write(join(opts.runDir, 'dispatch_admission.json'), JSON.stringify({
           version: 1, pass: true, errors: [], terminalOwners: { [terminalPath]: 'finalizer' },
@@ -1025,7 +1034,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
         decisionPath = await waitForFile(stagePath, (name) => name.startsWith('scope_revision_decision_'));
         return { output: 'request handled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       } }, new Map(), undefined, agentsDir, undefined,
-      '---\nterminal_states:\n  escalated:\n    paths: [docs/escalation.md]\n---\n# fixture', true, false,
+      '---\nterminal_states:\n  escalated:\n    paths: [docs/escalation.md]\n---\n# Goal\n## What the report must show\n1. Exercise terminal ownership refusal.\n', true, false,
     );
     const decision = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
     const event = readRunEvents(projectDir, final.runId).find((entry) => entry.type === 'scope_revision_decided');

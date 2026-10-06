@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 16 -->
+<!-- flowcrew-skill-revision: 17 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -173,10 +173,10 @@ content is intentionally part of the task, put that path in `inputs:` or attach 
 `on_existing: update`, `append`, or `replace` disposition. Preflight, rehearsal, and setup must agree
 on the inventory before launch; a large unrelated file is not made safe by being at the requested path.
 
-The planner owns planner-created stages. Its hard rules reserve every declared terminal path for the
-status-committing final stage and give any gate that may write tests, probes, snapshots, reports, or
-generated output a complete writable scope. Preflight/rehearsal still lint explicit writable mappings
-in an authored staged brief and countable `stage_glob` floors.
+In an authored staged brief, map each stage's writable paths, including validation outputs.
+The planner translates that mapping into scopes and the declared output/read/replay interface in
+the canonical contract; admission checks terminal ownership and those declarations. Preflight and
+rehearsal still lint authored writable mappings and countable `stage_glob` floors.
 
 Declare `terminal_states` only for an artifact whose appearance should end the entire run. Omit it
 for an intermediate or mid-pipeline output, because declaring that path terminal would skip pending

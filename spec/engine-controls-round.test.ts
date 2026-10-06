@@ -1,3 +1,4 @@
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import {
@@ -163,7 +164,7 @@ function checkMarkdown(script: string, reads?: unknown[]): string {
     'checks:',
     '  - name: manifest fields exist',
     '    type: exec-script-exit-zero',
-    ...(reads ? [`    reads: ${JSON.stringify(reads)}`] : []),
+    `    reads: ${JSON.stringify(reads ?? [])}`,
     '    params:',
     '      script: |',
     ...script.trimEnd().split('\n').map((line) => `        ${line}`),
@@ -212,7 +213,7 @@ function oneStageWorkflow(name: string, prompt = 'exercise the engine control'):
     config: {description: '', 
       name,
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
         id: 'subject', role: 'coder', depends_on: [], scope: [],
         prompt_template: prompt, skills: [],
         dynamic_dispatch: false, is_gate: false,
@@ -345,8 +346,9 @@ describe('engine controls round replays', () => {
       const disposition = preflight.advisoryFindings.length > 0
         ? 'admitted_with_advisories'
         : 'admitted';
+      mkdirSync(join(fixtureRoot, 'task'), { recursive: true });
       const terminal = await runAllChecks(
-        [{ name: 'manifest fields exist', type: 'exec-script-exit-zero', params: { script: variant.script } }],
+        [{ reads: [], name: 'manifest fields exist', type: 'exec-script-exit-zero', params: { script: variant.script } }],
         { projectDir, taskDir: join(fixtureRoot, 'task') },
       );
       const result = terminal.results[0];
@@ -378,7 +380,7 @@ describe('engine controls round replays', () => {
     const workflow: WorkflowConfig = {description: '', 
       name: 'admission-after-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: 'write the deterministic dispatch and check', skills: [],
         dynamic_dispatch: true, is_gate: false,

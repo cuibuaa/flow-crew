@@ -1,3 +1,4 @@
+import { inputFile } from './spec_contracts/declared-fixtures.js';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -210,46 +211,38 @@ describe('boundary 55: evidence from the launched process', () => {
 });
 
 function markdown(script: string) {
-  return '## Reality checks\n```yaml\n' + stringify({ checks: [{
+  return '## Reality checks\n```yaml\n' + stringify({ checks: [{ reads: [],
     name: 'check', type: 'exec-script-exit-zero', params: { script },
   }] }) + '```';
 }
 function admission(script: string) {
   return inspectRealityCheckReachability({ markdown: markdown(script), projectDir: fixture(), stages: [] });
 }
-describe('boundary 56: printf format operands', () => {
+describe('boundary 56: script text does not declare reads', () => {
   it.each([
-    String.raw`printf '%s\n' diagnostic`, String.raw`printf "%s\n" diagnostic`,
-    String.raw`printf -- '%s\n' diagnostic`, String.raw`printf -v result '%s\n' diagnostic`,
-    String.raw`/usr/bin/printf '%s\n' diagnostic`, String.raw`command printf '%s\n' diagnostic`,
-    String.raw`env MARKER=x printf '%s\n' diagnostic`, String.raw`MARKER=x printf '%s\n' diagnostic`,
-    String.raw`if true; then printf '%s\n' diagnostic; fi`,
-    String.raw`printf 'docs/unowned.txt\n' diagnostic`,
-  ])('does not invent a file from the format in %s', script => {
+    String.raw`printf '%s\n' diagnostic`,
+    String.raw`printf -- '%s\n' diagnostic > docs/unowned.txt`,
+    String.raw`printf -v result '%s\n' diagnostic; cat docs/unowned.txt`,
+    String.raw`command printf 'docs/unowned.txt\n'`,
+    String.raw`env MARKER=x printf '%s\n' diagnostic; test -s docs/unowned.txt`,
+    String.raw`sed -e's/foo/bar/' docs/unowned.txt`,
+    "printf '' 'docs/unowned.txt'",
+  ])('keeps operands inert when reads are explicitly empty: %s', script => {
     expect(admission(script)).toEqual([]);
   });
-
-  it.each([
-    String.raw`printf '%s\n' diagnostic; cat '%s\n'`,
-    String.raw`printf '%s\n' diagnostic > '%s\n'`,
-    String.raw`printf '%s\n' diagnostic; test -s docs/unowned.txt`,
-    String.raw`sed -e's/foo/bar/' docs/unowned.txt`,
-  ])('still rejects an unproduced file in %s', script => {
-    expect(admission(script).join('\n')).toMatch(/references absent (?:%s\/n|docs\/unowned.txt)/);
-  });
-
-  it('keeps an empty format distinct from a following path-like data operand', () => {
-    expect(admission("printf '' 'docs/unowned.txt'").join('\n')).toContain('references absent docs/unowned.txt');
+  it('still refuses an explicitly declared missing read independently of the script operands', () => {
+    const declared = markdown('printf diagnostic').replace('reads: []', 'reads: [{id: file, root: project, path: docs/unowned.txt, source: {kind: stage, stage: absent, artifact: file}}]');
+    expect(inspectRealityCheckReachability({ markdown: declared, projectDir: fixture(), stages: [] }).join('\n')).toContain('ARTIFACT_READ_UNREACHABLE');
   });
 });
 
 describe('boundary 58: one complete declaration', () => {
-  const payload = 'checks:\n  - name: artifact\n    type: file-exists-nonempty\n    params: { paths: [artifact.txt] }';
+  const payload = 'checks:\n  - name: artifact\n    type: file-exists-nonempty\n    reads: []\n    params: { paths: [artifact.txt] }';
   const fence = '```yaml\n' + payload + '\n```';
   it.each(['before', 'after', 'both'])('accepts explanation %s the fence', placement => {
     const body = [placement !== 'after' ? 'Explanation.\n' : '', fence, placement !== 'before' ? '\nExplanation.' : ''].join('\n');
     expect(parseChecksFromMarkdown('## Reality checks\n' + body)).toEqual([
-      { name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
+      { reads: [], name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
     ]);
   });
   it('allows an unrelated complete text fence before the YAML declaration', () => {

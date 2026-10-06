@@ -148,7 +148,9 @@ function resolveExactFile(
 }
 
 function distinctAnchors(context: CheckContext): string[] {
-  return [...new Set([resolve(context.projectDir), resolve(context.taskDir)])];
+  const roots = context.declaredReads === undefined ? [context.projectDir, context.taskDir]
+    : context.declaredReads.map((read) => read.root === 'run' ? context.taskDir : context.projectDir);
+  return [...new Set(roots.map((root) => resolve(root)))];
 }
 
 function inspectExistingPath(

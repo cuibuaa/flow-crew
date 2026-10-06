@@ -1,6 +1,6 @@
+import { portCanBind } from './test-support/engine-fixtures.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -45,13 +45,7 @@ function waitForExit(
   });
 }
 
-function portCanBind(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
-  });
-}
+
 
 describe('flowcrew start signal lifecycle', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(

@@ -22,21 +22,13 @@ import {
   publishBuildGeneration,
 } from '../src/build-manifest.js';
 import { findDeployedDistConsumers } from '../src/daemon-identity.js';
+import { processIsAlive } from '../src/run-lock.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cacheDir = join(projectRoot, '.cache');
 const lockPath = join(cacheDir, 'build.lock');
 const checkoutKey = createHash('sha256').update(projectRoot).digest('hex').slice(0, 16);
 const stagingDist = join(tmpdir(), `flowcrew-build-${checkoutKey}`, 'dist');
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
 
 function acquireBuildLock(): number {
   mkdirSync(cacheDir, { recursive: true });
@@ -46,7 +38,7 @@ function acquireBuildLock(): number {
       const value = JSON.parse(readFileSync(lockPath, 'utf-8')) as { pid?: unknown };
       if (Number.isSafeInteger(value.pid) && Number(value.pid) > 0) owner = Number(value.pid);
     } catch { /* malformed lock is stale */ }
-    if (owner && processAlive(owner)) throw new Error(`Another build is publishing this checkout (pid ${owner}).`);
+    if (owner && processIsAlive(owner)) throw new Error(`Another build is publishing this checkout (pid ${owner}).`);
     rmSync(lockPath, { force: true });
   }
   const fd = openSync(lockPath, 'wx', 0o600);

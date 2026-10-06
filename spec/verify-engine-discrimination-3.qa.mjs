@@ -373,6 +373,7 @@ try {
     'checks:',
     '  - name: temporal_check',
     '    type: file-exists-nonempty',
+    '    reads: [{id: manifest, root: project, path: docs/run_manifest.json, source: {kind: input}}]',
     '    params:',
     '      paths: [docs/run_manifest.json]',
     '```',

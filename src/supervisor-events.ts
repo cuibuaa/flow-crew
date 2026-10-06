@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { canonicalJson } from './runtime-negotiation.js';
 
 export const SUPERVISOR_EVENT_VERSION = 1;
 export const SUPERVISOR_DEADLINE_MIN_MARGIN_MS = 60_000;
@@ -81,28 +82,17 @@ const EVENT_PRIORITY: Record<SupervisorEventType, number> = {
 };
 const EVENT_TYPES = new Set<SupervisorEventType>(Object.keys(EVENT_PRIORITY) as SupervisorEventType[]);
 
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, canonicalValue(entry)]));
-  }
-  return value;
-}
-
 export function supervisorEventFingerprint(candidate: Pick<
   SupervisorEventCandidate,
   'type' | 'source' | 'stageId' | 'fingerprint'
 >): string {
-  return createHash('sha256').update(JSON.stringify(canonicalValue({
+  return createHash('sha256').update(canonicalJson({
     version: SUPERVISOR_EVENT_VERSION,
     type: candidate.type,
     source: candidate.source,
     stageId: candidate.stageId,
     fingerprint: candidate.fingerprint,
-  }))).digest('hex');
+  })).digest('hex');
 }
 
 export function createSupervisorEvent(candidate: SupervisorEventCandidate): SupervisorEvent {

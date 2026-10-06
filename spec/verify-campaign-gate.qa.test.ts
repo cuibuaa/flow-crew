@@ -1,7 +1,7 @@
+import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   readCampaignOperatorView,
-  type CampaignInboxOverviewLike,
   type CampaignPageSources,
 } from '../src/campaign-page.js';
 import { fetchCampaignOperatorView } from '../ui/src/components/campaign/client.js';
@@ -9,14 +9,7 @@ import { fetchCampaignOperatorView } from '../ui/src/components/campaign/client.
 const CAMPAIGN_ID = 'qa-campaign-source-failure';
 const PROJECT_DIR = '/tmp/flowcrew-qa-campaign-project';
 
-function emptyInbox(): CampaignInboxOverviewLike {
-  return {
-    approvals: { status: 'complete', items: [] },
-    deferred: { status: 'complete', items: [] },
-    stale: { status: 'complete', items: [] },
-    patches: { status: 'complete', items: [], coverage: { succeeded: 1, failed: 0 } },
-  };
-}
+
 
 function baseSources(): Partial<CampaignPageSources> {
   return {

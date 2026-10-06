@@ -5,7 +5,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -45,6 +45,7 @@ import {
 } from './store.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
+import { resolveRunIdentity } from './cancellation-policy.js';
 import {
   RunCancellationCoordinator,
   type CancellationResult,
@@ -699,8 +700,9 @@ export class Orchestrator {
 
   private readBoundRun(task: TaskEntry): BoundRun | undefined {
     if (!task.run_id) return undefined;
-    const path = this.boundRunPath(task.run_id);
     try {
+      const identity = resolveRunIdentity(this.boundRunPath(task.run_id), isAbsolute(task.run_id) ? undefined : runsRoot());
+      const path = identity.directory;
       const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as {
         runId?: unknown;
         status?: unknown;
@@ -709,7 +711,7 @@ export class Orchestrator {
       };
       if (typeof parsed.status !== 'string') return undefined;
       return {
-        runId: typeof parsed.runId === 'string' && parsed.runId ? parsed.runId : basename(path),
+        runId: identity.runId,
         path,
         status: parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
@@ -817,12 +819,23 @@ export class Orchestrator {
       );
       return { kind: 'stop' };
     }
+    let recovered = false;
     if (bound.checkpointed && readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
       const reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId);
+      if (isTerminalRunStatus(reconciled.status)) {
+        this.failClosed(task, `${leading}bound run ${bound.runId} ended ${reconciled.status}; refusing to resume it`);
+        return { kind: 'stop' };
+      }
       if (reconciled.recovery?.kind !== 'resumable') {
         this.failClosed(task, `${leading}${reconciled.failureReason ?? 'RECOVERY_FATE_UNKNOWN: checkpoint could not be reconciled'}`);
         return { kind: 'stop' };
       }
+      recovered = true;
+    }
+    const latest = this.readBoundRun(task);
+    if (!latest || latest.runId !== bound.runId || latest.path !== bound.path || isTerminalRunStatus(latest.status) || (isPausedRunStatus(latest.status) && !recovered)) {
+      this.failClosed(task, `${leading}bound run ${bound.runId} changed before resume; inspect its current lifecycle before retrying`);
+      return { kind: 'stop' };
     }
     const pid = observed.kind === 'missing' ? '' : ` pid ${observed.pid}`;
     return {

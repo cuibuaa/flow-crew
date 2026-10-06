@@ -1,4 +1,5 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -50,13 +51,7 @@ function writeRoles(...names: string[]): string {
 }
 
 function prepareRun(config: WorkflowConfig, yaml: string) {
-  const created = createRun(projectDir, config.name, yaml, config.stages.map((stage) => stage.id));
-  writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
-  const state = readRunState(projectDir, created.runId);
-  state.autoApprove = true;
-  state.maxRetries = 2;
-  writeRunState(projectDir, created.runId, state);
-  return created;
+  return prepareFixtureRun(projectDir, config, yaml);
 }
 
 function summaryResult(opts: RunOpts): RunResult | undefined {
@@ -78,7 +73,7 @@ async function waitForDecision(directory: string): Promise<Record<string, any>> 
 function singleStageWorkflow(input: { gate: boolean; scopePresent: boolean; name: string }): { config: WorkflowConfig; yaml: string } {
   const role = input.gate ? 'qa' : 'coder';
   const scope = input.scopePresent ? ['src/declared.ts'] : undefined;
-  const stage = {criterion_refs: [], 
+  const stage = { artifact_contract: fixtureArtifactContract('subject', input.gate),criterion_refs: [], 
     id: 'subject', role, depends_on: [], prompt_template: 'M3 matrix fixture', skills: [],
     dynamic_dispatch: false, is_gate: input.gate, ...(scope ? { scope } : {}),
   };
@@ -318,7 +313,7 @@ describe('scheduler-authoritative full-tree enforcement', () => {
       const config: WorkflowConfig = {description: '', 
         name: input.name,
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [{criterion_refs: [], 
+        stages: [{ artifact_contract: fixtureArtifactContract('subject', false),criterion_refs: [], 
           id: 'subject', role: 'coder', depends_on: [], prompt_template: 'J8 fixture', skills: [],
           dynamic_dispatch: false, is_gate: false, scope: input.scope,
         }],
@@ -419,7 +414,7 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
       const config: WorkflowConfig = {description: '', 
         name: `historical-${shape.stage}`,
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [{criterion_refs: [], 
+        stages: [{ artifact_contract: fixtureArtifactContract(shape.stage, shape.gate),criterion_refs: [], 
           id: shape.stage, role, depends_on: [], prompt_template: `synthetic shape ${shape.origin}`,
           skills: [], dynamic_dispatch: false, is_gate: shape.gate,
         }],
@@ -441,6 +436,8 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
         expect(prompt).toContain(`"runId":"${created.runId}"`);
         if (stageCalls === 1) {
           expect(prompt).toContain('Declared project-write scope: [] (declaration missing)');
+          const commandId = `scope-request-${opts.stageId}`;
+          opts.onCommandLifecycle?.({ phase: 'started', id: commandId, command: 'declare synthetic write scope', timestamp: new Date().toISOString() });
           const directory = join(opts.runDir, 'stages', opts.stageId);
           writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
             version: 1, kind: 'scope_revision', requestId: `synthetic-${shape.stage}`,
@@ -450,6 +447,7 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
           }));
           const decision = await waitForDecision(directory);
           expect(decision).toMatchObject({ accepted: true, requestedPaths: canonicalPaths });
+          opts.onCommandLifecycle?.({ phase: 'completed', id: commandId, timestamp: new Date().toISOString() });
           return {
             output: 'scope accepted; stop at the control boundary', exitCode: 0,
             duration_ms: 20, writes: [], writeAttribution: 'structured',
@@ -498,7 +496,7 @@ describe('rejected digest handoff across planner iterations', () => {
       const config: WorkflowConfig = {description: '', 
         name: `m3-two-iteration-${disposition}`,
         defaults: { max_iterations: 2, max_retries: 0 },
-        stages: [{criterion_refs: [], 
+        stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
           id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [],
           dynamic_dispatch: true, is_gate: false,
         }],

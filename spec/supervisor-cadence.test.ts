@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import ts from 'typescript';
@@ -261,8 +261,10 @@ describe('supervisor routine/anomaly scheduling', () => {
     const cursor = new SupervisorEventCursor();
     cursor.offer([{ type: 'artifact_change', observedAt: artifact.observedAt, source: 'test',
       fingerprint: { version: 1 }, quantities }]);
-    expect(cursor.peek()?.eventId).toBe(artifact.eventId);
-    expect(cursor.peek()?.eventId).toBe(artifact.eventId);
+    const selectedEventId = cursor.peek()?.eventId;
+    expect(selectedEventId).toBe(artifact.eventId);
+    // Reading the pending selection again must preserve its identity.
+    expect(cursor.peek()?.eventId).toBe(selectedEventId);
     expect(cursor.pendingCount).toBe(1);
     cursor.offer([{ type: 'artifact_change', observedAt: '2026-09-25T00:01:30.000Z', source: 'test',
       fingerprint: { version: 2 }, quantities }]);
@@ -284,6 +286,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     let supervisor: Supervisor | undefined;
     try {
       const project = join(root, 'project');
+      mkdirSync(project);
       const yaml = 'name: cadence\nstages:\n  - id: left\n    role: coder\n  - id: right\n    role: coder\n';
       const created = createRun(project, 'cadence', yaml, ['left', 'right']);
       const state = readRunState(project, created.runId);

@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { result as checkResult } from './checks/_utils.js';
 import { REALITY_CHECK_REGISTRY } from './registry.js';
+import { inspectRealityHandlerReads } from './declared-reads.js';
 import { ArtifactReadSchema } from '../artifact-declarations.js';
 import { inspectDeclaredStageReads } from '../declared-artifact-audit.js';
 import type { StageStatus } from '../store.js';
@@ -104,7 +106,8 @@ function normalizeChecks(checks: unknown[]): CheckDecl[] {
       return invalidDeclaration(position, 'must have a string type', rec.name);
     }
     const params = rec.params && typeof rec.params === 'object' ? rec.params as object : {};
-    const reads = rec.reads === undefined ? undefined : ArtifactReadSchema.array().safeParse(rec.reads);
+    if (rec.reads === undefined) return invalidDeclaration(position, `REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(rec.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`, rec.name);
+    const reads = ArtifactReadSchema.array().safeParse(rec.reads);
     if (reads && !reads.success) return invalidDeclaration(position, `reads must declare exact rooted inputs: ${reads.error.message}`, rec.name);
     return {
       name: rec.name,
@@ -122,7 +125,7 @@ function invalidDeclaration(position: number, diagnostic: string, suppliedName?:
     kind: 'invalid',
     name,
     type: '__invalid-reality-check-declaration__',
-    diagnostic: `Reality check item #${position} ${diagnostic}`,
+    diagnostic: diagnostic.startsWith('REALITY_READ_DECLARATION_REQUIRED:') ? diagnostic : `Reality check item #${position} ${diagnostic}`,
   };
 }
 
@@ -153,6 +156,7 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
       continue;
     }
     try {
+      if (decl.reads === undefined) throw new Error(`REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(decl.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`);
       if (decl.reads !== undefined) {
         let statuses: Record<string, StageStatus> | undefined;
         if (decl.reads.some((read) => read.source.kind === 'stage' || read.when)) {
@@ -160,13 +164,18 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
           if (run.runId !== basename(context.taskDir) || !run.projectDir || resolve(run.projectDir) !== resolve(context.projectDir) || !run.stages) throw new Error('ARTIFACT_READ_FACTS_UNBOUND: reality reads require this run\'s settled producer facts');
           statuses = run.stages;
         }
-        const errors = inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses });
+        const errors = [...inspectRealityHandlerReads(decl, context.projectDir, context.taskDir), ...inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [], replays: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses })];
         if (errors.length) {
-          results.push({ name: decl.name, type: decl.type, pass: false, details: errors.join('; '), ...(decl.advisory === true ? { advisory: true } : {}) });
+          results.push({ name: decl.name, type: decl.type, ...checkResult(false, `${errors.join('; ')}. Create each missing file or fix the named declared inputs, then rerun Reality-Gate.`), ...(decl.advisory === true ? { advisory: true } : {}) });
           continue;
         }
       }
-      const { advisory: handlerAdvisory, ...result } = await handler.run(decl.params, context);
+      const { advisory: handlerAdvisory, ...result } = await handler.run(decl.params, {
+        ...context, declaredReads: decl.reads,
+        commandBoundary: { projectDir: context.projectDir,
+          runDir: resolve(context.taskDir) === resolve(context.projectDir) ? undefined : context.taskDir,
+          stageId: '_reality', authority: 'project-command' },
+      });
       results.push({
         name: decl.name,
         type: decl.type,

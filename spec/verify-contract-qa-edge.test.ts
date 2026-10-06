@@ -1,3 +1,4 @@
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -97,7 +98,7 @@ describe('verification-owned orchestration edge probes', () => {
 
   it('rejects an absent unquoted literal path in a hard exec reality check', () => {
     const projectDir = temporaryRoot('flowcrew-qa-reality-');
-    const work = parseDispatchedStageConfig({
+    const work = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
       id: 'work',
       role: 'coder',
       scope: ['docs/owned.json'],
@@ -114,6 +115,7 @@ describe('verification-owned orchestration edge probes', () => {
       'checks:',
       '  - name: unquoted future file',
       '    type: exec-script-exit-zero',
+      '    reads: [{id: input, root: project, path: docs/not_owned.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      script: |',
       '        test -s docs/not_owned.json',
@@ -166,7 +168,7 @@ describe('verification-owned orchestration edge probes', () => {
   });
 
   it('classifies a terminal finalizer\'s conservative extra capability as validation-only', () => {
-    const finalizer = parseDispatchedStageConfig({
+    const finalizer = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
       id: 'finalize',
       role: 'writer',
       scope: ['docs/final.md', 'docs/new_measurement.json'],
@@ -192,7 +194,7 @@ describe('verification-owned orchestration edge probes', () => {
 
   it('rejects a hard check on the optional result even when a mandatory stage owns that path', () => {
     const projectDir = temporaryRoot('flowcrew-qa-optional-result-');
-    const measure = parseDispatchedStageConfig({
+    const measure = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
       id: 'measure',
       role: 'researcher',
       scope: ['docs/round.json'],
@@ -209,6 +211,7 @@ describe('verification-owned orchestration edge probes', () => {
       'checks:',
       '  - name: numeric result exists',
       '    type: exec-script-exit-zero',
+      '    reads: [{id: result, root: project, path: docs/round.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      script: test -s docs/round.json',
       '```',

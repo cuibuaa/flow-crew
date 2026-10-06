@@ -1,3 +1,4 @@
+import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,7 @@ import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { findAllReady, inspectRealityCheckReachability, runWorkflow, selectRunnableBatch, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
 import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { artifacts, producedRead } from './spec_contracts/declared-fixtures.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const writerCase = (gateNeedsReport = true) => {
@@ -53,7 +55,7 @@ const writerCase = (gateNeedsReport = true) => {
   }];
   const merged = mergePlanRetryPair(incumbent, proposed, refusal).pair.dispatch;
   const entries = (parseYaml(merged) as { stages: Array<Record<string, unknown>> }).stages;
-  const stages = entries.map((entry): StageConfig => ({
+  const stages = entries.map((entry): StageConfig => ({ criterion_refs: [], artifact_contract: artifacts(entry.is_gate === true ? [{ id: 'verdict', root: 'run', path: `verdict_${String(entry.id)}.json` }] : entry.id === 'write_report' ? [{ id: 'report', root: 'project', path: 'docs/report.md' }] : [], [], [], []),
     id: String(entry.id), role: String(entry.role),
     scope: entry.scope as string[],
     depends_on: (entry.depends_on as string[] | undefined) ?? [],
@@ -77,7 +79,7 @@ describe('engine boundary audit probes', () => {
       writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 10000\n');
       writeFileSync(join(projectDir, 'config', 'agents', 'coder.yaml'),
         'name: coder\ndescription: fixture\nmodel: default\nreasoning_effort: low\ntools: []\nprompt: fixture\n');
-      const stage: StageConfig = {
+      const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'report', root: 'project', path: 'docs/report.md' }], [], [], []),
         id: 'writer', role: 'coder', scope: ['docs/report.md'], depends_on: [],
         prompt_template: 'Write docs/report.md.', skills: [], dynamic_dispatch: false, is_gate: false,
       };
@@ -148,7 +150,8 @@ describe('engine boundary audit probes', () => {
       const projectDir = join(root, 'project');
       mkdirSync(projectDir, { recursive: true });
       const { stages } = writerCase();
-      const markdown = '```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    params:\n      paths: [docs/report.md]\n```\n';
+      const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    reads: [{id: report, root: project, path: docs/report.md, source: {kind: stage, stage: write_report, artifact: report}}]\n    params:\n      paths: [docs/report.md]\n```\n';
+      expect(parseChecksFromMarkdown(markdown)).toHaveLength(1);
       expect(inspectRealityCheckReachability({ markdown, projectDir, stages })).toEqual([]);
 
       const runId = 'failed-gate-fixture';
@@ -185,7 +188,7 @@ describe('engine boundary audit probes', () => {
       // only when a declared gate completes.
       writeFileSync(join(dir, 'validation_baseline.json'), '{"version":1}\n');
       writeFileSync(join(dir, 'verdict_baseline.json'), '{"pass":true,"reason":"baseline captured"}\n');
-      const stage = (id: string, extra: Record<string, unknown>) => ({
+      const stage = (id: string, extra: Record<string, unknown>) => ({ artifact_contract: artifacts([], [], [], []),
         id, role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], criterion_refs: [],
         skills: [], prompt_template: id, is_gate: false, ...extra,
       });
@@ -271,11 +274,13 @@ describe('engine boundary audit probes', () => {
       const projectDir = join(root, 'project');
       const runDirectory = join(root, 'run');
       mkdirSync(runDirectory, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
       const template = "Write this run's validation_final.json.";
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory });
+      const artifactContract = artifacts([{ id: 'validation', root: 'run', path: 'validation_final.json' }]);
+      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory, artifactContract });
       writeFileSync(join(runDirectory, 'validation_final.json'), '{"passed":true}\n');
       const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory,
+        stageId: 'write_report', template, projectDir, runDir: runDirectory, artifactContract,
         preimages, writes: [],
       });
       expect(result.violations).toEqual([]);
@@ -288,15 +293,17 @@ describe('engine boundary audit probes', () => {
       const projectDir = join(root, 'project');
       const runDirectory = join(root, 'run');
       mkdirSync(runDirectory, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
       writeFileSync(join(runDirectory, 'validation_final.json'), '{"old":true}\n');
       const template = "Write this run's validation_final.json.";
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory });
+      const artifactContract = artifacts([{ id: 'validation', root: 'run', path: 'validation_final.json' }]);
+      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory, artifactContract });
       const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory,
+        stageId: 'write_report', template, projectDir, runDir: runDirectory, artifactContract,
         preimages, writes: [],
       });
       expect(result.violations).toEqual([expect.objectContaining({
-        reason: expect.stringContaining('no attributable stage write'),
+        reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE'),
       })]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

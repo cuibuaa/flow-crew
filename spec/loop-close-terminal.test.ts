@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig } from '../src/adapters/base.js';
@@ -35,7 +35,7 @@ describe('settled terminal decisions', () => {
     rmSync(isolatedStateDir, { recursive: true, force: true });
   });
 
-  async function run(script: StageScript, brief: string) {
+  async function run(script: StageScript, brief: string, declaresOutcome = true) {
     const workflow = WorkflowConfigSchema.parse({
       name: 'loop-close-fixture',
       defaults: { max_retries: 0, max_iterations: 1 },
@@ -44,12 +44,25 @@ describe('settled terminal decisions', () => {
         role: 'coder',
         prompt_template: 'produce the declared outcome',
         scope: ['docs/**'],
+        artifact_contract: {
+          version: 1,
+          produces: declaresOutcome ? [
+            { id: 'final', root: 'project', path: 'docs/final_verification.md' },
+            { id: 'blocker', root: 'project', path: 'docs/escalation_note.md' },
+          ] : [],
+          reads: [],
+          replays: [],
+          groups: declaresOutcome ? [{ id: 'outcome', mode: 'exactly_one', members: ['final', 'blocker'] }] : [],
+        },
       }],
     });
     const adapter = new ScriptedAdapter({
       deliver: script,
       _summary: { output: 'summary', exitCode: 0 },
     });
+    const agentsDir = join(projectDir, 'config', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'coder.yaml'), 'name: coder\ndescription: fixture\nmodel: test\nreasoning_effort: low\ntools: []\nprompt: fixture\n');
     const state = await runWorkflow(
       workflow,
       '',
@@ -57,7 +70,7 @@ describe('settled terminal decisions', () => {
       adapter,
       new Map([['coder', coder]]),
       undefined,
-      undefined,
+      agentsDir,
       undefined,
       brief,
       true,
@@ -80,7 +93,7 @@ terminal_states:
 # Failure-containing terminal fixture
 `);
 
-    expect(state.status).toBe('escalated');
+    expect(state.status, state.failureReason).toBe('escalated');
     expect(state.terminalArtifact).toBe('escalation_note.md');
     expect(state.stages.deliver.status).toBe('failed');
   });
@@ -94,9 +107,9 @@ terminal_states:
     paths: [docs/escalation_note.md]
 ---
 # No-match terminal fixture
-`);
+`, false);
 
-    expect(state.status).toBe('incomplete');
+    expect(state.status, state.failureReason).toBe('incomplete');
     expect(state.failureReason).toContain('no declared terminal state matched');
     expect(events).toContainEqual(expect.objectContaining({
       type: 'run_completed',

@@ -1,3 +1,5 @@
+import type { ArtifactRead } from '../src/artifact-declarations.js';
+import { artifacts, inputFile  } from './spec_contracts/declared-fixtures.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,7 +43,7 @@ interface CheckFixture {
   type: string;
   params: Record<string, unknown>;
   advisory?: boolean;
-  reads?: Array<{id:string; root:'project'|'run'; path:string; source:{kind:'stage'; stage:string; artifact:string}}>;
+  reads?: ArtifactRead[];
 }
 
 function checksMarkdown(...checks: CheckFixture[]): string {
@@ -106,7 +108,7 @@ const BAD_CHECKS: Array<{
 }> = [
   {
     label: 'an exact Markdown heading used as a proxy for required evidence',
-    check: {
+    check: { reads: [],
       name: 'report contains validation evidence',
       type: 'exec-script-exit-zero',
       params: { script: "grep -q '## Validation' docs/final.md" },
@@ -116,7 +118,7 @@ const BAD_CHECKS: Array<{
   },
   {
     label: 'a forbidden-pattern scan that contradicts an explicit preservation exception',
-    check: {
+    check: { reads: [inputFile('subject', "CHANGELOG.md")],
       name: 'published sources omit the former private area',
       type: 'static-ast-scan',
       params: { glob: 'CHANGELOG.md', language: 'markdown', forbid_pattern: 'legacy/private-area/' },
@@ -126,7 +128,7 @@ const BAD_CHECKS: Array<{
   },
   {
     label: 'existence of an artifact the contract never requires',
-    check: {
+    check: { reads: [inputFile('file_0', 'docs/archive-copy.md')],
       name: 'archive copy exists',
       type: 'file-exists-nonempty',
       params: { paths: ['docs/archive-copy.md'] },
@@ -136,7 +138,7 @@ const BAD_CHECKS: Array<{
   },
   {
     label: 'byte equality between two copies',
-    check: {
+    check: { reads: [],
       name: 'archive copy exactly matches report',
       type: 'exec-script-exit-zero',
       params: { script: 'cmp -s docs/final.md docs/archive-copy.md' },
@@ -153,12 +155,12 @@ const GOOD_CHECKS: Array<{ label: string; check: CheckFixture }> = [
       name: 'terminal report exists',
       type: 'file-exists-nonempty',
       params: { paths: ['docs/final.md'] },
-      reads: [{id:'report',root:'project',path:'docs/final.md',source:{kind:'stage',stage:'work',artifact:'report'}}],
+      reads: [{id:'report',root:'project',path:'docs/final.md',kind:'file',source:{kind:'stage',stage:'work',artifact:'report'}}],
     },
   },
   {
     label: 'a validation command exits zero',
-    check: {
+    check: { reads: [],
       name: 'project validation passes',
       type: 'exec-script-exit-zero',
       params: { script: 'npm run test' },
@@ -166,7 +168,7 @@ const GOOD_CHECKS: Array<{ label: string; check: CheckFixture }> = [
   },
   {
     label: 'a report number equals an independently recomputed number',
-    check: {
+    check: { reads: [],
       name: 'reported count matches source data',
       type: 'exec-script-exit-zero',
       params: {
@@ -203,7 +205,7 @@ describe('planner Reality-Gate check preflight', () => {
     ];
     const brief = ['---', ...mapping, '---', '# Contract'].join('\n');
     const path = resultFile ?? 'docs/research_round_result.json';
-    const check: CheckFixture = {
+    const check: CheckFixture = { reads: [inputFile('file_0', path)],
       name: 'round result exists',
       type: 'file-exists-nonempty',
       params: { paths: [path] },
@@ -222,7 +224,7 @@ describe('planner Reality-Gate check preflight', () => {
   });
 
   it('blocks a hard command that is mechanically incapable of failing', () => {
-    expect(tierCodes({
+    expect(tierCodes({ reads: [],
       name: 'validation always passes',
       type: 'exec-script-exit-zero',
       params: { script: 'true' },
@@ -246,7 +248,7 @@ describe('planner Reality-Gate check preflight', () => {
       ].join('\n'),
     },
   ])('blocks a red-baseline validation command used as $label', ({ script }) => {
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation remains acceptable',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -268,7 +270,7 @@ describe('planner Reality-Gate check preflight', () => {
     baseline.results[0].failureEvidence = 'partial';
     baseline.results[0].reason = 'validation output was truncated';
     baseline.gateCriteria[0].baselineFailureEvidence = 'partial';
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation remains acceptable',
       type: 'exec-script-exit-zero',
       params: { script: 'python -m pytest tests' },
@@ -324,7 +326,7 @@ describe('planner Reality-Gate check preflight', () => {
     },
   ])('blocks a generic red-baseline validator used as $label', ({ script }) => {
     const baseline = failingValidationBaseline('validator verify --all', ['suite/case::known_failure']);
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation remains acceptable',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -345,7 +347,7 @@ describe('planner Reality-Gate check preflight', () => {
       'set -e',
       'node scripts/compare-validation-failures.mjs "$status" "$output" docs/recorded-baseline.json',
     ].join('\n');
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation has no regression from baseline',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -360,7 +362,7 @@ describe('planner Reality-Gate check preflight', () => {
       'validation_status=$?',
       'test "$validation_status" -le 1',
     ].join('\n');
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation status is interpreted',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -425,7 +427,7 @@ describe('planner Reality-Gate check preflight', () => {
       },
     },
   ])('does not invent a cannot-pass finding for $label', ({ context }) => {
-    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({
+    const report = inspectRealityChecks(CONTRACT_BRIEF, checksMarkdown({ reads: [],
       name: 'project validation passes',
       type: 'exec-script-exit-zero',
       params: { script: 'python -m pytest tests' },
@@ -563,7 +565,7 @@ describe('historical planner syntax regressions', () => {
   ];
 
   it.each(requiredArtifactCases)('accepts $label', ({ brief, paths }) => {
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'required artifacts exist',
       type: 'file-exists-nonempty',
       params: { paths },
@@ -582,7 +584,7 @@ describe('historical planner syntax regressions', () => {
       '# Contract',
       'Produce the research result described by the metadata.',
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [inputFile('file_0', 'docs/round/round_result.json'), inputFile('file_1', 'docs/round/supporting-result.json')],
       name: 'research outputs exist',
       type: 'file-exists-nonempty',
       params: { paths: ['docs/round/round_result.json', 'docs/round/supporting-result.json'] },
@@ -595,7 +597,7 @@ describe('historical planner syntax regressions', () => {
       'Move the existing six tracked reference documents with `git mv` from `docs/` into `guide/`.',
       'The reference set is Markdown documentation whose filenames remain unchanged by the move.',
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [inputFile('file_0', 'guide/architecture.md'), inputFile('file_1', 'guide/campaigns.md'), inputFile('file_2', 'guide/cli.md'), inputFile('file_3', 'guide/configuration.md'), inputFile('file_4', 'guide/reality-gate.md'), inputFile('file_5', 'guide/skills.md')],
       name: 'migrated reference documents exist',
       type: 'file-exists-nonempty',
       params: {
@@ -620,7 +622,7 @@ describe('historical planner syntax regressions', () => {
       '> 参考实现（operator 的原型，可直接借鉴思路，不必照抄）：对每行做',
       '> `/(===|!==|includes\\(|\\bcase\\s+)\\s*[\'\"]<status>[\'\"]/` 匹配，跳过以 `//`/`*` 开头的行。',
     ].join('\n');
-    const markdown = checksMarkdown({
+    const markdown = checksMarkdown({ reads: [inputFile('file_0', 'local-suite/status-literal-guard.test.ts'), inputFile('file_1', 'local-suite/jsonl-reader.test.ts'), inputFile('file_2', 'local-suite/campaign-context.test.ts')],
       name: 'planner-selected behavioral test files exist',
       type: 'file-exists-nonempty',
       params: {
@@ -716,7 +718,7 @@ describe('historical planner syntax regressions', () => {
   ];
 
   it.each(presentationCases)('flags $label', ({ script }) => {
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'report contains the required evidence',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -739,7 +741,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       'if (failures.length) process.exit(1);',
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'Article structure, length, numbers, and forbidden literals',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -755,7 +757,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       'if (failures.length) process.exit(1);',
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'contracted title remains exact',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -774,7 +776,7 @@ describe('historical planner syntax regressions', () => {
       'const section = summary.slice(heading.index);',
       "if (!/\\b[0-9a-f]{40}\\b/.test(section)) throw new Error('E9 section has no implementation SHA');",
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'e9-tracked-commit-integrity',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -800,7 +802,7 @@ describe('historical planner syntax regressions', () => {
       ].join('\n'),
     },
   ])('flags $label', ({ script }) => {
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'working copy preserves source bytes',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -824,7 +826,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       "if (bad.length) throw new Error(bad.join('\\n'));",
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'published files omit the private area',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -853,7 +855,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       "if (bad.length) throw new Error(bad.join('\\n'));",
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'published files omit the private area except at contracted locations',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -876,7 +878,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       "if (bad.length) throw new Error(bad.join('\\n'));",
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'published files omit the private area',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -901,7 +903,7 @@ describe('historical planner syntax regressions', () => {
       '}',
       "if (bad.length) throw new Error(bad.join('\\n'));",
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'published files omit the private area except in ignore configuration',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -915,7 +917,7 @@ describe('historical planner syntax regressions', () => {
       "const expected = spawnSync('git', ['show', 'HEAD:fixtures/corpus.json']);",
       'if (!actual.equals(expected.stdout)) process.exit(1);',
     ].join('\n');
-    expect(findingCodes({
+    expect(findingCodes({ reads: [],
       name: 'contracted byte identity holds',
       type: 'exec-script-exit-zero',
       params: { script },
@@ -940,7 +942,7 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
     config: {description: '', 
       name: 'reality-check-preflight-fixture',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
         id: 'plan',
         role: 'planner',
         depends_on: [],
@@ -965,16 +967,17 @@ const WORK_DISPATCH = [
   '    version: 1',
   '    produces: [{id: report, root: project, path: docs/final.md}]',
   '    reads: []',
+  '    replays: []',
 ].join('\n');
 
 const BAD_CHECK_MARKDOWN = checksMarkdown(BAD_CHECKS[0].check);
-const BLOCKING_BAD_CHECK_MARKDOWN = checksMarkdown({
+const BLOCKING_BAD_CHECK_MARKDOWN = checksMarkdown({ reads: [],
   name: 'validation always passes',
   type: 'exec-script-exit-zero',
   params: { script: 'true' },
 });
 const GOOD_CHECK_MARKDOWN = checksMarkdown(GOOD_CHECKS[0].check);
-const RAW_RED_BASELINE_CHECK_MARKDOWN = checksMarkdown({
+const RAW_RED_BASELINE_CHECK_MARKDOWN = checksMarkdown({ reads: [],
   name: 'project validation remains acceptable',
   type: 'exec-script-exit-zero',
   params: { script: 'python -m pytest tests' },

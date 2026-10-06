@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,6 +122,7 @@ describe('attempt token evidence', () => {
       role,
       dependsOn: [],
       promptTemplate: 'fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 10_000,
       projectDir,
       runId: created.runId,

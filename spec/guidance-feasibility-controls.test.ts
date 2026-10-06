@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -75,6 +76,7 @@ function makeRun(stageIds: string[]) {
 
 function stageOptions(created: { runId: string; runDirPath: string }, stageId = 'work') {
   return {
+      artifactContract: fixtureArtifactContract(stageId),
     stageId,
     role,
     dependsOn: [],

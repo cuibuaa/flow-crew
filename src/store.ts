@@ -24,11 +24,13 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { projectPersistenceIdentity } from './project-identity.js';
+import { cancelledRunPublicationError, canonicalRunDirectory, resolveRunIdentity } from './cancellation-policy.js';
 import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 import type { AdapterFailureKind } from './adapters/base.js';
+import type { ProviderFailure } from './provider-result.js';
 import type { SupervisorEvent } from './supervisor-events.js';
 import {
   UnknownRunStatusError,
@@ -120,6 +122,9 @@ export interface StageAttempt {
   status: StageAttemptState;
   duration_ms?: number;
   exitCode?: number;
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  providerFailure?: ProviderFailure;
   tokens_in?: number;
   tokens_out?: number;
   /** Persisted evidence: both counters are known, or this settled attempt is explicitly unknown. */
@@ -139,6 +144,9 @@ export interface StageAttempt {
 export interface StageStatus {
   status: StageState;
   exitCode?: number;
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  providerFailure?: ProviderFailure;
   duration_ms?: number;
   artifacts?: string[];
   retries: number;
@@ -236,6 +244,9 @@ export interface SupervisorAttempt {
   status: 'complete' | 'failed';
   duration_ms: number;
   exitCode: number;
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  providerFailure?: ProviderFailure;
   tokens_in?: number;
   tokens_out?: number;
   /** Deterministic event and complete quantities that authorized the call. */
@@ -491,6 +502,8 @@ export interface ResearchConfig {
  * the machine-checked assertion.
  */
 export interface ResearchConfirmConfig {
+  /** Explicit handler reads; old persisted configurations remain readable. */
+  reads?: import('./artifact-declarations.js').ArtifactRead[];
   /** Shell command run before a `ship`; exit 0 confirms the candidate. */
   command: string;
   /** Optional human-readable assertion the command is expected to enforce (documentation only). */
@@ -695,7 +708,6 @@ export const FC_DIR = '.fc';
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
 let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
-export const FC_GLOBAL_DIR = _fcGlobalDir;
 
 export function fcGlobalDir(): string {
   return _fcGlobalDir;
@@ -1374,8 +1386,8 @@ function stateLockSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function withRunStateLock<T>(projectDir: string, runId: string, fn: () => T): T {
-  const path = join(runDir(projectDir, runId), RUN_STATE_LOCK_FILE);
+function withRunStateLock<T>(directory: string, fn: () => T): T {
+  const path = join(directory, RUN_STATE_LOCK_FILE);
   const token = randomBytes(12).toString('hex');
   const started = Date.now();
   let fd: number | undefined;
@@ -1603,9 +1615,11 @@ function persistRunStateUnlocked(
   runId: string,
   state: StoreState,
   expectation?: RunStateProjectionExpectation,
+  runPath = runDir(projectDir, runId),
 ): void {
-  const runPath = runDir(projectDir, runId);
   const runJsonPath = join(runPath, 'run.json');
+  const publishesToSelectedStore = canonicalRunDirectory(runPath)
+    === canonicalRunDirectory(runDir(projectDir, runId));
   requireKnownRunStatus(state.status, `write run state ${runId}`);
   if (state.runId !== runId) throw new Error(`Run state id ${state.runId} does not match target ${runId}`);
 
@@ -1632,6 +1646,11 @@ function persistRunStateUnlocked(
   }
   if (expectation && currentRaw !== expectation.raw) {
     throw new RunStateProjectionConflictError(`Run state changed before mutation commit for ${runId}`);
+  }
+  if (currentState?.status === 'stopped') {
+    if (!isJsonPersistedEqual(currentState, state)) throw cancelledRunPublicationError(runId);
+    copyPersistedHistoryState(state, currentState);
+    return;
   }
 
   const currentRef = currentProjection?.stateFormat ? historyRef(currentProjection.stateFormat) : undefined;
@@ -1673,8 +1692,10 @@ function persistRunStateUnlocked(
   if (currentProjection && isJsonPersistedEqual(currentProjection, comparable)) {
     assertProjectionUnchanged();
     copyPersistedHistoryState(state, { ...merged, stateFormat: comparable.stateFormat });
-    try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
-    emitCampaignEnvelopeEvents(projectDir, runId, merged);
+    if (publishesToSelectedStore) {
+      try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
+      emitCampaignEnvelopeEvents(projectDir, runId, merged);
+    }
     return;
   }
 
@@ -1682,8 +1703,10 @@ function persistRunStateUnlocked(
   assertProjectionUnchanged();
   atomicWrite(runJsonPath, JSON.stringify(projection) + '\n');
   copyPersistedHistoryState(state, { ...merged, stateFormat: projection.stateFormat });
-  try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
-  emitCampaignEnvelopeEvents(projectDir, runId, merged);
+  if (publishesToSelectedStore) {
+    try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
+    emitCampaignEnvelopeEvents(projectDir, runId, merged);
+  }
 }
 
 export function readArchivedRunState(projectDir: string, runId: string): ArchivedRunStateRead {
@@ -1722,22 +1745,35 @@ export function readRunState(projectDir: string, runId: string): StoreState {
 }
 
 export function writeRunState(projectDir: string, runId: string, state: StoreState): void {
-  withRunStateLock(projectDir, runId, () => persistRunStateUnlocked(projectDir, runId, state));
+  const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
+  withRunStateLock(identity.directory, () => persistRunStateUnlocked(projectDir, identity.runId, state, undefined, identity.directory));
 }
 
 export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
+  const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
+  return updateRunStateInDirectory(projectDir, identity.runId, identity.directory, mutator, afterCommit);
+}
+
+/** A selected private/legacy store uses the same lock, hydration and publisher.
+ * No raw JSON fallback may bypass committed history or cancellation fences. */
+export function updateRunStateAtPath(directory: string, mutator: (state: StoreState) => void): StoreState {
+  const identity = resolveRunIdentity(directory);
+  if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
+  return updateRunStateInDirectory(identity.projectDir, identity.runId, identity.directory, mutator);
+}
+
+function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
   // Serialize read/mutate/commit under the run-local lock. This closes the old
   // mtime check-to-rename race while retaining a byte-exact CAS for a legacy
   // writer that does not yet participate in the lock.
-  return withRunStateLock(projectDir, runId, () => {
-    const runPath = runDir(projectDir, runId);
+  return withRunStateLock(runPath, () => {
     const runJsonPath = join(runPath, 'run.json');
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const raw = readFileSync(runJsonPath, 'utf-8');
       const state = hydrateRunProjection(runPath, JSON.parse(raw) as ArchivedStoreState) as StoreState;
       mutator(state);
       try {
-        persistRunStateUnlocked(projectDir, runId, state, { raw });
+        persistRunStateUnlocked(projectDir, runId, state, { raw }, runPath);
         // Opt-in recovery notification stays ordered before cancellation's
         // acknowledgement. This callback must not re-enter the run-state lock.
         afterCommit?.(state);
@@ -1762,19 +1798,24 @@ export function writeStageStatus(
   stageId: string,
   status: StageStatus,
 ): void {
-  const dir = stageDir(projectDir, runId, stageId);
-  mkdirSync(dir, { recursive: true });
-  atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
   // The per-stage file is the execution ledger, while run.json is the public
   // aggregate consumed by the dashboard and campaign views. Keep the current
   // attempt visible there immediately instead of waiting for the parent
   // scheduler to finish the attempt. updateRunState re-applies this narrow
   // mutation if a parallel stage updates run.json at the same time.
-  const runJsonPath = join(runDir(projectDir, runId), 'run.json');
+  const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
+  const dir = join(identity.directory, 'stages', stageId);
+  const runJsonPath = join(identity.directory, 'run.json');
   if (existsSync(runJsonPath)) {
-    updateRunState(projectDir, runId, (state) => {
+    updateRunState(projectDir, identity.runId, (state) => {
+      if (state.status === 'stopped') throw cancelledRunPublicationError(identity.runId);
+      mkdirSync(dir, { recursive: true });
+      atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
       state.stages[stageId] = status;
     });
+  } else {
+    mkdirSync(dir, { recursive: true });
+    atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
   }
 }
 
@@ -1788,15 +1829,18 @@ export function updateStageStatusUnderRunLock(
   stageId: string,
   mutator: (state: StoreState, ledger: StageStatus) => StageStatus | undefined,
 ): StoreState {
-  return withRunStateLock(projectDir, runId, () => {
-    const directory = runDir(projectDir, runId);
+  const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
+  runId = identity.runId;
+  return withRunStateLock(identity.directory, () => {
+    const directory = identity.directory;
     const raw = readFileSync(join(directory, 'run.json'), 'utf8');
     const state = hydrateRunProjection(directory, JSON.parse(raw) as ArchivedStoreState) as StoreState;
     const status = mutator(state, readStageStatus(projectDir, runId, stageId));
     if (status === undefined) return state;
+    if (state.status === 'stopped') throw cancelledRunPublicationError(runId);
     atomicWrite(join(stageDir(projectDir, runId, stageId), 'status.json'), JSON.stringify(status, null, 2));
     state.stages[stageId] = status;
-    persistRunStateUnlocked(projectDir, runId, state, { raw });
+    persistRunStateUnlocked(projectDir, runId, state, { raw }, directory);
     return state;
   });
 }
@@ -1848,6 +1892,9 @@ export function beginStageAttempt(
 
 export interface CompleteStageAttemptInput {
   exitCode: number;
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  providerFailure?: ProviderFailure;
   duration_ms: number;
   completedAt?: string;
   artifacts?: string[];
@@ -1905,6 +1952,9 @@ export function completedStageAttemptStatus(
     status: completion.exitCode === 0 ? 'complete' : 'failed',
     duration_ms: completion.duration_ms,
     exitCode: completion.exitCode,
+    processExitCode: completion.processExitCode,
+    processSignal: completion.processSignal,
+    providerFailure: completion.providerFailure,
     tokens_in: tokensIn,
     tokens_out: tokensOut,
     tokenUsage: tokensIn !== undefined && tokensOut !== undefined ? 'known' : 'unknown',
@@ -1920,6 +1970,9 @@ export function completedStageAttemptStatus(
   const final: StageStatus = {
     status: completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
     exitCode: completion.exitCode,
+    processExitCode: completion.processExitCode,
+    processSignal: completion.processSignal,
+    providerFailure: completion.providerFailure,
     duration_ms: sumAttemptField(attempts, 'duration_ms'),
     artifacts: uniqueStrings(previous?.artifacts, completion.artifacts),
     retries,

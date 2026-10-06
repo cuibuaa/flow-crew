@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { Orchestrator } from './orchestrator.js';
 import {
   DaemonUnavailableError,
@@ -16,6 +16,7 @@ import {
 } from './run-control.js';
 import { isUnitStatus } from './supervision.js';
 import { TaskRegistry, type TaskEntry } from './task-registry.js';
+import { canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 
 export interface LocalCancellationControl {
   cancel(taskId: number): Promise<CancellationResult>;
@@ -95,6 +96,7 @@ function mayFallbackAfter(error: unknown): boolean {
 function clientRuntime(options: CancellationClientOptions): {
   request: (request: RpcRequest) => Promise<RpcResponse>;
   local: () => LocalCancellationControl;
+  runsDirectory: string;
 } {
   const socketPath = options.socketPath ?? defaultSocketPath();
   const request = options.sendRequest ?? ((rpcRequest: RpcRequest) => (
@@ -107,6 +109,7 @@ function clientRuntime(options: CancellationClientOptions): {
   let localControl = options.localControl;
   return {
     request,
+    runsDirectory: join(dirname(socketPath), 'runs'),
     local: () => {
       if (!localControl) {
         const baseDir = dirname(socketPath);
@@ -126,6 +129,7 @@ export async function cancelRunThroughControlPlane(
   options: CancellationClientOptions = {},
 ): Promise<CancellationResult> {
   const runtime = clientRuntime(options);
+  runId = canonicalRunId(runtime.runsDirectory, runId);
   return requestRunCancellation(
     runId,
     unit,
@@ -176,7 +180,7 @@ export async function cancelTaskThroughControlPlane(
   if (!task) return runtime.local().cancel(taskId);
 
   if (task.run_id) {
-    const runId = isAbsolute(task.run_id) ? basename(task.run_id) : task.run_id;
+    const runId = isAbsolute(task.run_id) ? resolveRunIdentity(task.run_id).runId : canonicalRunId(runtime.runsDirectory, task.run_id);
     // The daemon protocol is run-id first. If compatibility finalization is
     // needed, retain the registry task binding (including legacy absolute run
     // paths) instead of re-deriving that binding from the socket root.

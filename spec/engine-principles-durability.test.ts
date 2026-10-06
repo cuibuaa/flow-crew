@@ -15,7 +15,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'flowcrew-revision-durability-'));
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  const stage = (id: string) => StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute declared work.', artifact_contract: { version: 1, produces: [], reads: [] } });
+  const stage = (id: string) => StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute declared work.', artifact_contract: { version: 1, produces: [], reads: [] , replays: [] } });
   const stages = [stage('writer')];
   runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['writer']).runId;
   directory = runDir(project, runId);

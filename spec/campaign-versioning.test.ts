@@ -3,23 +3,27 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import { rollback } from '../src/brief-versioning.js';
 import { loadCampaignConfig, runCampaign } from '../src/campaign.js';
-import { campaignDir, runsRoot } from '../src/store.js';
+import { campaignDir, createRun, runDir, runsRoot, updateRunState } from '../src/store.js';
 
 let tempDir: string;
 let runsBefore: Set<string>;
 let campaignId: string;
+let publishedRuns: string[];
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), `flowcrew-campaign-versioning-${randomBytes(4).toString('hex')}-`));
   runsBefore = existsSync(runsRoot()) ? new Set(readdirSync(runsRoot())) : new Set();
   campaignId = `campaign-versioning-${randomBytes(4).toString('hex')}`;
+  publishedRuns = [];
 });
 
 afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
   rmSync(campaignDir(campaignId), { recursive: true, force: true });
+  for (const id of publishedRuns) rmSync(runDir(tempDir, id), { recursive: true, force: true });
   if (existsSync(runsRoot())) {
     for (const id of readdirSync(runsRoot())) {
       if (!runsBefore.has(id) && id.startsWith('campaign-versioning-run-')) {
@@ -51,18 +55,20 @@ Start here.
 Keep.
 `;
 
-    writeFileSync(scriptPath, `#!/usr/bin/env bash
-set -euo pipefail
-run_id="campaign-versioning-run-$(date +%s%N)-$RANDOM"
-dir="${runsRoot()}/$run_id"
-mkdir -p "$dir"
-cat > "$dir/run.json" <<JSON
-{"runId":"$run_id","workflowName":"test","projectDir":"${tempDir}","status":"failed","stages":{},"startedAt":"2026-05-23T00:00:00.000Z","result":0}
-JSON
-cat > "$dir/research_integrity_rejections.json" <<JSON
-{"unstable_seeds":7}
-JSON
-`, 'utf-8');
+    // The launcher requests admission from a private parent. A child cannot
+    // fabricate engine-owned run state; native publishers retain that authority.
+    const registrar = createServer((_request, response) => {
+      const id = createRun(tempDir, 'test', 'name: test\nstages: []\n', []).runId;
+      publishedRuns.push(id);
+      updateRunState(tempDir, id, (state) => { state.status = 'failed'; state.result = 0; });
+      writeFileSync(join(runDir(tempDir, id), 'research_integrity_rejections.json'), '{"unstable_seeds":7}\n');
+      response.end(id);
+    });
+    await new Promise<void>((resolve) => registrar.listen(0, '127.0.0.1', resolve));
+    const address = registrar.address();
+    if (!address || typeof address === 'string') throw new Error('private registrar did not bind');
+    const request = `require('node:http').get('http://127.0.0.1:${address.port}/launch',r=>{r.resume();r.on('end',()=>{if(r.statusCode!==200)process.exitCode=1})}).on('error',()=>{process.exitCode=1})`;
+    writeFileSync(scriptPath, `#!/usr/bin/env bash\nexec '${process.execPath.replace(/'/g, `'\\''`)}' -e '${request.replace(/'/g, `'\\''`)}'\n`, 'utf-8');
     chmodSync(scriptPath, 0o755);
 
     writeFileSync(yamlPath, `
@@ -92,7 +98,9 @@ campaign:
     const seed = await import('../src/brief-versioning.js');
     seed.ensureBriefDir(briefDir, initialBrief);
 
-    const result = await runCampaign(cfg);
+    let result: Awaited<ReturnType<typeof runCampaign>>;
+    try { result = await runCampaign(cfg); }
+    finally { await new Promise<void>((resolve, reject) => registrar.close((error) => error ? reject(error) : resolve())); }
 
     expect(result.status).toBe('budget_exhausted');
     expect(readFileSync(join(briefDir, 'HEAD'), 'utf-8')).toBe('v4\n');

@@ -1,8 +1,8 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { portCanBind } from './test-support/engine-fixtures.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -77,7 +77,7 @@ function dynamicWorkflow(name: string): { config: WorkflowConfig; yaml: string }
     config: {description: '', 
       name,
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -181,13 +181,7 @@ function waitForExit(child: ChildProcessByStdio<null, Readable, Readable>, timeo
   });
 }
 
-function portCanBind(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
-  });
-}
+
 
 describe('dashboard signal shutdown', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)('releases the listening port and exits zero after the first %s', { timeout: 20_000 }, async (signal) => {
@@ -351,7 +345,7 @@ describe('campaign cost honesty', () => {
     const config: WorkflowConfig = {description: '', 
       name: 'p6-replan-cost',
       defaults: { max_iterations: 2, max_retries: 0 },
-      stages: [{criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],

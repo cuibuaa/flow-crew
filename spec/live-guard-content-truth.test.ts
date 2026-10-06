@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   chmodSync,
@@ -101,6 +102,7 @@ function workflow(scope: string[], suffix: string): { config: WorkflowConfig; ya
     stages: [{
       id: 'scout', role: 'scout', scope, depends_on: [],
       prompt_template: 'Read the fixture.', skills: [], dynamic_dispatch: false, is_gate: false,
+      artifact_contract: emptyArtifactContract(),
     }],
   };
   const yaml = [
@@ -114,6 +116,7 @@ function workflow(scope: string[], suffix: string): { config: WorkflowConfig; ya
     `    scope: [${scope.map((entry) => JSON.stringify(entry)).join(', ')}]`,
     '    depends_on: []',
     '    prompt_template: Read the fixture.',
+    '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
   ].join('\n');
   return { config, yaml };
 }

@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,6 +41,7 @@ function stage(id: string, scope: string[], extra: Record<string, unknown> = {})
     depends_on: [],
     dependency_reasons: {},
     criterion_refs: [],
+    artifact_contract: emptyArtifactContract(),
     ...extra,
   };
 }

@@ -16,7 +16,7 @@ function inspect(brief: string, check: CheckFixture) {
   const markdown = [
     '## Reality checks',
     '```yaml',
-    stringify({ checks: [check] }).trimEnd(),
+    stringify({ checks: [{ reads: [], ...check }] }).trimEnd(),
     '```',
   ].join('\n');
   return inspectRealityChecks(brief, markdown).blockingFindings;

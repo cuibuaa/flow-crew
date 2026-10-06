@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 /**
  * Engine wind-tunnel scenarios — the REAL scheduler run end-to-end against a
  * ScriptedAdapter (deterministic fake agent), replicating in milliseconds the
@@ -110,10 +110,11 @@ const DEFAULT_RESEARCH_SCOPE = [
 function strictResearchDispatch(
   stages: ScriptedDispatchStage[],
   terminalPaths = ['research/val/ship_report.md'],
+  contracts: NonNullable<Parameters<typeof declaredDispatch>[1]> = {},
 ): string {
   const rows = stages.map((stage) => {
     const dependencies = stage.dependsOn ?? [];
-    return {
+    return { artifact_contract: contracts[stage.id] ?? fixtureArtifactContract(stage.id, stage.isGate === true),
       id: stage.id,
       role: 'researcher',
       depends_on: dependencies,
@@ -127,7 +128,7 @@ function strictResearchDispatch(
     };
   });
   const mandatory = stages.filter((stage) => !stage.condition).map((stage) => stage.id);
-  rows.push({
+  rows.push({ artifact_contract: fixtureArtifactContract('research_finalize', false),
     id: 'research_finalize',
     role: 'researcher',
     depends_on: mandatory,
@@ -141,7 +142,9 @@ function strictResearchDispatch(
 
 const dispatchOf = (id: string, terminalPaths = ['research/val/ship_report.md', 'research/val/ceiling_report.md'], checkConfirmation = false) => ({
   runFiles: {
-    'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id }], terminalPaths),checkConfirmation ? {[id]:{version:1,produces:[{id:'confirm',root:'project',path:'research/val/confirm_flag'}],reads:[]}} : {}),
+    'dispatch.yaml': strictResearchDispatch([{ id }], terminalPaths, checkConfirmation ? {
+      [id]: { version: 1, produces: [{ id: 'confirm', root: 'project', path: 'research/val/confirm_flag' }], reads: [], replays: [] },
+    } : {}),
     ...(checkConfirmation ? {'reality_checks.md':['## Reality checks','```yaml','checks:',
       ' - name: confirmation_input_present','   type: exec-script-exit-zero',
       `   reads: [{id: confirm, root: project, path: research/val/confirm_flag, source: {kind: stage, stage: ${id}, artifact: confirm}}]`,

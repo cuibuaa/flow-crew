@@ -1,163 +1,75 @@
-/** Offline decision replay. Stored scripts and prompts are data, never commands. */
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+/** Full frozen-population recognition replay. Historical commands remain data. */
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { FrozenReplayCorpus, parseReplayArguments, requireFreshTemporaryDirectory, sha256 as hash } from './engine-principles-inputs.js';
 import { pathToFileURL } from 'node:url';
 import { parse as yaml, stringify } from 'yaml';
 import { classifyDeclarationAdmissionChange, classifyRealityDeclarationChange, type ReplayDecision } from '../src/recorded-replay-policy.js';
-
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node --import tsx scripts/engine-principles-replay.ts --census <frozen-census> --baseline-dist <copied-dist> --candidate-dist <dist> --private-root <os.tmpdir child> --out <evidence> [--old-dist <historical-runtime>]');
+  console.log('Usage: node --import tsx scripts/engine-principles-replay.ts --census <frozen-corpus> --baseline-dist <copied-dist> --candidate-dist <dist> --private-root <fresh os.tmpdir child> --out <own evidence>');
   process.exit(0);
 }
-function option(flag: string): string { const index = args.indexOf(flag); if (index < 0 || !args[index + 1]) throw new Error(`missing ${flag}`); return resolve(args[index + 1]); }
-const census = option('--census'), baseline = option('--baseline-dist'), candidate = option('--candidate-dist'), scratch = option('--private-root'), output = option('--out');
-const rel = relative(tmpdir(), scratch);
-if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new Error('Replay requires a fresh owned os.tmpdir child');
-mkdirSync(scratch, { recursive: true }); mkdirSync(output, { recursive: true });
-process.env.FC_HOME = join(scratch, 'private-store');
-process.env.FLOWCREW_DAEMON_SOCKET = join(scratch, 'unavailable.sock');
-const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
-const json = (name: string) => JSON.parse(readFileSync(join(census, name), 'utf8'));
-const frozen = json('corpus.json').files as Array<Record<string, any>>;
-const verdictCarriers = frozen.filter((row) => row.readable && /(?:^|\/)(?:rejected_)?verdict(?:_[^/]+)?\.json$/.test(row.relative_path));
-const admissionCarriers = frozen.filter((row) => row.readable && /(?:^|\/)(?:(?:proposed|effective)_)?dispatch_admission\.json$/.test(row.relative_path));
-const sources: Record<string, { bytes: number; sha256: string }> = {};
-for (const name of ['corpus.json', 'dispatch_records.json', 'native_planner_records.json', 'dispatch_documents.json', 'native_planner_documents.json', 'replay_templates_unique_context.json', 'checks_replay_selection.json', 'recovery_occurrences.json']) {
-  const data = readFileSync(join(census, name)); sources[name] = { bytes: data.length, sha256: hash(data) };
+if (args.includes('--old-dist')) throw new Error('--old-dist third-generation comparison was retired; run a separate --baseline-dist/--candidate-dist comparison for each declared generation pair');
+const options = parseReplayArguments(args, ['--census', '--baseline-dist', '--candidate-dist', '--private-root', '--out']);
+const census = resolve(options['--census']), baseline = resolve(options['--baseline-dist']), candidate = resolve(options['--candidate-dist']);
+const scratch = resolve(options['--private-root']), output = resolve(options['--out']);
+requireFreshTemporaryDirectory(scratch);
+mkdirSync(scratch, {recursive:false}); mkdirSync(output, {recursive:true});
+process.env.FC_HOME = join(scratch, 'private-store'); process.env.FLOWCREW_DAEMON_SOCKET = join(scratch, 'unavailable.sock');
+const corpus = new FrozenReplayCorpus(census);
+const carriers = corpus.files, sources = corpus.sources;
+const json = (name: string) => corpus.json(name);
+const frozen = (path: string) => corpus.read(path);
+for (const name of ['dispatch_records.json','native_planner_records.json','dispatch_documents.json','native_planner_documents.json','replay_templates_unique_context.json','checks_replay_selection.json']) json(name);
+const audits=carriers.filter((row)=>row.readable&&/(?:^|\/)artifact_contract\.json$/.test(row.relative_path));
+const verdicts=carriers.filter((row)=>row.readable&&/(?:^|\/)(?:rejected_)?verdict(?:_[^/]+)?\.json$/.test(row.relative_path));
+const admissions=carriers.filter((row)=>row.readable&&/(?:^|\/)(?:(?:proposed|effective)_)?dispatch_admission\.json$/.test(row.relative_path));
+const rawStages=[...json('dispatch_records.json'),...json('native_planner_records.json')],templates=json('replay_templates_unique_context.json'),checks=json('checks_replay_selection.json').members,documents=json('dispatch_documents.json').documents;
+const nativeDocs=json('native_planner_documents.json').documents.filter((row:any)=>row.status==='stage_document');
+const expected:Record<string,number>={stage_schema:rawStages.length,artifact_contracts:templates.length,check_declarations:checks.length,general_admission:documents.length,native_admission:nativeDocs.length,reality_admission:checks.length,recorded_audits:audits.length,gate_verdicts:verdicts.length,retry_requirements:admissions.length};
+writeFileSync(join(output,'replay_selection_before.json'),JSON.stringify({version:3,at:new Date().toISOString(),expected,sources,rules:['New live inputs add exact contract/replays errors while retaining graph, ownership, warnings and terminal decisions.','Prompt/report prose supplies no obligations; a legacy input is refused for missing declarations.','Reality declarations require reads including advisory checks; malformed declarations fail admission. Only undeclared script references are superseded.','Typed handler reads bind their declared physical root; invalid/outward declarations remain refused.','Recorded obligation/replay/verdict bytes remain readable; no stored command or check runs.','Every other difference is ambiguous_unpredicted and blocks an achieved replay claim.'],context:'Frozen full selected recognition projections; absent original complete-plan role/criteria/input/terminal provenance is censored'},null,2));
+async function runtime(dist:string){const load=(file:string)=>import(pathToFileURL(join(dist,file)).href);return{scheduler:await load('scheduler.js'),contract:await load('stage-artifact-contract.js'),checks:await load('reality-gate/index.js'),retry:await load('plan-retry-monotone.js'),declarations:await load('artifact-declarations.js')};}
+const before=await runtime(baseline),after=await runtime(candidate),reader=await import(pathToFileURL(join(candidate,'recorded-artifact-contract.js')).href);
+const project=join(scratch,'empty-project'),directory=join(scratch,'empty-run');mkdirSync(project);mkdirSync(directory);
+const normalize=(value:unknown):unknown=>JSON.parse(JSON.stringify(value,(k,v)=>k==='checkedAt'||k==='inspectedAt'?'<time>':typeof v==='string'?v.replaceAll(scratch,'<owned-root>'):v));
+function decision(fn:()=>unknown):ReplayDecision{try{return{status:'returned',value:normalize(fn())};}catch(e){return{status:'refused',error:String((e as Error).message??e).replaceAll(scratch,'<owned-root>')};}}
+const key=(value:unknown)=>JSON.stringify(value),same=(a:ReplayDecision,b:ReplayDecision)=>key(a)===key(b);
+function formatErrors(raw:any):string[]{
+  if(!raw.artifact_contract)return[`ARTIFACT_DECLARATION_REQUIRED: ${raw.id??'stage'}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[], replays:[]} explicitly; prose cannot supply this contract`];
+  if(typeof raw.artifact_contract==='object'&&!('replays'in raw.artifact_contract)){
+    const errors=[`REPLAY_DECLARATION_REQUIRED: ${raw.id??'stage'}.artifact_contract.replays: declare [] explicitly, or structured {id, runner, targets, argv, expected} replay commands`];
+    const recorded=after.declarations.RecordedArtifactContractSchema.safeParse(raw.artifact_contract);
+    if(!recorded.success)errors.push(`ARTIFACT_DECLARATION_INVALID: ${raw.id??'stage'}.artifact_contract: ${recorded.error.message}`);
+    return errors;
+  }return[];
 }
-const expected = {
-  rawStages: json('dispatch_records.json').length + json('native_planner_records.json').length,
-  templateContexts: json('replay_templates_unique_context.json').length,
-  templateOccurrences: json('replay_templates_unique_context.json').reduce((total: number, row: any) => total + row.occurrences.length, 0),
-  checkCarriers: json('checks_replay_selection.json').members.length,
-  yamlDocuments: json('dispatch_documents.json').documents.length,
-  nativeStageDocuments: json('native_planner_documents.json').documents.filter((row: any) => row.status === 'stage_document').length,
-  verdictCarriers: verdictCarriers.length,
-  admissionErrorCarriers: admissionCarriers.length,
-};
-writeFileSync(join(output, 'replay_selection_before.json'), JSON.stringify({ version: 2, at: new Date().toISOString(), expected, sources, rule: 'Every selected readable member, including refused and partial inputs. Compatibility helpers must stay equal. New admission may add only the predicted missing-contract errors, preserving every other error, warning and owner. New reality admission replaces undeclared script references with the exact predicted missing-reads refusal, retaining declared-read errors. All other changes block the replay. Earlier-source differences are inherited and individually retained, not retroactively approved.' }, null, 2));
-const byPath = new Map(frozen.map((row) => [row.path, row]));
-const readFrozen = (path: string): string => {
-  const row = byPath.get(path); if (!row) throw new Error(`Unselected carrier ${path}`);
-  const raw = readFileSync(row.snapshot ?? path).subarray(0, row.captured_size);
-  if (raw.length !== row.captured_size || hash(raw) !== row.sha256) throw new Error(`Frozen-prefix mismatch ${path}`);
-  return raw.toString('utf8');
-};
-async function runtime(dist: string, label: string) {
-  const load = (file: string) => import(pathToFileURL(join(dist, file)).href);
-  return { label, scheduler: await load('scheduler.js'), contract: await load('stage-artifact-contract.js'), checks: await load('reality-gate/index.js'), retry:await load('plan-retry-monotone.js') };
-}
-const current = await runtime(baseline, 'copied_deployed'), after = await runtime(candidate, 'candidate');
-const oldIndex = args.indexOf('--old-dist');
-const before = oldIndex >= 0 ? await runtime(resolve(args[oldIndex + 1]), 'historic_before') : current;
-const runtimes = [before, current, after];
-function decision(fn: () => unknown): ReplayDecision { try { return { status: 'returned', value: fn() }; } catch (error) { return { status: 'refused', error: error instanceof Error ? error.message : String(error) }; } }
-const key = (value: unknown) => JSON.stringify(value);
-const classified = (decisions: object[]) => ({ candidate_classification: key(decisions[1]) === key(decisions[2]) ? 'unchanged' : 'ambiguous_unpredicted', historical_classification: key(decisions[0]) === key(decisions[1]) ? 'unchanged' : 'inherited_prior_release_difference' });
-const rawStages = [...json('dispatch_records.json'), ...json('native_planner_records.json')];
-const schemaCache = new Map<string, ReplayDecision[]>();
-const schemaRows = rawStages.map((row: any) => {
-  const digest = hash(JSON.stringify(row.stage)); let decisions = schemaCache.get(digest);
-  if (!decisions) { decisions = runtimes.map((runtime) => decision(() => runtime.scheduler.parseDispatchedStageConfig(row.stage))); schemaCache.set(digest, decisions); }
-  return { source: row.source_path, runId: row.run_id, stageId: row.stage_id, line: row.line, phase: row.phase, digest, partial: !row.recorded_prompt_field, decisions, ...classified(decisions) };
+const schemaCache=new Map<string,{decisions:ReplayDecision[];classification:string}>();
+const schemaRows=rawStages.map((row:any)=>{
+  const digest=hash(JSON.stringify(row.stage));let result=schemaCache.get(digest);
+  if(!result){const a=decision(()=>before.scheduler.parseDispatchedStageConfig(row.stage)),b=decision(()=>after.scheduler.parseDispatchedStageConfig(row.stage));const errors=formatErrors(row.stage),predicted=errors.join('; ');result={decisions:[a,b],classification:same(a,b)?'unchanged':errors.length&&b.status==='refused'&&b.error===(a.status==='refused'?`${a.error}; ${predicted}`:predicted)?'intended':'ambiguous_unpredicted'};schemaCache.set(digest,result);}
+  return{source:row.source_path,runId:row.run_id,stageId:row.stage_id,line:row.line,digest,partial:!row.recorded_prompt_field,...result,rule:'new_input_declaration_required'};
 });
-if (schemaRows.length !== expected.rawStages) throw new Error(`Stage population mismatch ${schemaRows.length}`);
-writeFileSync(join(output, 'replay_stage_schema.json'), JSON.stringify(schemaRows));
-const project = join(scratch, 'empty-project'), run = join(scratch, 'empty-run'); mkdirSync(project, { recursive: true }); mkdirSync(run, { recursive: true });
-const templates = json('replay_templates_unique_context.json');
-const artifactRows = templates.map((row: any, index: number) => {
-  let template = row.template; if (row.project_dir) template = template.replaceAll(row.project_dir, project); if (row.run_dir) template = template.replaceAll(row.run_dir, run);
-  const decisions = runtimes.map((runtime) => decision(() => {
-    const input = { stageId: 'recorded', template, projectDir: project, runDir: run, writes: [] };
-    const audit = runtime.contract.inspectStageArtifactContract({ ...input, preimages: runtime.contract.captureStageArtifactContractPreimages(input) });
-    if (audit.replayExecutions.length) throw new Error('REPLAY_FORBIDDEN: no recorded report command may execute');
-    return { obligations: audit.obligations.map((entry: any) => ({ kind: entry.kind, path: relative(scratch, entry.path), source: entry.source })), violations: audit.violations.map((entry: any) => ({ kind: entry.kind, path: relative(scratch, entry.path), reason: entry.reason.replaceAll(project, '<project>').replaceAll(run, '<run>') })) };
-  }));
-  return { index, templateHash: row.raw_sha256, occurrenceCount: row.occurrences.length, decisions, ...classified(decisions) };
+const artifactRows=templates.map((row:any,index:number)=>{
+  let template=row.template;if(row.project_dir)template=template.replaceAll(row.project_dir,project);if(row.run_dir)template=template.replaceAll(row.run_dir,directory);
+  const inspect=(engine:typeof after)=>decision(()=>{const i={stageId:'recorded',template,projectDir:project,runDir:directory,writes:[]};const audit=engine.contract.inspectStageArtifactContract({...i,preimages:engine.contract.captureStageArtifactContractPreimages(i)});if(audit.replayExecutions.length)throw new Error('Stored command execution forbidden');return{obligations:audit.obligations,violations:audit.violations};});
+  const a=inspect(before),b=inspect(after);const intended=b.status==='returned'&&key((b.value as any).obligations)==='[]'&&(b.value as any).violations.length===1&&(b.value as any).violations[0].reason===formatErrors({id:'recorded'})[0];
+  return{index,templateHash:row.raw_sha256,contextState:row.context_state,occurrenceCount:row.occurrences.length,decisions:[a,b],classification:same(a,b)?'unchanged':intended?'intended':'ambiguous_unpredicted',rule:'prose_inference_removed_and_legacy_input_refused'};
 });
-if (artifactRows.length !== expected.templateContexts || artifactRows.reduce((n: number, row: any) => n + row.occurrenceCount, 0) !== expected.templateOccurrences) throw new Error('Artifact population mismatch');
-writeFileSync(join(output, 'replay_artifact_contracts.json'), JSON.stringify(artifactRows));
-const selectedChecks = json('checks_replay_selection.json').members;
-const checkRows = selectedChecks.map((row: any) => { const text = readFrozen(row.path); const decisions = runtimes.map((runtime) => decision(() => runtime.checks.parseChecksFromMarkdown(text))); return { source: row.path, runId: row.run_id, sha256: hash(text), decisions, ...classified(decisions) }; });
-if (checkRows.length !== expected.checkCarriers) throw new Error('Check population mismatch');
-writeFileSync(join(output, 'replay_check_declarations.json'), JSON.stringify(checkRows));
-const documents = json('dispatch_documents.json').documents;
-function admissionDecision(runtime: typeof after, raw: any, strict: boolean): ReplayDecision {
-  return decision(() => {
-    const items = Array.isArray(raw) ? raw : raw?.stages;
-    if (!Array.isArray(items)) throw new Error('No stage list in selected carrier');
-    const stages = items.map((item: any) => runtime.scheduler.StageConfigSchema.parse(item));
-    const report = runtime.scheduler.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: stages.find((stage: any) => stage.dynamic_dispatch)?.id ?? 'plan', requireArtifactContracts: strict });
-    return { pass: report.pass, errors: report.errors, warnings: report.warnings, terminalOwners: report.terminalOwners };
-  });
-}
-function admissionRow(row: any, raw: any) {
-  const decisions = runtimes.map((runtime) => admissionDecision(runtime, raw, false));
-  const strict = admissionDecision(after, raw, true);
-  const requiredErrors: string[] = [];
-  if (decisions[2].status === 'returned') {
-    const items = Array.isArray(raw) ? raw : raw?.stages;
-    for (const item of items) if (!item.artifact_contract) requiredErrors.push(`ARTIFACT_DECLARATION_REQUIRED: ${item.id}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[]} explicitly; prose cannot supply this contract`);
-  }
-  return { source: row.path ?? row.source_path, runId: row.run_id, line: row.line, context: 'general_core_only; absent original criteria/terminal/input/role provenance is not manufactured', decisions, ...classified(decisions), new_admission: { decision: strict, requiredErrors, classification: classifyDeclarationAdmissionChange({ baseline: decisions[1], candidate: strict, compatibility: decisions[2], requiredErrors }), explanation: 'New submitted legacy format requires explicit artifact_contract; every existing core verdict is retained.' } };
-}
-const admissionRows = documents.map((row: any) => admissionRow(row, yaml(readFrozen(row.path))));
-if (admissionRows.length !== expected.yamlDocuments) throw new Error('YAML population mismatch');
-writeFileSync(join(output, 'replay_general_admission.json'), JSON.stringify(admissionRows));
-const nativeCarriers = new Map<string, string[]>();
-const nativeAdmissionRows = json('native_planner_documents.json').documents.filter((row: any) => row.status === 'stage_document').map((row: any) => {
-  let lines = nativeCarriers.get(row.source_path); if (!lines) { lines = readFrozen(row.source_path).split(/\r?\n/); nativeCarriers.set(row.source_path, lines); }
-  const event = JSON.parse(lines[row.line - 1]);
-  const stdout = event.item?.aggregated_output;
-  if (typeof stdout !== 'string' || hash(stdout) !== row.stdout_sha256) throw new Error(`Native stdout binding mismatch ${row.source_path}:${row.line}`);
-  return admissionRow(row, yaml(stdout));
-});
-if (nativeAdmissionRows.length !== expected.nativeStageDocuments) throw new Error('Native document population mismatch');
-writeFileSync(join(output, 'replay_native_admission.json'), JSON.stringify(nativeAdmissionRows));
-const realityRows = selectedChecks.map((row: any) => {
-  const markdown = readFrozen(row.path);
-  const inspect = (runtime: typeof after, text: string, strict: boolean) => decision(() => runtime.scheduler.inspectRealityCheckReachability({markdown:text, projectDir:project, runDir:run, stages:[], requireDeclaredReads:strict}));
-  const decisions = runtimes.map((runtime) => inspect(runtime, markdown, false));
-  const strict = inspect(after, markdown, true);
-  const checks = after.checks.parseChecksFromMarkdown(markdown);
-  const requiredErrors = checks.filter((check: any) => check.kind !== 'invalid' && check.advisory !== true && check.reads === undefined).map((check: any) => `REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(check.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`);
-  const declaredMarkdown = '## Reality checks\n```yaml\n' + stringify({checks:checks.filter((check: any) => check.reads !== undefined)}) + '```\n';
-  const declaredOnly = inspect(after, declaredMarkdown, false);
-  return {source:row.path, runId:row.run_id, context:'empty-project/read-format-boundary; original producer graph is unavailable', decisions, ...classified(decisions), new_admission:{decision:strict, requiredErrors, classification:classifyRealityDeclarationChange({baseline:decisions[1], candidate:strict, compatibility:decisions[2], declaredOnly, requiredErrors}), explanation:'New hard checks require explicit reads; undeclared prose references no longer create a failing obligation.'}};
-});
-writeFileSync(join(output, 'replay_reality_admission.json'), JSON.stringify(realityRows));
-const requirementRows = admissionCarriers.map((row) => {
-  const text = readFrozen(row.path);
-  const decisions = runtimes.map((runtime) => decision(() => {
-    const report = JSON.parse(text);
-    if (!Array.isArray(report.errors)) throw new Error('Admission carrier has no errors array');
-    return report.errors.map((error: unknown) => {
-      if (typeof error !== 'string') throw new Error('Admission error is not a string');
-      return runtime.retry.planRetryRequirement(error);
-    });
-  }));
-  return {source:row.path,runId:row.run_id,context:'admission errors to retry component identities; archived unsatisfied/satisfied state is not rewritten',decisions,...classified(decisions)};
-});
-writeFileSync(join(output, 'replay_retry_requirements.json'), JSON.stringify(requirementRows));
-const verdictProject = join(scratch,'verdict-project'), verdictDirectory = join(verdictProject,'docs');mkdirSync(verdictDirectory,{recursive:true});
-const verdictRows = verdictCarriers.map((row) => {
-  const text = readFrozen(row.path);writeFileSync(join(verdictDirectory,'verdict_recorded.json'),text);
-  const decisions = runtimes.map((runtime) => decision(() => runtime.scheduler.readGateVerdict(verdictProject,'recorded',undefined,null,false,false)));
-  return {source:row.path,runId:row.run_id,sha256:hash(text),context:'raw verdict only; original metric/criteria/validation/research/plan provenance is unavailable',decisions,...classified(decisions)};
-});
-writeFileSync(join(output, 'replay_gate_verdicts.json'), JSON.stringify(verdictRows));
-if (verdictRows.length !== expected.verdictCarriers || requirementRows.length !== expected.admissionErrorCarriers) throw new Error('Verdict/requirement carrier population mismatch');
-const facets: Record<string, any[]> = { stage_schema: schemaRows, artifact_contracts: artifactRows, check_declarations: checkRows, general_admission: admissionRows, native_admission:nativeAdmissionRows, reality_admission:realityRows, retry_requirements:requirementRows, gate_verdicts:verdictRows };
-const newAdmissions = [...admissionRows,...nativeAdmissionRows,...realityRows].map((row) => ({source:row.source,runId:row.runId,line:row.line,...row.new_admission}));
-writeFileSync(join(output, 'replay_new_admission_decisions.json'), JSON.stringify(newAdmissions));
-const summary = { version: 2, at: new Date().toISOString(), selections: sources,
-  populations: Object.fromEntries(Object.entries(facets).map(([name, rows]) => [name, { expected: rows.length, processed: rows.length, feasibility_floor: rows.length, candidate_differences: rows.filter((row) => row.candidate_classification !== 'unchanged').length, inherited_differences: rows.filter((row) => row.historical_classification !== 'unchanged').length, new_admission_intended:rows.filter((row)=>row.new_admission?.classification==='intended').length, new_admission_unpredicted:rows.filter((row)=>row.new_admission?.classification==='ambiguous_unpredicted').length }])),
-  limits: ['New proposals must declare contracts and hard-check reads or receive a precise format refusal. Already-admitted legacy work and compatibility helpers retain their old inference.', 'General-core replay covers all YAML and projected native stage-document carriers but does not authenticate complete original plan/criteria/terminal/research/input/role combinations. It is not whole safety admission proof.', 'Native projected stdout and mutable aliases retain their censored/partial status.', 'No historical script, replay command, model, daemon or GPU operation executed.', 'State/leases/revision/restart need their separate recorded/protection/private-daemon receipts.'],
-  differences: Object.fromEntries(Object.entries(facets).map(([name, rows]) => [name, rows.filter((row) => row.candidate_classification !== 'unchanged')])),
-};
-writeFileSync(join(output, 'replay.json'), `${JSON.stringify(summary, null, 2)}\n`);
-console.log(JSON.stringify({ populations: summary.populations, unpredicted: Object.values(summary.populations).reduce((n, value) => n + value.candidate_differences + value.new_admission_unpredicted, 0) }));
-process.exitCode = Object.values(summary.populations).some((value) => value.candidate_differences > 0 || value.new_admission_unpredicted > 0) ? 2 : 0;
+function readsRequired(check:any):string{return`REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(check.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`;}
+const checkRows=checks.map((row:any)=>{const text=frozen(row.path),a=decision(()=>before.checks.parseChecksFromMarkdown(text)),b=decision(()=>after.checks.parseChecksFromMarkdown(text));const predicted=a.status==='returned'?(a.value as any[]).map(check=>check.kind!=='invalid'&&check.reads===undefined?{kind:'invalid',name:check.name,type:'__invalid-reality-check-declaration__',diagnostic:readsRequired(check)}:check):undefined;return{source:row.path,runId:row.run_id,decisions:[a,b],classification:same(a,b)?'unchanged':b.status==='returned'&&key(predicted)===key(b.value)?'intended':'ambiguous_unpredicted',rule:'reality_reads_required'};});
+function admission(engine:typeof after,raw:any):ReplayDecision{return decision(()=>{if(typeof raw==='string')raw=yaml(raw);const items=Array.isArray(raw)?raw:raw?.stages;if(!Array.isArray(items))throw new Error('No stage list in selected carrier');const stages=items.map((item:any)=>engine.scheduler.StageConfigSchema.parse(item));const report=engine.scheduler.inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan'});return{pass:report.pass,errors:report.errors,warnings:report.warnings,terminalOwners:report.terminalOwners};});}
+function admissionRow(row:any,raw:any){const a=admission(before,raw),b=admission(after,raw);let parsed=raw;try{if(typeof parsed==='string')parsed=yaml(parsed);}catch{parsed=undefined;}const items=Array.isArray(parsed)?parsed:parsed?.stages;const requiredErrors=Array.isArray(items)?items.filter(item=>after.declarations.RecordedArtifactContractSchema.safeParse(item.artifact_contract).success||!item.artifact_contract).flatMap(formatErrors):[];return{source:row.path??row.source_path,runId:row.run_id,line:row.line,decisions:[a,b],requiredErrors,classification:classifyDeclarationAdmissionChange({baseline:a,candidate:b,requiredErrors}),rule:'new_input_declaration_required_with_other_refusals_retained',context:'general core only'};}
+const admissionRows=documents.map((row:any)=>admissionRow(row,frozen(row.path)));
+const nativeRows=nativeDocs.map((row:any)=>admissionRow(row,corpus.nativeDocument(row)));
+const realityRows=checks.map((row:any)=>{const markdown=frozen(row.path);const inspect=(engine:typeof after,text:string)=>decision(()=>engine.scheduler.inspectRealityCheckReachability({markdown:text,projectDir:project,runDir:directory,stages:[]}));const a=inspect(before,markdown),b=inspect(after,markdown),parsed=before.checks.parseChecksFromMarkdown(markdown);const requiredErrors=parsed.flatMap((check:any)=>check.kind==='invalid'?[check.diagnostic]:check.reads===undefined?[readsRequired(check)]:[]);const text='## Reality checks\n```yaml\n'+stringify({checks:parsed.filter((check:any)=>check.kind!=='invalid'&&check.reads!==undefined)})+'```\n';const declaredOnly=inspect(after,text);return{source:row.path,runId:row.run_id,decisions:[a,b],requiredErrors,declaredOnly,classification:classifyRealityDeclarationChange({baseline:a,candidate:b,declaredOnly,requiredErrors}),rule:'declared_reads_only_invalid_checks_refused',context:'empty-project producer projection'};});
+const archivedPath=join(scratch,'recorded-artifact.json');
+const auditRows=audits.map(row=>{const text=frozen(row.path);writeFileSync(archivedPath,text);const a=decision(()=>JSON.parse(text)),record=reader.readRecordedArtifactContract(archivedPath);const b=record.status==='readable'?decision(()=>record.record):{status:'refused'as const,error:record.reason};return{source:row.path,runId:row.run_id,decisions:[a,b],legacy:record.legacy,classification:same(a,b)?'unchanged':'ambiguous_unpredicted',rule:'recorded_audit_data_preserved'};});
+const vd=join(project,'docs');mkdirSync(vd);
+const verdictRows=verdicts.map(row=>{writeFileSync(join(vd,'verdict_recorded.json'),frozen(row.path));const a=decision(()=>before.scheduler.readGateVerdict(project,'recorded',undefined,null,false,false)),b=decision(()=>after.scheduler.readGateVerdict(project,'recorded',undefined,null,false,false));return{source:row.path,runId:row.run_id,decisions:[a,b],classification:same(a,b)?'unchanged':'ambiguous_unpredicted',context:'raw recorded verdict only'};});
+const requirementRows=admissions.map(row=>{const text=frozen(row.path);const inspect=(engine:typeof after)=>decision(()=>{const report=JSON.parse(text);if(!Array.isArray(report.errors))throw new Error('Admission carrier has no errors array');return report.errors.map((error:string)=>engine.retry.planRetryRequirement(error));});const a=inspect(before),b=inspect(after);return{source:row.path,runId:row.run_id,decisions:[a,b],classification:same(a,b)?'unchanged':'ambiguous_unpredicted'};});
+const facets:Record<string,any[]>={stage_schema:schemaRows,artifact_contracts:artifactRows,check_declarations:checkRows,general_admission:admissionRows,native_admission:nativeRows,reality_admission:realityRows,recorded_audits:auditRows,gate_verdicts:verdictRows,retry_requirements:requirementRows};
+for(const[name,rows]of Object.entries(facets)){if(rows.length!==expected[name])throw new Error(`Population mismatch ${name}`);writeFileSync(join(output,`replay_${name}.json`),JSON.stringify(rows));}
+const populations=Object.fromEntries(Object.entries(facets).map(([name,rows])=>[name,{expected:expected[name],processed:rows.length,unchanged:rows.filter(row=>row.classification==='unchanged').length,intended:rows.filter(row=>row.classification==='intended').length,ambiguous_unpredicted:rows.filter(row=>row.classification==='ambiguous_unpredicted').length}]));
+const summary={version:3,at:new Date().toISOString(),populations,selections:sources,commandsExecuted:0,checksExecuted:0,limits:['Every selected relevant recognition/reader carrier replayed; absent original full admission context is censored.','Historical commands/scripts and model prompts were never executed.','Actual declared executions and registered private daemon/generation/recovery trials require their constructed evidence.'],differences:Object.fromEntries(Object.entries(facets).map(([name,rows])=>[name,rows.filter(row=>row.classification==='ambiguous_unpredicted')]))};
+writeFileSync(join(output,'replay.json'),JSON.stringify(summary,null,2));console.log(JSON.stringify({populations,unpredicted:Object.values(populations).reduce((n,p)=>n+p.ambiguous_unpredicted,0)}));process.exitCode=Object.values(populations).some(p=>p.ambiguous_unpredicted>0)?2:0;

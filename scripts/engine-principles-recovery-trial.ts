@@ -1,15 +1,16 @@
 /** Bounded private-daemon recovery publication trials. No provider, GPU or operator RPC is used. */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
+import { sha256 as hash, parseReplayArguments } from './engine-principles-inputs.js';
+import { cancelledContinuationRefused, createPrivateTrialSupport } from './engine-principles-trial-support.js';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) { console.log('Usage: node --import tsx scripts/engine-principles-recovery-trial.ts --dist <copied candidate dist> --out <evidence directory>'); process.exit(0); }
-function option(flag: string): string { const i = args.indexOf(flag); if (i < 0 || !args[i + 1]) throw new Error(`missing ${flag}`); return resolve(args[i + 1]); }
-const dist = option('--dist'), out = option('--out');
+const options = parseReplayArguments(args, ['--dist', '--out']);
+const dist = resolve(options['--dist']), out = resolve(options['--out']);
 const root = mkdtempSync(join(tmpdir(), 'flowcrew-recovery-daemon-'));
 const storeRoot = join(root, 'store'), socket = join(storeRoot, 'trial.sock'), bin = join(root, 'bin'), home = join(root, 'empty-home');
 for (const path of [out, storeRoot, bin, home]) mkdirSync(path, { recursive: true });
@@ -22,23 +23,22 @@ const { readRunStateView } = await module('run-state-view.js');
 const { reconcileHostInterruptedRun, engineGeneration } = await module('restart-recovery.js');
 const { processStartToken } = await module('run-lock.js');
 const { extractBriefCriteria } = await module('brief-criteria.js');
-const tracked: Array<{ pid: number; token: object | undefined; label: string }> = [];
 const children: ChildProcess[] = [];
 const cases: any[] = [];
 const cancellationCases: any[] = [];
 function write(path: string, content: string): void { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content); }
-const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const empty = { version: 1, produces: [], reads: [] };
+const empty = { version: 1, produces: [], reads: [], groups: [], replays: [] };
 function stage(id: string, extra: object = {}): object { return { id, role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/**'], prompt_template: 'Do the declared private fixture work.', artifact_contract: empty, ...extra }; }
 const fixtureSource = `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path');
+if(process.argv.includes('--version')){console.log('codex private-fixture');process.exit(0)}
 const root=process.env.EP1_TRIAL_ROOT;
-if(!root||!process.env.CODEX_HOME?.startsWith(root+'/store/runs/')) { if(process.argv.includes('--version')) {console.log('codex private-fixture');process.exit(0)}; console.error('private fixture binding required');process.exit(7); }
+if(!root||!process.env.CODEX_HOME?.startsWith(root+'/store/runs/')) { console.error('private fixture binding required');process.exit(7); }
 const stage=path.basename(path.dirname(process.env.CODEX_HOME)),run=path.resolve(process.env.CODEX_HOME,'../../..'),project=process.cwd();
 const write=(p,t)=>{fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,t)};
 let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
  const stat=fs.readFileSync('/proc/self/stat','utf8'),token={kind:'linux',value:stat.slice(stat.lastIndexOf(')')+1).trim().split(/\\s+/)[19]};
- fs.appendFileSync(path.join(root,'fixture-calls.jsonl'),JSON.stringify({at:new Date().toISOString(),pid:process.pid,token,stage,run,project,inputSha256:require('node:crypto').createHash('sha256').update(input).digest('hex')})+'\\n');
+ console.log(JSON.stringify({type:'flowcrew_private_fixture',at:new Date().toISOString(),pid:process.pid,token,stage,run,project,inputSha256:require('node:crypto').createHash('sha256').update(input).digest('hex')}));
  const kind=JSON.parse(fs.readFileSync(path.join(project,'fixture.json'))).kind,refs=JSON.parse(fs.readFileSync(path.join(run,'brief_criteria.json'))).criteria.map(c=>c.id);let message='fixture completed',writes=[];
  if(stage==='_supervisor'){message=JSON.stringify({action:'WAIT',reason:'Private deterministic fixture; no semantic intervention required.'});}
  else if(stage==='completed'){write(path.join(project,'docs/completed.md'),'completed before restart');writes.push('docs/completed.md');}
@@ -55,39 +55,6 @@ let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',d=>input+
 `;
 write(join(bin, 'codex'), fixtureSource); writeFileSync(join(bin, 'claude'), fixtureSource); spawnSync('chmod', ['755', join(bin, 'codex'), join(bin, 'claude')]);
 for (const name of ['systemd-run', 'systemctl']) { write(join(bin, name), '#!/bin/sh\nexit 1\n'); spawnSync('chmod', ['755', join(bin, name)]); }
-function own(pid: number, label: string, expected?: object): void {
-  const token = processStartToken(pid);
-  if (expected && JSON.stringify(token) !== JSON.stringify(expected)) return;
-  if (!tracked.some((entry) => entry.pid === pid)) tracked.push({ pid, token, label });
-}
-function stopOwned(entry: typeof tracked[number], signal: NodeJS.Signals = 'SIGTERM'): void {
-  const current = processStartToken(entry.pid);
-  if (!entry.token || !current || JSON.stringify(entry.token) !== JSON.stringify(current)) return;
-  try { process.kill(entry.pid, signal); } catch { /* already exited */ }
-}
-function discoverOwned(): void {
-  const calls = join(root, 'fixture-calls.jsonl');
-  if (existsSync(calls)) for (const line of readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean)) { const call = JSON.parse(line); if (call.run.startsWith(join(storeRoot, 'runs') + '/')) own(call.pid, `fixture ${call.stage}`, call.token); }
-  const supervise = join(storeRoot, 'supervise');
-  if (existsSync(supervise)) for (const name of readdirSync(supervise)) {
-    const file = join(supervise, name, 'running.json'); if (!existsSync(file)) continue;
-    const record = JSON.parse(readFileSync(file, 'utf8'));
-    if (!record.command?.includes(dist)) throw new Error('Foreign child in private supervision store');
-    if (record.agentToken) own(record.agentPid, 'private portable agent', record.agentToken);
-    if (record.shimToken) own(record.shimPid, 'private portable shim', record.shimToken);
-  }
-  const runs = join(storeRoot, 'runs');
-  if (existsSync(runs)) for (const name of readdirSync(runs)) {
-    const file = join(runs, name, 'run.json'); if (!existsSync(file)) continue;
-    const state = JSON.parse(readFileSync(file, 'utf8'));
-    if (state.engineCheckpoint?.processStart && state.projectDir.startsWith(root + '/')) own(state.engineCheckpoint.pid, 'private scheduler', state.engineCheckpoint.processStart);
-  }
-}
-async function poll<T>(label: string, check: () => T | undefined | Promise<T | undefined>, timeout = 60000): Promise<T> {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) { discoverOwned(); const value = await check(); if (value !== undefined) return value; await new Promise((done) => setTimeout(done, 100)); }
-  throw new Error(`TRIAL_TIMEOUT: ${label}`);
-}
 function project(label: string, stages: object[]): string {
   const kind = 'restart';
   const dir = join(root, `source-${label}`); mkdirSync(dir);
@@ -96,7 +63,7 @@ function project(label: string, stages: object[]): string {
   for (const name of ['coder', 'planner', 'qa']) write(join(dir, `config/agents/${name}.yaml`), JSON.stringify({ name, description: name, model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Execute only the private deterministic fixture.' }));
   const refs = extractBriefCriteria(brief).criteria.map((entry: any) => entry.id);
   const initial = stages.map((entry: any) => ({ ...entry, criterion_refs: entry.dynamic_dispatch ? [] : refs }));
-  initial.push(stage('audit', { role: 'qa', scope: [], depends_on: ['interrupted'], dependency_reasons: { interrupted: 'Audit declared outcomes' }, criterion_refs: refs, is_gate: true, artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_audit.json' }], reads: [{ id: 'state', root: 'run', path: 'run.json', source: { kind: 'framework', artifact: 'run_state' } }] } }));
+  initial.push(stage('audit', { role: 'qa', scope: [], depends_on: ['interrupted'], dependency_reasons: { interrupted: 'Audit declared outcomes' }, criterion_refs: refs, is_gate: true, artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_audit.json' }], reads: [{ id: 'state', root: 'run', path: 'run.json', source: { kind: 'framework', artifact: 'run_state' } }], groups: [], replays: [] } }));
   write(join(dir, 'config/workflows/trial.yaml'), JSON.stringify({ name: kind, defaults: { max_iterations: 1 }, stages: initial }));
   write(join(dir, 'Makefile'), 'build:\n\tnode --check fixture-driver.mjs\ntest:\n\tnode --test spec/fixture.test.mjs\nlint:\n\tnode --check fixture-driver.mjs\n');
   write(join(dir, 'fixture-driver.mjs'), "export const fixtureKinds = ['restart'];\n");
@@ -111,22 +78,11 @@ function project(label: string, stages: object[]): string {
 }
 const brief = '# Private fixture\n\n## Requirements\n1. The declared workflow stages finish and their evidence is retained.\n';
 const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
-async function register(dir: string, runId?: string): Promise<any> { return sendRpc(socket, { cmd: 'register', task: { name: dirname(dir).split('/').at(-1), projectDir: dir, brief_text: brief, brief_admission: admission, max_retries: 0, launch_args: ['--workflow', 'trial', '--adapter', 'codex'], ...(runId ? { run_id: runId } : {}) } }); }
+const { tracked, own, stopOwned, discoverOwned, poll, register, preserve, fixtureCalls } = createPrivateTrialSupport({
+  root, storeRoot, dist, out, socket, brief, admission, processStartToken, sendRpc, readRunStateView, engineGeneration,
+});
 async function bound(response: any): Promise<string> { return poll('run binding', async () => { const show = await sendRpc(socket, { cmd: 'show', id: response.id, raw: false }); return show.task?.run_id; }); }
-async function settled(dir: string, runId: string): Promise<any> { return poll('run completion and scheduler closure', () => { const f = join(storeRoot, 'runs', runId, 'run.json'); if (!existsSync(f)) return; const s = JSON.parse(readFileSync(f, 'utf8')); return ['complete', 'failed', 'stopped', 'parked'].includes(s.status) && (!s.engineCheckpoint || processStartToken(s.engineCheckpoint.pid) === undefined) ? s : undefined; }); }
-async function preserve(label: string, dir: string, runId: string, state: any): Promise<any> {
-  const run = join(storeRoot, 'runs', runId), target = join(out, 'trial-evidence', label);
-  const view = await poll('coherent state observation', () => {
-    try { return readRunStateView(dir, runId, { includePromptText: true }); }
-    catch (error) { if (error instanceof Error && 'code' in error && error.code === 'STATE_VIEW_UNSTABLE') return undefined; throw error; }
-  }, 10000);
-  mkdirSync(target, { recursive: true }); cpSync(run, join(target, 'run'), { recursive: true, dereference: false }); cpSync(dir, join(target, 'project'), { recursive: true, dereference: false });
-  if (hash(readFileSync(join(target, 'run/run.json'), 'utf8')) !== view.snapshot.runStateSha256) throw new Error('TRIAL_COPY_UNSTABLE: copied run projection differs from the coherent observation');
-  write(join(target, 'state-view.json'), JSON.stringify(view, null, 2));
-  const calls = existsSync(join(root, 'fixture-calls.jsonl')) ? readFileSync(join(root, 'fixture-calls.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.run === run) : [];
-  write(join(target, 'fixture-calls.json'), JSON.stringify(calls, null, 2));
-  return { label, projectDir: dir, runId, evidence: target, status: state.status, iteration: state.currentIteration, maxIterations: state.maxIterations, planHistory: state.queryState?.planHistory, findings: state.queryState?.findings, stages: state.stages, fixtureCalls: calls.map(({ stage, inputSha256 }: any) => ({ stage, inputSha256 })), promptCoverage: view.prompts.coverage, generation: engineGeneration() };
-}
+async function settled(dir: string, runId: string): Promise<any> { return poll('run completion and scheduler closure', () => { const f = join(storeRoot, 'runs', runId, 'run.json'); if (!existsSync(f)) return; const s = JSON.parse(readFileSync(f, 'utf8')); return ['complete', 'failed', 'stopped', 'incomplete', 'parked'].includes(s.status) && (!s.engineCheckpoint || processStartToken(s.engineCheckpoint.pid) === undefined) ? s : undefined; }); }
 const points = ['no_crash', 'stage_ledger', 'run_projection', 'intent', 'pending_ledger', 'pending_projection', 'commit'];
 const recoveryChild = `
  import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
@@ -214,13 +170,12 @@ async function stopDaemon(): Promise<void> {
 try {
  await startDaemon();
  for (const point of points) {
-  const target = project(point, [stage('completed', { artifact_contract: { version: 1, produces: [{ id: 'completed', root: 'project', path: 'docs/completed.md' }], reads: [] } }), stage('interrupted', { depends_on: ['completed'], dependency_reasons: { completed: 'Continue completed work' }, artifact_contract: { version: 1, produces: [{ id: 'resumed', root: 'project', path: 'docs/resumed.md' }], reads: [] } })]);
+  const target = project(point, [stage('completed', { artifact_contract: { version: 1, produces: [{ id: 'completed', root: 'project', path: 'docs/completed.md' }], reads: [], groups: [], replays: [] } }), stage('interrupted', { depends_on: ['completed'], dependency_reasons: { completed: 'Continue completed work' }, artifact_contract: { version: 1, produces: [{ id: 'resumed', root: 'project', path: 'docs/resumed.md' }], reads: [], groups: [], replays: [] } })]);
   const runId = await bound(await register(target));
   const before = await poll('interrupted work and deterministic provider running', () => {
    const file = join(storeRoot, 'runs', runId, 'run.json'); if (!existsSync(file)) return;
    const state = JSON.parse(readFileSync(file, 'utf8'));
-   const calls = join(root, 'fixture-calls.jsonl');
-   const provider = existsSync(calls) && readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).some(call => call.run === join(storeRoot, 'runs', runId) && call.stage === 'interrupted');
+   const provider = fixtureCalls().some(call => call.run === join(storeRoot, 'runs', runId) && call.stage === 'interrupted');
    return state.stages.interrupted?.status === 'running' && state.stages.completed?.status === 'complete' && provider ? state : undefined;
   });
   await preserve(`${point}-before`, target, runId, before);
@@ -263,13 +218,12 @@ try {
  }
  for (const point of ['before_entry', 'intent_release', 'closed_release', 'pending_release', 'commit_release', 'blocked_release']) {
   const label = `cancel-${point}`;
-  const target = project(label, [stage('completed', { artifact_contract: { version: 1, produces: [{ id: 'completed', root: 'project', path: 'docs/completed.md' }], reads: [] } }), stage('interrupted', { depends_on: ['completed'], dependency_reasons: { completed: 'Continue completed work' }, artifact_contract: { version: 1, produces: [{ id: 'resumed', root: 'project', path: 'docs/resumed.md' }], reads: [] } })]);
+  const target = project(label, [stage('completed', { artifact_contract: { version: 1, produces: [{ id: 'completed', root: 'project', path: 'docs/completed.md' }], reads: [], groups: [], replays: [] } }), stage('interrupted', { depends_on: ['completed'], dependency_reasons: { completed: 'Continue completed work' }, artifact_contract: { version: 1, produces: [{ id: 'resumed', root: 'project', path: 'docs/resumed.md' }], reads: [], groups: [], replays: [] } })]);
   const runId = await bound(await register(target));
   const before = await poll('private cancellation trial executing interrupted work', () => {
    const file = join(storeRoot, 'runs', runId, 'run.json'); if (!existsSync(file)) return;
    const state = JSON.parse(readFileSync(file, 'utf8'));
-   const calls = join(root, 'fixture-calls.jsonl');
-   const provider = existsSync(calls) && readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).some(call => call.run === join(storeRoot, 'runs', runId) && call.stage === 'interrupted');
+   const provider = fixtureCalls().some(call => call.run === join(storeRoot, 'runs', runId) && call.stage === 'interrupted');
    return state.stages.interrupted?.status === 'running' && state.stages.completed?.status === 'complete' && provider ? state : undefined;
   });
   const prior = await preserve(`${label}-before`, target, runId, before);
@@ -290,10 +244,7 @@ try {
   const request = await register(target, runId);
   const continuation = await poll('daemon refuses cancelled same-run continuation', async () => {
    const response = await sendRpc(socket, { cmd: 'show', id: request.id, raw: false });
-   // The RPC merges the authoritative stopped run over the registry's failed
-   // transport status. Require terminal unit evidence before judging refusal.
-   return ['failed', 'cancelled', 'stuck', 'stopped'].includes(response.task?.status)
-    && response.unit_status?.kind === 'terminal' ? response : undefined;
+   return cancelledContinuationRefused(response, runId) ? response : undefined;
   });
   const finalState = JSON.parse(readFileSync(join(storeRoot, 'runs', runId, 'run.json'), 'utf8'));
   const final = await preserve(`${label}-after`, target, runId, finalState);

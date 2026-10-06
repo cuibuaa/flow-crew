@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { NodeSystemd } from '../src/orchestrator.js';
+import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { sendRpc, type RpcResponse } from '../src/orchestrator-rpc.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { TERMINAL_STATUSES } from '../src/store.js';
@@ -24,6 +25,7 @@ const distCli = join(repositoryRoot, 'dist', 'cli.js');
 const MOCK_OUTPUT_SENTINEL = 'FLOWCREW_MOCK_AGENT_STDOUT_SENTINEL_7d94a6';
 const HOLD_MARKER = 'FLOWCREW_SUPERVISED_HOLD_2f6c1b';
 const EXIT_THREE_MARKER = 'FLOWCREW_SUPERVISED_EXIT_3_61c8f0';
+const LIFECYCLE_CRITERION = '1. Record the supervised lifecycle outcome for this fixture.';
 interface Harness {
   root: string;
   home: string;
@@ -243,6 +245,10 @@ async function createHarness(): Promise<Harness> {
     tokens_in: 0,
     tokens_out: 0,
   }), 'utf-8');
+  writeFileSync(join(mockDir, 'judge.json'), JSON.stringify({
+    output_text: 'portable fixture gate passed', exit_code: 0,
+    write_files: { 'verdict_judge.json': JSON.stringify({ pass: true, reason: 'deterministic lifecycle evidence' }) },
+  }), 'utf-8');
   writeFileSync(preloadPath, preloadSource(), 'utf-8');
 
   let daemonOutput = '';
@@ -325,11 +331,26 @@ function createProject(harness: Harness, label: string): string {
     '  max_retries: 0',
     'stages:',
     '  - id: work',
-    '    role: worker',
+    '    role: coder',
+    '    scope: []',
+    `    criterion_refs: ${JSON.stringify(extractBriefCriteria(`## What the report must show\n${LIFECYCLE_CRITERION}`).criteria.map(({ id }) => id))}`,
+    '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+    '  - id: judge',
+    '    role: qa',
+    '    depends_on: [work]',
+    '    dependency_reasons: {work: "Judge the lifecycle fixture output."}',
+    '    scope: []',
+    '    is_gate: true',
+    `    criterion_refs: ${JSON.stringify(extractBriefCriteria(`## What the report must show\n${LIFECYCLE_CRITERION}`).criteria.map(({ id }) => id))}`,
+    '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_judge.json}], reads: [], replays: []}',
     '',
   ].join('\n'), 'utf-8');
-  writeFileSync(join(agentsDir, 'worker.yaml'), [
-    'name: worker',
+  writeFileSync(join(agentsDir, 'qa.yaml'), [
+    'name: qa', 'description: deterministic portable lifecycle gate', 'model: default',
+    'reasoning_effort: default', 'tools: []', 'prompt: judge the fixture', '',
+  ].join('\n'), 'utf-8');
+  writeFileSync(join(agentsDir, 'coder.yaml'), [
+    'name: coder',
     'description: deterministic portable lifecycle fixture',
     'model: default',
     'reasoning_effort: default',
@@ -342,16 +363,11 @@ function createProject(harness: Harness, label: string): string {
 
 function registerBackgroundTask(harness: Harness, project: string, marker: string): RegisteredTask {
   const brief = [
-    '---',
-    'terminal_states:',
-    '  complete:',
-    '    paths: [docs/result.md]',
-    '---',
     '# Goal',
     `Exercise portable supervision: ${marker}`,
     '',
     '## What the report must show',
-    '1. Record the supervised lifecycle outcome for this fixture.',
+    LIFECYCLE_CRITERION,
     '',
   ].join('\n');
   writeReadySetupRecord(project, brief, harness.fcHome);
