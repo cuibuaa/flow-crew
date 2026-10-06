@@ -113,8 +113,10 @@ describe('durable portable supervision shim', () => {
     const unit = 'launch-refusal.service';
     const refusal = 'Launch refused: research.stop.max_rounds (8 rounds) exceeds the engine limit (5 iterations).';
     const supervisionModule = pathToFileURL(join(repositoryRoot, 'dist', 'supervision.js')).href;
+    const leaked = join(root, 'grandchild-env.txt');
     const source = [
       `import(${JSON.stringify(supervisionModule)}).then(({ recordLaunchRefusal }) => {`,
+      `  require('node:child_process').spawnSync(process.execPath, ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(leaked)}, String(process.env.FLOWCREW_LAUNCH_RESULT_PATH))`)}]);`,
       `  recordLaunchRefusal(${JSON.stringify(refusal)});`,
       '  process.exit(2);',
       '});',
@@ -138,6 +140,8 @@ describe('durable portable supervision shim', () => {
       normalized: 2,
       launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
     });
+    // The private launch-result channel is consumed by the direct child and never inherited further.
+    expect(readFileSync(leaked, 'utf8')).toBe('undefined');
   });
 
   it('lets a live systemd unit veto stale running evidence when exit.json is absent', async () => {

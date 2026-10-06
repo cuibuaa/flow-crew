@@ -67,6 +67,12 @@ export interface SupervisorBackend {
 
 export const SUPERVISION_PROTOCOL_VERSION = 1 as const;
 export const FLOWCREW_LAUNCH_RESULT_PATH_ENV = 'FLOWCREW_LAUNCH_RESULT_PATH';
+/** The supervise shim hands its direct CLI child a private launch-result path.
+ * It is consumed once, here, and removed from the environment so that no
+ * stage, validation command or test the CLI later launches can inherit it and
+ * write into the real supervision directory. */
+const launchResultPath = process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
+delete process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
 export const DEFAULT_SUPERVISION_STARTUP_GRACE_MS = 5_000;
 export const DEFAULT_SUPERVISION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
@@ -256,7 +262,7 @@ export function readLaunchRefusal(path: string): LaunchRefusalRecord | undefined
 
 /** Called by the supervised CLI before returning from a pre-launch refusal. */
 export function recordLaunchRefusal(message: string): void {
-  const path = process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
+  const path = launchResultPath;
   if (!path || !message.startsWith('Launch refused:')) return;
   atomicWriteJson(path, {
     version: SUPERVISION_PROTOCOL_VERSION,
