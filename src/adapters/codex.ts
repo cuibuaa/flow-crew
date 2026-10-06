@@ -340,15 +340,34 @@ export interface CodexCapabilityMemory {
   learnedAt: string;
 }
 
-let cachedCodexVersion: string | undefined;
+/** Versions learned outside any stage boundary, keyed by the executable's file
+ * identity so a replaced binary is never mistaken for the one that was probed. */
+const versionByExecutable = new Map<string, string>();
 
+function executableFingerprint(executable: string): string | undefined {
+  const candidates = executable.includes('/') ? [executable]
+    : (process.env.PATH ?? '').split(':').filter(Boolean).map((dir) => join(dir, executable));
+  for (const candidate of candidates) {
+    try {
+      const info = statSync(candidate);
+      if (info.isFile()) return `${candidate}:${info.dev}:${info.ino}:${info.size}:${Math.trunc(info.mtimeMs)}`;
+    } catch { /* not this PATH entry */ }
+  }
+  return undefined;
+}
+
+/** Inside a stage write boundary the adapter binary is never launched just to
+ * learn its version: launching it there costs a full boundary installation and
+ * can only fail the attempt. The identity falls back to the file fingerprint,
+ * which still changes whenever the binary does. */
 function detectedCodexVersion(executable: string): string {
-  const guarded = engineChildAdapterHome() !== undefined;
-  if (!guarded && cachedCodexVersion !== undefined && executable === 'codex') return cachedCodexVersion;
+  const fingerprint = executableFingerprint(executable);
+  if (fingerprint && versionByExecutable.has(fingerprint)) return versionByExecutable.get(fingerprint)!;
+  if (engineChildAdapterHome() !== undefined) return fingerprint ? `fingerprint:${fingerprint}` : 'unknown';
   let version = 'unknown';
   const result = execEngineChildSync(executable, ['--version'], 2_000);
   if (result.status === 0) version = result.stdout.trim() || 'unknown';
-  if (!guarded && executable === 'codex') cachedCodexVersion = version;
+  if (fingerprint) versionByExecutable.set(fingerprint, version);
   return version;
 }
 

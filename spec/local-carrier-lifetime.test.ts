@@ -138,22 +138,20 @@ describe('engine-owned local carrier lifetime', () => {
     const { inspectRunScheduler } = await import('../src/run-lock.js');expect(inspectRunScheduler(f.runId, f.runDir).kind).toBe('corrupt');
   });
 
-  native('confines each real synchronous Codex version probe and records its private receipt', async () => {
-    const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), before = readFileSync(history, 'utf8'), executable = join(f.projectDir, 'version-probe');
-    writeFileSync(executable, `#!${process.execPath}\n${child(`try{fs.writeFileSync(${JSON.stringify(history)},'bad');console.log('wrote')}catch(e){console.log('refused:'+e.code)}`)}`); chmodSync(executable, 0o755);
-    await withEngineWriteBoundary(f, async () => {
-      for (let i = 0; i < 2; i++) expect(resolveCodexCapabilityIdentity({ model: 'fixture', reasoning_effort: 'low' }, { executable }).version).toBe('refused:EACCES');
-    });
-    expect(readFileSync(history, 'utf8')).toBe(before);
-    const receipts = readFileSync(join(f.runDir, 'stages', f.stageId, 'write_boundary_attempt_0.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-    expect(receipts.map((row) => row.kind)).toEqual(['installed', 'installed']); expect(new Set(receipts.map((row) => row.pid)).size).toBe(2);
-  });
-
-  native('refuses unknown synchronous probe enforcement instead of treating it as an unknown version', async () => {
-    const f = fixture(), executable = join(f.projectDir, 'version-probe'), ran = join(f.projectDir, 'ran');
-    writeFileSync(executable, `#!${process.execPath}\n${child(`fs.writeFileSync(${JSON.stringify(ran)},'ran');console.log('version')`)}`); chmodSync(executable, 0o755); linkSync(executable, join(f.root, 'external-link'));
-    await expect(withEngineWriteBoundary(f, async () => resolveCodexCapabilityIdentity({ model: 'fixture', reasoning_effort: 'low' }, { executable }))).rejects.toThrow('ENGINE_WRITE_BOUNDARY_UNVERIFIED');
+  native('never launches the adapter binary to learn its version inside a stage boundary', async () => {
+    const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), before = readFileSync(history, 'utf8'), executable = join(f.projectDir, 'version-probe'), ran = join(f.projectDir, 'ran');
+    writeFileSync(executable, `#!${process.execPath}\n${child(`fs.writeFileSync(${JSON.stringify(ran)},'ran');try{fs.writeFileSync(${JSON.stringify(history)},'bad')}catch{};console.log('version')`)}`); chmodSync(executable, 0o755);
+    const identity = () => resolveCodexCapabilityIdentity({ model: 'fixture', reasoning_effort: 'low' }, { executable }).version;
+    const versions = await withEngineWriteBoundary(f, async () => [identity(), identity()]);
+    expect(versions[0]).toMatch(/^fingerprint:/); expect(versions[1]).toBe(versions[0]);
+    expect(existsSync(ran)).toBe(false); expect(readFileSync(history, 'utf8')).toBe(before);
+    expect(existsSync(join(f.runDir, 'stages', f.stageId, 'write_boundary_attempt_0.jsonl'))).toBe(false);
+    expect(identity()).toBe('version'); rmSync(ran);
+    expect(await withEngineWriteBoundary(f, async () => identity())).toBe('version');
     expect(existsSync(ran)).toBe(false);
+    writeFileSync(executable, `${readFileSync(executable, 'utf8')}\n// replaced binary`);
+    const replaced = await withEngineWriteBoundary(f, async () => identity());
+    expect(replaced).toMatch(/^fingerprint:/); expect(replaced).not.toBe(versions[0]); expect(existsSync(ran)).toBe(false);
   });
 
   native('gives observer calls read-only project access and private adapter state without request authority', async () => {
