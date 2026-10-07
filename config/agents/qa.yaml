@@ -1,5 +1,6 @@
 name: qa
 description: 'Verifies implementations through tests and independent review; writes declared evidence and current-behaviour regressions.'
+reasoning_effort: high
 tools:
 - read
 - write

@@ -68,6 +68,10 @@ session_reuse: false
 # model here only to lock an experiment.
 model: default   # Inherit ~/.codex/config.toml; set a model here to override it.
 reasoning_effort: default   # Inherit model_reasoning_effort from the adapter config.
+# Role files may pin their own effort, which wins over this value. The shipped coder and qa roles pin high: batch A
+# (run 2026-10-06T10-21-20-45fe2c) measured 77% of stage wall time as model generation at about 24 tokens/s, and the QA
+# stages ran at max. The planner and the other roles inherit this value. Projects with their own config/agents copies
+# keep their own settings.
 paths:
   agents: config/agents
   workflows: config/workflows
