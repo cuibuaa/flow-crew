@@ -20,6 +20,7 @@ import vitestConfig, {
 
 interface VitestIsolationRegistry {
   roots: Set<string>;
+  environments: Map<string, NodeJS.ProcessEnv>;
   cleanupRoot: (root: string) => void;
   cleanupAll: () => void;
 }
@@ -115,6 +116,17 @@ describe('root-suite file isolation', () => {
     const socket = process.env.FLOWCREW_DAEMON_SOCKET!;
     expectInside(socket, root);
     expect(existsSync(socket)).toBe(false);
+  });
+
+  it('isolates adapter and runtime homes before engine imports', () => {
+    const root = process.env.FLOWCREW_VITEST_ROOT!;
+    const registry = Reflect.get(process, Symbol.for('flowcrew.vitest.file-isolation.registry')) as VitestIsolationRegistry;
+    const environment = registry.environments.get(root)!;
+    expect(environment).toBeDefined();
+    expectInside(environment.CODEX_HOME!, root);
+    expectInside(environment.XDG_RUNTIME_DIR!, root);
+    expect(environment.FLOWCREW_LAUNCH_RESULT_PATH).toBeUndefined();
+    expect(environment.DBUS_SESSION_BUS_ADDRESS).toBeUndefined();
   });
 
   it('keeps file isolation and three-worker concurrency without suite retry', () => {

@@ -49,6 +49,7 @@ import {
 import { loadProjectDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
+import { withEngineCommandBoundary } from './write-boundary.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -1817,13 +1818,13 @@ async function discoverTestPopulationMethod(
           runner,
           method: {
             tool: 'vitest',
-            display: 'vitest list --filesOnly --json --passWithNoTests',
+            display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
             evidencePath: `${packagePath}#scripts.test`,
             request: {
               role: 'test',
               command: process.execPath,
-              args: [executable, 'list', '--filesOnly', '--json', '--passWithNoTests'],
-              display: 'vitest list --filesOnly --json --passWithNoTests',
+              args: [executable, 'list', '--filesOnly', '--json', '--passWithNoTests', '--configLoader', 'runner'],
+              display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
               evidencePath: packagePath,
               cwd: projectDir,
             },
@@ -2002,6 +2003,9 @@ async function compareTestPopulations(
   runner: ValidationCommandRunner,
   declaredCommands: readonly BriefValidationCommand[],
 ): Promise<TestPopulationComparison> {
+  const commandRunner = runner;
+  runner = (request) => withEngineCommandBoundary({ projectDir: request.cwd,
+    stageId: '_collection', authority: 'observer' }, () => Promise.resolve(commandRunner(request)));
   const sourceDiscovery = await discoverTestPopulationMethod(sourceDir, fs, declaredCommands, runner);
   const targetDiscovery = await discoverTestPopulationMethod(targetDir, fs, declaredCommands, runner);
   const discoveries = { sourceDiscovery, targetDiscovery };

@@ -42,7 +42,8 @@ export async function settleGateRetries(
     while (revisitRuntimeFacts) {
     revisitRuntimeFacts = false;
     state = readRunState(projectDir, runId);
-    if (iterationDispatchedIds.length > 0) {
+      // Mechanical settlement belongs to every completed gate. Dispatch origin
+      // only controls the dynamic repair topology below, not validation evidence.
       if (readRunValidationBaseline(runDirPath)) {
         const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
         for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE)) {
@@ -62,6 +63,7 @@ export async function settleGateRetries(
           }
         }
       }
+    if (iterationDispatchedIds.length > 0) {
       const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
       const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
       state = admitScopedAuditRepairs(sorted, state, outerCheck, projectDir, runId, runDirPath, workflow, roleRegistry);

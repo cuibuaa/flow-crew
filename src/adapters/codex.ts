@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { delimiter, isAbsolute, join, relative } from 'node:path';
 import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
@@ -286,13 +286,23 @@ export interface CodexCapabilityMemory {
  * identity so a replaced binary is never mistaken for the one that was probed. */
 const versionByExecutable = new Map<string, string>();
 
-function executableFingerprint(executable: string): string | undefined {
-  const candidates = executable.includes('/') ? [executable]
-    : (process.env.PATH ?? '').split(':').filter(Boolean).map((dir) => join(dir, executable));
+function executableIdentity(executable: string, cwd: string): { path: string; fingerprint: string } | undefined {
+  // execvpe in the bridge treats empty PATH members as cwd and skips EACCES.
+  // Resolve against the child's cwd, which need not be the scheduler's cwd.
+  // Keep lexical hops until the filesystem checks them: missing/../bin does
+  // not reach bin during exec, even though path.resolve would erase missing.
+  const absoluteCwd = isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd}`;
+  const fromCwd = (path: string) => isAbsolute(path) ? path : `${absoluteCwd}/${path}`;
+  const candidates = executable.includes('/') ? [fromCwd(executable)]
+    : (process.env.PATH ?? '/bin:/usr/bin').split(delimiter).map((dir) => `${fromCwd(dir)}/${executable}`);
   for (const candidate of candidates) {
     try {
-      const info = statSync(candidate);
-      if (info.isFile()) return `${candidate}:${info.dev}:${info.ino}:${info.size}:${Math.trunc(info.mtimeMs)}`;
+      const info = statSync(candidate, { bigint: true });
+      if (!info.isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      const path = realpathSync(candidate);
+      // ctime and mode also invalidate in-place replacements with restored mtime.
+      return { path, fingerprint: `${path}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}` };
     } catch { /* not this PATH entry */ }
   }
   return undefined;
@@ -302,12 +312,14 @@ function executableFingerprint(executable: string): string | undefined {
  * learn its version: launching it there costs a full boundary installation and
  * can only fail the attempt. The identity falls back to the file fingerprint,
  * which still changes whenever the binary does. */
-function detectedCodexVersion(executable: string): string {
-  const fingerprint = executableFingerprint(executable);
+function detectedCodexVersion(executable: string, cwd: string): string {
+  const selected = executableIdentity(executable, cwd);
+  const fingerprint = selected?.fingerprint;
   if (fingerprint && versionByExecutable.has(fingerprint)) return versionByExecutable.get(fingerprint)!;
   if (engineChildAdapterHome() !== undefined) return fingerprint ? `fingerprint:${fingerprint}` : 'unknown';
   let version = 'unknown';
-  const result = execEngineChildSync(executable, ['--version'], 2_000);
+  if (!selected) return version;
+  const result = execEngineChildSync(selected.path, ['--version'], 2_000);
   if (result.status === 0) version = result.stdout.trim() || 'unknown';
   if (fingerprint) versionByExecutable.set(fingerprint, version);
   return version;
@@ -317,7 +329,7 @@ function detectedCodexVersion(executable: string): string {
  * model deliberately produces a different key and therefore gets re-probed. */
 export function resolveCodexCapabilityIdentity(
   role: Pick<AgentConfig, 'model' | 'reasoning_effort'>,
-  overrides: Partial<CodexCapabilityIdentity> = {},
+  overrides: Partial<CodexCapabilityIdentity> & { cwd?: string } = {},
 ): CodexCapabilityIdentity {
   const executable = overrides.executable ?? 'codex';
   const model = overrides.model ?? (
@@ -336,7 +348,7 @@ export function resolveCodexCapabilityIdentity(
   );
   return {
     executable,
-    version: overrides.version ?? detectedCodexVersion(executable),
+    version: overrides.version ?? detectedCodexVersion(executable, overrides.cwd ?? process.cwd()),
     provider: overrides.provider ?? globalCodexConfigValue('model_provider') ?? 'codex',
     model,
     reasoningEffort,
@@ -466,7 +478,7 @@ export class CodexAdapter implements Adapter {
       // retry that re-sends the request the server just rejected (and, with a
       // 30-minute stage timeout, burns real wall time to fail identically).
       // At most 2 fixes, each fix applied at most once.
-      const capabilityIdentity = resolveCodexCapabilityIdentity(role);
+      const capabilityIdentity = resolveCodexCapabilityIdentity(role, { cwd: opts.workDir });
       const rememberedEffortRejection = readCodexCapabilityMemory(opts.runDir, capabilityIdentity) !== undefined;
       let effectiveRole = rememberedEffortRejection ? applyFix(role, 'drop_effort') : role;
       const applied = new Set<AdapterFix>();

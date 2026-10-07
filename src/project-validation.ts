@@ -1,6 +1,8 @@
 import { errorMessage } from './source_services/cli-inputs.js';
 import { spawnEngineChild, withEngineCommandBoundary, engineCommandDirectory, withEngineWriteBoundaryDirectory } from './write-boundary.js';
-import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, type Dirent } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, type Dirent } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { validationEnvironment } from './validation-environment.js';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
 import { loadProjectDefaults } from './config.js';
@@ -51,6 +53,8 @@ export interface ValidationRunRequest extends ValidationCommand {
   cwd: string;
   /** Parent-supplied run anchor; pre-admission validation uses a private one. */
   runDir?: string;
+  /** Ordinary project inputs and explicit home/config reads. Reserved control,
+   * credential and executable-injection settings are suppressed with a diagnostic. */
   env?: NodeJS.ProcessEnv;
   observer?: ValidationProgressObserver;
 }
@@ -779,15 +783,20 @@ export function outwardProjectSymlinks(projectDir: string): OutwardProjectSymlin
 
 export const runValidationCommand: ValidationCommandRunner = (request) => withEngineCommandBoundary({
   projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
-}, () => {
+}, async () => {
+  const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));
+  try {
+  const environment = validationEnvironment(environmentRoot, process.env, request.env);
   const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
   const { child, stop, boundaryError } = spawnEngineChild(request.command, request.args, {
     cwd: request.cwd,
-    env: request.env ?? process.env,
+    env: environment.env,
   });
   let stdout = '';
-  let stderr = '';
+  let stderr = environment.removed.length
+    ? `FlowCrew validation environment: suppressed engine/control or credential settings: ${environment.removed.join(', ')}. Supply ordinary project inputs through the command environment; reserved settings are isolated.\n`
+    : '';
   let settled = false;
   let timedOut = false;
   let spawnError: string | undefined;
@@ -839,7 +848,9 @@ export const runValidationCommand: ValidationCommandRunner = (request) => withEn
   });
   });
   const directory = engineCommandDirectory(request);
-  return directory ? withEngineWriteBoundaryDirectory(directory, launch) : launch();
+    return await withEngineWriteBoundaryDirectory(environmentRoot,
+      () => directory ? withEngineWriteBoundaryDirectory(directory, launch) : launch());
+  } finally { rmSync(environmentRoot, { recursive: true, force: true }); }
 });
 
 interface FailureFacts {

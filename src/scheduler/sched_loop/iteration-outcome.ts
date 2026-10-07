@@ -86,8 +86,10 @@ export async function concludeWorkflowIteration(
       }
     }
 
-    // If no dispatched stages, check if all base stages passed
-    if (iterationDispatchedIds.length === 0 && !anyFailed(state) && allDone(state)) {
+    // Completed execution is not gate acceptance: static gates use the same
+    // effective authored/validation facts as dispatched gates.
+    if (iterationDispatchedIds.length === 0 && !anyFailed(state) && allDone(state)
+        && collectGateRuntimeFacts(sorted, state, projectDir, runId).allPass) {
       if (state.status === RUN_STATUS.FAILED) {
         writeCampaignEntry(projectDir, state);
         return { kind: 'settled', state };

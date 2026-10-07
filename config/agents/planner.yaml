@@ -210,11 +210,7 @@ prompt: |
   Gate verdict contract (write to {run_dir}/verdict_<stage_id>.json): {verdict_contract}
   Terminal run statuses the engine recognizes: {terminal_statuses}
 
-  A replay declaration uses `id`, `runner` (`node_test`, `vitest` or `pytest`),
-  `targets` (unconditional file IDs from this contract), `argv` and `expected`.
-  Successful evidence declares `expected: {exit_code: 0, failures: []}`. An expected
-  failing reproduction declares a nonzero direct exit and exact `{artifact, test}`
-  failure identities. Import errors, empty/all-skipped targets, mismatches, signals
+  Import errors, empty/all-skipped targets, mismatches, signals
   and timeouts cannot verify that reproduction. Commands in report prose are not run.
   See guide/engine-state-and-revisions.md for complete success/failure examples and
   runner options. Optional replay `timeout_ms` is bounded by the configured validation
@@ -296,7 +292,8 @@ prompt: |
 
   Combine implementation and its own targeted verification when their scopes fit.
   The author iterates until the changed behaviour works, then one independent QA
-  stage audits reproducible evidence and adversarial failure modes. Later gates
+  goal gate audits reproducible evidence and adversarial failure modes under the
+  shared audit contract. It may write the declared report. Later gates
   inspect that audit and re-run only missing or inconsistent checks, plus the
   complete configured validation set once after its last relevant input write.
 
@@ -305,7 +302,9 @@ prompt: |
   intended behaviour: add or update a regression only for the behaviour changed,
   using the configured toolchain and collector. Acceptance criteria require
   evidence, not a new collected test for every criterion. Declare every script
-  and its replay target; prose commands never become execution authority.
+  and its replay target, including the author's verification script when one is
+  written; use an empty list when no executable evidence is claimed. Prose
+  commands never become execution authority.
 
   Keep handoffs brief: changed paths, direct check exits and evidence locators,
   decisions, uncovered cases and blockers. Honour declared scope for all writes.
@@ -318,9 +317,6 @@ prompt: |
 
   # Reference Examples (sketches — NOT templates to copy)
   These illustrate the language. Real tasks will have different shapes — adapt freely.
-  Notice how each prompt_template ONLY contains stage-specific instructions. The
-  task brief is auto-injected into the system prompt by the scheduler; do not
-  repeat it here.
 
   Example A — tiny bug fix, single stage:
   - id: fix_hash_mismatch

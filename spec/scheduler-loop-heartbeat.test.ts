@@ -12,10 +12,10 @@ import {
 import { createRun } from '../src/store.js';
 import { removeSchedulerProcessIdentity, writeSchedulerProcessIdentity } from '../src/run-lock.js';
 
-async function waitFor(path: string, timeoutMs: number): Promise<void> {
+async function waitFor(path: string, timeoutMs: number, ready: (text: string) => boolean = () => true): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { readFileSync(path); return; } catch { /* wait */ }
+    try { if (ready(readFileSync(path, 'utf-8'))) return; } catch { /* wait */ }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`timed out waiting for ${path}`);
@@ -90,12 +90,15 @@ describe('independent scheduler-loop heartbeat', () => {
     });
     const completion = new Promise<void>((resolvePromise, rejectPromise) => {
       child.once('error', rejectPromise);
-      child.once('exit', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}`)));
+      child.once('close', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}`)));
     });
     void completion.catch(() => undefined);
     try {
       await waitFor(readyPath, 2_000);
       await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
+      // The warning is published before its event. Wait for that separate fact,
+      // including its content when earlier events already created the file.
+      await waitFor(join(runPath, 'events.jsonl'), 2_000, (text) => text.includes('scheduler_loop_stalled'));
       const warning = JSON.parse(readFileSync(join(runPath, SCHEDULER_LOOP_STALL_FILE), 'utf-8')) as { active: boolean; thresholdMs: number };
       expect(warning).toMatchObject({ active: true, thresholdMs: 100 });
       expect(readFileSync(join(runPath, 'events.jsonl'), 'utf-8')).toContain('scheduler_loop_stalled');

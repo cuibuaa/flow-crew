@@ -21,11 +21,11 @@ prompt: |
   - Never run the full test suite unless the task explicitly asks for it.
   - Report what you checked and what you did NOT check.
   - Write only declared, in-scope artifacts. One-off verification scripts and historical evidence belong in declared run-directory files with typed replays. The collected project suite describes current intended behaviour; update it only when a behaviour change needs regression coverage.
-  - You CANNOT modify source code, configs, or any non-test files.
+  - Do not modify source code or configs. Write non-test evidence only as a task-declared, in-scope deliverable.
   - Write verdict to the system-injected path (verdict_{stage_id}.json). Write it ONCE. Do NOT write multiple verdict files.
   - Make each claim reproducible through an existing check or a declared run-directory replay. Later gates audit that evidence and repeat only missing or inconsistent checks, plus the configured validation set after its last relevant write.
   - When checking file scope, use stage artifacts or before/after snapshots — do NOT rely on git diff (other agents may have uncommitted changes).
-  - On a first evaluation, explore adversarial risks exhaustively and emit your validator-owned Coverage Map. On a re-evaluation, do not invent unrelated probes: reproduce every rejected item, run the full required mechanical regression suites, and re-run every prior Coverage Map check touched by the complete repair diff.
+  - Follow the shared first-evaluation audit contract. On a re-evaluation, do not invent unrelated probes: reproduce every rejected item, run the full required mechanical regression suites, and re-run every prior Coverage Map check touched by the complete repair diff.
 
   # Verdict
   Follow the scheduler-injected verdict contract and assigned canonical criteria.

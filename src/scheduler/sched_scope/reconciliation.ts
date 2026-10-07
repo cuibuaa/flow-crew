@@ -168,11 +168,12 @@ export function createScopeReconciler(services: ScopeValidationOutputs) {
     const auditRelativePath = auditPath.slice(runDirPath.length + 1).replace(/\\/g, '/');
     const stageKind: ScopeStageKind = input.stage.is_gate ? 'gate' : 'ordinary';
     const iteration = readRunState(input.projectDir, input.runId).currentIteration ?? 1;
-    const rejectedDecisions = decisionRecords.filter((decision) => decision.accepted === false);
+    const rejectedDecisions = decisionRecords.filter((decision) => decision.accepted === false
+      || Array.isArray(decision.rejectedPaths) && decision.rejectedPaths.length > 0);
     const planningDigests = rejectedDecisions.flatMap((decision) => {
-      const requestedPaths = Array.isArray(decision.requestedPaths)
-        ? decision.requestedPaths.filter((value): value is string => typeof value === 'string')
-        : [];
+      const withheld = Array.isArray(decision.rejectedPaths) ? decision.rejectedPaths : decision.requestedPaths;
+      const requestedPaths = Array.isArray(withheld)
+        ? withheld.filter((value): value is string => typeof value === 'string') : [];
       if (requestedPaths.length === 0) return [];
       const digest = rejectedScopeDigest({ stageKind, requestedPaths });
       const planningInput: ScopePlanningInputV1 = {
@@ -184,7 +185,8 @@ export function createScopeReconciler(services: ScopeValidationOutputs) {
         stageId: input.stage.id,
         stageKind,
         requestedPaths,
-        pathDigest: typeof decision.pathDigest === 'string' ? decision.pathDigest : scopePathDigest(requestedPaths),
+        pathDigest: Array.isArray(decision.rejectedPaths) ? scopePathDigest(requestedPaths)
+          : typeof decision.pathDigest === 'string' ? decision.pathDigest : scopePathDigest(requestedPaths),
         rejectionReason: typeof decision.rejectionReason === 'string' ? decision.rejectionReason : decision.policyBasis,
         auditPath: auditRelativePath,
       };
@@ -201,6 +203,8 @@ export function createScopeReconciler(services: ScopeValidationOutputs) {
         scopePresence: declaredScope === null ? 'missing' : 'present',
         declaredScope: declaredScope ?? [],
         requestedPaths,
+        authorizedPaths: Array.isArray(decision.authorizedPaths)
+          ? decision.authorizedPaths.filter((value): value is string => typeof value === 'string') : undefined,
         decision: decision.accepted === true ? 'accepted' : 'rejected',
         effectiveScope: Array.isArray(decision.effectiveScope)
           ? decision.effectiveScope.filter((value): value is string => typeof value === 'string')

@@ -206,14 +206,23 @@ describe('portable live constraint guard', () => {
           pathDigest: scopePathDigest(requestedPaths),
           reason: 'the corrected fixture explicitly needs this existing test',
         }));
-        expect(await waitForDecision(directory, requestId)).toMatchObject({ accepted: true });
+        expect(await waitForDecision(directory, requestId)).toMatchObject({
+          accepted: true, requestId, authorizedPaths: requestedPaths,
+          pathDigest: scopePathDigest(requestedPaths),
+        });
         return {
           output: 'scope accepted; stop at the control boundary', exitCode: 0,
           duration_ms: 2, writes: [], writeAttribution: 'structured',
         };
       }
 
-      expect(prompt).toContain('Scope revision authorize-existing-test was accepted');
+      expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+      expect(prompt).toContain(`Continue the stage work in execution ${opts.attemptIndex}`);
+      expect(prompt).toContain('Newly admitted paths: ["spec/existing.test.ts"]');
+      const decisionName = readdirSync(join(opts.runDir, 'stages', opts.stageId))
+        .find((name) => name.startsWith('scope_revision_decision_attempt_'));
+      expect(prompt).toContain(`stages/${opts.stageId}/${decisionName}`);
+      expect(prompt).not.toContain('This attempt stops at the control boundary');
       writeFileSync(testPath, 'export const invariant = "authorized-after-revision";\n');
       return {
         output: 'corrected after scope re-dispatch', exitCode: 0, duration_ms: 2,

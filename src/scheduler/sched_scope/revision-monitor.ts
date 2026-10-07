@@ -1,6 +1,6 @@
 // Boundary: Observe one revision transport slot per stage and publish immutable policy decisions before activating capabilities; receive only the validation-baseline reader.
 import { type StoreState, readRunState, readStageStatus, runDir } from "../../store.js";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { readFileSync, mkdirSync, watch } from "node:fs";
 import { validationPathImpacts, type ProjectValidationBaseline } from "../../project-validation.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
@@ -149,17 +149,9 @@ export function createScopeRevisionMonitor(services: ScopeRevisionMonitorService
             runDir: runDirPath,
             target: stage.id,
             source: 'scheduler',
-            attemptIndex: request.attemptIndex,
-            knownStageIds: input.selected.map((candidate) => candidate.id),
-            body: `Scope revision ${request.requestId} was accepted. This attempt stops at the control boundary and the same stage will be re-dispatched with effective scope ${JSON.stringify(attemptContext.effectiveScope)}.${consequence ?? ''}`,
-          });
-          appendGuidanceEnvelope({
-            runDir: runDirPath,
-            target: stage.id,
-            source: 'scheduler',
             attemptIndex: request.attemptIndex + 1,
             knownStageIds: input.selected.map((candidate) => candidate.id),
-            body: `Scope revision ${request.requestId} was accepted for execution ${request.attemptIndex}. Continue the stage work with effective scope ${JSON.stringify(attemptContext.effectiveScope)}; read the durable decision for the exact added paths.${consequence ?? ''}`,
+            body: `# Accepted scope revision\nContinue the stage work in execution ${request.attemptIndex + 1}. Newly admitted paths: ${JSON.stringify(publication.decision.authorizedPaths ?? [])}. Read the run-local decision ${relative(runDirPath, publication.path).replace(/\\/g, '/')} for the exact grant and any denied paths; denied paths remain outside your authority.${consequence ?? ''}`,
           });
         }
         recordRunEvent(input.projectDir, input.runId, {

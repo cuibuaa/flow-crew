@@ -1,15 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   discoverProjectValidation,
   evaluateValidationDelta,
   runProjectValidationBaseline,
+  runValidationCommand,
   type ProjectValidationBaseline,
   type ValidationCommandResult,
   type ValidationFileSystem,
 } from '../src/project-validation.js';
+import { validationEnvironment } from '../src/validation-environment.js';
+import { withEngineCommandBoundary } from '../src/write-boundary.js';
 
 function memoryFs(files: Record<string, string>): ValidationFileSystem {
   return {
@@ -23,6 +26,61 @@ function memoryFs(files: Record<string, string>): ValidationFileSystem {
 }
 
 const root = resolve('portable-project');
+
+describe('project command environment and observer authority', () => {
+  it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'validation-env-'));
+    try {
+      const inherited = { PATH: '/project/bin', PROJECT_INPUT: 'ordinary', HOME: '/ambient',
+        CODEX_HOME: '/ambient/codex', FLOWCREW_LAUNCH_RESULT_PATH: '/ambient/result',
+        FC_SESSION_REUSE: '1', OPENAI_API_KEY: 'fake', NODE_OPTIONS: '--no-warnings',
+        DBUS_SESSION_BUS_ADDRESS: 'fake-bus', XDG_RUNTIME_DIR: '/ambient/runtime' };
+      const ambient = validationEnvironment(scratch, inherited);
+      expect(ambient.env.PROJECT_INPUT).toBe('ordinary');
+      expect(ambient.env.PATH).toBe('/project/bin');
+      expect(ambient.env.HOME).toBe(join(scratch, 'home'));
+      expect(ambient.env.CODEX_HOME).toBe(join(scratch, 'codex'));
+      expect(ambient.env.FC_HOME).toBe(join(scratch, 'home', '.fc'));
+      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBe(join(scratch, 'unavailable.sock'));
+      expect(ambient.removed).toEqual(['CODEX_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'FC_SESSION_REUSE',
+        'FLOWCREW_LAUNCH_RESULT_PATH', 'NODE_OPTIONS', 'OPENAI_API_KEY', 'XDG_RUNTIME_DIR']);
+      for (const name of ['FLOWCREW_LAUNCH_RESULT_PATH', 'FC_SESSION_REUSE', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'DBUS_SESSION_BUS_ADDRESS']) {
+        expect(ambient.env[name]).toBeUndefined();
+      }
+      const explicit = validationEnvironment(scratch, inherited, { HOME: '/read-home',
+        XDG_CONFIG_HOME: '/read-config', PROJECT_INPUT: 'explicit', PROJECT_API_KEY: 'fake' });
+      expect(explicit.env.HOME).toBe('/read-home');
+      expect(explicit.env.XDG_CONFIG_HOME).toBe('/read-config');
+      expect(explicit.env.PROJECT_INPUT).toBe('explicit');
+      expect(explicit.removed).toEqual(['PROJECT_API_KEY']);
+      if (process.platform !== 'win32') {
+        expect(() => validationEnvironment(join(scratch, 'x'.repeat(108)), {}))
+          .toThrow('use a shorter temporary directory (TMPDIR)');
+      }
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform !== 'linux')('narrows nested observers and restores project authority after observation', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'validation-observer-'));
+    const output = join(project, 'output');
+    const request = { role: 'test' as const, command: process.execPath,
+      args: ['-e', "try{require('fs').writeFileSync('output','ok');console.log('ALLOWED')}catch(e){console.log(e.code)}"],
+      display: 'observer write control', cwd: project };
+    try {
+      await withEngineCommandBoundary({ projectDir: project, stageId: '_project', authority: 'project-command' }, async () => {
+        const observed = await withEngineCommandBoundary({ projectDir: project, stageId: '_observer', authority: 'observer' },
+          () => Promise.resolve(runValidationCommand(request)));
+        expect(observed.exitCode, observed.error).toBe(0);
+        expect(observed.stdout?.trim()).toBe('EACCES');
+        expect(existsSync(output)).toBe(false);
+        const ordinary = await runValidationCommand(request);
+        expect(ordinary.exitCode, ordinary.error).toBe(0);
+        expect(ordinary.stdout?.trim()).toBe('ALLOWED');
+        expect(existsSync(output)).toBe(true);
+      });
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+});
 
 describe('configuration-driven project validation baseline', () => {
   it('discovers and runs exactly the declared build, test, and lint scripts with lockfile-selected argv', async () => {

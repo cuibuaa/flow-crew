@@ -1,5 +1,5 @@
 // Boundary: Authenticate attempt/path identity, validate capability expansion against frozen inputs/owners/peers/preimages, and read durable inherited decisions.
-import { type RuntimeConstraintDecisionV1, type ScopeRevisionRequestV1, parseScopeRevisionRequest, scopePathDigest, negotiationIdentity, readConstraintDecision } from "../../runtime-negotiation.js";
+import { type RuntimeConstraintDecisionV1, type ScopeRevisionRequestV1, parseScopeRevisionRequest, scopePathDigest, readAcceptedScopeRevisionDecisions } from "../../runtime-negotiation.js";
 import { SCOPE_REVISION_REQUEST_FILE } from "../../live-constraint-guard.js";
 import { join, basename, relative } from "node:path";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
@@ -9,7 +9,7 @@ import { findScopeConflict, parseDeclaredScope } from "../sched_admission/fronti
 import { normalizedProjectPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
 import { resolveResearchPaths } from "../../research-paths.js";
 import { stableGeneratedScope } from "../../generated-path-policy.js";
-import { firstDeclaredInputScopeConflict, listProjectFilesAt, resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from './path-capabilities.js';
+import { declaredInputScopeConflict, listProjectFilesAt, resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from './path-capabilities.js';
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshot } from './snapshots.js';
 import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
 import { compareRepairFileContents } from './file-images.js';
@@ -102,130 +102,124 @@ export function decideScopeRevision(input: {
   }
   const requestedPaths = [...new Set(normalizedPaths)];
   const requestedScopes = requestedPaths.map(parseDeclaredScope);
+  if (requestedScopes.some((scope) => scope.kind === 'unknown')) {
+    return scopeRevisionRejection(request, priorScope, 'every requested capability must have a valid project-relative scope');
+  }
+  // Reservations are loaded once. An unavailable input inventory cannot prove
+  // any subset safe; path conflicts below, unlike identity failures, are local.
+  let manifest: string | undefined;
   try {
     const state = readRunState(projectDir, runId);
-    if (state.research) {
-      const manifest = normalizedProjectPath(resolveResearchPaths(state.research).manifestFile);
-      if (manifest && requestedScopes.some((scope) => scopeMatchesProjectPath(scope, manifest))) {
-        return scopeRevisionRejection(
-          { ...request, requestedPaths },
-          priorScope,
-          `requested capability contains framework-owned research manifest ${manifest}, which the scheduler rewrites between rounds`,
-        );
-      }
-    }
-  } catch { /* an initialized run is validated by the remaining identity checks */ }
+    if (state.research) manifest = normalizedProjectPath(resolveResearchPaths(state.research).manifestFile);
+  } catch { /* static fixtures may have no run state */ }
+  let declaredInputs: ReturnType<typeof resolveDeclaredInputWriteBindings>;
   try {
     const briefPath = join(runDir(projectDir, runId), 'task_brief.md');
-    const declaredInputs = existsSync(briefPath)
-      ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf-8'))
-      : [];
-    const conflict = firstDeclaredInputScopeConflict(requestedPaths, declaredInputs, projectDir);
-    if (conflict) {
-      return scopeRevisionRejection(
-        { ...request, requestedPaths },
-        priorScope,
-        `requested write capability ${JSON.stringify(conflict.scope)} overlaps declared read-only input ${conflict.inputPath} (${conflict.inputKind}, ${conflict.comparison})`,
-      );
-    }
+    declaredInputs = existsSync(briefPath)
+      ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf-8')) : [];
   } catch (error) {
-    return scopeRevisionRejection(
-      { ...request, requestedPaths },
-      priorScope,
-      `could not verify declared-input reservations: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    return scopeRevisionRejection(request, priorScope,
+      `could not verify declared-input reservations: ${error instanceof Error ? error.message : String(error)}`);
   }
+  let terminalOwners: Record<string, string> = {};
   try {
-    const admission = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'dispatch_admission.json'), 'utf-8')) as {
+    terminalOwners = (JSON.parse(readFileSync(join(runDir(projectDir, runId), 'dispatch_admission.json'), 'utf-8')) as {
       terminalOwners?: Record<string, string>;
-    };
-    for (const [terminalPath, ownerId] of Object.entries(admission.terminalOwners ?? {})) {
-      if (ownerId === stage.id) continue;
-      const normalizedTerminal = normalizedProjectPath(terminalPath);
-      if (normalizedTerminal && requestedScopes.some((scope) => scopeMatchesProjectPath(scope, normalizedTerminal))) {
-        return scopeRevisionRejection(
-          { ...request, requestedPaths },
-          priorScope,
-          `requested capability contains terminal path ${terminalPath}, whose admitted owner is ${ownerId}; scope revision cannot transfer terminal ownership`,
-          ownerId,
-        );
-      }
-    }
+    }).terminalOwners ?? {};
   } catch { /* static workflows may have no dispatch admission artifact */ }
   const priorScopes = (priorScope ?? []).map(parseDeclaredScope);
-  const alreadyAuthorizedPaths = requestedPaths.filter((_path, index) => (
-    scopeRequestAlreadyAuthorized(requestedScopes[index], priorScopes)
-  ));
-  const alreadyAuthorized = new Set(alreadyAuthorizedPaths);
-  const capabilityRequestPaths = requestedPaths.filter((path) => !alreadyAuthorized.has(path));
-  const effectiveScope = [...new Set([...(priorScope ?? []), ...capabilityRequestPaths])];
-  const expanded: StageConfig = { ...stage, scope: effectiveScope };
-  for (const peer of activePeers) {
-    const conflict = findScopeConflict(expanded, peer);
-    if (conflict) {
-      return scopeRevisionRejection(
-        { ...request, requestedPaths },
-        priorScope,
-        `scope revision conflicts with running peer ${peer.id}: ${conflict.reason}`,
-        peer.id,
-      );
+  // An invalid active admission is not repaired by granting a subset.
+  const priorConflicts = (priorScope?.length ? activePeers : []).flatMap((peer) => {
+    const conflict = findScopeConflict({ ...stage, scope: priorScope ?? [] }, peer);
+    return conflict ? [{ conflictingStageId: peer.id, reason: `existing scope conflicts with running peer ${peer.id}: ${conflict.reason}` }] : [];
+  });
+  if (priorConflicts.length > 0) return {
+    ...scopeRevisionRejection(request, priorScope, priorConflicts.map((conflict) => conflict.reason).join('; '), priorConflicts[0].conflictingStageId),
+    priorScopeConflicts: priorConflicts,
+  };
+  const conflicts: Array<{ path: string; reason: string; conflictingStageId?: string }> = [];
+  const authorizedPaths: string[] = [];
+  const alreadyAuthorizedPaths: string[] = [];
+  const changedSinceSnapshot = snapshot ? changedProjectPathsSinceSnapshot(snapshot, projectDir) : [];
+  for (let index = 0; index < requestedPaths.length; index++) {
+    const path = requestedPaths[index], scope = requestedScopes[index];
+    const deny = (reason: string, conflictingStageId?: string): void => {
+      conflicts.push({ path, reason, ...(conflictingStageId ? { conflictingStageId } : {}) });
+    };
+    const conflictStart = conflicts.length;
+    if (manifest && scopeMatchesProjectPath(scope, manifest)) {
+      deny(`requested capability contains framework-owned research manifest ${manifest}, which the scheduler rewrites between rounds`);
     }
-  }
-  if (snapshot) {
-    const capabilityRequestScopes = capabilityRequestPaths.map(parseDeclaredScope);
-    const requestedCandidates = new Set(capabilityRequestPaths);
-    for (const scope of capabilityRequestScopes) {
-      const root = scope.kind === 'glob' ? scope.directoryPrefix
-        : scope.kind === 'unknown' ? undefined : scope.value;
-      if (!root) continue;
-      for (const path of listProjectFilesAt(projectDir, root)) {
-        if (scopeMatchesProjectPath(scope, path)) requestedCandidates.add(path);
+    for (const input of declaredInputs) {
+      const conflict = declaredInputScopeConflict(path, input, projectDir);
+      if (conflict) deny(`requested write capability ${JSON.stringify(conflict.scope)} overlaps declared read-only input ${conflict.inputPath} (${conflict.inputKind}, ${conflict.comparison})`);
+    }
+    for (const [terminalPath, ownerId] of Object.entries(terminalOwners)) {
+      const normalizedTerminal = normalizedProjectPath(terminalPath);
+      if (ownerId !== stage.id && normalizedTerminal && scopeMatchesProjectPath(scope, normalizedTerminal)) {
+        deny(`requested capability contains terminal path ${terminalPath}, whose admitted owner is ${ownerId}; scope revision cannot transfer terminal ownership`, ownerId);
       }
     }
-    const changedPaths = new Set([...requestedCandidates].filter((path) => compareRepairFileContents(
-      snapshot.files.get(path) ?? baselineImage(snapshot.rollbackBaseline, path),
-      readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path),
-    ) === 'different'));
-    for (const path of changedProjectPathsSinceSnapshot(snapshot, projectDir)) {
-      if (capabilityRequestScopes.some((scope) => scopeMatchesProjectPath(scope, path))) changedPaths.add(path);
+    for (const peer of activePeers) {
+      // Compare every peer capability, not just the first overlapping member.
+      for (const peerScope of peer.scope ?? [undefined]) {
+        const conflict = findScopeConflict({ ...stage, scope: [path] }, {
+          ...peer, scope: peerScope === undefined ? undefined : [peerScope],
+        });
+        if (conflict) deny(`scope revision conflicts with running peer ${peer.id}: ${conflict.reason}`, peer.id);
+      }
     }
-    const unexpectedChange = [...changedPaths].find((path) => {
-      const stableParent = stableGeneratedScope(path);
-      return !stableParent || !capabilityRequestPaths.includes(stableParent);
-    });
-    if (unexpectedChange) {
-      const stableParent = stableGeneratedScope(unexpectedChange);
-      const correction = stableParent
-        ? `Request the stable generated parent ${JSON.stringify(stableParent)} before running the generator, or request this literal before writing it.`
-        : 'Request this capability before writing it, then retry the attempt.';
-      return scopeRevisionRejection(
-        request,
-        priorScope,
-        `requested content changed before scope approval: ${unexpectedChange}. ${correction}`,
-      );
+    const alreadyAuthorized = scopeRequestAlreadyAuthorized(scope, priorScopes);
+    if (snapshot && !alreadyAuthorized) {
+      const candidates = new Set([path]);
+      const root = scope.kind === 'glob' ? scope.directoryPrefix : scope.kind === 'unknown' ? undefined : scope.value;
+      if (root) for (const member of listProjectFilesAt(projectDir, root)) {
+        if (scopeMatchesProjectPath(scope, member)) candidates.add(member);
+      }
+      const changedPaths = new Set([...candidates].filter((member) => compareRepairFileContents(
+        snapshot.files.get(member) ?? baselineImage(snapshot.rollbackBaseline, member),
+        readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, member),
+      ) === 'different'));
+      for (const member of changedSinceSnapshot) if (scopeMatchesProjectPath(scope, member)) changedPaths.add(member);
+      for (const member of [...changedPaths].sort()) {
+        const stableParent = stableGeneratedScope(member);
+        if (stableParent === path) continue;
+        const correction = stableParent
+          ? `Request the stable generated parent ${JSON.stringify(stableParent)} before running the generator, or request this literal before writing it.`
+          : 'Request this capability before writing it, then retry the attempt.';
+        deny(`requested content changed before scope approval: ${member}. ${correction}`);
+      }
+    }
+    if (conflicts.length === conflictStart) {
+      (alreadyAuthorized ? alreadyAuthorizedPaths : authorizedPaths).push(path);
     }
   }
-
-  // Capture the exact preimage before acknowledging the request. This turns the
-  // newly accepted path into first-class repair-diff evidence rather than a
-  // post-hoc scope escape with an unavailable preimage.
-  if (snapshot) {
-    for (const path of capabilityRequestPaths) {
-      snapshot.files.set(path, readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
-    }
+  const rejectedPaths = [...new Set(conflicts.map((conflict) => conflict.path))];
+  const diagnostics = conflicts.length > 0 ? { rejectedPaths, conflicts } : {};
+  if (authorizedPaths.length === 0 && alreadyAuthorizedPaths.length === 0) {
+    return { ...scopeRevisionRejection({ ...request, requestedPaths }, priorScope,
+      conflicts.map((conflict) => `${conflict.path}: ${conflict.reason}`).join('; '),
+      conflicts.find((conflict) => conflict.conflictingStageId)?.conflictingStageId), ...diagnostics };
+  }
+  // Capture only the admitted subset before publication. Withheld capabilities
+  // never become inherited scope or retrospective write authorization.
+  if (snapshot) for (const path of authorizedPaths) {
+    snapshot.files.set(path, readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
   }
   return {
     requestedPaths,
-    authorizedPaths: capabilityRequestPaths,
+    authorizedPaths,
     ...(alreadyAuthorizedPaths.length > 0 ? { alreadyAuthorizedPaths } : {}),
+    ...diagnostics,
     accepted: true,
     decision: 'accepted',
     decidedAt: new Date().toISOString(),
-    policyBasis: capabilityRequestPaths.length === 0
+    policyBasis: (authorizedPaths.length === 0
       ? 'requested paths are already authorized by the stable effective scope'
-      : 'current attempt, unchanged requested-content preimage or recognized stable generated-parent churn, valid project path, and no active-peer scope conflict',
+      : 'current attempt, unchanged requested-content preimage or recognized stable generated-parent churn, valid project path, and no active-peer scope conflict')
+      + (rejectedPaths.length ? `; ${rejectedPaths.length} requested capabilities withheld: ${conflicts.map((conflict) => `${conflict.path}: ${conflict.reason}`).join('; ')}` : ''),
     priorScope,
-    effectiveScope,
+    effectiveScope: [...new Set([...(priorScope ?? []), ...authorizedPaths])],
   };
 }
 
@@ -249,35 +243,9 @@ export function acceptedInheritedScope(
   const scope = new Set(stage.scope ?? []);
   const decisionPaths: string[] = [];
   const stagePath = join(runDirPath, 'stages', stage.id);
-  let files: string[] = [];
-  try { files = readdirSync(stagePath).filter((name) => /^scope_revision_decision_.*\.json$/.test(name)).sort(); } catch { /* no earlier decision */ }
-  for (const file of files) {
-    const path = join(stagePath, file);
-    const decision = readConstraintDecision(path);
-    if (!decision || decision.kind !== 'scope_revision' || decision.accepted !== true
-      || decision.decision !== 'accepted' || decision.decidedBy !== 'scheduler-policy'
-      || decision.stageId !== stage.id || decision.runId !== basename(runDirPath)) continue;
-    const requestedPaths = Array.isArray(decision.requestedPaths)
-      ? decision.requestedPaths.filter((value): value is string => typeof value === 'string')
-      : [];
-    if (requestedPaths.length === 0 || decision.pathDigest !== scopePathDigest(requestedPaths)) continue;
-    if ((decision.requestedBy !== 'stage' && decision.requestedBy !== 'operator' && decision.requestedBy !== 'supervisor')
-      || !Number.isSafeInteger(decision.attemptIndex) || typeof decision.reason !== 'string') continue;
-    const persistedRequest: ScopeRevisionRequestV1 = {
-      version: 1, kind: 'scope_revision', requestId: decision.requestId,
-      runId: decision.runId, stageId: decision.stageId, attemptIndex: decision.attemptIndex,
-      requestedBy: decision.requestedBy, reason: decision.reason,
-      requestedPaths, pathDigest: decision.pathDigest,
-    };
-    if (decision.identityDigest !== negotiationIdentity(persistedRequest)) continue;
-    const authorizedPaths = Array.isArray(decision.authorizedPaths)
-      ? decision.authorizedPaths.filter((value): value is string => typeof value === 'string')
-      : requestedPaths;
-    const normalized = authorizedPaths.map(normalizedProjectPath);
-    if (normalized.some((value) => value === undefined)
-      || normalized.some((value) => !requestedPaths.includes(value!))) continue;
-    for (const pathValue of normalized as string[]) scope.add(pathValue);
-    decisionPaths.push(relative(runDirPath, path).replace(/\\/g, '/'));
+  for (const grant of readAcceptedScopeRevisionDecisions(stagePath, { runId: basename(runDirPath), stageId: stage.id })) {
+    for (const path of grant.authorizedPaths) scope.add(path);
+    decisionPaths.push(relative(runDirPath, grant.path).replace(/\\/g, '/'));
   }
   return { scope: [...scope], decisionPaths };
 }

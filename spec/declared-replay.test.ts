@@ -1,7 +1,8 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { basename, join, resolve } from 'node:path';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { ArtifactContractSchema, RecordedArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
 import { captureStageArtifactContractPreimages, inspectStageArtifactContract, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { readRecordedArtifactContract } from '../src/recorded-artifact-contract.js';
@@ -13,13 +14,32 @@ import { runStage } from '../src/worker.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 
 const roots: string[] = [];
+let installedRoot: string | undefined;
+afterAll(() => { if (installedRoot) rmSync(installedRoot, { recursive: true, force: true }); });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const role: AgentConfig = { name: 'fixture', description: '', model: 'default', reasoning_effort: 'default', tools: [], prompt: '' };
 function fixture(vitest = false) {
-  const root = mkdtempSync(join(tmpdir(), 'flowcrew-declared-replay-spec-')); roots.push(root);
+  // One physical installation per spec; each project/run still owns its state.
+  // Parent lookup gives the real collector its dependencies without outward links.
+  if (vitest && !installedRoot) {
+    installedRoot = mkdtempSync(join(tmpdir(), 'flowcrew-declared-replay-tools-'));
+    cpSync(resolve('node_modules'), join(installedRoot, 'node_modules'), {
+      recursive: true, dereference: true,
+      // The replay invokes the resolved CLI directly; executable links and
+      // caches from the source installation are neither inputs nor fixtures.
+      filter: (path) => !['.bin', '.vite', '.vite-temp'].includes(basename(path)),
+    });
+  }
+  const root = mkdtempSync(join(vitest ? installedRoot! : tmpdir(), 'flowcrew-declared-replay-spec-')); roots.push(root);
   const project = join(root, 'project'), directory = join(root, 'run'); mkdirSync(project); mkdirSync(directory);
   writeFileSync(join(project, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'vitest run' } }));
-  if (vitest) cpSync(resolve('node_modules'), join(project, 'node_modules'), { recursive: true });
+  if (vitest) {
+    // Vite finds this writable local cache directory; packages resolve in the
+    // physically contained parent installation, which the replay cannot write.
+    mkdirSync(join(project, 'node_modules'));
+    expect(realpathSync(createRequire(join(project, 'package.json')).resolve('vitest/package.json')))
+      .toBe(join(installedRoot!, 'node_modules', 'vitest', 'package.json'));
+  }
   writeFileSync(join(project, 'vitest.config.mjs'), `export default {cacheDir:${JSON.stringify(join(project, '.cache/vitest'))},test:{include:['*.test.ts'],pool:'forks',maxWorkers:1,fileParallelism:false,testTimeout:30000}};`);
   return { root, project, directory };
 }

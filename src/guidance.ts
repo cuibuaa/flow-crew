@@ -370,6 +370,14 @@ export function routePendingOperatorGuidanceToStage(
   }
 }
 
+/** Retain delivery receipts verbatim while omitting superseded scheduler scope
+ * notices from a later invocation. Operator rulings keep their original binding. */
+export function guidanceForExecution(entries: readonly GuidanceEnvelope[], attemptIndex: number): GuidanceEnvelope[] {
+  return entries.filter((entry) => !(entry.source === 'scheduler'
+    && entry.attemptIndex !== undefined && entry.attemptIndex < attemptIndex
+    && /^(?:Scope revision [^\s]+ was accepted\b|# Accepted scope revision\b)/.test(entry.body)));
+}
+
 export function renderGuidanceDelivery(entries: readonly GuidanceEnvelope[]): string {
   return entries.map(renderGuidanceEnvelope).join('\n\n');
 }

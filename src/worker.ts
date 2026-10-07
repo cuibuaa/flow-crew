@@ -37,9 +37,11 @@ import {
 } from './attempt-deadline.js';
 import {
   guidanceForStageFromText,
+  guidanceForExecution,
   appendGuidanceEnvelope,
   readGuidanceForStage,
   renderGuidanceDelivery,
+  renderGuidanceEnvelope,
   routePendingOperatorGuidanceToStage,
 } from './guidance.js';
 import { recordRunEvent } from './run-events.js';
@@ -65,6 +67,7 @@ import {
   writeStageArtifactContractAudit,
 } from './stage-artifact-contract.js';
 import { readRecordedArtifactContract } from './recorded-artifact-contract.js';
+import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
 
 function getDefaultTimeout(projectDir: string): string {
   return String(loadProjectDefaults(projectDir).timeout_ms);
@@ -395,8 +398,9 @@ async function runStageWithWriterLease(
     }
   } catch { /* first execution has no delivery receipt */ }
   const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
-    const rendered = renderGuidanceDelivery(entries);
-    const historical = entries.some((entry) => entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex);
+    const current = guidanceForExecution(entries, attemptIndex);
+    const rendered = renderGuidanceDelivery(current);
+    const historical = current.some((entry) => entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex);
     return rendered
       ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${historical ? 'Historical execution notices retain their original attempt binding; current duties and revalidated capability govern this execution.\n' : ''}${rendered}\n\n`
         + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
@@ -411,10 +415,6 @@ async function runStageWithWriterLease(
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
   const priorAttempt = runningStatus.attempts?.at(-2);
-  if (priorAttempt?.status === 'suspended'
-    && (priorAttempt.constraintAudit?.acceptedRevisionCount ?? 0) > 0) {
-    prompt += `\n\n# Accepted scope revision\nThe prior execution stopped at its scope-control boundary. Continue the stage work in execution ${attemptIndex} with the accepted effective project-write scope ${JSON.stringify(opts.projectWriteScope ?? [])}. Read the durable scope revision decision for the exact added paths.`;
-  }
   if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended')) {
     prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${opts.runDir}/stages/${opts.stageId}/live.log for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}. Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
   }
@@ -466,6 +466,7 @@ async function runStageWithWriterLease(
       persistGuidanceReceipt();
     } catch { checkFailed = true; }
     if (!entries.length && !checkFailed && boundary !== 'attempt_start' && boundary !== 'adapter_invocation') return entries;
+    const currentDelivery = guidanceForExecution(boundary === 'attempt_start' ? deliveredGuidance : entries, attemptIndex);
     recordRunEvent(opts.projectDir, opts.runId, {
       type: 'guidance_delivery_checked',
       runId: opts.runId,
@@ -477,14 +478,12 @@ async function runStageWithWriterLease(
       ...(boundaryInvocationIndex === undefined ? {} : { invocationIndex: boundaryInvocationIndex }),
       ...(commandEvent?.id ? { commandId: commandEvent.id } : {}),
       ...(checkFailed ? { checkFailed: true } : {}),
-      guidanceIds: boundary === 'attempt_start'
-        ? [...deliveredGuidanceIds]
-        : entries.map((entry) => entry.id),
-      delivered: boundary === 'attempt_start' ? deliveredGuidanceIds.size > 0 : entries.length > 0,
+      guidanceIds: currentDelivery.map((entry) => entry.id),
+      delivered: currentDelivery.length > 0,
       detail: entries.length > 0
         ? `delivered ${entries.length} new guidance envelope${entries.length === 1 ? '' : 's'} at ${boundary}`
-        : boundary === 'attempt_start' && deliveredGuidanceIds.size > 0
-          ? `confirmed ${deliveredGuidanceIds.size} guidance envelope${deliveredGuidanceIds.size === 1 ? '' : 's'} at attempt start`
+        : boundary === 'attempt_start' && currentDelivery.length > 0
+          ? `confirmed ${currentDelivery.length} guidance envelope${currentDelivery.length === 1 ? '' : 's'} at attempt start`
           : `no new guidance available at ${boundary}`,
       source: 'worker',
     });
@@ -602,7 +601,7 @@ async function runStageWithWriterLease(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt';
+    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt' | 'scope_revision';
     command: CommandLifecycleEvent;
     guidance: ReturnType<typeof readGuidanceForStage>;
     interrupt?: StageCommandInterruptSignal;
@@ -841,13 +840,14 @@ async function runStageWithWriterLease(
       effectiveBudgetMs,
     });
     invocationIndex++;
-    const invocationGuidance = consumeNewGuidance('adapter_invocation', invocationIndex);
+    consumeNewGuidance('adapter_invocation', invocationIndex);
     const continuation = continuations.get(selectedAdapter);
     // A fresh child (including a failed-resume fallback) needs both its duties
     // and the current local correction; the thread only carries the former.
-    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}`;
+    const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
+    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}`;
     const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
-      ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}\n\n${deadlineContext()}`
+      ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}`
       : fullPrompt;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
@@ -861,7 +861,7 @@ async function runStageWithWriterLease(
         invocationIndex: ++inputRecordIndex, boundary,
         adapter: selectedRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
         model: input.model ?? selectedRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
-        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: [...deliveredGuidanceIds],
+        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: guidanceForExecution(deliveredGuidance, attemptIndex).map((entry) => entry.id),
       });
     };
     // input.md remains a compatible latest alias; immutable records carry exact inputs.
@@ -1004,8 +1004,19 @@ async function runStageWithWriterLease(
         'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
       );
       if (guidance.length > 0 && !commandBoundaryControl) commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
-      if (commandBoundaryControl?.kind === 'guidance' && activeCommands.size === 0 && !invocationAbortController.signal.aborted) {
-        invocationAbortController.abort('guidance_delivery_at_tool_completion');
+      // Scope admission is an immutable control fact, independent of which
+      // operator guidance happened to arrive first. Finish every active tool
+      // and wait for child closure before re-admitting a new execution.
+      if (activeCommands.size === 0 && commandBoundaryControl?.kind !== 'operator_interrupt'
+        && readAcceptedScopeRevisionDecisions(join(opts.runDir, 'stages', opts.stageId), {
+          runId: opts.runId, stageId: opts.stageId, attemptIndex,
+        }).length > 0) {
+        commandBoundaryControl = { kind: 'scope_revision', command: completed, guidance: [] };
+      }
+      if ((commandBoundaryControl?.kind === 'guidance' || commandBoundaryControl?.kind === 'scope_revision')
+        && activeCommands.size === 0 && !invocationAbortController.signal.aborted) {
+        invocationAbortController.abort(commandBoundaryControl.kind === 'scope_revision'
+          ? 'scope_revision_at_tool_completion' : 'guidance_delivery_at_tool_completion');
       }
     };
     latestLiveConstraintResult = undefined;
@@ -1130,18 +1141,17 @@ async function runStageWithWriterLease(
       const current = await invokeAdapter(selectedAdapter, selectedRole, invocationPrompt);
       combined = mergeInvocationTelemetry(combined, current);
       const commandControl = commandBoundaryControl;
+      // No correction may launch another child until the prior child is known
+      // closed; a scope grant cannot turn missing closure into clean suspension.
+      if (childCloseUnverified) return combined;
       if (commandControl && !aggregateAbortSignal.aborted) {
         activeCommands.delete(commandControl.command.id);
-        // The scheduler has already persisted the accepted decision before
-        // publishing this guidance. The current tool has settled and the
-        // adapter child has closed, so no same-attempt reinvocation is needed.
-        // The scheduler will suspend this successful attempt and re-dispatch
-        // with the inherited capability after its normal reconciliation.
-        const acceptedScopeRevision = commandControl.guidance.some((entry) => (
-          entry.source === 'scheduler'
-          && /^Scope revision [^\s]+ was accepted\. This attempt stops at the control boundary\b/.test(entry.body)
-        ));
-        if (acceptedScopeRevision && commandControl.kind !== 'operator_interrupt'
+        // A durable current-execution grant stops at the closed child boundary.
+        // The scheduler alone re-admits inherited capability for the next child.
+        if (commandControl.kind === 'scope_revision'
+            && (combined.writeBoundary?.kind === 'refused'
+              || (combined.exitCode !== 0 && combined.exitCode !== 137))) return combined;
+        if (commandControl.kind === 'scope_revision'
             && !latestLiveConstraintResult?.monitorFailure
             && !(latestLiveConstraintResult?.incidents.length)) {
           scopeRevisionBoundaryReached = true;
@@ -1179,7 +1189,7 @@ async function runStageWithWriterLease(
           : commandControl.kind === 'timeout_projection'
             ? 'Command timeout projection'
             : 'Live guidance delivered at tool completion';
-        invocationPrompt = `# ${label}\n${guidanceBlock(deliveredGuidance)}`;
+        invocationPrompt = `# ${label}`;
         try {
           appendFileSync(
             liveLogPath,
@@ -1231,7 +1241,7 @@ async function runStageWithWriterLease(
         };
       }
       liveReinvocations++;
-      invocationPrompt = `# Live constraint correction\n${instructions.join('\n')}\n${guidanceBlock(deliveredGuidance)}`;
+      invocationPrompt = `# Live constraint correction\n${instructions.join('\n')}`;
       try {
         appendFileSync(
           liveLogPath,

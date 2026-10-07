@@ -638,12 +638,17 @@ still represent three historical states:
 
 A stage that needs a path outside its declared scope writes one JSON object to
 `stages/<stageId>/scope_revision_request.json`, then waits for
-`scope_revision_decision_<requestId>.json` in the same directory before writing the new
-path. The request, the decision, and the outcome are all recorded in the run directory —
+`scope_revision_decision_attempt_<attemptIndex>_<identityDigest>.json` in the same
+directory. Match its `runId`, `stageId`, `attemptIndex`, `requestId` and `pathDigest`
+to the exact request; a filename match alone grants no authority. The request, the decision, and the outcome are all recorded in the run directory —
 this is the mechanism behind "a stage that needs something outside its boundary can ask"
 mentioned in the project README.
-The worker yields while waiting for that exact request ID. The scheduler wakes it through
-the decision file plus a bounded fallback check; an agent must not implement a tight poll.
+The worker consumes the bound durable decision at command completion and waits for
+child closure. An accepted grant suspends the execution; a later execution inherits
+only `authorizedPaths` after the scheduler revalidates them against the current peers.
+A partial grant leaves denied paths outside the scope and records every conflict owner.
+The scheduler watches the directory with a bounded fallback check; an agent must not
+implement a tight poll.
 A mismatched run, stage, execution index, or path digest receives a rejected decision file.
 An accepted revision is inherited and revalidated by later executions of the same stage.
 

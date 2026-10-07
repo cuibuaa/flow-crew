@@ -483,7 +483,11 @@ describe('independent engine-remediation verification', () => {
           decisionPath = await waitForDecision(directory);
           return { output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
         }
-        expect(prompt).toContain('Scope revision ordinary-control was accepted');
+        expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+        expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
+        expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([requestedPath])}`);
+        expect(prompt).toContain(`stages/${options.stageId}/${basename(decisionPath)}`);
+        expect(prompt).not.toContain('This attempt stops at the control boundary');
         write(join(projectDir, requestedPath), 'ordinary report\n');
         return { output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' };
       } },
@@ -493,7 +497,10 @@ describe('independent engine-remediation verification', () => {
     const decision = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
     expect(final.status).toBe('complete');
     expect(calls).toBe(2);
-    expect(decision).toMatchObject({ accepted: true, decision: 'accepted', authorizedPaths: [requestedPath] });
+    expect(decision).toMatchObject({
+      accepted: true, decision: 'accepted', requestId: 'ordinary-control',
+      authorizedPaths: [requestedPath], pathDigest: scopePathDigest([requestedPath]),
+    });
     expect(readRunEvents(projectDir, final.runId)).toContainEqual(expect.objectContaining({
       type: 'scope_revision_decided', stageId: 'work', decision: 'accepted',
     }));

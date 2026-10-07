@@ -248,6 +248,13 @@ describe('UX/performance engine-loop evidence replays', () => {
         return { output: 'force technical retry', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
       expect(prompt).toContain(JSON.stringify(['src/declared.ts', added]));
+      expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+      expect(prompt).toContain(`Continue the stage work in execution ${opts.attemptIndex}`);
+      expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([added])}`);
+      const decisionName = readdirSync(stageDirectory)
+        .find((name) => name.startsWith('scope_revision_decision_attempt_'));
+      expect(prompt).toContain(`stages/${opts.stageId}/${decisionName}`);
+      expect(prompt).not.toContain('This attempt stops at the control boundary');
       mkdirSync(join(projectDir, 'src'), { recursive: true });
       writeFileSync(join(projectDir, added), 'inherited capability\n');
       return { output: 'retry used inherited scope', exitCode: 0, duration_ms: 1, writes: [added], writeAttribution: 'structured' };
@@ -262,9 +269,9 @@ describe('UX/performance engine-loop evidence replays', () => {
     const events = readRunEvents(projectDir, created.runId);
     expect(events.filter((event) => event.type === 'scope_revision_requested')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'scope_revision_decided')).toHaveLength(1);
-    // One accepted decision writes an attempt-bound stop notice and a
-    // continuation notice for the re-dispatched execution.
-    expect(events.filter((event) => event.type === 'guidance_written' && event.stageId === 'work')).toHaveLength(2);
+    // The durable decision stops the current attempt; only its next-execution
+    // continuation needs guidance, including when that execution is a retry.
+    expect(events.filter((event) => event.type === 'guidance_written' && event.stageId === 'work')).toHaveLength(1);
   }, 15_000);
 
   it('unchanged-base seam item 3: the recorded direct sidecar load and shared-slot existence assertion are rejected for every role', () => {

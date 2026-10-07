@@ -63,7 +63,15 @@ export function engineCommandDirectory(request: object): string | undefined {
  * text. Pre-admission commands have a private anchor; nested calls inherit the
  * admitted policy rather than replacing it with broader permissions. */
 export async function withEngineCommandBoundary<T>(input: EngineCommandBoundaryInput, action: () => Promise<T>): Promise<T> {
-  if (activeBoundary.getStore()) return action();
+  const parent = activeBoundary.getStore();
+  if (parent) {
+    // Observation is a restriction of the current authority. Keep its run,
+    // receipt identity and scratch, but discard every publication capability.
+    // Nested project commands cannot widen an observer back to a publisher.
+    if (input.authority !== 'observer' || parent.input.authority === 'observer') return action();
+    return activeBoundary.run({ ...parent, input: { ...parent.input, authority: 'observer' },
+      directories: [parent.scratch], files: [] }, action);
+  }
   const anchor = input.runDir ? undefined : mkdtempSync(join(tmpdir(), 'flowcrew-command-authority-'));
   try {
     return await withEngineWriteBoundary({ ...input, runDir: input.runDir ?? anchor!,

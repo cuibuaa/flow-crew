@@ -2,6 +2,7 @@ import { afterAll, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validationEnvironment } from "./src/validation-environment.js";
 
 interface VitestFileIsolation {
   root: string;
@@ -12,6 +13,7 @@ interface VitestFileIsolation {
 
 interface VitestIsolationRegistry {
   roots: Set<string>;
+  environments: Map<string, NodeJS.ProcessEnv>;
   cleanupRoot: (root: string) => void;
   cleanupAll: () => void;
 }
@@ -23,11 +25,14 @@ function getIsolationRegistry(): VitestIsolationRegistry {
   if (existing) return existing;
 
   const roots = new Set<string>();
+  const environments = new Map<string, NodeJS.ProcessEnv>();
   const cleanupRoot = (root: string) => {
     rmSync(root, { recursive: true, force: true });
+    environments.delete(root);
   };
   const registry: VitestIsolationRegistry = {
     roots,
+    environments,
     cleanupRoot,
     cleanupAll: () => {
       for (const root of roots) {
@@ -72,7 +77,14 @@ const previousUserProfile = process.env.USERPROFILE;
 const previousFcHome = process.env.FC_HOME;
 const previousIsolationRoot = process.env.FLOWCREW_VITEST_ROOT;
 const isolation = createVitestFileIsolation();
-const isolatedDaemonSocket = join(isolation.root, "unavailable-daemon.sock");
+
+// Apply the same control/credential separation before loading engine modules.
+// The process already has its test-runner preload; it must not pass that ambient
+// executable injection or a supervised launch channel to project children.
+const testEnvironment = validationEnvironment(isolation.root, process.env);
+const isolatedDaemonSocket = testEnvironment.env.FLOWCREW_DAEMON_SOCKET!;
+for (const name of Object.keys(process.env)) delete process.env[name];
+Object.assign(process.env, testEnvironment.env);
 
 // setupFiles run before the test module graph. HOME covers modules that call
 // homedir() directly; the setter covers store.ts's process-level override.
@@ -81,6 +93,15 @@ process.env.USERPROFILE = isolation.home;
 delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
 process.env.FLOWCREW_DAEMON_SOCKET = isolatedDaemonSocket;
+
+// Capture the setup-owned inputs at the import boundary. Tests examine this
+// construction, rather than requiring any variable from the invoking shell.
+getIsolationRegistry().environments.set(isolation.root, {
+  CODEX_HOME: process.env.CODEX_HOME,
+  XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+  FLOWCREW_LAUNCH_RESULT_PATH: process.env.FLOWCREW_LAUNCH_RESULT_PATH,
+  DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+});
 
 const store = await import("./src/store.js");
 const runEvents = await import("./src/run-events.js");

@@ -14,6 +14,7 @@ import {
   setFcGlobalDir,
   writeRunState,
 } from '../src/store.js';
+import { scopeRevisionContract, scopeRevisionInstruction } from '../src/live-constraint-guard.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
@@ -455,8 +456,9 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
         }
         expect(prompt).toContain('# Accepted scope revision');
         expect(prompt).toContain('Continue the stage work in execution 2');
-        expect(prompt).toContain(`Scope revision synthetic-${shape.stage} was accepted. This attempt stops`);
-        expect(prompt).toContain('Historical execution notices retain their original attempt binding');
+        expect(prompt).not.toContain('This attempt stops at the control boundary');
+        expect(prompt).toContain('Newly admitted paths:');
+        expect(prompt).toContain('scope_revision_decision_');
         for (const path of requestedPaths) {
           mkdirSync(join(projectDir, path, '..'), { recursive: true });
           writeFileSync(join(projectDir, path), `${shape.origin}\n`);
@@ -605,3 +607,81 @@ describe('rejected digest handoff across planner iterations', () => {
     },
   );
 });
+
+// A revision changes the next child, while concurrently held capabilities stay held.
+describe('partial revision at concurrent control boundaries', () => {
+  it('continues with two safe grants, retaining peer ownership and withheld planning feedback', async () => {
+    const paths = ['safe/one.txt', 'shared/one.txt', 'shared/two.txt', 'safe/two.txt'];
+    const stage = (id: string, scope: string[]) => ({ id, scope, role: 'coder', depends_on: [], skills: [],
+      dynamic_dispatch: false, is_gate: false, criterion_refs: [], prompt_template: 'perform independently scoped work',
+      artifact_contract: fixtureArtifactContract(id) });
+    const config: WorkflowConfig = { name: 'concurrent-scope', description: '',
+      defaults: { max_iterations: 1, max_retries: 0 },
+      stages: [stage('work', []), stage('first', ['shared/one.txt']), stage('second', ['shared/two.txt'])] };
+    const created = prepareRun(config, 'name: concurrent-scope\nstages: []');
+    let releasePeers!: () => void;
+    const peerRelease = new Promise<void>((resolve) => { releasePeers = resolve; });
+    const waitingPeers = new Set<string>();
+    let workCalls = 0;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      const summary = summaryResult(opts); if (summary) return summary;
+      if (opts.stageId !== 'work') {
+        waitingPeers.add(opts.stageId);
+        await peerRelease;
+        waitingPeers.delete(opts.stageId);
+        return { output: 'peer closed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      if (++workCalls === 1) {
+        const directory = join(opts.runDir, 'stages', 'work');
+        opts.onCommandLifecycle?.({ phase: 'started', id: 'request', command: 'declare independent capabilities', timestamp: new Date().toISOString() });
+        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({ version: 1, kind: 'scope_revision',
+          requestId: 'concurrent', runId: created.runId, stageId: 'work', attemptIndex: opts.attemptIndex,
+          requestedPaths: paths, pathDigest: scopePathDigest(paths), reason: 'independent work products' }));
+        const decision = await waitForDecision(directory);
+        expect(waitingPeers.size).toBe(2);
+        expect(decision).toMatchObject({ accepted: true, authorizedPaths: ['safe/one.txt', 'safe/two.txt'],
+          rejectedPaths: ['shared/one.txt', 'shared/two.txt'], effectiveScope: ['safe/one.txt', 'safe/two.txt'] });
+        opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
+        return { output: 'closed at revision boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      expect(opts.attemptIndex).toBe(2);
+      expect(waitingPeers.size).toBe(2);
+      expect(prompt).toContain('Declared project-write scope: ["safe/one.txt","safe/two.txt"]');
+      expect(prompt).not.toContain('This attempt stops at the control boundary');
+      mkdirSync(join(projectDir, 'safe'), { recursive: true });
+      for (const path of ['safe/one.txt', 'safe/two.txt']) writeFileSync(join(projectDir, path), 'safe grant\n');
+      releasePeers();
+      return { output: 'safe subset produced; withheld paths require planning', exitCode: 0, duration_ms: 1,
+        writes: ['safe/one.txt', 'safe/two.txt'], writeAttribution: 'structured' };
+    } };
+    // A failed expectation must also release these test-owned waiters.
+    const cleanupTimer = setTimeout(releasePeers, 5000);
+    try {
+      await runWorkflow(config, 'name: concurrent-scope', projectDir, adapter, new Map(), undefined,
+        writeRoles('coder'), created.runId, 'produce safe outputs and report withheld work', true);
+      const status = readStageStatus(projectDir, created.runId, 'work');
+      expect(workCalls).toBe(2);
+      expect(status.attempts?.map((attempt) => attempt.status)).toEqual(['suspended', 'complete']);
+      const audit = readJson(join(created.runDirPath, status.attempts![0].constraintAudit!.path));
+      const accepted = audit.stateTransitions[0].transitions.find((transition: { event: string }) => transition.event === 'policy_accepted');
+      expect(accepted.authorizedRequestPaths).toEqual(['safe/one.txt', 'safe/two.txt']);
+      const planning = readdirSync(created.runDirPath).filter((file) => /^scope_negotiation_input_.*\.json$/.test(file));
+      expect(planning).toHaveLength(1);
+      expect(readJson(join(created.runDirPath, planning[0])).requestedPaths).toEqual(['shared/one.txt', 'shared/two.txt']);
+      expect(existsSync(join(projectDir, 'safe/one.txt'))).toBe(true);
+      expect(existsSync(join(projectDir, 'shared/one.txt'))).toBe(false);
+    } finally { clearTimeout(cleanupTimer); releasePeers(); }
+  });
+});
+
+ it('addresses the durable decision outlet and binds a partial grant to later re-admission', () => {
+  const input = { runDir: 'private-run', runId: 'private-id', stageId: 'work', attemptIndex: 3,
+    scope: [], scopePresence: 'present' as const, gate: false };
+  for (const prompt of [scopeRevisionContract(input), scopeRevisionInstruction({ ...input, violatingPaths: ['product.txt'] })]) {
+    expect(prompt).toContain('scope_revision_decision_attempt_3_*.json');
+    expect(prompt).not.toContain('scope_revision_decision_<requestId>.json');
+    expect(prompt).toContain('runId, stageId, attemptIndex, requestId and pathDigest');
+    expect(prompt).toContain('only a later re-admitted execution may write newly authorizedPaths');
+    expect(prompt).toContain('Denied paths remain outside your authority');
+  }
+ });

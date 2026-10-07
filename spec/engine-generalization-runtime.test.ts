@@ -53,6 +53,7 @@ import {
 } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { settleGateRetries } from '../src/scheduler/sched_loop/gate-loop.js';
 
 const roots: string[] = [];
 const originalStateRoot = fcGlobalDir();
@@ -198,6 +199,64 @@ afterEach(() => {
 });
 
 describe('engine generalization runtime bindings', () => {
+  it.each(['regression', 'authored-rejection'])('refuses static completion after %s despite completed execution', async (failure) => {
+    const { projectDir, agentsDir } = seedProject('static-gate-acceptance', 'qa');
+    const gate = stage({ id: 'qa', role: 'qa', is_gate: true });
+    const workflow: WorkflowConfig = { name: 'static-gate-acceptance', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate] };
+    const created = createRun(projectDir, workflow.name, `name: ${workflow.name}`, ['qa']);
+    const command = join(projectDir, 'validation.cjs');
+    writeFileSync(command, failure === 'regression'
+      ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1'
+      : 'console.log("ok")');
+    const baseline = await runProjectValidationBaseline(projectDir, {
+      commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath, args: [command], display: `private ${role}` })),
+      runCommand: validationRunner(0),
+    });
+    writeValidationSnapshot(created.runDirPath, baseline);
+    let reviews = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      const summary = summaryResult(opts); if (summary) return summary;
+      reviews++;
+      writeFileSync(join(opts.runDir, 'verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
+      return { output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' };
+    } };
+    const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
+      created.runId, '# Require accepted gates.', true, false);
+    expect(final.status).toBe('incomplete');
+    expect(final.stages.qa.status).toBe('complete');
+    expect(reviews).toBe(1);
+    expect(final.stages.qa.attempts).toHaveLength(1);
+  });
+  it.each([false, true])('settles mechanical validation for dynamic=%s without another authored review', async (dynamic) => {
+    const { projectDir, agentsDir } = seedProject('gate-settlement-parity');
+    const created = createRun(projectDir, 'gate-settlement-parity', 'name: gate-settlement-parity', ['qa']);
+    const at = new Date().toISOString();
+    const status = { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] };
+    writeStageStatus(projectDir, created.runId, 'qa', status);
+    const state = readRunState(projectDir, created.runId);
+    state.status = 'running'; state.stages.qa = status; state.maxRetries = 0;
+    writeRunState(projectDir, created.runId, state);
+    const command = join(projectDir, 'validation.cjs');
+    writeFileSync(command, 'console.log("ok")');
+    const baseline = await runProjectValidationBaseline(projectDir, {
+      commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath, args: [command], display: `private ${role}` })),
+      runCommand: validationRunner(0),
+    });
+    writeValidationSnapshot(created.runDirPath, baseline);
+    const verdict = '{"pass":true,"reason":"Authored review remains valid"}';
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: 1, stdout: 'unparseable failure' }) });
+    const gate = stage({ id: 'qa', is_gate: true });
+    const workflow: WorkflowConfig = { name: 'gate-settlement-parity', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate] };
+    const adapter: Adapter = { run: async () => { throw new Error('Mechanical settlement must preserve the authored review'); } };
+    await settleGateRetries(state, [gate], 1, dynamic ? ['qa'] : [], new Set(), new Map(), projectDir, created.runId, created.runDirPath,
+      workflow, adapter, new Map(), agentsDir, new Map());
+    const settled = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    expect(settled.pass).toBe(true); expect(settled.validationAttemptIndex).toBe(2);
+    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('unparseable failure');
+    expect(readRunState(projectDir, created.runId).stages.qa.attempts).toEqual(status.attempts);
+  });
   it('settles incomplete validation once without replacing its authored gate review', async () => {
     const { projectDir } = seedProject('validation-only');
     const created = createRun(projectDir, 'validation-only', 'name: validation-only', ['qa']);
@@ -672,7 +731,7 @@ describe('engine generalization runtime bindings', () => {
       true,
     );
     expect(calls).toBe(2);
-    expect(redispatchPrompt).toContain('Scope revision validation-input was accepted');
+    expect(redispatchPrompt).toContain('# Accepted scope revision');
     expect(redispatchPrompt).toContain('spec/new-audit.test.ts -> test command "npm run test"');
     expect(redispatchPrompt).toContain('3 research rounds remain');
     expect(redispatchPrompt).toContain('new failing identifier will block acceptance');

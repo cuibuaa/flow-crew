@@ -716,7 +716,11 @@ describe('engine controls round replays', () => {
               exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured',
             };
           }
-          expect(prompt).toContain(`Scope revision ${requestId} was accepted`);
+          expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+          expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
+          expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([family.expectedScope])}`);
+          expect(prompt).toContain(`stages/${options.stageId}/scope_revision_decision_attempt_1_${decision?.identityDigest}.json`);
+          expect(prompt).not.toContain('This attempt stops at the control boundary');
           for (const path of [family.exactPath, family.siblingPath, family.futurePath]) {
             write(join(projectDir, path), `${path}\n`);
           }
@@ -738,6 +742,7 @@ describe('engine controls round replays', () => {
       expect(invocationCount).toBe(2);
       expect(decision).toMatchObject({
         accepted: true,
+        requestId,
         requestedPaths: [family.expectedScope],
         authorizedPaths: [family.expectedScope],
         effectiveScope: [family.expectedScope],

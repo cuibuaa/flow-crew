@@ -46,6 +46,12 @@ export function scopeRevisionPathsForViolations(paths: readonly string[]): strin
   }))].sort();
 }
 
+function scopeDecisionWaitInstruction(attemptIndex: ScopeRevisionContractInput['attemptIndex']): string {
+  return `Wait without hot-polling: continue independent work, or inspect scope_revision_decision_attempt_${attemptIndex}_*.json in this stage directory at most once per second, bounded by the remaining execution deadline. `
+    + 'Match the decision runId, stageId, attemptIndex, requestId and pathDigest to your exact request; the scheduler publishes one durable decision and watches the directory. '
+    + 'An accepted decision ends the current execution at a command completion after child closure; only a later re-admitted execution may write newly authorizedPaths. Denied paths remain outside your authority. ';
+}
+
 /** One byte-stable source for the ordinary prompt and live/post-audit guidance. */
 export function scopeRevisionContract(input: ScopeRevisionContractInput): string {
   const gateIsolation = input.gate
@@ -58,8 +64,7 @@ export function scopeRevisionContract(input: ScopeRevisionContractInput): string
     + `"attemptIndex":${input.attemptIndex === '<current execution index>' ? '<current execution index>' : input.attemptIndex},"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
     + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/execution/path binding. `
     + `Accepted paths from an earlier execution of this same stage remain in the effective scope after the scheduler revalidates them against the current batch. `
-    + `Wait without hot-polling: continue independent work, or check for scope_revision_decision_<requestId>.json at most once per second, bounded by the remaining execution deadline; the scheduler also watches the directory and publishes one durable decision. `
-    + `Write the new path only when accepted; `
+    + scopeDecisionWaitInstruction(input.attemptIndex)
     + `a rejection is an auditable request to stop or re-plan, not permission to bypass scope with casts or indirection.`
     + gateIsolation;
 }
@@ -80,7 +85,8 @@ export function scopeRevisionInstruction(input: ScopeRevisionContractInput & {
     + `If the declared work requires ${paths.length === 1 ? 'it' : 'them'}, write exactly one request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`
     + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(requestedPaths)},"pathDigest":"${digest}",`
-    + `"reason":"<why the declared work requires it>"}. Wait without hot-polling for scope_revision_decision_<requestId>.json and write only after acceptance. `
+    + `"reason":"<why the declared work requires it>"}. `
+    + scopeDecisionWaitInstruction(input.attemptIndex)
     + `This is the same instruction recorded by the post-attempt constraint audit, which remains the backstop.`;
 }
 
