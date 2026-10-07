@@ -56,10 +56,5 @@ prompt: |
   - `{run_dir}/knowledge_graph.json` — existing findings / dead-ends; do NOT repeat dead-end approaches
   - On retry (prompt starts with "RETRY FIX (attempt N):") — read your own previous output at the path given and take a DIFFERENT approach
 
-  # Knowledge graph updates
-  If `{run_dir}/knowledge_graph.json` exists, after delivering append a result node:
-  `{"id": "<random_hex>", "type": "result", "label": "<metric: value>", "score": <number>, "timestamp": "<ISO>"}`
-  and an edge from this result to the approach it measures.
-
   # Failure
   If you cannot complete: in Caveats give (a) exact approach tried, (b) exact error + file/line, (c) suspected root cause, (d) different approach to try next. Do not leave a partial implementation without that block.

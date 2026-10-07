@@ -24,14 +24,7 @@ import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import {
-  runWorkflow,
-  diagnoseEmptyDispatch,
-  decideEmptyDispatchAction,
-  decideRejectAction,
-  buildRetryPreamble,
-  type WorkflowConfig,
-} from '../../src/scheduler.js';
+import { runWorkflow, diagnoseEmptyDispatch, decideEmptyDispatchAction, buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
 import { SUPERVISOR_VERDICTS, parseSupervisorVerdict } from '../../src/supervisor.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
 import { createRun, readRunState, runDir, writeRunState } from '../../src/store.js';
@@ -408,109 +401,4 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(audit.rolledBackWrites).toContain('src/generated.ts');
     expect(audit.terminalDurableScope).toEqual(['docs/final.md']);
   }, 60_000);
-});
-
-// =====================================================================================
-// FIX 2 — supervisor REJECT verdict
-// =====================================================================================
-describe('FIX 2 — REJECT is a first-class supervisor verdict', () => {
-  it('REJECT is in the verdict vocabulary and parses', () => {
-    expect(SUPERVISOR_VERDICTS.map(v => v.id)).toContain('REJECT');
-    const parsed = parseSupervisorVerdict('{"verdict":"REJECT","target_stage":"work","reason":"verdict claims pass but artifact missing","guidance":null}');
-    expect(parsed?.verdict).toBe('REJECT');
-    expect(parsed?.targetStage).toBe('work');
-  });
-});
-
-describe('FIX 2 (pure) — decideRejectAction re-works under budget, then escalates (no silent acceptance)', () => {
-  const sig = { targetStage: 'work', reason: 'verdict says pass but the cited metric shows fail' };
-  it('under budget → REWORK the named stage', () => {
-    const d = decideRejectAction(sig, 'work', 0, 2);
-    expect(d.action).toBe('rework');
-    if (d.action === 'rework') { expect(d.targetStage).toBe('work'); expect(d.nextCount).toBe(1); }
-  });
-  it('at budget → ESCALATE (avoid infinite loop without accepting rejected work)', () => {
-    const d = decideRejectAction(sig, 'work', 2, 2);
-    expect(d.action).toBe('escalate');
-    if (d.action === 'escalate') expect(d.reason).toMatch(/budget exhausted/i);
-  });
-  it('no resolvable target → ESCALATE (cannot mechanically force re-work)', () => {
-    const d = decideRejectAction({ targetStage: null, reason: 'x' }, null, 0, 2);
-    expect(d.action).toBe('escalate');
-  });
-});
-
-describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT accepted', () => {
-  it('a stage whose first deliverable is rejected is re-run before the run completes', async () => {
-    const runId = setupPlainRun();
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let workCalls = 0;
-    const adapter = {
-      async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n')));
-          return ok('planned');
-        }
-        if (opts.stageId === 'work') {
-          workCalls++;
-          if (workCalls === 1) {
-            // First deliverable is a smoke — drop a supervisor REJECT signal (as
-            // the supervisor's act() would) so the scheduler consumer fires.
-            mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-            writeFileSync(join(opts.runDir, 'signals', 'reject_work.json'),
-              JSON.stringify({ stage: 'work', reason: 'deliverable claims success but the required artifact is empty', timestamp: new Date().toISOString() }));
-            return ok('produced (smoke)');
-          }
-          return ok('produced (real, re-worked)');
-        }
-        return ok(`did ${opts.stageId}`);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(workCalls).toBeGreaterThanOrEqual(2);   // the work stage was RE-DONE (not accepted on the smoke)
-    // The rejection guidance was injected for the re-work.
-    const rd = runDir(projectDir, runId);
-    const guidancePath = join(rd, 'supervisor_guidance.md');
-    if (existsSync(guidancePath)) {
-      expect(readFileSync(guidancePath, 'utf-8')).toMatch(/DELIVERABLE REJECTED/);
-    }
-    // The reject signal was consumed (one-shot).
-    expect(existsSync(join(rd, 'signals', 'reject_work.json'))).toBe(false);
-  });
-
-  it('a mis-firing supervisor that rejects every pass is BOUNDED — the run still terminates', async () => {
-    const runId = setupPlainRun();
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let workCalls = 0;
-    const adapter = {
-      async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n')));
-          return ok('planned');
-        }
-        if (opts.stageId === 'work') {
-          workCalls++;
-          // ALWAYS reject — simulate a mis-firing supervisor. The bound must stop it.
-          mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-          writeFileSync(join(opts.runDir, 'signals', 'reject_work.json'),
-            JSON.stringify({ stage: 'work', reason: 'still not good enough (mis-fire)', timestamp: new Date().toISOString() }));
-          return ok(`produced attempt ${workCalls}`);
-        }
-        return ok(`did ${opts.stageId}`);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    // It must NOT loop forever: bounded by default_supervisor_max_rejects (2) per
-    // iteration × iterations. Terminates and does not hang.
-    expect(['complete', 'failed', 'escalated', 'ceiling_hit', 'incomplete', 'stopped']).toContain(final.status);
-    expect(workCalls).toBeLessThan(50); // sanity: not an unbounded loop
-  });
 });

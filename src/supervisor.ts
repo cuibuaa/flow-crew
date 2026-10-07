@@ -71,9 +71,6 @@ export const SUPERVISOR_VERDICTS = [
   { id: 'WAIT', description: 'Agents making progress. No intervention.' },
   { id: 'GUIDE', description: 'Agent going wrong direction. Provide corrective instruction in "guidance".' },
   { id: 'ABORT', description: 'Stage stuck/looping/wasting time. Kill it and let retry handle it.' },
-  { id: 'REPLAN', description: 'Fundamental approach is wrong. Needs a new plan entirely.' },
-  { id: 'REJECT', description: 'A stage emitted a deliverable that does NOT meet its own declared work/acceptance criteria (e.g. a verdict claims pass while its evidence shows otherwise, or a stage marked itself done with the required artifact missing/empty). The result must NOT be accepted — set "target_stage" to the stage and the work is re-done.' },
-  { id: 'DONE', description: 'The original goal is fully met based on evidence in the output.' },
 ] as const;
 export type SupervisorVerdict = typeof SUPERVISOR_VERDICTS[number]['id'];
 
@@ -988,15 +985,6 @@ function operationalDuration(milliseconds: number): string {
   return `${seconds}s`;
 }
 
-export interface SupervisorEvidenceBinding {
-  version: 1;
-  stageId: string;
-  attemptIndex: number;
-  attemptStartedAt: string;
-  generation: string;
-  emittedDeliverable: boolean;
-}
-
 interface AttemptGenerationRecord {
   version: 1;
   stageId: string;
@@ -1062,50 +1050,6 @@ function isEnginePlaceholderMetric(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Bind a rejection to exactly one scheduler attempt and its current evidence
- * bytes. Engine-written placeholder metrics never count as deliverables. */
-export function computeSupervisorEvidenceBinding(
-  runDirectory: string,
-  stageId: string,
-  status: StageStatus,
-): SupervisorEvidenceBinding | undefined {
-  const attempt = [...(status.attempts ?? [])].reverse().find((candidate) => (
-    candidate.status === STAGE_STATUS.RUNNING || candidate.status === STAGE_STATUS.COMPLETE || candidate.status === STAGE_STATUS.FAILED
-  ));
-  if (!attempt) return undefined;
-  const record = readAttemptGeneration(runDirectory, stageId);
-  if (!record || record.attemptIndex !== attempt.index || record.attemptStartedAt !== attempt.startedAt) return undefined;
-  const stagePath = join(runDirectory, 'stages', stageId);
-  const logPath = join(stagePath, 'live.log');
-  const outputPath = join(stagePath, `output_attempt_${attempt.index}.md`);
-  const verdictPath = join(runDirectory, `verdict_${stageId}.json`);
-  const metricPath = join(stagePath, 'metric.json');
-  const hash = createHash('sha256').update(JSON.stringify(record));
-  try {
-    const bytes = readFileSync(logPath);
-    hash.update(bytes.subarray(Math.min(record.segmentStart, bytes.length)));
-  } catch { /* an empty current segment remains a valid generation */ }
-  let emittedDeliverable = false;
-  for (const [kind, path] of [['output', outputPath], ['verdict', verdictPath], ['metric', metricPath]] as const) {
-    if (!existsSync(path) || isEnginePlaceholderMetric(path)) continue;
-    try {
-      const bytes = readFileSync(path);
-      const fingerprint = createHash('sha256').update(bytes).digest('hex');
-      if ((record.artifactBaselines?.[kind] ?? null) === fingerprint) continue;
-      if (bytes.length > 0) emittedDeliverable = true;
-      hash.update(path.slice(runDirectory.length)).update(bytes);
-    } catch { /* ignore a file racing an atomic replacement */ }
-  }
-  return {
-    version: 1,
-    stageId,
-    attemptIndex: attempt.index,
-    attemptStartedAt: attempt.startedAt,
-    generation: hash.digest('hex'),
-    emittedDeliverable,
-  };
 }
 
 export function supervisorEvidenceDigest(input: {
@@ -1258,11 +1202,9 @@ ${verdictList}
 Rules:
 - Default to WAIT when agents are making progress toward the goal.
 - GUIDE only when you see a concrete wrong direction (not just slow progress).
-- REJECT only when an EMITTED deliverable contradicts its OWN declared work or acceptance criteria — e.g. a gate verdict says pass:true while the evidence/metric it cites shows fail, a stage claims it produced an artifact that is missing or empty, or a result codifies a smoke/error as success. Set "target_stage" to that stage; "reason" must name the specific contradiction (what was claimed vs what the evidence shows). REJECT forces the work to be re-done — it is NOT for slow progress (use WAIT) or a wrong overall approach (use REPLAN). CRITICAL GUARD: an HONEST NEGATIVE is a VALID deliverable, not a rejection — do NOT REJECT a result simply because the target metric was not beaten, the hypothesis failed, or the run found no improvement. Only REJECT when the deliverable itself is internally inconsistent or does not actually do the work it declares.
-- DONE only when the ORIGINAL GOAL (stated at the top of this prompt) is fully satisfied — not when an intermediate stage passes its own tests. A stage's tests passing means that STAGE succeeded, not that the overall goal is met. Only signal DONE if you see evidence that ALL acceptance criteria from the original goal are achieved (e.g., final QA gate passes, target metric exceeded, all deliverables confirmed). For exploration/research tasks where the goal is to improve a metric, NEVER signal DONE just because code compiles or intermediate tests pass.
 - ABORT only in either of these cases: (1) a stage has made no real progress for ${stuckMinutes}+ minutes and is truly stuck, or (2) the same concrete wrong direction continues after repeated GUIDE decisions. Active or high-volume output is not proof that the direction is correct and must not prevent case (2) from escalating to ABORT. Note: codex agents often edit files silently via tool calls without printing to stdout; do NOT infer case (1) from stdout silence alone if you can see file/artifact activity in the snapshot.
 - For every GUIDE, set direction_key to a short lower_snake_case identity for the concrete wrong direction. For ABORT case (2), reuse that exact key only when the evidence produced after each correction still shows the same direction. Set direction_key to null for idle ABORT and every other verdict.
-- Evidence rows marked ACTION can establish what a stage said or did. Rows marked INSPECTION are read-only commands, text the stage read, or tool output it received; they remain context, but cannot establish that the stage pursued the content. Every GUIDE, direction-based ABORT, and REPLAN must name the exact current ACTION rows it relies on in evidence_ids, and its reason or direction_key must repeat at least one concrete term from those rows. Do not cite an adjacent action for a claim found only in inspection output. Idle ABORT, WAIT, REJECT, and DONE may use an empty array.
+- Evidence rows marked ACTION can establish what a stage said or did. Rows marked INSPECTION are read-only commands, text the stage read, or tool output it received; they remain context, but cannot establish that the stage pursued the content. Every GUIDE, direction-based ABORT, must name the exact current ACTION rows it relies on in evidence_ids, and its reason or direction_key must repeat at least one concrete term from those rows. Do not cite an adjacent action for a claim found only in inspection output. Idle ABORT and WAIT may use an empty array.
 - If this assessment explicitly retracts or replaces one prior assessment, copy that assessment's exact id into supersedes_assessment_id. Otherwise use null.
 - Treat the verified stage-facts line as authoritative. \`output.md\` is not a verdict: say a verdict exists only when the facts explicitly say "verdict observed". Never ABORT during a stated finalization window; the stage timeout remains the outer bound.
 - Do not ABORT slow but correct work, ordinary progress, or an honestly reported negative result.
@@ -1965,14 +1907,12 @@ export class Supervisor {
     now: number,
   ): SupervisorEventQuantities {
     let gateRetryMaximum = Math.max(0, Math.floor(state.maxRetries ?? 0));
-    let supervisorRejectMaximum = 0;
     // Reading a project's existing defaults is safe. Do not cause a supervisor
     // heartbeat to scaffold configuration in projects that do not have it.
     if (existsSync(join(this.projectDir, 'config', 'defaults.yaml'))) {
       try {
         const defaults = loadProjectDefaults(this.projectDir);
         gateRetryMaximum = Math.max(0, Math.floor(state.maxRetries ?? defaults.gate_retry_loops));
-        supervisorRejectMaximum = Math.max(0, Math.floor(defaults.supervisor_max_rejects));
       } catch { /* zero/explicit state quantities fail closed and remain visible */ }
     }
     const maximum = Math.max(0, Math.floor(this.config.maxAssessmentsPerIteration));
@@ -1991,7 +1931,7 @@ export class Supervisor {
         maximum,
         remaining: Math.max(0, maximum - this.iterationAssessmentCount),
       },
-      supervisorRejectBudget: { maximum: supervisorRejectMaximum },
+      supervisorRejectBudget: { maximum: 0 },
       gateRetryBudget: { maximum: gateRetryMaximum },
     };
   }
@@ -2190,27 +2130,6 @@ export class Supervisor {
         },
       });
     }
-    for (const attempt of quantities.activeAttempts) {
-      if (attempt.remainingMs === undefined || attempt.remainingMs > quantities.deadlineMarginMs) continue;
-      candidates.push({
-        type: 'deadline_margin',
-        observedAt,
-        source: 'attempt_deadline_ledger',
-        stageId: attempt.stageId,
-        fingerprint: {
-          stageId: attempt.stageId,
-          attemptIndex: attempt.attemptIndex,
-          attemptStartedAt: attempt.attemptStartedAt,
-          deadlineAt: attempt.deadlineAt,
-        },
-        quantities: {
-          ...quantities,
-          deadlineStageId: attempt.stageId,
-          deadlineAttemptIndex: attempt.attemptIndex,
-          deadlineRemainingMs: attempt.remainingMs,
-        },
-      });
-    }
     return candidates;
   }
 
@@ -2276,22 +2195,6 @@ export class Supervisor {
     const runningStages = Object.entries(state.stages)
       .filter(([, s]) => isRunningStageStatus(s.status))
       .map(([id]) => id);
-
-    // Freeze the rejection authority before reading any prompt evidence. If
-    // an output/verdict/metric changes during tail collection, artifact scan,
-    // prompt assembly, or the model call, act()'s fresh comparison suppresses
-    // REJECT instead of binding a judgement to bytes the assessor never saw.
-    const observedEvidenceBindings = new Map<string, SupervisorEvidenceBinding>();
-    for (const [stageId, fallback] of Object.entries(state.stages)) {
-      try {
-        const binding = computeSupervisorEvidenceBinding(
-          this.runDir(),
-          stageId,
-          this.authoritativeStageStatus(stageId, fallback),
-        );
-        if (binding) observedEvidenceBindings.set(stageId, binding);
-      } catch { /* a racing artifact cannot become reject authority */ }
-    }
 
     // Read and ACCUMULATE live.log tails across cheap heartbeats. The previous
     // implementation advanced byte offsets every 30s, so a 180s LLM cadence
@@ -2537,7 +2440,6 @@ export class Supervisor {
       assessment,
       assessmentEvidenceCapturedAt,
       userInput ? 'operator' : 'supervisor',
-      observedEvidenceBindings,
       observedDirectionEvidence,
       observedStageEvidence,
       comparisonStageEvidence,
@@ -2607,12 +2509,6 @@ export class Supervisor {
       this.observations.push(`${effectiveAssessment.verdict}: ${effectiveAssessment.reason}`);
       if (effectiveAssessment.verdict === 'GUIDE' && effectiveAssessment.guidance) {
         this.decisions.push(`Guided ${effectiveAssessment.targetStage}: ${effectiveAssessment.guidance.slice(0, 100)}`);
-      } else if (effectiveAssessment.verdict === 'REPLAN') {
-        this.decisions.push(`Triggered replan: ${effectiveAssessment.reason}`);
-      } else if (effectiveAssessment.verdict === 'REJECT') {
-        this.decisions.push(`Rejected ${effectiveAssessment.targetStage ?? 'deliverable'}: ${effectiveAssessment.reason.slice(0, 100)}`);
-      } else if (effectiveAssessment.verdict === 'DONE') {
-        this.decisions.push(`Goal confirmed met: ${effectiveAssessment.reason}`);
       }
       log.info({ tick: this.tickCount, verdict: effectiveAssessment.verdict, target: effectiveAssessment.targetStage, reason: effectiveAssessment.reason }, 'Supervisor action');
     }
@@ -2975,12 +2871,10 @@ export class Supervisor {
     assessment: SupervisorAssessment,
     progressSinceMs = Date.now(),
     source: 'supervisor' | 'operator' = 'supervisor',
-    observedEvidenceBindings?: ReadonlyMap<string, SupervisorEvidenceBinding>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
     observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
     comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment> {
-    const signalDir = this.signalDir();
     const citedActionEvidence = (): {
       verified: boolean;
       reason: string;
@@ -3159,96 +3053,6 @@ export class Supervisor {
           return { ...assessment, reason: abort.reason };
         }
 
-      case 'REPLAN':
-        if (source === 'supervisor') {
-          const evidence = citedActionEvidence();
-          if (!evidence.verified || !evidence.attempt || !assessment.targetStage || !assessment.assessmentId) {
-            return {
-              ...assessment,
-              verdict: 'WAIT',
-              guidance: null,
-              reason: `REPLAN suppressed${assessment.targetStage ? ` for ${assessment.targetStage}` : ''}: ${evidence.reason}.`,
-            };
-          }
-          writeFileSync(join(signalDir, 'replan.json'), JSON.stringify({
-            version: 2,
-            assessmentId: assessment.assessmentId,
-            targetStage: assessment.targetStage,
-            attemptIndex: evidence.attempt.index,
-            attemptStartedAt: evidence.attempt.startedAt,
-            evidenceIds: assessment.evidenceIds,
-            reason: assessment.reason,
-            timestamp: assessment.assessedAt ?? new Date().toISOString(),
-          }, null, 2), 'utf-8');
-        } else {
-          writeFileSync(join(signalDir, 'replan.json'),
-            JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
-        }
-        this.lastActionTime = Date.now();
-        return assessment;
-
-      case 'REJECT':
-        // Reject an emitted deliverable that does not meet its declared work.
-        // The scheduler-side consumer re-pends the target stage so the work is
-        // re-done rather than accepted. Bounded there by a max reject count.
-        if (assessment.targetStage) {
-          let current: SupervisorEvidenceBinding | undefined;
-          try {
-            const state = readRunState(this.projectDir, this.runId);
-            const status = state.stages[assessment.targetStage];
-            if (status) current = computeSupervisorEvidenceBinding(this.runDir(), assessment.targetStage, this.authoritativeStageStatus(assessment.targetStage, status));
-          } catch { /* fail closed below */ }
-          // Production assessments supply the generation captured immediately
-          // before the model call. Direct unit callers retain the historical
-          // immediate-check behavior by omitting the map.
-          const observed = observedEvidenceBindings
-            ? observedEvidenceBindings.get(assessment.targetStage)
-            : current;
-          if (!observed?.emittedDeliverable) {
-            return {
-              verdict: 'WAIT',
-              targetStage: assessment.targetStage,
-              guidance: null,
-              reason: `REJECT suppressed for ${assessment.targetStage}: no emitted deliverable was bound to the evidence assessed for the current execution.`,
-            };
-          }
-          if (
-            !current?.emittedDeliverable
-            || current.stageId !== observed.stageId
-            || current.attemptIndex !== observed.attemptIndex
-            || current.attemptStartedAt !== observed.attemptStartedAt
-            || current.generation !== observed.generation
-          ) {
-            return {
-              verdict: 'WAIT',
-              targetStage: assessment.targetStage,
-              guidance: null,
-              reason: `REJECT suppressed for ${assessment.targetStage}: its attempt evidence changed while the assessment was running.`,
-            };
-          }
-          const timestamp = new Date().toISOString();
-          writeFileSync(join(signalDir, `reject_${assessment.targetStage}.json`),
-            JSON.stringify({ version: 2, stage: assessment.targetStage, reason: assessment.reason, timestamp, evidence: observed }), 'utf-8');
-          recordRunEvent(this.projectDir, this.runId, {
-            type: 'supervisor_reject_requested', runId: this.runId, timestamp,
-            stageId: assessment.targetStage, attemptIndex: observed.attemptIndex,
-            attemptStartedAt: observed.attemptStartedAt, evidenceGeneration: observed.generation,
-            detail: assessment.reason, source: 'supervisor', level: 'warning',
-          });
-        } else {
-          return {
-            verdict: 'WAIT', targetStage: null, guidance: null,
-            reason: 'REJECT suppressed: the assessment named no target stage, so no attempt-bound evidence can be identified.',
-          };
-        }
-        this.lastActionTime = Date.now();
-        return assessment;
-
-      case 'DONE':
-        writeFileSync(join(signalDir, 'goal_met.json'),
-          JSON.stringify({ reason: assessment.reason, timestamp: new Date().toISOString() }), 'utf-8');
-        this.lastActionTime = Date.now();
-        return assessment;
     }
   }
 

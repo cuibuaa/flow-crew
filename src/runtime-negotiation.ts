@@ -266,23 +266,6 @@ export function parseScopeRevisionRequest(
   };
 }
 
-export function parseTimeoutExtensionRequest(
-  raw: unknown,
-  requestedBy: NegotiationRequester,
-): { ok: true; request: TimeoutExtensionRequestV1 } | { ok: false; error: string } {
-  const common = parseCommonRequest(raw, 'timeout_extension', requestedBy);
-  if (!common.ok) return common;
-  if (typeof common.raw.requestedExtensionMs !== 'number') return { ok: false, error: 'requestedExtensionMs must be a number' };
-  return {
-    ok: true,
-    request: {
-      ...common.common,
-      kind: 'timeout_extension',
-      requestedExtensionMs: common.raw.requestedExtensionMs,
-    },
-  };
-}
-
 export function constraintDecisionPath(stagePath: string, request: RuntimeConstraintRequestV1): string {
   const prefix = request.kind === 'scope_revision' ? 'scope_revision_decision' : 'timeout_extension_decision';
   return join(stagePath, `${prefix}_attempt_${request.attemptIndex}_${negotiationIdentity(request)}.json`);

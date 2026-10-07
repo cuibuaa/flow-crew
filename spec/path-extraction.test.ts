@@ -156,7 +156,6 @@ describe('declared reality-check reads replace lexical path inference', () => {
   it.each([
     ['json-schema-match', { file: 'report.json', schema: { type: 'object' } }, 'report.json'],
     ['file-exists-nonempty', { paths: ['Makefile'] }, 'Makefile'],
-    ['variance-floor', { file: 'scores.json', field_path: 'rows[*].score', min_stddev: 0.1 }, 'scores.json'],
   ] as const)('requires the declared handler input for %s', (type, params, path) => {
     const projectDir = temporaryProject(), markdown = markdownFor(type, params);
     expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [] }).join('\n')).toContain('ARTIFACT_HANDLER_READ_UNDECLARED');

@@ -244,7 +244,7 @@ describe('repeated wrong-direction abort evidence', () => {
       verdict: 'GUIDE', targetStage: stageId,
       reason: 'the corpus output was mistaken for pursuit', guidance: 'stop the unrelated workflow',
       directionKey: 'unrelated_workflow', evidenceIds: [readCommand.id],
-    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    }, Date.now(), 'supervisor', undefined, new Map([[stageId, projection]]));
     expect(commandSuppressed).toMatchObject({ verdict: 'WAIT', guidance: null });
     expect(commandSuppressed.reason).toContain('inspection-only');
 
@@ -252,7 +252,7 @@ describe('repeated wrong-direction abort evidence', () => {
       verdict: 'GUIDE', targetStage: stageId,
       reason: 'the corpus output was mistaken for pursuit', guidance: 'stop the unrelated workflow',
       directionKey: 'unrelated_workflow', evidenceIds: [inspected.id],
-    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    }, Date.now(), 'supervisor', undefined, new Map([[stageId, projection]]));
     expect(suppressed).toMatchObject({ verdict: 'WAIT', guidance: null });
     expect(suppressed.reason).toContain('inspection-only');
 
@@ -260,7 +260,7 @@ describe('repeated wrong-direction abort evidence', () => {
       verdict: 'GUIDE', targetStage: stageId,
       reason: 'the stage authored a replacement of the required source', guidance: 'retain the required source and annotate it',
       directionKey: 'replacing_required_source', evidenceIds: [authored.id],
-    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    }, Date.now(), 'supervisor', undefined, new Map([[stageId, projection]]));
     expect(delivered.verdict).toBe('GUIDE');
     expect(delivered.guidanceId).toMatch(/^[0-9a-f]{20}$/);
   });
@@ -301,7 +301,7 @@ describe('repeated wrong-direction abort evidence', () => {
       reason: 'the stage is pursuing an unrelated market workflow',
       guidance: 'return to the declared objective', directionKey: 'unrelated_market_workflow',
       evidenceIds: [unrelated.id],
-    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    }, Date.now(), 'supervisor', undefined, new Map([[stageId, projection]]));
     expect(unsupported).toMatchObject({ verdict: 'WAIT', guidance: null });
     expect(unsupported.reason).toContain('share no concrete claim term');
 
@@ -310,7 +310,7 @@ describe('repeated wrong-direction abort evidence', () => {
       reason: 'the stage is pursuing an unrelated market workflow',
       guidance: 'return to the declared objective', directionKey: 'unrelated_market_workflow',
       evidenceIds: [wrongWorkflow.id],
-    }, Date.now(), 'supervisor', undefined, undefined, new Map([[stageId, projection]]));
+    }, Date.now(), 'supervisor', undefined, new Map([[stageId, projection]]));
     expect(supported.verdict).toBe('GUIDE');
     expect(supported.guidanceId).toMatch(/^[0-9a-f]{20}$/);
   });
@@ -380,7 +380,7 @@ describe('repeated wrong-direction abort evidence', () => {
       directionKey,
       evidenceIds: ['ev_cccccccccccccccccccc'],
       assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([
+    }, Date.now() + 1_000, 'supervisor', new Map([
       [stageId, evidence('c'.repeat(64))],
     ]), undefined, new Map([
       [stageId, accusedComparisonEvidence()],
@@ -433,7 +433,7 @@ describe('repeated wrong-direction abort evidence', () => {
       directionKey,
       evidenceIds: ['ev_cccccccccccccccccccc'],
       assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([
+    }, Date.now() + 1_000, 'supervisor', new Map([
       [stageId, evidence('c'.repeat(64))],
     ]));
 
@@ -477,7 +477,7 @@ describe('repeated wrong-direction abort evidence', () => {
       reason: 'the bound direction continues',
       guidance: null,
       directionKey,
-    }, assessmentStartedAt, 'supervisor', undefined, new Map([
+    }, assessmentStartedAt, 'supervisor', new Map([
       [stageId, evidence('c'.repeat(64))],
     ]));
 

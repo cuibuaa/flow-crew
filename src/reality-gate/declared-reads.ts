@@ -14,11 +14,10 @@ export function realityHandlerInputs(check: Exclude<CheckDecl, { kind: 'invalid'
   if (check.type === 'file-exists-nonempty') {
     if (Array.isArray(params.paths)) paths.push(...params.paths);
     else if (params.paths && typeof params.paths === 'object') paths.push((params.paths as { from_manifest?: unknown }).from_manifest);
-  } else if (['json-schema-match', 'variance-floor'].includes(check.type)) {
+  } else if (check.type === 'json-schema-match') {
     paths.push(params.file);
-    if (check.type === 'json-schema-match' && params.schema && typeof params.schema === 'object') paths.push((params.schema as { file?: unknown }).file);
-  } else if (check.type === 'static-ast-scan') paths.push(params.glob);
-  else if (check.type === 'exec-script-exit-zero' && Array.isArray(params.archive_paths)) paths.push(...params.archive_paths);
+    if (params.schema && typeof params.schema === 'object') paths.push((params.schema as { file?: unknown }).file);
+  } else if (check.type === 'exec-script-exit-zero' && Array.isArray(params.archive_paths)) paths.push(...params.archive_paths);
   return paths.filter((path): path is string => typeof path === 'string');
 }
 

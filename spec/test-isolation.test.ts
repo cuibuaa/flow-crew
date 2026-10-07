@@ -181,7 +181,7 @@ describe('root-suite file isolation', () => {
     expect(existsSync(secondRoot)).toBe(false);
   });
 
-  it('uses a random nonzero port and removes both timers and signal listeners on close', async () => {
+  it('uses a random nonzero port, starts no recovery timers, and removes signal listeners on close', async () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-dashboard-lifecycle-'));
     mkdirSync(join(projectDir, 'config', 'workflows'), { recursive: true });
     mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
@@ -208,7 +208,7 @@ describe('root-suite file isolation', () => {
       const dashboardTimers = setIntervalSpy.mock.calls
         .map((args, index) => ({ delay: args[1], handle: setIntervalSpy.mock.results[index]?.value }))
         .filter(({ delay }) => delay === 60_000 || delay === 5 * 60_000);
-      expect(dashboardTimers).toHaveLength(2);
+      expect(dashboardTimers).toHaveLength(0);
 
       await app.close();
       await app.close();

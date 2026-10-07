@@ -36,6 +36,7 @@ export async function executeOrdinaryStage(
   ordinaryScopeContext: ReturnType<typeof createScopeBatchContext>,
   skills?: string, taskDescription?: string, availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
+  beforeSettlement?: () => Promise<boolean>,
 ): Promise<{stage: StageConfig; result: RunResult; currentRetries: number}> {
       if (!agents.has(stage.role)) {
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -178,7 +179,6 @@ export async function executeOrdinaryStage(
         artifactContract: stage.artifact_contract,
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
-        resources: stage.resources,
         timeout_ms: prepared.budgetMs,
         ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
         projectDir,
@@ -202,6 +202,8 @@ export async function executeOrdinaryStage(
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: shouldPreserveSession(stage, sorted, sessionReuseEnabled),
         projectWriteScope: stage.scope ?? [],
+        beforeSettlement,
+        deferSettlement: true,
         liveConstraintGuardFactory: createSchedulerLiveConstraintGuardFactory({
           stage,
           projectDir,

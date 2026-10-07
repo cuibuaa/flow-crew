@@ -105,7 +105,7 @@ function baseState(): StoreState {
 describe('supervisor routine/anomaly scheduling', () => {
   it('keeps every intervention verdict available', () => {
     expect(SUPERVISOR_VERDICTS.map((verdict) => verdict.id)).toEqual([
-      'WAIT', 'GUIDE', 'ABORT', 'REPLAN', 'REJECT', 'DONE',
+      'WAIT', 'GUIDE', 'ABORT',
     ]);
   });
 

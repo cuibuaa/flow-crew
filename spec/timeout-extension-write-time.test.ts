@@ -5,11 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
-import { parseTimeoutExtensionRequest, type TimeoutExtensionRequestV1 } from '../src/runtime-negotiation.js';
 import {
-  evaluateTimeoutExtensionRequest,
   runStage,
-  type TimeoutExtensionPolicyInput,
 } from '../src/worker.js';
 import type { AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
@@ -62,84 +59,7 @@ class ManualAttemptDeadlineClock implements AttemptDeadlineClock {
   }
 }
 
-function request(overrides: Record<string, unknown> = {}): TimeoutExtensionRequestV1 {
-  const parsed = parseTimeoutExtensionRequest({
-    version: 1,
-    kind: 'timeout_extension',
-    requestId: 'write-time-policy',
-    stageId: 'work',
-    attemptIndex: 1,
-    requestedExtensionMs: 50,
-    reason: 'verified work remains',
-    ...overrides,
-  }, 'stage');
-  if (!parsed.ok) throw new Error(parsed.error);
-  return parsed.request;
-}
-
-function evaluate(
-  candidate: TimeoutExtensionRequestV1,
-  overrides: Partial<Omit<TimeoutExtensionPolicyInput, 'request'>> = {},
-) {
-  return evaluateTimeoutExtensionRequest({
-    request: candidate,
-    attemptStartedWallMs: ATTEMPT_STARTED_WALL_MS,
-    attemptElapsedMs: 25,
-    effectiveBudgetMs: 100,
-    supervisorAborted: false,
-    attemptAborted: false,
-    deadlineAborted: false,
-    ...overrides,
-  });
-}
-
-describe('legacy timeout-extension write-time policy', () => {
-  it('rejects pre-deadline and legacy requests without changing their parsed audit timing', () => {
-    const persisted = evaluate(request({ requestedAt: '2030-01-01T00:00:00.025Z' }));
-    expect(persisted).toMatchObject({
-      accepted: false,
-      grantedExtensionMs: 0,
-      timingBasis: 'requested_at',
-      adjudicatedAttemptElapsedMs: 25,
-      requestedAtAttemptElapsedMs: 25,
-      rejectionReason: 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch',
-    });
-
-    const legacy = evaluate(request());
-    expect(legacy).toMatchObject({
-      accepted: false,
-      grantedExtensionMs: 0,
-      timingBasis: 'legacy_consumption',
-      adjudicatedAttemptElapsedMs: 25,
-      rejectionReason: 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch',
-    });
-  });
-
-  it('keeps a current-attempt ABORT authoritative in the rejection audit', () => {
-    expect(evaluate(request(), { supervisorAborted: true })).toMatchObject({
-      accepted: false,
-      rejectionReason: 'a current-attempt ABORT already exists',
-    });
-  });
-
-  it('preserves supervisor requestedAt metadata through legacy v1 parsing', () => {
-    const parsed = parseTimeoutExtensionRequest({
-      version: 1,
-      kind: 'timeout_extension',
-      requestId: 'supervisor-write-time',
-      stageId: 'work',
-      attemptIndex: 1,
-      requestedAt: '2030-01-01T00:00:00.025Z',
-      requestedExtensionMs: 50,
-      reason: 'verified work remains',
-    }, 'supervisor');
-
-    expect(parsed).toMatchObject({
-      ok: true,
-      request: { requestedBy: 'supervisor', requestedAt: '2030-01-01T00:00:00.025Z' },
-    });
-  });
-
+describe('immutable attempt deadline settlement', () => {
   async function persistedTerminationCause(settleAfterDeadline: boolean) {
     const stageId = settleAfterDeadline ? 'late_settlement' : 'prompt_settlement';
     const created = createRun(projectDir, 'deadline-accounting', 'name: deadline-accounting', [stageId]);

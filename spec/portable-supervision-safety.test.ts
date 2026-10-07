@@ -41,6 +41,7 @@ import {
   type UnitStatus,
 } from '../src/supervision.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 
 const TERMINATION_WAIT_MS = 5_000;
 const POLL_MS = 25;
@@ -440,7 +441,9 @@ describe('portable supervision safety invariants', () => {
 
   it('builds the supervised command with the daemon absolute Node interpreter', () => {
     const registry = new TaskRegistry({ baseDir: fixtureRoot });
-    const task = registry.create({ config_path: join(fixtureRoot, 'campaign.yml'), projectDir: fixtureRoot });
+    const brief = 'Verify the absolute interpreter used by supervised commands.';
+    const task = registry.create({ brief_text: brief, projectDir: fixtureRoot,
+      brief_admission: createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: '2026-07-30T00:00:00.000Z' }) });
 
     const command = buildCommand(task, join(fixtureRoot, 'cli.js'));
 

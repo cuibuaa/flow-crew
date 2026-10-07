@@ -186,55 +186,6 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     });
   });
 
-  it('advises on a literal negative validation assertion intersecting a future scope and stays silent for two-factor controls', () => {
-    mkdirSync(join(projectDir, 'tests'), { recursive: true });
-    writeFileSync(join(projectDir, 'package.json'), JSON.stringify({
-      packageManager: 'npm@10.0.0',
-      scripts: { test: 'pytest' },
-    }), 'utf-8');
-    const testPath = join(projectDir, 'tests', 'test_scope.py');
-    const negative = [
-      'from pathlib import Path',
-      'ROOT = Path(__file__).resolve().parents[1]',
-      'ARTIFACTS = ROOT / "artifacts" / "prescreen-gonogo"',
-      'def test_before_inference():',
-      '    assert not (ARTIFACTS / "local").exists()',
-      '',
-    ].join('\n');
-    writeFileSync(testPath, negative, 'utf-8');
-    const writer = stage('measure_local', ['artifacts/prescreen-gonogo/local/**']);
-
-    const conflict = inspectDispatchAdmission({
-      dispatched: [writer],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    expect(conflict.pass).toBe(true);
-    expect(conflict.validationPlanConflicts).toEqual([
-      expect.objectContaining({
-        kind: 'negative_path_assertion_future_scope',
-        assertionPath: 'artifacts/prescreen-gonogo/local',
-        assertionSource: 'tests/test_scope.py',
-        stageId: 'measure_local',
-        scope: 'artifacts/prescreen-gonogo/local/**',
-      }),
-    ]);
-    expect(conflict.warnings).toEqual([
-      expect.stringContaining('scope is capability, not proof of a write'),
-    ]);
-
-    writeFileSync(testPath, negative.replace('assert not', 'assert'), 'utf-8');
-    const positiveAndDisjoint = inspectDispatchAdmission({
-      dispatched: [stage('measure_elsewhere', ['artifacts/other/**'])],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    expect(positiveAndDisjoint.validationPlanConflicts).toEqual([]);
-    expect(positiveAndDisjoint.warnings).toEqual([]);
-  });
-
   it('retains every Git index stage and assigns explicit entry kinds', () => {
     const oid = 'a'.repeat(40);
     const entries = parseLiveConstraintGitIndexEntries([

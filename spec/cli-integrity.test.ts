@@ -133,3 +133,30 @@ describe('doctor tells port occupancy apart from your own dashboard', () => {
     expect(source).not.toContain("message: 'FlowCrew server is running'");
   });
 });
+
+// Help must remain safe even when its remaining arguments name a writable run.
+describe('command help before side effects', () => {
+  it.each([
+    ['start', '--help'],
+    ['inbox', 'approve', 'missing', '--always', '--help'],
+    ['guide', '--run', '2000-01-01T00-00-00-help', 'operator text', '--help'],
+  ])('prints help for %s without changing the run', (...args) => {
+    const isolated = fixture();
+    const run = join(isolated.fcHome, 'runs', '2000-01-01T00-00-00-help');
+    mkdirSync(run, { recursive: true });
+    const record = JSON.stringify({ runId: '2000-01-01T00-00-00-help', projectDir: repositoryRoot,
+      status: 'running', stages: { writer: { status: 'running', retries: 0 } } });
+    writeFileSync(join(run, 'run.json'), record);
+    const result = spawnSync(process.execPath, [join(repositoryRoot, 'dist', 'cli.js'), ...args], {
+      cwd: repositoryRoot, encoding: 'utf-8', timeout: 5000,
+      env: { ...process.env, HOME: isolated.home, FC_HOME: isolated.fcHome, TMPDIR: isolated.temp },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Usage:');
+    expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(record);
+    expect(existsSync(join(run, 'user_input.md'))).toBe(false);
+    expect(existsSync(join(run, 'supervisor_guidance.md'))).toBe(false);
+    expect(existsSync(join(run, 'approvals.jsonl'))).toBe(false);
+  });
+});

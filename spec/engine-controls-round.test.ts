@@ -10,6 +10,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,7 +30,7 @@ import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import { runAllChecks } from '../src/reality-gate/index.js';
 import { readRunEvents, recordRunEvent } from '../src/run-events.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { configuredValidationCommandRole, runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
   createRun,
   fcGlobalDir,
@@ -964,8 +965,7 @@ describe('engine controls round replays', () => {
           assessment: SupervisorAssessment,
           progressSinceMs: number,
           source: 'supervisor' | 'operator',
-          observedDeliverables?: ReadonlyMap<string, never>,
-          observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
+              observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
           observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
           comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
         ): Promise<SupervisorAssessment>;
@@ -999,17 +999,7 @@ describe('engine controls round replays', () => {
         });
       });
       internals.stageLastProgressMs = { [stageId]: Date.now() };
-      const result = await internals.act({
-        verdict: 'ABORT',
-        targetStage: stageId,
-        reason: 'assessment made when operator supplied a missing fact',
-        guidance: null,
-        directionKey: 'same_implementation_direction',
-        evidenceIds: ['ev_cccccccccccccccccccc'],
-        assessedAt: new Date(now).toISOString(),
-      }, Date.now() + 1_000, variant.triggerSource, undefined, new Map([
-        [stageId, directionEvidence('c')],
-      ]), undefined, new Map([[stageId, {
+      const actionEvidence = new Map([[stageId, {
         version: 1,
         stageId,
         attemptIndex: 1,
@@ -1031,7 +1021,18 @@ describe('engine controls round replays', () => {
           authority: 'action',
           text: 'npm test completed',
         }],
-      }]]));
+      }]]);
+      const result = await internals.act({
+        verdict: 'ABORT',
+        targetStage: stageId,
+        reason: 'assessment made when operator supplied a missing fact',
+        guidance: null,
+        directionKey: 'same_implementation_direction',
+        evidenceIds: ['ev_cccccccccccccccccccc'],
+        assessedAt: new Date(now).toISOString(),
+      }, Date.now() + 1_000, variant.triggerSource, new Map([
+        [stageId, directionEvidence('c')],
+      ]), actionEvidence, actionEvidence);
       const signalPath = join(created.runDirPath, 'signals', `abort_${stageId}.json`);
       const signal = existsSync(signalPath) ? readJson(signalPath) : undefined;
       expect(result.verdict).toBe(variant.expected);
@@ -1147,4 +1148,47 @@ describe('engine controls round replays', () => {
       population,
     });
   });
+});
+
+it('assigns validation provenance only to a configured command with an external destination', () => {
+  const temporaryRoot = (label: string) => { const p = join(sandboxRoot, label); mkdirSync(p); return p; };
+  const record = (_id: string, _property: string, expected: unknown, actual: unknown) => { expect(actual).toEqual(expected); };
+  const redirectRoot = temporaryRoot('validation-redirection');
+  const redirectProject = join(redirectRoot, 'project');
+  const redirectLink = join(redirectRoot, 'external-log-link');
+  const externalLog = join(redirectRoot, 'external.log');
+  mkdirSync(join(redirectProject, 'dist'), { recursive: true });
+  symlinkSync(join(redirectProject, 'dist', 'authored.txt'), redirectLink);
+  const configuredCommands = [{ role: 'build', display: 'npm run build' }];
+  record(
+    'item5-direct-project-redirection',
+    'a direct shell-authored project redirection must not receive validation provenance',
+    null,
+    configuredValidationCommandRole(
+      'npm run build > dist/authored.txt',
+      configuredCommands,
+      redirectProject,
+    ) ?? null,
+  );
+  record(
+    'item5-symlink-project-redirection',
+    'an external-looking redirection resolving into the project must not receive validation provenance',
+    null,
+    configuredValidationCommandRole(
+      `npm run build > ${redirectLink}`,
+      configuredCommands,
+      redirectProject,
+    ) ?? null,
+  );
+  record(
+    'item5-external-redirection-calibration',
+    'a configured command redirected to a real external destination retains validation provenance',
+    'build',
+    configuredValidationCommandRole(
+      `npm run build > ${externalLog} 2>&1`,
+      configuredCommands,
+      redirectProject,
+    ) ?? null,
+  );
+
 });

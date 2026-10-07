@@ -190,153 +190,6 @@ describe('Dashboard admission handshake', () => {
     expect(registrations).toBe(0);
   });
 
-  it('guards subtask creation before createRun and persists exact accepted bytes', async () => {
-    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      isProjectBusy: () => null,
-    });
-    const { runId: parentId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    const before = listRuns(projectDir);
-    const brief = '# Child goal\r\nKeep exact CRLF.\r\n';
-
-    const unchecked = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${parentId}/subtasks`,
-      payload: { name: 'Child', brief },
-    });
-    expect(unchecked.statusCode).toBe(409);
-    expect(listRuns(projectDir)).toEqual(before);
-
-    const current = unchecked.json();
-    const accepted = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${parentId}/subtasks`,
-      payload: {
-        name: 'Child',
-        brief,
-        briefPreflightDigest: current.report.digest,
-        briefPreflightReceipt: current.receipt,
-        acknowledgeBriefWarnings: true,
-      },
-    });
-    expect(accepted.statusCode).toBe(200);
-    const childId = accepted.json().id as string;
-    const child = readRunState(projectDir, childId);
-    expect(child.briefAdmission?.digest).toBe(current.report.digest);
-    expect(readFileSync(join(runsRoot(), childId, 'task_brief.md'), 'utf-8')).toBe(brief);
-  });
-
-  it('guards execute and rerun before status, cleanup, or detached spawn', async () => {
-    const spawns: Array<{ runId: string; exactBrief: string; briefAdmission: BriefAdmissionRecord }> = [];
-    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      spawnDetachedRun: (options) => {
-        spawns.push({
-          runId: options.runId,
-          exactBrief: options.exactBrief,
-          briefAdmission: options.briefAdmission,
-        });
-      },
-      isProjectBusy: () => null,
-    });
-    const brief = '# Goal\nExecute safely.\n';
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    let state = readRunState(projectDir, runId);
-    state.status = 'pending';
-    state.taskDescription = brief;
-    writeRunState(projectDir, runId, state);
-    writeFileSync(join(runsRoot(), runId, 'task_brief.md'), brief, 'utf-8');
-
-    const uncheckedExecute = await app.inject({ method: 'POST', url: `/api/tasks/${runId}/execute`, payload: {} });
-    expect(uncheckedExecute.statusCode).toBe(409);
-    expect(readRunState(projectDir, runId).status).toBe('pending');
-    expect(spawns).toHaveLength(0);
-
-    const executeReview = uncheckedExecute.json();
-    const acceptedExecute = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${runId}/execute`,
-      payload: {
-        briefPreflightDigest: executeReview.report.digest,
-        briefPreflightReceipt: executeReview.receipt,
-        acknowledgeBriefWarnings: true,
-      },
-    });
-    expect(acceptedExecute.statusCode).toBe(200);
-    expect(readRunState(projectDir, runId)).toMatchObject({
-      status: 'running',
-      briefAdmission: { digest: executeReview.report.digest },
-    });
-    expect(spawns).toMatchObject([{
-      runId,
-      exactBrief: brief,
-      briefAdmission: { digest: inspectBrief(brief).digest },
-    }]);
-
-    state = readRunState(projectDir, runId);
-    state.status = 'failed';
-    writeRunState(projectDir, runId, state);
-    const edited = `${brief}\n`;
-    writeFileSync(join(runsRoot(), runId, 'task_brief.md'), edited, 'utf-8');
-    const cleanupSentinel = join(runsRoot(), runId, 'events.jsonl');
-    writeFileSync(cleanupSentinel, 'must survive rejected rerun\n', 'utf-8');
-
-    const uncheckedRerun = await app.inject({ method: 'POST', url: `/api/tasks/${runId}/rerun`, payload: {} });
-    expect(uncheckedRerun.statusCode).toBe(409);
-    expect(readFileSync(cleanupSentinel, 'utf-8')).toContain('must survive');
-    expect(readRunState(projectDir, runId).status).toBe('failed');
-    expect(spawns).toHaveLength(1);
-
-    const rerunReview = uncheckedRerun.json();
-    const acceptedRerun = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${runId}/rerun`,
-      payload: {
-        briefPreflightDigest: rerunReview.report.digest,
-        briefPreflightReceipt: rerunReview.receipt,
-        acknowledgeBriefWarnings: true,
-      },
-    });
-    expect(acceptedRerun.statusCode).toBe(200);
-    expect(spawns).toHaveLength(2);
-    expect(spawns[1]).toMatchObject({
-      runId,
-      exactBrief: edited,
-      briefAdmission: { digest: inspectBrief(edited).digest },
-    });
-    expect(readRunState(projectDir, runId).briefAdmission?.digest).toBe(inspectBrief(edited).digest);
-  });
-
-  it('launches the captured admitted bytes even if the sidecar changes at detached start', async () => {
-    const brief = '# Goal\nLaunch the admitted snapshot.\n';
-    const changed = `${brief}\n`;
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    const sidecar = join(runsRoot(), runId, 'task_brief.md');
-    const state = readRunState(projectDir, runId);
-    state.status = 'pending';
-    state.taskDescription = brief;
-    state.briefAdmission = explicitAdmission(brief);
-    writeRunState(projectDir, runId, state);
-    writeFileSync(sidecar, brief, 'utf-8');
-
-    let startedBrief: string | undefined;
-    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      isProjectBusy: () => null,
-      spawnDetachedRun: (options) => {
-        expect(verifyBriefAdmission(options.exactBrief, options.briefAdmission).status).toBe('valid');
-        return () => {
-          writeFileSync(sidecar, changed, 'utf-8');
-          startedBrief = options.exactBrief;
-        };
-      },
-    });
-
-    const response = await app.inject({ method: 'POST', url: `/api/tasks/${runId}/execute`, payload: {} });
-
-    expect(response.statusCode).toBe(200);
-    expect(startedBrief).toBe(brief);
-    expect(readFileSync(sidecar, 'utf-8')).toBe(changed);
-    expect(readRunState(projectDir, runId).status).toBe('running');
-  });
-
   it('keeps the captured brief through the scheduler instead of rereading a changed sidecar', async () => {
     const brief = '# Goal\nUse the captured scheduler input marker.\n## What the report must show\n1. Preserve the captured scheduler input.\n';
     const changed = '# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n## What the report must show\n1. Preserve the captured scheduler input.\n';
@@ -392,51 +245,13 @@ describe('Dashboard admission handshake', () => {
     expect(prompts.join('\n')).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
   });
 
-  it('guards stage rerun before deleting its output or starting the in-process scheduler', async () => {
-    const workflowRuns = vi.fn(async () => readRunState(projectDir, runId));
-    const adapter: Adapter = {
-      async run() {
-        return { output: 'completed', exitCode: 0, duration_ms: 1 };
-      },
-    };
-    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      runWorkflow: workflowRuns as never,
-      isProjectBusy: () => null,
-      adapter,
-    });
-    const brief = '# Goal\nRerun one stage.\n';
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    let state = readRunState(projectDir, runId);
-    state.status = 'failed';
-    state.taskDescription = brief;
-    writeRunState(projectDir, runId, state);
-    writeFileSync(join(runsRoot(), runId, 'task_brief.md'), brief, 'utf-8');
-    const output = join(runsRoot(), runId, 'stages', 'work', 'output.md');
-    writeFileSync(output, 'must survive rejected stage rerun', 'utf-8');
-
-    const rejected = await app.inject({ method: 'POST', url: `/api/tasks/${runId}/stages/work/rerun`, payload: {} });
-    expect(rejected.statusCode).toBe(409);
-    expect(readFileSync(output, 'utf-8')).toContain('must survive');
-    expect(workflowRuns).not.toHaveBeenCalled();
-
-    const review = rejected.json();
-    const accepted = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${runId}/stages/work/rerun`,
-      payload: {
-        briefPreflightDigest: review.report.digest,
-        briefPreflightReceipt: review.receipt,
-        acknowledgeBriefWarnings: true,
-      },
-    });
-    expect(accepted.statusCode).toBe(200);
-    expect(workflowRuns).toHaveBeenCalledTimes(1);
-  });
-
   it('replaces a same-digest invalid record before consuming an Inbox decision', async () => {
     const spawns: string[] = [];
     app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      spawnDetachedRun: (options) => { spawns.push(options.runId); },
+      registerTask: async (task) => {
+        spawns.push(task.run_id!);
+        return { id: 1, unit: 'private-resume', pid: process.pid, build: 'fixture' };
+      },
       isProjectBusy: () => null,
     });
     const brief = 'Resume this consequential one-line brief';
@@ -488,14 +303,11 @@ describe('Dashboard admission handshake', () => {
       },
     });
     expect(accepted.statusCode).toBe(200);
-    expect(accepted.json()).toMatchObject({ won: true, resumed: true });
+    expect(accepted.json()).toMatchObject({ won: true, resumeRegistered: true });
     expect(spawns).toEqual([runId]);
     const persistedAdmission = readRunState(projectDir, runId).briefAdmission;
-    expect(persistedAdmission).toMatchObject({
-      digest: inspectBrief(brief).digest,
-      acknowledgement: { kind: 'explicit', source: 'dashboard_receipt' },
-    });
-    expect(persistedAdmission?.findingFingerprints.length).toBeGreaterThan(0);
+    expect(verifyBriefAdmission(brief, persistedAdmission).status).toBe('valid');
+    expect(accepted.json().resumeRegistered).toBe(true);
   });
 });
 
@@ -615,26 +427,22 @@ describe('deferred continuation snapshots', () => {
       atIteration: 1,
     });
 
-    let launchedArgs: string[] | undefined;
+    let registeredTask: TaskCreateInput | undefined;
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const code = await cmdInbox(['inbox', 'approve', 'captured-cli-resume'], {
       stdout: stdout as unknown as NodeJS.WriteStream,
       stderr: stderr as unknown as NodeJS.WriteStream,
-      resumeSpawner: (_command, childArgs) => {
+      registerTask: async (task) => {
         writeFileSync(sidecar, changed, 'utf-8');
-        launchedArgs = childArgs;
-        return { pid: 4242, unref() {} };
+        registeredTask = task;
+        return { id: 1, unit: 'private-resume', pid: process.pid, build: 'fixture' };
       },
     });
 
     expect(code).toBe(0);
-    expect(launchedArgs).toBeDefined();
-    const inputIndex = launchedArgs!.indexOf('--brief-input-base64');
-    const admissionIndex = launchedArgs!.indexOf('--brief-admission-record');
-    expect(Buffer.from(launchedArgs![inputIndex + 1], 'base64url').toString('utf8')).toBe(brief);
-    expect(JSON.parse(Buffer.from(launchedArgs![admissionIndex + 1], 'base64url').toString('utf8'))).toEqual(admission);
-    expect(launchedArgs).not.toContain('--task');
+    expect(registeredTask).toMatchObject({ run_id: runId, brief_text: brief, brief_admission: admission });
+    expect(registeredTask?.launch_args).not.toContain('--task');
     expect(readFileSync(sidecar, 'utf-8')).toBe(changed);
   });
 });
@@ -872,55 +680,6 @@ describe('quick and operator entry behavior', () => {
     expect(source.slice(postReportQuestion, launch)).toContain('Wait for a new explicit answer');
     expect(source.slice(launch, launch + 700)).toContain('- < docs/task_brief.md');
     expect(source).toContain('Do not treat the original `/ship` request or an earlier “ship it” as');
-  });
-
-  it('shows outer and generated campaign reports and refuses a newly introduced child finding before reservation', () => {
-    const isolated = cliFixture();
-    mkdirSync(join(isolated.project, 'config'), { recursive: true });
-    writeFileSync(join(isolated.project, 'config', 'defaults.yaml'), 'adapter: mock\n', 'utf-8');
-    const direction = 'Implementation must import `p11-probe.ts`.';
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0',
-      '  policy: greedy_stack',
-      '  higher_is_better: true',
-      '  directions:',
-      `    - "${direction}"`,
-      '  confirm:',
-      '    command: "true"',
-      '  stop:',
-      '    beat: 1',
-      '    max_rounds: 1',
-      'terminal_states:',
-      '  ceiling_hit:',
-      '    paths: [docs/ceiling.md]',
-      '---',
-      '# Goal',
-      'Explore one generated direction.',
-      '',
-    ].join('\n');
-
-    const paused = runCliSync(isolated, [
-      'campaign-loop', '-', '--project', isolated.project, '--campaign', 'p11-campaign', '--no-scout',
-    ], brief);
-    expect(paused.status).toBe(2);
-    expect(paused.stdout).toContain('Brief preflight');
-    expect(`${paused.stdout}${paused.stderr}`).toContain('paused before adapter or proposer loading');
-    expect(existsSync(join(isolated.fcHome, 'runs'))).toBe(false);
-
-    const guarded = runCliSync(isolated, [
-      'campaign-loop', '-', '--project', isolated.project, '--campaign', 'p11-campaign', '--no-scout',
-      '--acknowledge-brief-warnings',
-    ], brief);
-    expect(guarded.status).toBe(1);
-    expect(guarded.stdout.match(/Brief preflight/g)).toHaveLength(2);
-    expect(guarded.stdout).toContain(direction);
-    expect(`${guarded.stdout}${guarded.stderr}`).toContain('new consequential finding');
-    expect(`${guarded.stdout}${guarded.stderr}`).not.toContain('FlowCrew: shipping task');
-    const runsDir = join(isolated.fcHome, 'runs');
-    const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
-    expect(entries.every((entry) => !existsSync(join(runsDir, entry, 'run.json')))).toBe(true);
   });
 
   it('gives stale Dashboard status an executable PID-and-port next step', async () => {

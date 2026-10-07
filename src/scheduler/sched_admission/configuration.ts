@@ -2,9 +2,8 @@
 import { loadProjectDefaults as loadDefaults } from '../../config.js';
 import { z } from 'zod';
 import { type AgentConfig } from '../../adapters/base.js';
-import { RecordedArtifactContractSchema, ArtifactPathSchema, artifactActivation, artifactDeclarationErrors } from '../../artifact-declarations.js';
+import { RecordedArtifactContractSchema, artifactActivation, artifactDeclarationErrors } from '../../artifact-declarations.js';
 import { type StoreState, RUN_STATUS } from '../../store.js';
-import { resourceLeaseRegistryPath } from '../../resource-leases.js';
 import { parseCondition } from '../../condition.js';
 
 export { loadDefaults };
@@ -57,18 +56,7 @@ export const StageConfigSchema = z.object({
   criterion_refs: z.array(z.string()).optional().default([]),
   /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
   artifact_contract: RecordedArtifactContractSchema.optional(),
-  resources: z.object({
-    gpu_cards: z.array(z.string().min(1)).default([]),
-    disk: z.array(z.object({
-      root: z.enum(['project', 'run']),
-      path: z.union([z.literal('.'), ArtifactPathSchema]).default('.'),
-      bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      minimum_free_bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
-    }).strict()).default([]),
-  }).strict().superRefine((request, context) => {
-    if (!request.gpu_cards.length && !request.disk.length) context.addIssue({ code: 'custom', message: 'RESOURCE_REQUEST_EMPTY: declare at least one GPU card or disk reservation' });
-    if (new Set(request.gpu_cards).size !== request.gpu_cards.length) context.addIssue({ code: 'custom', path: ['gpu_cards'], message: 'RESOURCE_GPU_DUPLICATE: each card may be requested once' });
-  }).optional(),
+  resources: z.never({ error: 'RESOURCES_RETIRED: stage.resources scheduling was retired; remove resources and provision GPU/disk capacity outside the engine.' }).optional(),
 });
 
 const StrictDispatchedStageConfigSchema = StageConfigSchema.extend({
@@ -127,7 +115,6 @@ export function refreshRunQueryState(state: StoreState, stages: StageConfig[]): 
   const previous = state.queryState ?? { version: 1 as const };
   state.queryState = {
     ...previous, version: 1,
-    resourceRegistryPath: resourceLeaseRegistryPath(),
     artifacts: stages.flatMap((stage) => [
       ...(stage.artifact_contract?.produces ?? []).map((artifact) => ({
         id: `${stage.id}:${artifact.id}`, root: artifact.root, path: artifact.path, kind: artifact.kind,

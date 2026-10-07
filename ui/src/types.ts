@@ -143,7 +143,6 @@ export interface InboxItem {
     reason: string;
     scheduler?: { kind: string; pid?: number; detail?: string };
   };
-  standingRuleEligible: { ok: boolean; reason?: string };
   campaignId?: string;
   campaignName?: string;
 }
@@ -152,7 +151,7 @@ export interface InboxResolveResult {
   ok: boolean;
   won: boolean;
   item?: InboxItem;
-  resumed?: boolean;
+  resumeRegistered?: boolean;
   error?: string;
   winner?: {
     decision: InboxDecision;

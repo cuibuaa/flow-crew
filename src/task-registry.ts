@@ -34,6 +34,7 @@ export const TASK_LIST_STATUS = {
   ALL: 'all',
 } as const;
 export type TaskListStatus = TaskStatus | typeof TASK_LIST_STATUS[keyof typeof TASK_LIST_STATUS];
+/** Legacy campaign rows remain readable; new tasks are always quick launches. */
 export type TaskKind = 'quick' | 'campaign';
 export type TaskSummaryVerdict = 'PASS' | 'FAIL' | 'ESCALATE';
 
@@ -85,7 +86,7 @@ export interface TaskEntry {
 
 export interface TaskCreateInput {
   name?: string;
-  kind?: TaskKind;
+  kind?: 'quick';
   brief_path?: string;
   brief_text?: string;
   brief_admission?: BriefAdmissionRecord;
@@ -335,6 +336,9 @@ export class TaskRegistry {
   }
 
   create(input: TaskCreateInput): TaskEntry {
+    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
+      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    }
     return this.withLock(() => {
       const registry = this.readLatestUnlocked();
       // A complete damaged historical row cannot be mistaken for a partially
@@ -346,7 +350,7 @@ export class TaskRegistry {
       const id = this.nextIdUnlocked();
       const taskDir = join(this.tasksDir, String(id));
       mkdirSync(taskDir, { recursive: true });
-      const brief = input.brief_text ?? input.brief_path ?? input.config_path ?? '';
+      const brief = input.brief_text ?? input.brief_path ?? '';
       const name = input.name ?? (brief.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || `Task ${id}`);
       const briefPath = input.brief_text === undefined
         ? input.brief_path
@@ -354,10 +358,9 @@ export class TaskRegistry {
       const entry: TaskEntry = {
         id,
         name,
-        kind: input.kind ?? (input.config_path ? 'campaign' : 'quick'),
+        kind: 'quick',
         brief_path: briefPath,
         brief_admission: input.brief_admission,
-        config_path: input.config_path,
         projectDir: input.projectDir,
         systemd_unit: input.systemd_unit ?? `flowcrew-task-${id}.service`,
         run_id: input.run_id,

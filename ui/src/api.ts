@@ -177,7 +177,7 @@ export const fetchInboxOverview = () => json<InboxOverview>(`${BASE}/inbox/overv
 export const resolveInboxItem = (
   runId: string,
   requestId: string,
-  body: { decision: InboxDecision; by?: string; reason?: string; always?: boolean }
+  body: { decision: InboxDecision; by?: string; reason?: string;  }
     & Partial<BriefAdmissionSubmission>,
 ) => postWithBriefAdmission<InboxResolveResult>(
   `${BASE}/inbox/${encodeURIComponent(runId)}/${encodeURIComponent(requestId)}/resolve`,

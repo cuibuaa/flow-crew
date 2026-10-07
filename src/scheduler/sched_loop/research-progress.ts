@@ -5,7 +5,6 @@ import { ratchetCheck, updateMetadata } from '../../knowledge-graph.js';
 import { recordRunEvent } from '../../run-events.js';
 import { generateRunSummary } from '../../run-summary.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
-import { readPendingRejectSignal } from '../sched_admission/dispatch-retry.js';
 import { clearGateContinuationsForStages } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
 import { findCampaignMetric } from '../sched_policy/campaign.js';
@@ -68,7 +67,7 @@ export async function advanceSettledResearch(
     });
 
     // A research result is not durable campaign evidence until every gate has
-    // settled green and every supervisor rejection/re-work has settled. This is
+    // settled green. This is
     // the sole research-advance call site: an eager pre-gate consumer could
     // previously bank a rejected round and move the campaign to the next one.
     state = readRunState(projectDir, runId);
@@ -77,7 +76,7 @@ export async function advanceSettledResearch(
     if (state.research && researchAdvanceEligible({
       gatesSettled: settledResearchGates.allPass,
       stageFailed: anyFailed(state),
-      supervisorRejectPending: readPendingRejectSignal(runDirPath) !== null,
+      supervisorRejectPending: false,
     })) {
       const recoveredSettlement = recoverVerifiedResearchSettlement(sorted, state, projectDir, runId, runDirPath);
       const researchResult = recoveredSettlement

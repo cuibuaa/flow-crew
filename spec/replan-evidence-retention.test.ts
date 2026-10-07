@@ -183,13 +183,6 @@ describe('outer re-plan evidence retention', () => {
 
     const app = await startDashboard(projectDir, 0, { distDir: join(projectDir, 'missing-dist') });
     try {
-      const list = (await app.inject({ method: 'GET', url: '/api/runs' })).json() as Array<{
-        runId: string;
-        stageEvidence?: HistoricalStageEvidence[];
-      }>;
-      expect(list.find((run) => run.runId === final.runId)?.stageEvidence)
-        .toEqual(expect.arrayContaining([expect.objectContaining({ iteration: 1, stageId: 'first_work' })]));
-
       const detail = (await app.inject({ method: 'GET', url: `/api/runs/${final.runId}` })).json() as {
         stages: Array<{ id: string }>;
         stageEvidence: HistoricalStageEvidence[];
@@ -199,12 +192,6 @@ describe('outer re-plan evidence retention', () => {
         expect.objectContaining({ iteration: 1, stageId: 'first_work' }),
       ]));
 
-      const task = (await app.inject({ method: 'GET', url: `/api/tasks/${final.runId}` })).json() as {
-        stageEvidence?: HistoricalStageEvidence[];
-      };
-      expect(task.stageEvidence).toEqual(expect.arrayContaining([
-        expect.objectContaining({ iteration: 1, stageId: 'first_gate' }),
-      ]));
     } finally {
       await app.close();
     }
@@ -326,10 +313,9 @@ describe('outer re-plan evidence retention', () => {
 
     expect(final.status).toBe('complete');
     expect(final.currentIteration).toBe(2);
-    expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(4);
+    expect(adapter.calls.filter((call) => call.stageId === 'plan')).toHaveLength(3);
     expect(adapter.calls.filter((call) => call.stageId === 'replacement_work')).toHaveLength(1);
     expect(adapter.calls.filter((call) => call.stageId === 'plan')[2].prompt).toContain('hard_check_cannot_fail');
-    expect(adapter.calls.filter((call) => call.stageId === 'plan')[3].prompt).toContain('ARTIFACT_READ_UNREACHABLE');
     const archived = stageEvidence(final).filter((entry) => entry.iteration === 1 && entry.stageId === 'first_work');
     expect(archived).toHaveLength(1);
     expect(readFileSync(join(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8'))

@@ -29,7 +29,7 @@ The stage must write one JSON object and stop before performing the action:
 |---|---:|---|
 | `id` | Yes | Stable idempotency key within the run. It must match `[A-Za-z0-9._-]{1,64}`. `requestId` is accepted as an alias. |
 | `action` | Yes | Non-empty action name, such as `publish`, `deploy`, or `send`. |
-| `target` | No | Exact object affected by the action. It is mandatory for a standing rule. |
+| `target` | No | Exact object affected by the action. |
 | `risk` | No | `external`, `exec`, or `write`; missing or unknown values become `unknown`. |
 | `title` | No | Operator-facing summary. The engine derives one from action and target when omitted. |
 | `body` | No | Explanation, evidence, and blast radius. |
@@ -47,7 +47,7 @@ honest terminal artifact explaining the block.
 
 ## Park and resume semantics
 
-If no standing rule matches, the scheduler:
+For each unresolved request, the scheduler:
 
 1. records every request emitted by the completed stage batch;
 2. chooses the oldest unresolved request;
@@ -80,10 +80,6 @@ flowcrew inbox show <requestId> --run <runId>
 flowcrew inbox approve <requestId> [--reason "..."] [--no-resume]
 flowcrew inbox deny <requestId> [--reason "..."] [--no-resume]
 
-# Grant, inspect, and revoke a bounded standing rule
-flowcrew inbox approve <requestId> --always
-flowcrew inbox rules
-flowcrew inbox revoke <action> <target> [--project <dir>]
 ```
 
 Use `--run <runId>` with `show`, `approve`, or `deny` when the request ID alone
@@ -93,18 +89,9 @@ is ambiguous across runs.
 
 Run `flowcrew start`, then open `/inbox`. The page polls pending requests across
 campaigns, shows their risk, action, target, explanation, run, and waiting time,
-and offers approve, deny, and eligible standing-rule actions. Dashboard
+and offers approve and deny. Dashboard
 resolutions use the same first-wins store and resume a parked run after the
 winning decision is persisted.
 
-## Standing rules
-
-“Always allow” is intentionally narrow. A request is eligible only when:
-
-- `risk` is exactly `external`; and
-- `target` is present and exact.
-
-The stored match also binds the project directory, action, and target. A rule
-therefore authorizes one named external action against one target in one
-project. `exec`, `write`, `unknown`, and untargeted requests must be decided
-every time. Only an approval can create a standing rule; denial never does.
+Manual decisions publish one `approval_resolved` event for the winning resolution.
+Historical rule-attributed decisions remain readable as archived data.

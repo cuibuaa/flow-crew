@@ -117,16 +117,6 @@ const BAD_CHECKS: Array<{
     tier: 'advisory',
   },
   {
-    label: 'a forbidden-pattern scan that contradicts an explicit preservation exception',
-    check: { reads: [inputFile('subject', "CHANGELOG.md")],
-      name: 'published sources omit the former private area',
-      type: 'static-ast-scan',
-      params: { glob: 'CHANGELOG.md', language: 'markdown', forbid_pattern: 'legacy/private-area/' },
-    },
-    code: 'contract_exception_conflict',
-    tier: 'advisory',
-  },
-  {
     label: 'existence of an artifact the contract never requires',
     check: { reads: [inputFile('file_0', 'docs/archive-copy.md')],
       name: 'archive copy exists',
@@ -443,7 +433,7 @@ describe('planner Reality-Gate check preflight', () => {
       inspectRealityChecks(CONTRACT_BRIEF, invalid),
     ];
     const messages = reports.flatMap(({ findings }) => findings.map(({ message }) => message));
-    expect(messages).toHaveLength(6);
+    expect(messages).toHaveLength(5);
     for (const message of messages) {
       expect(message).toMatch(/replace|change|declare|narrow|remove|make|fix|mark/i);
     }
@@ -453,10 +443,10 @@ describe('planner Reality-Gate check preflight', () => {
     const markdown = checksMarkdown(...BAD_CHECKS.map(({ check }) => check));
     const report = inspectRealityChecks(CONTRACT_BRIEF, markdown);
     const rewrite = demoteRealityCheckAdvisories(markdown, report.advisoryFindings);
-    expect(rewrite.demotedCheckIndexes).toEqual([1, 2, 3]);
+    expect(rewrite.demotedCheckIndexes).toEqual([1, 2]);
     expect(parseChecksFromMarkdown(rewrite.markdown).map((declaration) =>
       declaration.kind === 'invalid' ? undefined : declaration.advisory === true))
-      .toEqual([true, true, true, false]);
+      .toEqual([true, true, false]);
   });
 
   it('does not turn an explicitly advisory wording check into a blocking finding', () => {

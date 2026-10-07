@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { statusExplanation } from '../src/campaign-page.js';
-import { LIVE_CAMPAIGN_RUN_ACTIONS } from '../src/campaign-loop-live.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import {
@@ -60,11 +59,7 @@ describe('total run-status semantics', () => {
     );
     expect(isSuccessfulRunStatus(status)).toBe(expected.successful);
     expect(isRunMutationBlockedStatus(status)).toBe(expected.mutationBlocked);
-    expect(LIVE_CAMPAIGN_RUN_ACTIONS[status]).toBe(
-      status === RUN_STATUS.PARKED
-        ? 'await_approval'
-        : expected.successful ? 'score' : 'reject',
-    );
+
   });
 
   it('keeps unknown text outside every known outcome and blocks mutation', () => {

@@ -130,35 +130,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-const REPORT_PATH = join(PROJECT_ROOT, 'docs', 'engine-remediation', 'report.md');
 
 describe('independent engine-remediation verification', () => {
-  it('reports exactly one numbered result for every claimed decision', (context) => {
-    // The report lives under a git-ignored docs/ tree, so a clean checkout (CI)
-    // does not carry it. Skip where it is absent; assert in full where it is.
-    if (!existsSync(REPORT_PATH)) return context.skip();
-    const report = readFileSync(REPORT_PATH, 'utf-8');
-    const ids = [...report.matchAll(/^### (\d+) —/gm)].map((match) => Number(match[1]));
-    expect(ids).toEqual(Array.from({ length: 20 }, (_value, index) => index + 1));
-  });
-
-  it('keeps the report-published before replay command executable from the project root', (context) => {
-    if (!existsSync(REPORT_PATH)) return context.skip();
-    const report = readFileSync(REPORT_PATH, 'utf-8');
-    const target = /node node_modules\/vitest\/vitest\.mjs run (spec\/\S+) --config/.exec(report)?.[1];
-    expect(target, 'the report must publish a concrete frozen before-spec target').toBeTypeOf('string');
-    expect(existsSync(join(PROJECT_ROOT, target!)), `reported replay target does not exist: ${target}`).toBe(true);
-  });
-
-  it('calibrates reach counting through the reach instrument rather than a fixed sentinel predicate', () => {
-    const source = readFileSync(join(PROJECT_ROOT, 'spec', 'engine-remediation.test.ts'), 'utf-8');
-    const start = source.indexOf('function reach(');
-    const end = source.indexOf('\n}\n\nfunction recordAfter', start);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    const helper = source.slice(start, end);
-    expect(helper).not.toContain("['known-positive'].filter");
-  });
 
   it('records and consumes the validation delta through a completed scheduler gate', { timeout: 20_000 }, async () => {
     const root = temporaryRoot();

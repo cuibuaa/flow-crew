@@ -108,7 +108,8 @@ export async function executeSingleStage(
   availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
   liveConstraintGuardFactory?: LiveConstraintGuardFactory,
-): Promise<void> {
+  beforeSettlement?: () => Promise<boolean>,
+): Promise<RunResult | undefined> {
   if (!agents.has(stage.role)) {
     const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
     if (!existsSync(agentPath)) throw new Error(`No agent config for role "${stage.role}"`);
@@ -168,8 +169,8 @@ export async function executeSingleStage(
   const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
   let retries = 0;
   const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
-  const resumeSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined)
-    ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
+  const gateSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined);
+  let result: RunResult | undefined;
   const technicalRetry = createSchedulerTechnicalRetryState(initialTimeout);
 
   while (true) {
@@ -179,11 +180,15 @@ export async function executeSingleStage(
     // call and must never overwrite a just-recorded timeout/failure.
     let latestStageStatus = state.stages[stage.id];
     try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
+    const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
+    // Read the failure cause before the running projection clears latest error.
+    const retryPreamble = retries > 0
+      ? buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)
+      : undefined;
     state.stages[stage.id] = freshRunningStageProjection(latestStageStatus, retries);
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
-    const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
     const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
     if (currentGateAttempt) {
       initializeGateMetricAttempt(
@@ -194,18 +199,18 @@ export async function executeSingleStage(
         retries,
       );
     }
-    const result = await runStage(stageAdapter, {
+    const resumeSession = gateSession ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
+    result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
       dependsOn: stage.depends_on ?? [],
-      promptTemplate: appendAttemptDeadlineContract(retries > 0
-        ? `${buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`
+      promptTemplate: appendAttemptDeadlineContract(retryPreamble
+        ? `${retryPreamble}\n\n${resolvedPrompt}`
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
-      resources: stage.resources,
       timeout_ms: prepared.budgetMs,
       ...(attemptDeadlineClockFactory ? { deadlineClock: attemptDeadlineClockFactory() } : {}),
       projectDir,
@@ -226,6 +231,8 @@ export async function executeSingleStage(
       preserveSession: shouldPreserveSession(stage, allStages, sessionReuseEnabled),
       projectWriteScope: stage.scope ?? [],
       liveConstraintGuardFactory,
+      beforeSettlement,
+      deferSettlement: beforeSettlement !== undefined,
     });
 
     const retryableTechnicalFailure = recordSchedulerTechnicalAttemptResult(
@@ -300,6 +307,7 @@ export async function executeSingleStage(
   try {
     readKG(state.projectDir, state.runId);
   } catch { /* no KG yet, that's fine */ }
+  return result;
 }
 
 // Share the existing gate-attempt path services with ordinary and repair execution.

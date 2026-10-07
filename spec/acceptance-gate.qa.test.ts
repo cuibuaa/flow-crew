@@ -158,7 +158,7 @@ describe('acceptance gate: dashboard mutation peers', () => {
     ['whole-run rerun', (runId: string) => `/api/tasks/${runId}/rerun`],
     ['stage rerun', (runId: string) => `/api/tasks/${runId}/stages/gate/rerun`],
     ['gate re-evaluation', (runId: string) => `/api/tasks/${runId}/stages/gate/reeval`],
-  ])('blocks %s without mutating all three busy run states', async (_name, route) => {
+  ])('refuses retired %s without mutating all three busy run states', async (_name, route) => {
     for (const status of [
       RUN_STATUS.RUNNING,
       RUN_STATUS.PARKED,
@@ -168,9 +168,9 @@ describe('acceptance gate: dashboard mutation peers', () => {
       const runJson = writeBlockedRun(runId, status);
       const before = readFileSync(runJson, 'utf-8');
 
-      const response = await app!.inject({ method: 'POST', url: route(runId) });
+      const response = await app!.inject({ method: 'POST', url: route(runId), payload: {} });
 
-      expect(response.statusCode, `${_name} should block ${status}`).toBe(409);
+      expect(response.statusCode, `${_name} is retired for ${status}`).toBe(400);
       expect(readFileSync(runJson, 'utf-8')).toBe(before);
     }
   });

@@ -11,11 +11,10 @@ import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatc
 import { applyPlanRevision, planDigest, recordAdmittedPlan } from '../src/plan-revisions.js';
 import { AuditFindingsSchema, buildScopedRepair } from '../src/scoped-audit-repair.js';
 import { engineGeneration, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
-import { readHostBootId } from '../src/resource-leases.js';
+import { readHostBootId } from '../src/restart-recovery.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { cmdState } from '../src/run-state-access.js';
 import { startDashboard } from '../src/dashboard.js';
-import { ResourceLeaseRegistry } from '../src/resource-leases.js';
 import { runStage } from '../src/worker.js';
 import { beginStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, updateRunState, writeStageStatus, type StoreState } from '../src/store.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
@@ -175,19 +174,6 @@ describe('whole-plan admission at each revision', () => {
 });
 
 describe('worker state, invocation capture and engine resources', () => {
-  it('serves the operator HTTP state query from the same projection and rejects an absent run', async () => {
-    updateRunState(project, runId, (state) => { state.status = 'complete'; });
-    const app = await startDashboard(project, 0);
-    try {
-      const response = await app.inject({ method: 'GET', url: `/api/runs/${runId}/state?prompts=true` });
-      expect(response.statusCode).toBe(200);
-      const expected = readRunStateView(project, runId, { includePromptText: true });
-      expect(response.json().snapshot.runStateSha256).toBe(expected.snapshot.runStateSha256);
-      expect(response.json().stages).toEqual(expected.stages);
-      expect(response.json().prompts).toEqual(expected.prompts);
-      expect((await app.inject({ method: 'GET', url: '/api/runs/absent_fixture/state' })).statusCode).toBe(409);
-    } finally { await app.close(); }
-  });
   it('refuses malformed resource paths, duplicate cards and empty declarations at admission', () => {
     for (const resources of [{ gpu_cards: [], disk: [] }, { gpu_cards: ['card', 'card'] }, { disk: [{ root: 'project', path: '../other', bytes: 1 }] }]) {
       expect(() => StageConfigSchema.parse({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'writer', role: 'coder', resources })).toThrow();
@@ -217,14 +203,7 @@ describe('worker state, invocation capture and engine resources', () => {
     const result = await runStage(adapter, { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: '', artifactContract, timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0 });
     expect(called).toBe(false); expect(result.exitCode).toBe(1); expect(result.output).toContain('ARTIFACT_READ_ABSENT');
   });
-  it('leases before execution, retains unknown consumers and refuses a contending stage', async () => {
-    const registry = new ResourceLeaseRegistry({ registryPath: join(root, 'leases.sqlite'), gpuInventory: () => ({ cardIds: ['synthetic-card'], observedAt: new Date().toISOString() }) });
-    let calls = 0; const adapter: Adapter = { async run() { calls++; return { output: 'done', exitCode: 0, duration_ms: 1 }; } };
-    const opts = { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: '', artifactContract: empty(), timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0, resources: { gpu_cards: ['synthetic-card'], disk: [] }, resourceRegistry: registry };
-    expect((await runStage(adapter, opts)).exitCode).toBe(0);
-    expect((await runStage(adapter, { ...opts, stageId: 'pending' })).output).toContain('GPU_BUSY'); expect(calls).toBe(1);
-    const leases = registry.read(); expect(leases.status).toBe('available'); if (leases.status === 'available') expect(leases.snapshot.leases[0].status).toBe('active');
-  });
+
 });
 
 describe('proven restart recovery', () => {

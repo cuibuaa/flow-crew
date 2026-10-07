@@ -1,12 +1,11 @@
 // Boundary: Compose existing typed admission, policy, scope and settlement services; exports individual effects, never a context or facade dependency.
-import { createSupervisorRejectConsumer } from '../sched_admission/dispatch-retry.js';
 import { createDispatchAdmission } from '../sched_admission/dispatch.js';
 import { createReadyFinder } from '../sched_admission/frontier.js';
 import { createTransientVitestScopeReader } from '../sched_admission/project-capabilities.js';
 import { createApprovalMonitor } from '../sched_policy/approvals.js';
 import { createCampaignWriters } from '../sched_policy/campaign.js';
 import { createDispatchInjector } from '../sched_policy/dispatch-injection.js';
-import { appendSchedulerGuidanceOnce, createBlockageConcluder, observeStableBlockage } from '../sched_policy/guidance.js';
+import { createBlockageConcluder } from '../sched_policy/guidance.js';
 import { createResearchAdvancer } from '../sched_policy/research.js';
 import { createTerminalEvaluator } from '../sched_policy/terminal.js';
 import { firstDeclaredInputScopeConflict, listProjectFilesAt, resolveDeclaredInputWriteBindings } from '../sched_scope/path-capabilities.js';
@@ -35,7 +34,6 @@ export const { tryParkOnApprovalRequest, inspectApprovalRequests, monitorApprova
 export const { tryAdvanceResearch } = createResearchAdvancer({ listProjectFilesAt, settleFrameworkRollbackPath, writeCampaignEntry });
 export const { ensureTerminalArtifactValidation, tryTerminateOnTerminalState, concludeDeclaredTerminalAtQuiescence } = createTerminalEvaluator({ validationDeltaMatchesCurrentExecution, recordGateValidationDelta, writeCampaignEntry, concludeRepeatedBlockage });
 export const { injectDispatchedStages } = createDispatchInjector({ inspectDispatchAdmission, resolveDeclaredInputWriteBindings, applyScopePlanningDispositions });
-export const consumeSupervisorReject = createSupervisorRejectConsumer({ observeStableBlockage, concludeRepeatedBlockage, writeCampaignEntry, appendSchedulerGuidanceOnce });
 export const { writeRepairRoundDiffArtifact } = createRepairDiffWriter({ gateArchiveCoordinate, canonicalGateRoundArtifactDir });
 export const { scopeRevisionValidationConsequence, monitorScopeRevisionRequests } = createScopeRevisionMonitor({ readRunValidationBaseline });
 export const { createSchedulerLiveConstraintGuardFactory } = createLiveGuardFactory({ transientVitestOutputScopes });

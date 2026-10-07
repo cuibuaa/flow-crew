@@ -16,16 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import * as codexModule from '../src/adapters/codex.js';
-import {
-  captureRepairRoundSnapshot,
-  consumeSupervisorReject,
-  inspectDispatchAdmission,
-  inspectRealityCheckReachability,
-  parseDispatchedStageConfig,
-  runWorkflow,
-  writeRepairRoundDiffArtifact,
-  type WorkflowConfig,
-} from '../src/scheduler.js';
+import { captureRepairRoundSnapshot, inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, runWorkflow, writeRepairRoundDiffArtifact, type WorkflowConfig } from '../src/scheduler.js';
 import * as schedulerModule from '../src/scheduler.js';
 import { Supervisor } from '../src/supervisor.js';
 import * as supervisorModule from '../src/supervisor.js';
@@ -63,7 +54,6 @@ const resolveCodexCapabilityIdentity = codexModule.resolveCodexCapabilityIdentit
 const appendResearchTemporalPathContract = schedulerModule.appendResearchTemporalPathContract!;
 const stageWithInheritedScope = schedulerModule.stageWithInheritedScope!;
 const buildSupervisorRolePrompt = supervisorModule.buildSupervisorRolePrompt!;
-const computeSupervisorEvidenceBinding = supervisorModule.computeSupervisorEvidenceBinding!;
 const supervisorEvidenceDigest = supervisorModule.supervisorEvidenceDigest!;
 const beginAttemptEvidenceGeneration = workerModule.beginAttemptEvidenceGeneration!;
 
@@ -118,176 +108,13 @@ function stage(raw: Record<string, unknown>) {
 }
 
 describe('UX/performance engine-loop evidence replays', () => {
-  it('item 1: a stale log and engine placeholder cannot become current-attempt rejection evidence', () => {
-    const runDirectory = temporaryRoot();
-    const stagePath = join(runDirectory, 'stages', 'audit_round_02');
-    mkdirSync(stagePath, { recursive: true });
-    const stale = recordedEvidence('item1_attempt1_stale_output');
-    const placeholderEvent = JSON.parse(
-      recordedEvidence('item1_engine_placeholder_shape').toString('utf-8'),
-    ) as { item: { aggregated_output: string } };
-    const placeholderText = placeholderEvent.item.aggregated_output
-      .slice(placeholderEvent.item.aggregated_output.indexOf('\n') + 1);
-    const placeholderMetric = JSON.parse(placeholderText) as Record<string, unknown>;
-    writeFileSync(join(stagePath, 'live.log'), stale);
-    writeFileSync(join(runDirectory, 'verdict_audit_round_02.json'), '{"pass":false,"reason":"attempt 1"}\n');
-    const startedAt = '2026-09-02T11:40:00.000Z';
-    const generation = beginAttemptEvidenceGeneration(runDirectory, 'audit_round_02', 2, startedAt);
-    writeFileSync(join(stagePath, 'live.log'), Buffer.concat([
-      stale, recordedEvidence('item1_engine_placeholder_shape'),
-    ]));
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify(placeholderMetric));
-    const status: StageStatus = {
-      status: 'complete', retries: 1,
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T11:41:00.000Z' }],
-    };
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status))
-      .toMatchObject({ attemptIndex: 2, emittedDeliverable: false });
+  
 
-    writeFileSync(join(stagePath, 'output_attempt_2.md'), 'attempt 2 correct output\n');
-    const bound = computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)!;
-    expect(bound.emittedDeliverable).toBe(true);
+  
 
-    // Changing bytes before the attempt boundary cannot change this generation.
-    const log = readFileSync(join(stagePath, 'live.log'));
-    const rewritten = Buffer.concat([Buffer.from('x'.repeat(stale.byteLength)), log.subarray(stale.byteLength)]);
-    writeFileSync(join(stagePath, 'live.log'), rewritten);
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)?.generation).toBe(bound.generation);
-    expect(generation.segmentStart).toBeGreaterThan(stale.byteLength);
+  
 
-    // Current-attempt output remains novelty-bearing.
-    writeFileSync(join(stagePath, 'live.log'), Buffer.concat([rewritten, Buffer.from('current attempt delta\n')]));
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)?.generation).not.toBe(bound.generation);
-  });
-
-  it('item 1: a rejection bound to an older evidence generation cannot re-pend the later correct output', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const work = stage({ id: 'audit_round_02', role: 'qa', scope: [], depends_on: [], dependency_reasons: {} });
-    const created = createRun(projectDir, 'reject-generation-replay', 'fixture', [work.id]);
-    const startedAt = '2026-09-02T11:40:00.000Z';
-    beginAttemptEvidenceGeneration(created.runDirPath, work.id, 2, startedAt);
-    writeFileSync(join(created.runDirPath, 'stages', work.id, 'output_attempt_2.md'), 'correct later output\n');
-    writeFileSync(
-      join(created.runDirPath, 'stages', work.id, 'metric.json'),
-      recordedEvidence('item1_later_correct_metric'),
-    );
-    const status: StageStatus = {
-      status: 'complete', retries: 1, completedAt: '2026-09-02T11:41:00.000Z',
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T11:41:00.000Z' }],
-    };
-    writeStageStatus(projectDir, created.runId, work.id, status);
-    const state = readRunState(projectDir, created.runId);
-    state.stages[work.id] = status;
-    writeRunState(projectDir, created.runId, state);
-    const current = computeSupervisorEvidenceBinding(created.runDirPath, work.id, status)!;
-    const signals = join(created.runDirPath, 'signals');
-    mkdirSync(signals, { recursive: true });
-    writeFileSync(join(signals, `reject_${work.id}.json`), JSON.stringify({
-      version: 2, stage: work.id, reason: 'recorded stale contradiction',
-      evidence: { ...current, generation: '0'.repeat(64) },
-    }));
-    expect(consumeSupervisorReject(state, [work], [work.id], {
-      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
-    })).toBe(false);
-    expect(state.stages[work.id].status).toBe('complete');
-    expect(readdirSync(join(created.runDirPath, 'supervisor_rejections', 'discarded'))).toHaveLength(1);
-    expect(readRunEvents(projectDir, created.runId).some((event) => event.type === 'supervisor_reject_discarded')).toBe(true);
-  });
-
-  it('unchanged-base seam item 1: an unprovable stale generation is never applied to the completed attempt', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-base-seam-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const work = stage({ id: 'audit_round_02', role: 'qa', scope: [], depends_on: [], dependency_reasons: {} });
-    const created = createRun(projectDir, 'reject-base-seam', 'fixture', [work.id]);
-    const startedAt = '2026-09-02T11:40:52.000Z';
-    const status: StageStatus = {
-      status: 'complete', retries: 1, completedAt: '2026-09-02T12:11:23.000Z',
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T12:11:23.000Z' }],
-    };
-    writeStageStatus(projectDir, created.runId, work.id, status);
-    const state = readRunState(projectDir, created.runId);
-    state.stages[work.id] = status;
-    writeRunState(projectDir, created.runId, state);
-    const stagePath = join(created.runDirPath, 'stages', work.id);
-    mkdirSync(stagePath, { recursive: true });
-    writeFileSync(join(stagePath, 'live.log'), 'attempt 1: I wrote the metric artifact\n');
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify({
-      hasMetric: false, source: { kind: 'engine_attempt_default' },
-    }));
-    const signals = join(created.runDirPath, 'signals');
-    mkdirSync(signals, { recursive: true });
-    writeFileSync(join(signals, `reject_${work.id}.json`), JSON.stringify({
-      version: 2,
-      stage: work.id,
-      reason: 'stale log contradicted the placeholder metric',
-      evidence: {
-        version: 1,
-        stageId: work.id,
-        attemptIndex: 1,
-        attemptStartedAt: '2026-09-02T11:09:20.000Z',
-        generation: '1'.repeat(64),
-        emittedDeliverable: true,
-      },
-    }));
-
-    expect(consumeSupervisorReject(state, [work], [work.id], {
-      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 2,
-    })).toBe(false);
-    expect(state.stages[work.id].status).toBe('complete');
-  });
-
-  it('item 1: output emitted during a supervisor call cannot be blamed for the evidence captured before that call', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-02T11:41:15.000Z'));
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-observation-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const created = createRun(projectDir, 'reject-observation-race', 'fixture', ['audit_round_02']);
-    const stagePath = join(created.runDirPath, 'stages', 'audit_round_02');
-    mkdirSync(stagePath, { recursive: true });
-    writeFileSync(join(stagePath, 'live.log'), 'attempt 1: I wrote the metric artifact\n');
-    const attemptStartedAt = '2026-09-02T11:40:52.000Z';
-    const status: StageStatus = {
-      status: 'running', retries: 1, startedAt: '2026-09-02T11:09:20.000Z',
-      attempts: [{ index: 2, status: 'running', startedAt: attemptStartedAt }],
-    };
-    writeStageStatus(projectDir, created.runId, 'audit_round_02', status);
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'running';
-    state.stages.audit_round_02 = status;
-    writeRunState(projectDir, created.runId, state);
-    beginAttemptEvidenceGeneration(created.runDirPath, 'audit_round_02', 2, attemptStartedAt);
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify({
-      hasMetric: false, source: { kind: 'engine_attempt_default' },
-    }));
-    const adapter: Adapter = { async run() {
-      // This is the later attempt's correct deliverable, emitted after the
-      // assessment input was frozen but before the REJECT response arrived.
-      writeFileSync(join(stagePath, 'output_attempt_2.md'), 'correct attempt 2 output\n');
-      return {
-        output: '{"verdict":"REJECT","target_stage":"audit_round_02","reason":"stale log contradicts placeholder","guidance":null}',
-        exitCode: 0, duration_ms: 1,
-      };
-    } };
-    const supervisor = new Supervisor(projectDir, created.runId, adapter, {
-      enabled: true, adapter: 'mock', model: 'default', reasoningEffort: 'low',
-      pollIntervalMs: 10, routineAssessmentIntervalMs: 10, cooldownAfterActionMs: 0,
-      maxAssessmentsPerIteration: 20, tailBytes: 16_384, minDeltaBytes: 0,
-      stuckThresholdMs: 600_000,
-    }, 'reject only the exact observed deliverable');
-    supervisor.start();
-    await vi.advanceTimersByTimeAsync(15);
-    supervisor.stop();
-
-    expect(readdirSync(join(created.runDirPath, 'signals'))).not.toContain('reject_audit_round_02.json');
-    expect(readFileSync(join(stagePath, 'output_attempt_2.md'), 'utf-8')).toContain('correct attempt 2');
-  });
+  
 
   it('unchanged-base seam item 2: a mismatched attempt receives one durable rejection and actionable non-hot wait guidance', async () => {
     const requestBytes = recordedEvidence('item2_mismatched_request');
@@ -1013,8 +840,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     const worker = readFileSync(join(import.meta.dirname, '..', 'src', 'worker.ts'), 'utf-8');
     const scheduler = readFileSync(join(import.meta.dirname, '..', 'src', 'scheduler', 'sched_scope', 'revision-monitor.ts'), 'utf-8');
     expect(worker).toContain("watch(directory, { persistent: false }");
-    expect(worker).toContain('setInterval(pollTimeoutExtensionRequests, 1000)');
-    expect(worker).not.toMatch(/setInterval\(pollTimeoutExtensionRequests,\s*20\)/);
+    expect(worker).not.toContain('pollTimeoutExtensionRequests');
     const requests = readFileSync(join(import.meta.dirname, '..', 'src', 'scheduler', 'sched_scope', 'scope-revisions.ts'), 'utf-8');
     expect(requests).toContain('join(stagePath, SCOPE_REVISION_REQUEST_FILE)');
     expect(scheduler).toContain('watch(stagePath, { persistent: false }');

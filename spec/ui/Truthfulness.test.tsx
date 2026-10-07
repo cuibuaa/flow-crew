@@ -327,7 +327,6 @@ describe("dashboard truthfulness", () => {
       title: "Deploy safely",
       createdAt: "2026-08-03T00:00:00.000Z",
       state: "pending",
-      standingRuleEligible: { ok: true },
     };
     const overview = (items: InboxItem[]): InboxOverview => ({
       approvals: { status: "complete", items },
@@ -351,10 +350,10 @@ describe("dashboard truthfulness", () => {
       .mockResolvedValue(overview([]));
     const resolveItem = vi.fn()
       .mockRejectedValueOnce(new BriefAdmissionRequestError("Resume brief review required", 409, review))
-      .mockResolvedValueOnce({ ok: true, won: true, resumed: true });
+      .mockResolvedValueOnce({ ok: true, won: true, resumeRegistered: true });
     render(
       <MemoryRouter>
-        <Inbox loadOverview={loadOverview} resolveItem={resolveItem} />
+        <><Inbox loadOverview={loadOverview} resolveItem={resolveItem} /><ToastContainer /></>
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve and resume" }));
@@ -368,6 +367,7 @@ describe("dashboard truthfulness", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /reviewed these warnings/i }));
     fireEvent.click(continueButton);
     await waitFor(() => expect(resolveItem).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Request approved; resume queued/i)).toBeInTheDocument();
     expect(resolveItem.mock.calls[1]).toEqual([
       approval.runId,
       approval.requestId,

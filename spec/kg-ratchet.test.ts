@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import {
-  readKG, writeKG, addNode, ratchetCheck, detectPlateau,
+  readKG, writeKG, addNode, ratchetCheck,
 } from '../src/knowledge-graph.js';
 import { runDir } from '../src/store.js';
 
@@ -91,25 +91,48 @@ describe('ratchetCheck', () => {
   });
 });
 
-describe('detectPlateau', () => {
-  it('returns false when not enough result nodes', () => {
-    ratchetCheck(projectDir, runId, 80, 'accuracy');
-    expect(detectPlateau(projectDir, runId, 3)).toBe(false);
+describe('ratchet signed scores and attribution', () => {
+it('ratchetCheck with score 0 still sets bestScore (0 is a valid score)', () => {
+    const result = ratchetCheck(projectDir, runId, 0, 'loss');
+    expect(result.improved).toBe(true);
+    expect(result.currentScore).toBe(0);
+    const kg = readKG(projectDir, runId);
+    expect(kg.metadata.bestScore).toBe(0);
   });
-
-  it('returns true when last N results all equal bestScore', () => {
-    // First call sets bestScore to 80
-    ratchetCheck(projectDir, runId, 80, 'accuracy');
-    // Next two calls with same score — not improvements, but score equals bestScore
-    ratchetCheck(projectDir, runId, 80, 'accuracy');
-    ratchetCheck(projectDir, runId, 80, 'accuracy');
-    expect(detectPlateau(projectDir, runId, 3)).toBe(true);
+it('ratchetCheck with negative score works', () => {
+    const result = ratchetCheck(projectDir, runId, -5, 'loss');
+    expect(result.improved).toBe(true);
+    const kg = readKG(projectDir, runId);
+    expect(kg.metadata.bestScore).toBe(-5);
   });
+it('approach already marked dead_end is not re-marked on subsequent regressions', () => {
+    const approach = addNode(projectDir, runId, { type: 'approach', label: 'A1', details: 'original' });
+    ratchetCheck(projectDir, runId, 90, 'accuracy');
+    // First regression marks as dead_end
+    ratchetCheck(projectDir, runId, 70, 'accuracy', undefined, approach.id);
+    const kg1 = readKG(projectDir, runId);
+    const after1 = kg1.nodes.find(n => n.id === approach.id)!;
+    expect(after1.type).toBe('dead_end');
+    const details1 = after1.details;
 
-  it('returns false when scores vary', () => {
-    ratchetCheck(projectDir, runId, 80, 'accuracy');
-    ratchetCheck(projectDir, runId, 85, 'accuracy');
-    ratchetCheck(projectDir, runId, 83, 'accuracy');
-    expect(detectPlateau(projectDir, runId, 3)).toBe(false);
+    // Second regression should NOT append another dead_end annotation
+    ratchetCheck(projectDir, runId, 60, 'accuracy', undefined, approach.id);
+    const kg2 = readKG(projectDir, runId);
+    const after2 = kg2.nodes.find(n => n.id === approach.id)!;
+    expect(after2.type).toBe('dead_end');
+    // Details should not grow with duplicate dead_end messages
+    expect(after2.details).toBe(details1);
+  });
+it('result node records stageId from gate', () => {
+    const result = ratchetCheck(projectDir, runId, 85, 'accuracy', 'gate-stage-1');
+    const kg = readKG(projectDir, runId);
+    const resultNode = kg.nodes.find(n => n.id === result.nodeId)!;
+    expect(resultNode.stageId).toBe('gate-stage-1');
+  });
+it('result node has undefined stageId when not provided', () => {
+    const result = ratchetCheck(projectDir, runId, 85, 'accuracy');
+    const kg = readKG(projectDir, runId);
+    const resultNode = kg.nodes.find(n => n.id === result.nodeId)!;
+    expect(resultNode.stageId).toBeUndefined();
   });
 });

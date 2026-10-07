@@ -229,6 +229,8 @@ class ViewReadFence {
 
 export interface ArtifactObservation {
   declaration: z.infer<typeof ArtifactSchema>;
+  /** Retained settlement receipt; checkedAt distinguishes it from current metadata. */
+  settlement?: { checkedAt: string; bytes: number; members?: number; sha256: string; fresh: boolean };
   existence: { status: 'present' | 'absent' | 'type_mismatch' | 'invalid_path' | 'unreadable'; path?: string; kind?: 'file' | 'directory' | 'other'; bytes?: number; modifiedAt?: string; inode?: string; device?: string; links?: number; reason?: string };
 }
 
@@ -406,9 +408,22 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
             if (typeof obligation?.path !== 'string' || !isAbsolute(obligation.path)) return;
             const root = contained(runDirectory, obligation.path) ? 'run' : contained(projectDir, obligation.path) ? 'project' : undefined;
             if (!root) { fence.diagnostics.push({ code: 'STATE_CONTRACT_LOCATION_UNBOUND', path: contractPath, detail: 'retained obligation names neither this project nor this run' }); return; }
-            const declaration = ArtifactSchema.parse({ id: `recorded_${stageId}_${index}`, root, path: relative(root === 'run' ? runDirectory : projectDir, obligation.path), stageId, role: obligation.kind === 'replay_command_target' ? 'read' : 'produce', source: contractPath, activation: typed.completionDeferred === true ? 'unknown' : 'active' });
+            const observation = Array.isArray(typed.observations) ? typed.observations.map(recordObject).find((value) => value?.path === obligation.path) : undefined;
+            const declaration = ArtifactSchema.parse({ id: `recorded_${stageId}_${index}`, root, path: relative(root === 'run' ? runDirectory : projectDir, obligation.path), ...(observation?.kind === 'directory' ? { kind: 'directory' } : {}), stageId, role: obligation.kind === 'replay_command_target' ? 'read' : 'produce', source: contractPath, activation: typed.completionDeferred === true ? 'unknown' : 'active' });
             artifacts.push({ declaration, existence: fence.watchValue(() => observeArtifact(projectDir, runDirectory, declaration)) });
           });
+        }
+      }
+      const retained = recordObject(contract);
+      if (typeof retained?.checkedAt === 'string' && Array.isArray(retained.observations)) {
+        for (const value of retained.observations) {
+          const observation = recordObject(value);
+          if (typeof observation?.path !== 'string' || !quantity.safeParse(observation.bytes).success
+            || !digest.safeParse(observation.sha256).success || typeof observation.fresh !== 'boolean') continue;
+          for (const artifact of artifacts) if (artifact.declaration.stageId === stageId && artifact.existence.path === observation.path) {
+            artifact.settlement = { checkedAt: retained.checkedAt, bytes: observation.bytes as number, sha256: observation.sha256 as string, fresh: observation.fresh,
+              ...(quantity.safeParse(observation.members).success ? { members: observation.members as number } : {}) };
+          }
         }
       }
       const verdictPath = path(`verdict_${stageId}.json`);

@@ -12,6 +12,8 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { promoteAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
 import { recordAdmittedPlan } from '../../plan-revisions.js';
 import { recordRunEvent } from '../../run-events.js';
+import { readDispatchDocument } from '../../dispatch-document.js';
+import { formatRealityCheckPreflightFindings, type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
 
 export interface DispatchInjectionServices {
   inspectDispatchAdmission: ReturnType<typeof import('../sched_admission/dispatch.js').createDispatchAdmission>;
@@ -30,6 +32,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     projectDir: string,
     runId: string,
     inspectOnly = false,
+    preflight?: RealityCheckPreflightReport,
   ): StageConfig[] {
     // Read dispatch.yaml from run dir
     const runDirPath = runDir(projectDir, runId);
@@ -39,6 +42,16 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         stageId: dispatchStageId, detail: report.errors.join('; '),
         source: 'scheduler', level: 'warning',
       });
+    };
+    const publishAdmission = (report: DispatchAdmissionReport): boolean => {
+      if (preflight) {
+        report.realityPreflight = preflight;
+        if (preflight.refusingFindings.length) report.errors.push(formatRealityCheckPreflightFindings(preflight.refusingFindings));
+      }
+      report.pass = report.pass && report.errors.length === 0;
+      writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+      if (!report.pass) emitAdmissionRejection(report);
+      return report.pass;
     };
     const dispatchPath = join(runDirPath, 'dispatch.yaml');
     if (!existsSync(dispatchPath)) return [];
@@ -52,8 +65,11 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     const proposalDigest = createHash('sha256').update(rawDispatchText, 'utf8').digest('hex');
 
     let items: unknown;
+    let itemList: unknown[];
     try {
-      items = parseYaml(rawDispatchText);
+      const parsed = readDispatchDocument(rawDispatchText);
+      items = parsed.document;
+      itemList = parsed.stages;
     } catch (error) {
       const report: DispatchAdmissionReport = {
         version: 1,
@@ -64,21 +80,10 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         proposalDigest,
         terminalOwners: {},
       };
-      writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
-      emitAdmissionRejection(report);
+      publishAdmission(report);
       log.warn({ errors: report.errors }, 'Failed to parse dispatch.yaml');
       return [];
     }
-    // Accept both bare list and {stages: [...]} wrapper
-    let itemList: unknown[];
-    if (Array.isArray(items)) {
-      itemList = items;
-    } else if (items && typeof items === 'object' && Array.isArray((items as Record<string, unknown>).stages)) {
-      itemList = (items as Record<string, unknown>).stages as unknown[];
-    } else {
-      return [];
-    }
-
     const dispatched: StageConfig[] = [];
     const skippedReasons: string[] = [];
     const schemaReasons: string[] = [];
@@ -131,8 +136,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         proposalDigest,
         terminalOwners: {},
       };
-      writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
-      emitAdmissionRejection(report);
+      publishAdmission(report);
       log.warn({ errors: report.errors }, 'Dynamic dispatch refused before any proposed stage was injected');
       return [];
     }
@@ -151,8 +155,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         proposalDigest,
         terminalOwners: {},
       };
-      writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
-      emitAdmissionRejection(report);
+      publishAdmission(report);
       return [];
     }
     // A process-bound brief admission makes zero criteria a launch contract.
@@ -199,9 +202,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
       admission.pass = false;
       admission.errors.unshift(...schemaReasons);
     }
-    writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(admission, null, 2)}\n`, 'utf-8');
-    if (!admission.pass) {
-      emitAdmissionRejection(admission);
+    if (!publishAdmission(admission)) {
       log.warn({ errors: admission.errors }, 'Dynamic dispatch topology refused before stage injection');
       return [];
     }

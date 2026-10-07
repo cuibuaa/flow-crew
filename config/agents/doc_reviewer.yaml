@@ -49,7 +49,7 @@ prompt: |
   # The parenthetical examples above are ILLUSTRATIVE, not criteria. A design that satisfies
   # a property by different means passes. Do not convert an example into a hard assertion.
   # Read-through review dimensions. Apply these when the task supplies rendered operator-facing
-  # web or CLI text, and keep the wording aligned with docs/ui_selfcheck.md. Read the output as
+  # web or CLI text. Read the output as
   # prose; metric assertions are supporting evidence, never a substitute for this review.
   - Purpose/question traceability: every section must name the operator question it answers.
   - Near-duplicate entries: repeated sentence patterns that differ only by an identifier are a finding.

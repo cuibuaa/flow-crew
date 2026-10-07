@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { mergePlanRetryPair } from '../src/plan-retry-monotone.js';
 import { captureStageArtifactContractPreimages, inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { findAllReady, inspectRealityCheckReachability, runWorkflow, selectRunnableBatch, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
@@ -53,7 +52,7 @@ const writerCase = (gateNeedsReport = true) => {
     id: 'reality-check:report-exists', source: 'admission' as const,
     detail: 'reality check "report-exists" references absent docs/report.md, but every producer is conditional or repair-only',
   }];
-  const merged = mergePlanRetryPair(incumbent, proposed, refusal).pair.dispatch;
+  const merged = proposed.dispatch;
   const entries = (parseYaml(merged) as { stages: Array<Record<string, unknown>> }).stages;
   const stages = entries.map((entry): StageConfig => ({ criterion_refs: [], artifact_contract: artifacts(entry.is_gate === true ? [{ id: 'verdict', root: 'run', path: `verdict_${String(entry.id)}.json` }] : entry.id === 'write_report' ? [{ id: 'report', root: 'project', path: 'docs/report.md' }] : [], [], [], []),
     id: String(entry.id), role: String(entry.role),

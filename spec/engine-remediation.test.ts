@@ -21,7 +21,6 @@ import type { Adapter } from '../src/adapters/base.js';
 import { createBuildManifest, publishBuildGeneration } from '../src/build-manifest.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
-import { createCampaignProposerScratch } from '../src/campaign-scratch.js';
 import { cancelRunThroughControlPlane } from '../src/cancellation-client.js';
 import { collectShipPreflight } from '../src/cli-ship-preflight.js';
 import { runShipSetup, type GitWorktreeCreator } from '../src/cli-ship-setup.js';
@@ -708,8 +707,6 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     expect(existsSync(join(stateRoot, 'runs', unknownId, RUN_RESERVATION_FILE))).toBe(true);
     expect(existsSync(join(stateRoot, 'runs', 'unknown-kg-target', RUN_RESERVATION_FILE))).toBe(true);
     expect(existsSync(join(stateRoot, 'runs', iterationLogId, RUN_RESERVATION_FILE))).toBe(true);
-    const proposer = createCampaignProposerScratch(root);
-    expect(proposer.startsWith(join(stateRoot, 'runs'))).toBe(false);
     const escapedDirectory = join(stateRoot, 'escape');
     write(join(escapedDirectory, 'run.json'), JSON.stringify({ runId: '../escape' }));
     expect(() => appendRunEvent(projectDir, '../escape', {

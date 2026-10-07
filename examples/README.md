@@ -1,13 +1,11 @@
 # FlowCrew examples
 
 These examples provide two token-free ways to inspect FlowCrew before allowing
-a real agent to run, plus a campaign configuration that is safe to validate in
-dry-run mode.
+a real agent to run.
 
 | File | Purpose | Safe first command |
 |---|---|---|
 | `hello-research.brief.md` | Minimal research contract with a metric, stop policy, confirmation command, and terminal paths | `flowcrew rehearse examples/hello-research.brief.md` |
-| `example_campaign.yaml` | Minimal campaign schema wired to the research brief | `flowcrew campaign run examples/example_campaign.yaml --dry-run` |
 | `mock-fixtures/` | Deterministic `plan` and `single` stage responses for the mock adapter | See the isolated mock loop below |
 
 ## Rehearse the research brief
@@ -36,23 +34,6 @@ path. It does not validate a real research conclusion. The scripted rehearsal
 deliberately presents a false ship candidate in an empty temporary repository;
 the confirmation command rejects it, proving that the loop continues to an
 honest terminal result.
-
-## Inspect the campaign plan
-
-```bash
-flowcrew campaign run examples/example_campaign.yaml --dry-run
-```
-
-Expected output starts with `Campaign dry run:`, shows the resolved paths and
-one-run budget, and ends with:
-
-```text
-Campaign hello-research-example: dry_run
-```
-
-`--dry-run` does not start a campaign or an agent. The example's
-`launch.systemdUnit` and `launch.launchScript` are placeholders; replace both
-with values for your own launcher before attempting a live campaign.
 
 ## Run a complete mock loop
 

@@ -4,8 +4,6 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { FrozenReplayCorpus, parseReplayArguments, requireFreshTemporaryDirectory, sha256 } from '../scripts/engine-principles-inputs.js';
-import { cancelledContinuationRefused, createPrivateTrialSupport } from '../scripts/engine-principles-trial-support.js';
-import type { ProcessStartToken } from '../src/run-lock.js';
 
 const roots: string[] = [];
 function fixture(): string {
@@ -78,67 +76,6 @@ describe('offline replay input integrity', () => {
     const selected = corpus(fixture(), { run_id: null, relative_path: 'setup.json' });
     expect(selected.files[0].run_id).toBeNull();
     expect(selected.read('native-key')).toBe('declared document');
-  });
-});
-
-function support(root: string, tokens = new Map<number, ProcessStartToken>()) {
-  const storeRoot = join(root, 'store'); mkdirSync(storeRoot);
-  const calls: unknown[] = [];
-  const trial = createPrivateTrialSupport({ root, storeRoot, dist: join(root, 'dist'), out: join(root, 'out'),
-    socket: join(root, 'private.sock'), brief: 'fixture brief', admission: { version: 1 },
-    processStartToken: pid => tokens.get(pid),
-    sendRpc: async (socket, request) => { calls.push({ socket, request }); return { id: 1 }; },
-    readRunStateView: () => ({ snapshot: { runStateSha256: sha256('state') }, prompts: { coverage: 'exact' } }),
-    engineGeneration: () => 'fixture-generation' });
-  return { trial, calls, storeRoot };
-}
-
-describe('private trial lifecycle boundary', () => {
-  it('accepts an exact pre-launch cancellation refusal and rejects unbound or running claims', () => {
-    const response = { task: { run_id: 'fixture-run', status: 'stopped',
-      notes: 'could not record launch intent: RUN_CANCELLED: run fixture-run has acknowledged cancellation' },
-      unit_status: { kind: 'unknown' } };
-    expect(cancelledContinuationRefused(response, 'fixture-run')).toBe(true);
-    expect(cancelledContinuationRefused(response, 'other-run')).toBe(false);
-    expect(cancelledContinuationRefused({ ...response, unit_status: { kind: 'running' } }, 'fixture-run')).toBe(false);
-    expect(cancelledContinuationRefused({ ...response, task: { ...response.task, notes: 'ordinary failure' } }, 'fixture-run')).toBe(false);
-  });
-  it('reads only fixture stdout bound to its private run and stage, without a fixture filesystem grant', () => {
-    const root = fixture(), { trial, storeRoot } = support(root);
-    const run = join(storeRoot, 'runs/fixture-run'), directory = join(run, 'stages/coder');
-    mkdirSync(directory, { recursive: true });
-    const receipt = { type: 'flowcrew_private_fixture', run, stage: 'coder', pid: 42,
-      token: { kind: 'linux', value: '12' }, inputSha256: sha256('fixture input') };
-    writeFileSync(join(directory, 'live.log'), [JSON.stringify(receipt),
-      JSON.stringify({ ...receipt, run: join(root, 'foreign-run') }),
-      JSON.stringify({ ...receipt, stage: 'other-stage' }), 'ordinary provider output'].join('\n'));
-    expect(trial.fixtureCalls()).toEqual([receipt]);
-  });
-  it('rejects a foreign supervision child before tracking it', () => {
-    const root = fixture(), { trial, storeRoot } = support(root);
-    mkdirSync(join(storeRoot, 'supervise/unit'), { recursive: true });
-    writeFileSync(join(storeRoot, 'supervise/unit/running.json'), JSON.stringify({ command: 'foreign runtime', agentPid: 42 }));
-    expect(() => trial.discoverOwned()).toThrow('Foreign child');
-    expect(trial.tracked).toEqual([]);
-  });
-  it('signals only a still-matching recorded process token', () => {
-    const root = fixture(), token: ProcessStartToken = { kind: 'linux', value: 'original' };
-    const tokens = new Map([[42, token]]), { trial } = support(root, tokens);
-    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
-    trial.own(42, 'owned', token); tokens.set(42, { kind: 'linux', value: 'reused-pid' });
-    trial.stopOwned(trial.tracked[0]); expect(kill).not.toHaveBeenCalled();
-    tokens.set(42, token); trial.stopOwned(trial.tracked[0], 'SIGTERM');
-    expect(kill).toHaveBeenCalledExactlyOnceWith(42, 'SIGTERM');
-    trial.own(43, 'wrong-token', token); expect(trial.tracked).toHaveLength(1);
-  });
-  it('registers only through the private socket with exact continuation identity', async () => {
-    const root = fixture(), { trial, calls } = support(root);
-    await trial.register(join(root, 'project'), 'fixture-run');
-    expect(calls).toEqual([{ socket: join(root, 'private.sock'), request: { cmd: 'register', task: {
-      name: basename(root), projectDir: join(root, 'project'), brief_text: 'fixture brief',
-      brief_admission: { version: 1 }, max_retries: 0, launch_args: ['--workflow', 'trial', '--adapter', 'codex'], run_id: 'fixture-run',
-    } } }]);
-    expect(await trial.poll('false is a defined result', () => false, 1000)).toBe(false);
   });
 });
 

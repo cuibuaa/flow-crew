@@ -242,8 +242,7 @@ export async function concludeWorkflowIteration(
 
 export async function completePlainWorkflow(
   state: StoreState, stages: StageConfig[], projectDir: string, runId: string, runDirPath: string,
-  iteration: number, adapter: Adapter, source: 'supervisor_goal_met' | 'gate_pass' | 'base_all_done',
-  goalReason?: string,
+  iteration: number, adapter: Adapter, source: 'gate_pass' | 'base_all_done',
 ): Promise<StoreState> {
   const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
     state, stages, {projectDir, runId, runDirPath, iteration, adapter}, source,
@@ -281,10 +280,8 @@ export async function completePlainWorkflow(
         }
 
   }
-  publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: source === 'supervisor_goal_met' ? goalReason : state.status}));
-  if (source === 'supervisor_goal_met') {
-    log.info({runId, iteration, goalReason}, 'Supervisor DONE acknowledged; stopping iteration loop early');
-  } else if (source === 'gate_pass') {
+  publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: state.status}));
+  if (source === 'gate_pass') {
     log.info({runId, iteration}, 'All gates passed, run complete');
   }
   await generateRunSummary(projectDir, runId, adapter).catch(() => { /* non-critical */ });

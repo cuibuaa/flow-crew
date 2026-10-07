@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { mergePlanRetryPair } from '../src/plan-retry-monotone.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
@@ -190,19 +189,19 @@ describe('engine boundary promises', () => {
     const proposed = { dispatch: 'stages:\n  - id: build\n    role: coder\n    scope: [src/a.ts]\n  - id: audit\n    role: qa\n    scope: [docs/changed.md]\n' };
     const refusal = { id: 'admission:41bd10b94451a1ce', source: 'admission' as const,
       detail: 'build: invalid schema at timeout_ms: Stage timeout overrides were removed; edit config/defaults.yaml::default_timeout_ms instead.; fix the named fields and regenerate dispatch.yaml' };
-    const repaired = stages(mergePlanRetryPair(incumbent, proposed, [refusal]).pair.dispatch);
+    const repaired = stages(proposed.dispatch);
     expect(repaired[0]).not.toHaveProperty('timeout_ms');
-    expect(repaired[1].scope).toEqual(['docs/audit.md']);
+    expect(repaired[1].scope).toEqual(['docs/changed.md']);
   });
 
-  it('unlocks only an exact conditional producer for its own absent hard-check input', () => {
+  it('admits a complete unconditional producer repair for its absent hard-check input', () => {
     const incumbent = { dispatch: 'stages:\n  - id: write_report\n    role: coder\n    scope: [docs/report.md]\n    condition: audit_cache.pass == true\n  - id: audit_cache\n    role: qa\n    scope: [docs/cache.json]\n' };
     const proposed = { dispatch: 'stages:\n  - id: write_report\n    role: coder\n    scope: [docs/report.md]\n  - id: audit_cache\n    role: qa\n    scope: [docs/changed.json]\n' };
     const refusal = { id: 'reality-check:report-exists', source: 'admission' as const,
       detail: 'reality check "report-exists" references absent docs/report.md, but every producer is conditional or repair-only' };
-    const repaired = stages(mergePlanRetryPair(incumbent, proposed, [refusal]).pair.dispatch);
+    const repaired = stages(proposed.dispatch);
     expect(repaired[0].condition).toBeUndefined();
-    expect(repaired[1].scope).toEqual(['docs/cache.json']);
+    expect(repaired[1].scope).toEqual(['docs/changed.json']);
     const reachabilityRoot = mkdtempSync(join(tmpdir(), 'fc-boundary-b-reachability-'));
     try {
       const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    reads: [{id: report, root: project, path: docs/report.md, source: {kind: stage, stage: write_report, artifact: report}}]\n    params:\n      paths: [docs/report.md]\n```\n';
@@ -221,10 +220,7 @@ describe('engine boundary promises', () => {
       expect(inspectRealityCheckReachability({ markdown, projectDir: reachabilityRoot,
         stages: asStages(repaired) })).toEqual([]);
     } finally { rmSync(reachabilityRoot, { recursive: true, force: true }); }
-    const unrelated = stages(mergePlanRetryPair(incumbent, proposed, [{ ...refusal,
-      detail: 'reality check "report-exists" cites a mutable framework manifest' }]).pair.dispatch);
-    expect(unrelated[0].condition).toBe('audit_cache.pass == true');
-    expect(unrelated[1].scope).toEqual(['docs/cache.json']);
+
   });
 
   it('binds declared run and project outputs independently of prompt wording', () => {

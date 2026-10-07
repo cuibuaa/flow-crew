@@ -191,42 +191,6 @@ export function ratchetCheck(
   return { improved, previousBest, currentScore: score, nodeId: resultNode.id };
 }
 
-/**
- * Check if the KG shows a plateau (no improvement over recent results).
- * Returns true if the last `window` result nodes all have the same score as bestScore.
- */
-export function detectPlateau(projectDir: string, runId: string, window: number = 3): boolean {
-  const kg = readKG(projectDir, runId);
-  if (kg.metadata.bestScore === undefined) return false;
-  const results = kg.nodes
-    .map((n, i) => ({ ...n, _idx: i }))
-    .filter(n => n.type === 'result' && n.score !== undefined)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b._idx - a._idx);
-  if (results.length < window) return false;
-  const recent = results.slice(0, window);
-  return recent.every(r => r.score === kg.metadata.bestScore);
-}
-
-/**
- * Add a sub-task node to the parent's knowledge graph.
- * The node links the parent KG to the child task.
- */
-export function addSubTaskNode(
-  projectDir: string,
-  parentRunId: string,
-  childRunId: string,
-  childName: string,
-  stageId?: string,
-): KGNode {
-  return addNode(projectDir, parentRunId, {
-    type: 'approach',
-    label: `Sub-task: ${childName}`,
-    details: `Child task ${childRunId}`,
-    source: childRunId,
-    stageId,
-  });
-}
-
 export function markDeadEnd(projectDir: string, runId: string, nodeId: string, reason: string): KGNode | null {
   const p = kgPath(projectDir, runId);
   if (!existsSync(p)) return null;

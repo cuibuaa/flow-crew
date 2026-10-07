@@ -7,9 +7,8 @@ export { RUN_VALIDATION_BASELINE_FILE } from './scheduler/sched_policy/terminal.
 export type { TerminalValidationFreshnessResult } from './scheduler/sched_policy/terminal.js';
 export type { CampaignAlert, CampaignEntry } from './scheduler/sched_policy/campaign.js';
 export { assessResearchIterationBudget, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
-export { buildRetryPreamble, decideEmptyDispatchAction, decideRealityCheckPreflightAction, decideRejectAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
+export { buildRetryPreamble, decideEmptyDispatchAction, decideRealityCheckPreflightAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
 export { StageConfigSchema, WorkflowConfigSchema, normalizeRetryGateRelationships, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';
-export { evaluateSupervisorReplanFreshness, reconcileSupervisorReplan } from './scheduler/sched_admission/supervisor-replan.js';
 export { detectParallelWriteConflicts, findScopeConflict, selectRunnableBatch } from './scheduler/sched_admission/frontier.js';
 export { GATE_VERDICT_CORRECTION_VERSION, canResumeOwnGateSession, canReuseCodexSession, gateVerdictCorrectionPath, isValidationStage } from './scheduler/sched_admission/sessions.js';
 export { applyBasePrompt, applyFrameworkScopeReservations, buildRoleRegistry, collectTransitiveDependents, findDownstream, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, parseDispatchBlock, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
@@ -17,9 +16,8 @@ export { configuredValidationCommandRole, discoverConfiguredCommandScopes } from
 export { assessTerminalConditionCoverage } from './scheduler/sched_admission/condition-coverage.js';
 export { inspectRealityCheckReachability } from './scheduler/sched_admission/reality-reads.js';
 export type { ParsedBriefFrontmatter, ResearchIterationBudgetAssessment, ResearchIterationBudgetBindings } from './scheduler/sched_admission/brief-contract.js';
-export type { EmptyDispatchAction, RealityCheckPreflightAction, RejectDecision, SupervisorRejectSignal } from './scheduler/sched_admission/dispatch-retry.js';
+export type { EmptyDispatchAction, RealityCheckPreflightAction } from './scheduler/sched_admission/dispatch-retry.js';
 export type { StageConfig, WorkflowConfig } from './scheduler/sched_admission/configuration.js';
-export type { ReconciledSupervisorReplan, SupervisorReplanFreshness, SupervisorReplanSignalV2 } from './scheduler/sched_admission/supervisor-replan.js';
 export type { ParallelWriteConflict, ScopeConflict } from './scheduler/sched_admission/frontier.js';
 export type { GateVerdictCorrection } from './scheduler/sched_admission/sessions.js';
 export type { TerminalConditionCoverageAssessment } from './scheduler/sched_admission/condition-coverage.js';
@@ -39,5 +37,5 @@ export { checkGates, findAllRetryToStages, findGateRecoveryStages, findRetryToSt
 export { recoverTerminalStudyCompletion } from './scheduler/sched_settlement/completion.js';
 export { archivedGateRejections, buildGateDispatchPreamble, buildGateReevaluationPreamble } from './scheduler/sched_settlement/gate-archives.js';
 export { recordSchedulerTechnicalAttemptResult } from './scheduler/sched_settlement/stage-execution.js';
-export { findAllReady, inspectDispatchAdmission, tryAdvanceResearch, consumeSupervisorReject, writeRepairRoundDiffArtifact } from './scheduler/sched_loop/services.js';
+export { findAllReady, inspectDispatchAdmission, tryAdvanceResearch, writeRepairRoundDiffArtifact } from './scheduler/sched_loop/services.js';
 export { runWorkflow } from './scheduler/sched_loop/run-workflow.js';

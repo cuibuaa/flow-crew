@@ -69,20 +69,6 @@ describe('Group A: Backend Integration', () => {
     expect(summary).toContain('Linear regression failed');
   });
 
-  it('A4: agent YAML prompts include KG instructions', () => {
-    const planner = readFileSync(join(process.cwd(), 'config/agents/planner.yaml'), 'utf-8');
-    expect(planner).toContain('Knowledge Graph Integration');
-
-    const researcher = readFileSync(join(process.cwd(), 'config/agents/researcher.yaml'), 'utf-8');
-    expect(researcher).toContain('knowledge_graph.json');
-
-    const coder = readFileSync(join(process.cwd(), 'config/agents/coder.yaml'), 'utf-8');
-    expect(coder).toContain('knowledge_graph.json');
-
-    const qa = readFileSync(join(process.cwd(), 'config/agents/qa.yaml'), 'utf-8');
-    expect(qa).toContain('knowledge_graph.json');
-  });
-
   it('A5: buildStagePrompt substitutes kg_path variable', () => {
     const result = buildStagePrompt({
       dependsOn: [],
@@ -92,14 +78,6 @@ describe('Group A: Backend Integration', () => {
       runDir: join(projectDir, '.fc', 'runs', 'r1'),
     });
     expect(result).toContain('knowledge_graph.json');
-  });
-
-  it('A6: worker detects KG changes in artifacts', () => {
-    const withKG = ['foo.ts', 'knowledge_graph.json'];
-    expect(withKG.some(a => a.endsWith('knowledge_graph.json'))).toBe(true);
-
-    const withoutKG = ['foo.ts', 'bar.ts'];
-    expect(withoutKG.some(a => a.endsWith('knowledge_graph.json'))).toBe(false);
   });
 
   it('A7: KG grows across iterations via addNode', () => {

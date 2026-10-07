@@ -469,7 +469,7 @@ describe('factual supervisor stall decisions', () => {
       directionKey,
       evidenceIds: ['ev_cccccccccccccccccccc'],
       assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([[stageId, {
+    }, Date.now() + 1_000, 'supervisor', new Map([[stageId, {
       version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
       generation: 'c'.repeat(64),
     }]]), undefined, new Map([[stageId, {

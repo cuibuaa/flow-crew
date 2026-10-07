@@ -499,7 +499,6 @@ describe('campaign-local attention and failure isolation', () => {
       title: 'Approve our change',
       createdAt: NOW.toISOString(),
       state: 'pending',
-      standingRuleEligible: { ok: false },
       campaignId,
     });
     inbox.approvals.items.push({
@@ -511,7 +510,6 @@ describe('campaign-local attention and failure isolation', () => {
       title: 'Other campaign approval',
       createdAt: NOW.toISOString(),
       state: 'pending',
-      standingRuleEligible: { ok: false },
       campaignId: 'other-campaign',
     });
     inbox.deferred.items.push({ id: 1, runId: early.runId, name: 'approval mirror', deferReason: 'approval pending' });

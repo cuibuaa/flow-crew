@@ -4,11 +4,9 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 export const PLAN_RETRY_STATE_FILE = 'plan_retry_state.json';
 const PLAN_RETRY_EVIDENCE_DIR = 'plan_retry';
@@ -69,8 +67,6 @@ export interface PreparedPlanRetryCandidate {
   effective: PlanRetryPair;
   proposedPairDigest: string;
   effectivePairDigest: string;
-  retainedStageIds: string[];
-  retainedRealityChecks: boolean;
 }
 
 export interface PlanRetryRefusalResult {
@@ -78,21 +74,6 @@ export interface PlanRetryRefusalResult {
   stop: boolean;
   reason?: string;
   disposition: PlanRetryAttemptRecord['disposition'];
-}
-
-interface DispatchDocument {
-  wrapper: boolean;
-  root: Record<string, unknown>;
-  stages: Record<string, unknown>[];
-  removeStageIds: Set<string>;
-}
-
-interface RealityCheckDocument {
-  original: string;
-  root: Record<string, unknown>;
-  checks: unknown[];
-  prefix?: string;
-  suffix?: string;
 }
 
 function sha256(value: string): string {
@@ -178,448 +159,6 @@ export function planRetryPreflightRequirement(input: {
   );
 }
 
-function parseDispatchDocument(markdown: string): DispatchDocument | undefined {
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(markdown);
-  } catch {
-    return undefined;
-  }
-  const wrapper = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed));
-  const root = wrapper ? parsed as Record<string, unknown> : {};
-  const rawStages = Array.isArray(parsed)
-    ? parsed
-    : wrapper && Array.isArray(root.stages)
-      ? root.stages
-      : undefined;
-  if (!rawStages || rawStages.some((stage) => !stage || typeof stage !== 'object' || Array.isArray(stage))) {
-    return undefined;
-  }
-  const retry = wrapper && root.retry && typeof root.retry === 'object' && !Array.isArray(root.retry)
-    ? root.retry as Record<string, unknown>
-    : undefined;
-  const removeStages = wrapper && Array.isArray(root.retry_remove_stages)
-    ? root.retry_remove_stages
-    : Array.isArray(retry?.remove_stages)
-      ? retry.remove_stages
-      : [];
-  return {
-    wrapper,
-    root,
-    stages: rawStages as Record<string, unknown>[],
-    removeStageIds: new Set(removeStages.filter((id): id is string => typeof id === 'string')),
-  };
-}
-
-function parseRealityCheckDocument(markdown: string | undefined): RealityCheckDocument | undefined {
-  if (markdown === undefined) return undefined;
-  const fence = /^(?<prefix>[\s\S]*?```(?:ya?ml)?[^\n]*\n)(?<body>[\s\S]*?)(?<suffix>\n```[\s\S]*)$/i.exec(markdown);
-  const body = fence?.groups?.body ?? markdown;
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(body);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const root = parsed as Record<string, unknown>;
-  if (!Array.isArray(root.checks)) return undefined;
-  return {
-    original: markdown,
-    root,
-    checks: root.checks,
-    ...(fence?.groups?.prefix ? { prefix: fence.groups.prefix } : {}),
-    ...(fence?.groups?.suffix ? { suffix: fence.groups.suffix } : {}),
-  };
-}
-
-function realityCheckKey(check: unknown, index: number): string {
-  if (check && typeof check === 'object' && !Array.isArray(check)) {
-    const name = (check as Record<string, unknown>).name;
-    if (typeof name === 'string' && name.trim()) return boundedSlug(name);
-  }
-  return `item-${index + 1}`;
-}
-
-function renderRealityCheckDocument(document: RealityCheckDocument, checks: unknown[]): string {
-  const root = { ...document.root, checks };
-  const body = stringifyYaml(root).trimEnd();
-  return document.prefix !== undefined && document.suffix !== undefined
-    ? `${document.prefix}${body}${document.suffix}`
-    : `${body}\n`;
-}
-
-/**
- * A check repair unlocks only the named failing check(s). Passing declarations
- * remain scheduler-owned even when the planner omits or rewrites them while
- * repairing a neighbour. Exact proposed bytes are retained when their locked
- * declarations are already semantically unchanged; otherwise the scheduler
- * reconstructs the list from the incumbent definitions plus the repairs.
- */
-function mergeRealityChecks(
-  incumbent: string | undefined,
-  proposed: string | undefined,
-  unsatisfied: readonly PlanRetryRequirement[],
-): { markdown?: string; retained: boolean } {
-  const unlocked = new Set(unsatisfied.flatMap((requirement) => {
-    const match = /^reality-check:([^:]+)(?::|$)/.exec(requirement.id);
-    return match ? [match[1]] : [];
-  }));
-  if (unlocked.size === 0) return { ...(incumbent === undefined ? {} : { markdown: incumbent }), retained: incumbent !== undefined };
-
-  const incumbentDocument = parseRealityCheckDocument(incumbent);
-  const proposedDocument = parseRealityCheckDocument(proposed);
-  if (!incumbentDocument) return { ...(proposed === undefined ? {} : { markdown: proposed }), retained: false };
-  if (!proposedDocument) {
-    if (proposed !== undefined) return { markdown: incumbentDocument.original, retained: true };
-    const locked = incumbentDocument.checks.filter((check, index) => !unlocked.has(realityCheckKey(check, index)));
-    if (locked.length === 0) return { retained: false };
-    return {
-      markdown: locked.length === incumbentDocument.checks.length
-        ? incumbentDocument.original
-        : renderRealityCheckDocument(incumbentDocument, locked),
-      retained: true,
-    };
-  }
-
-  const proposedByKey = new Map<string, Array<{ check: unknown; index: number }>>();
-  proposedDocument.checks.forEach((check, index) => {
-    const key = realityCheckKey(check, index);
-    const entries = proposedByKey.get(key) ?? [];
-    entries.push({ check, index });
-    proposedByKey.set(key, entries);
-  });
-  const consumedProposedIndexes = new Set<number>();
-  const merged: unknown[] = [];
-  let retained = false;
-  incumbentDocument.checks.forEach((check, index) => {
-    const key = realityCheckKey(check, index);
-    const replacement = proposedByKey.get(key)?.find((entry) => !consumedProposedIndexes.has(entry.index));
-    if (replacement) consumedProposedIndexes.add(replacement.index);
-    if (unlocked.has(key)) {
-      if (replacement) merged.push(replacement.check);
-      return;
-    }
-    merged.push(check);
-    retained = true;
-  });
-  proposedDocument.checks.forEach((check, index) => {
-    if (!consumedProposedIndexes.has(index)) merged.push(check);
-  });
-  if (JSON.stringify(merged) === JSON.stringify(proposedDocument.checks)) {
-    return { markdown: proposedDocument.original, retained };
-  }
-  return { markdown: renderRealityCheckDocument(proposedDocument, merged), retained };
-}
-
-function uniqueStrings(left: unknown, right: unknown): string[] | undefined {
-  const values = [...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])]
-    .filter((item): item is string => typeof item === 'string');
-  if (values.length === 0 && !Array.isArray(left) && !Array.isArray(right)) return undefined;
-  return [...new Set(values)];
-}
-
-function implicatedStageFields(requirements: readonly PlanRetryRequirement[]): {
-  fields: Map<string, Set<string>>;
-  criterionRepair: boolean;
-  terminalOwnerRepair: boolean;
-  dependencyRepair: boolean;
-  dispatchRepair: boolean;
-} {
-  const fields = new Map<string, Set<string>>();
-  let criterionRepair = false;
-  let terminalOwnerRepair = false;
-  let dependencyRepair = false;
-  let dispatchRepair = false;
-  for (const requirement of requirements) {
-    if (requirement.id.startsWith('reality-check:')) {
-      // Reachability can fail because the only producer of an absent hard-check
-      // input is conditional. Its gate dependency can also block the report
-      // when that gate rejects, even after the condition is removed. Unlock
-      // scheduling fields only on that producer; an edit to the check itself
-      // must not unlock dispatch.
-      const absentProducer = /\breferences absent (\S+), but every producer is conditional or repair-only\b/.exec(requirement.detail);
-      if (absentProducer) {
-        const path = absentProducer[1];
-        const current = fields.get(`producer-path:${path}`) ?? new Set<string>();
-        current.add('condition');
-        current.add('retry_to');
-        current.add('depends_on');
-        current.add('dependency_reasons');
-        fields.set(`producer-path:${path}`, current);
-        dispatchRepair = true;
-      }
-      continue;
-    }
-    dispatchRepair = true;
-    if (requirement.id.startsWith('criterion:')) criterionRepair = true;
-    if (requirement.id.startsWith('terminal-owner:')) {
-      terminalOwnerRepair = true;
-      // Duplicate-owner diagnostics name every stage whose scope contributes
-      // to the refusal. Those stages' scope fields (and only those fields) are
-      // valid repair targets, including explicit stage removal. A found-zero
-      // diagnostic has no incumbent owner to unlock; adding the missing scope
-      // remains possible through the additive terminal-owner merge below.
-      const listedOwners = /found\s+\d+\s+\(([^)]+)\)/i.exec(requirement.detail)?.[1];
-      for (const owner of listedOwners?.split(',') ?? []) {
-        const id = owner.trim();
-        if (!/^[a-z][a-z0-9_]*$/i.test(id)) continue;
-        const current = fields.get(boundedSlug(id)) ?? new Set<string>();
-        current.add('scope');
-        fields.set(boundedSlug(id), current);
-      }
-    }
-    if (/ancestor|dependency|depends_on|DAG sink/i.test(requirement.detail)) dependencyRepair = true;
-    // Admission refusals arrive as `admission:<digest>` with the stage and field
-    // only in the detail ("<stage>: invalid schema at <field>: ..."). Without
-    // this, no field was unlocked, every retry reproduced the incumbent and the
-    // run stopped as an identical refusal even when the planner removed the field.
-    const schemaField = /^([a-z][a-z0-9_]*): invalid schema at ([A-Za-z_][A-Za-z0-9_]*)/i.exec(requirement.detail);
-    if (requirement.id.startsWith('admission:') && schemaField) {
-      const current = fields.get(boundedSlug(schemaField[1])) ?? new Set<string>();
-      current.add(schemaField[2]);
-      fields.set(boundedSlug(schemaField[1]), current);
-    }
-    const match = /^stage:([^:]+)(?::([^:]+))?$/.exec(requirement.id);
-    if (!match) continue;
-    const current = fields.get(match[1]) ?? new Set<string>();
-    if (match[2] === 'artifact_contract') {
-      current.add('artifact_contract');
-      fields.set(match[1], current);
-      continue;
-    }
-    // The diagnostic's field identifies the failing component, but a coherent
-    // repair can require adjacent fields on the same stage (for example,
-    // separating a terminal writer changes both scope and condition). Other
-    // stages remain locked, and the complete admission oracle rejects any new
-    // failure introduced by this stage-level replacement.
-    current.add('*');
-    fields.set(match[1], current);
-  }
-  return { fields, criterionRepair, terminalOwnerRepair, dependencyRepair, dispatchRepair };
-}
-
-function mergeStage(
-  incumbent: Record<string, unknown>,
-  proposed: Record<string, unknown>,
-  unlocked: ReturnType<typeof implicatedStageFields>,
-): Record<string, unknown> {
-  const id = typeof incumbent.id === 'string' ? boundedSlug(incumbent.id) : '';
-  const fields = unlocked.fields.get(id) ?? new Set<string>();
-  const all = fields.has('*');
-  const merged: Record<string, unknown> = { ...incumbent };
-
-  // Prompt/skill changes do not establish admission facts, so a retry may
-  // improve them without weakening locked topology.
-  for (const field of ['prompt_template', 'task', 'skills']) {
-    if (field in proposed) merged[field] = proposed[field];
-  }
-  if (all) {
-    return { ...proposed };
-  }
-  for (const field of fields) {
-    if (field in proposed) merged[field] = proposed[field];
-    else delete merged[field];
-  }
-  if (unlocked.criterionRepair) {
-    merged.criterion_refs = uniqueStrings(incumbent.criterion_refs, proposed.criterion_refs) ?? [];
-    merged.depends_on = uniqueStrings(incumbent.depends_on, proposed.depends_on) ?? [];
-    merged.dependency_reasons = {
-      ...(incumbent.dependency_reasons && typeof incumbent.dependency_reasons === 'object'
-        ? incumbent.dependency_reasons as Record<string, unknown>
-        : {}),
-      ...(proposed.dependency_reasons && typeof proposed.dependency_reasons === 'object'
-        ? proposed.dependency_reasons as Record<string, unknown>
-        : {}),
-    };
-    if (proposed.is_gate === true) merged.is_gate = true;
-  }
-  if (unlocked.terminalOwnerRepair && !fields.has('scope')) {
-    merged.scope = uniqueStrings(incumbent.scope, proposed.scope) ?? [];
-  }
-  if (unlocked.dependencyRepair) {
-    merged.depends_on = uniqueStrings(incumbent.depends_on, proposed.depends_on) ?? [];
-    merged.dependency_reasons = {
-      ...(incumbent.dependency_reasons && typeof incumbent.dependency_reasons === 'object'
-        ? incumbent.dependency_reasons as Record<string, unknown>
-        : {}),
-      ...(proposed.dependency_reasons && typeof proposed.dependency_reasons === 'object'
-        ? proposed.dependency_reasons as Record<string, unknown>
-        : {}),
-    };
-  }
-  return merged;
-}
-
-export function mergePlanRetryPair(
-  incumbent: PlanRetryPair,
-  proposed: PlanRetryPair,
-  unsatisfied: readonly PlanRetryRequirement[],
-  satisfied: readonly PlanRetryRequirement[] = [],
-): { pair: PlanRetryPair; retainedStageIds: string[]; retainedRealityChecks: boolean } {
-  const unlocked = implicatedStageFields(unsatisfied);
-  let dispatch = incumbent.dispatch;
-  const retainedStageIds: string[] = [];
-  if (unlocked.dispatchRepair) {
-    const incumbentDocument = parseDispatchDocument(incumbent.dispatch);
-    const proposedDocument = parseDispatchDocument(proposed.dispatch);
-    if (!incumbentDocument || !proposedDocument) {
-      // A structurally invalid incumbent must be replaceable; an invalid repair
-      // remains visible to the unchanged parser instead of being hidden.
-      dispatch = proposed.dispatch;
-    } else {
-      const incumbentSemantic = JSON.stringify(incumbentDocument.stages);
-      const exactProducerIds = new Set<string>();
-      for (const [key, repairFields] of [...unlocked.fields]) {
-        if (!key.startsWith('producer-path:')) continue;
-        const path = key.slice('producer-path:'.length);
-        for (const stage of incumbentDocument.stages) {
-          if (typeof stage.id !== 'string' || !Array.isArray(stage.scope)
-              || !stage.scope.includes(path)) continue;
-          const stageKey = boundedSlug(stage.id);
-          const fields = unlocked.fields.get(stageKey) ?? new Set<string>();
-          for (const field of repairFields) fields.add(field);
-          unlocked.fields.set(stageKey, fields);
-          exactProducerIds.add(stage.id);
-        }
-        unlocked.fields.delete(key);
-      }
-      const proposedById = new Map(proposedDocument.stages
-        .filter((stage) => typeof stage.id === 'string')
-        .map((stage) => [stage.id as string, stage]));
-      const mergedStages: Record<string, unknown>[] = [];
-      const consumed = new Set<string>();
-      for (const prior of incumbentDocument.stages) {
-        const id = typeof prior.id === 'string' ? prior.id : undefined;
-        const replacement = id ? proposedById.get(id) : undefined;
-        const implicated = id ? unlocked.fields.has(boundedSlug(id)) : false;
-        const explicitRemoval = Boolean(id && proposedDocument.removeStageIds.has(id) && implicated);
-        if (explicitRemoval) {
-          consumed.add(id!);
-          continue;
-        }
-        if (!replacement) {
-          mergedStages.push(prior);
-          if (id) retainedStageIds.push(id);
-          continue;
-        }
-        consumed.add(id!);
-        const merged = mergeStage(prior, replacement, unlocked);
-        mergedStages.push(merged);
-        if (JSON.stringify(merged) === JSON.stringify(prior) && id) retainedStageIds.push(id);
-      }
-      for (const stage of proposedDocument.stages) {
-        const id = typeof stage.id === 'string' ? stage.id : undefined;
-        if (!id || !consumed.has(id)) mergedStages.push(stage);
-      }
-      const terminalOwnerIds = new Set(satisfied.flatMap((requirement) => {
-        if (!requirement.id.startsWith('terminal-owner:')) return [];
-        const owner = /retains scoped owner\s+([a-z][a-z0-9_]*)/i.exec(requirement.detail)?.[1];
-        return owner ? [owner] : [];
-      }));
-      const incumbentIds = new Set(incumbentDocument.stages
-        .map((stage) => typeof stage.id === 'string' ? stage.id : undefined)
-        .filter((id): id is string => Boolean(id)));
-      const incumbentById = new Map(incumbentDocument.stages
-        .filter((stage) => typeof stage.id === 'string')
-        .map((stage) => [stage.id as string, stage]));
-      const byId = new Map(mergedStages
-        .filter((stage) => typeof stage.id === 'string')
-        .map((stage) => [stage.id as string, stage]));
-      const dependsOn = (stageId: string, ancestorId: string): boolean => {
-        const seen = new Set<string>();
-        const queue = Array.isArray(byId.get(stageId)?.depends_on)
-          ? [...byId.get(stageId)!.depends_on as string[]]
-          : [];
-        while (queue.length > 0) {
-          const current = queue.shift()!;
-          if (current === ancestorId) return true;
-          if (seen.has(current)) continue;
-          seen.add(current);
-          const dependencies = byId.get(current)?.depends_on;
-          if (Array.isArray(dependencies)) queue.push(...dependencies.filter((item): item is string => typeof item === 'string'));
-        }
-        return false;
-      };
-      for (const producerId of exactProducerIds) {
-        const priorProducer = incumbentById.get(producerId);
-        const producer = byId.get(producerId);
-        if (!priorProducer || !producer || producer.condition
-          || (Array.isArray(producer.retry_to) && producer.retry_to.length > 0)) continue;
-        const priorDependencies = Array.isArray(priorProducer.depends_on)
-          ? priorProducer.depends_on.filter((id): id is string => typeof id === 'string')
-          : [];
-        for (const gateId of priorDependencies) {
-          const priorGate = incumbentById.get(gateId);
-          const proposedGate = proposedById.get(gateId);
-          const gate = byId.get(gateId);
-          if (priorGate?.is_gate !== true || proposedGate?.is_gate !== true || gate?.is_gate !== true
-            || !Array.isArray(proposedGate.depends_on)
-            || !proposedGate.depends_on.includes(producerId)
-            || dependsOn(producerId, gateId)
-            || dependsOn(gateId, producerId)) continue;
-          // The retry moved this exact report writer ahead of its old gate.
-          // Honor only the proposed reciprocal edge; keep the gate's other
-          // prerequisites and fields locked.
-          gate.depends_on = uniqueStrings(gate.depends_on, [producerId]) ?? [producerId];
-          if (gate.dependency_reasons && typeof gate.dependency_reasons === 'object') {
-            const proposedReasons = proposedGate.dependency_reasons;
-            const proposedReason = proposedReasons && typeof proposedReasons === 'object'
-              ? (proposedReasons as Record<string, unknown>)[producerId]
-              : undefined;
-            gate.dependency_reasons = {
-              ...gate.dependency_reasons as Record<string, unknown>,
-              [producerId]: typeof proposedReason === 'string' && proposedReason.trim()
-                ? proposedReason
-                : 'This gate follows the report writer moved ahead by the accepted reachability repair.',
-            };
-          }
-          const retainedIndex = retainedStageIds.indexOf(gateId);
-          if (retainedIndex >= 0) retainedStageIds.splice(retainedIndex, 1);
-        }
-      }
-      const newMandatoryIds = mergedStages.flatMap((stage) => {
-        const id = typeof stage.id === 'string' ? stage.id : undefined;
-        if (!id || incumbentIds.has(id) || stage.condition) return [];
-        if (Array.isArray(stage.retry_to) && stage.retry_to.length > 0 && stage.is_gate !== true) return [];
-        return [id];
-      });
-      for (const ownerId of terminalOwnerIds) {
-        const owner = byId.get(ownerId);
-        if (!owner || proposedById.has(ownerId)) continue;
-        const dependencies = new Set(Array.isArray(owner.depends_on)
-          ? owner.depends_on.filter((item): item is string => typeof item === 'string')
-          : []);
-        const reasons = owner.dependency_reasons && typeof owner.dependency_reasons === 'object'
-          ? { ...owner.dependency_reasons as Record<string, unknown> }
-          : {};
-        for (const mandatoryId of newMandatoryIds) {
-          if (mandatoryId === ownerId || dependsOn(mandatoryId, ownerId)) continue;
-          dependencies.add(mandatoryId);
-          reasons[mandatoryId] ??= 'Monotone retry dependency: retained terminal owners run only after newly repaired mandatory work and gates.';
-        }
-        owner.depends_on = [...dependencies];
-        owner.dependency_reasons = reasons;
-      }
-      const root: Record<string, unknown> = proposedDocument.wrapper
-        ? { ...proposedDocument.root, stages: mergedStages }
-        : { stages: mergedStages };
-      delete root.retry;
-      delete root.retry_remove_stages;
-      dispatch = JSON.stringify(mergedStages) === incumbentSemantic
-        ? incumbent.dispatch
-        : stringifyYaml(root);
-    }
-  }
-
-  const mergedChecks = mergeRealityChecks(incumbent.realityChecks, proposed.realityChecks, unsatisfied);
-  return {
-    pair: { dispatch, ...(mergedChecks.markdown === undefined ? {} : { realityChecks: mergedChecks.markdown }) },
-    retainedStageIds,
-    retainedRealityChecks: mergedChecks.retained,
-  };
-}
-
 function statePath(runDirPath: string): string {
   return join(runDirPath, PLAN_RETRY_STATE_FILE);
 }
@@ -696,21 +235,6 @@ function readPairRef(runDirPath: string, ref: PlanRetryPairRef): PlanRetryPair {
   return pair;
 }
 
-export function materializePlanRetryIncumbent(runDirPath: string, state: MonotonePlanRetryState): void {
-  const incumbent = readPairRef(runDirPath, state.incumbent);
-  writeFileSync(join(runDirPath, 'dispatch.yaml'), incumbent.dispatch, 'utf8');
-  const checksPath = join(runDirPath, 'reality_checks.md');
-  if (incumbent.realityChecks === undefined) {
-    try {
-      if (existsSync(checksPath)) unlinkSync(checksPath);
-    } catch {
-      // A later read/digest check still fails closed if a stale file survives.
-    }
-  } else {
-    writeFileSync(checksPath, incumbent.realityChecks, 'utf8');
-  }
-}
-
 export function preparePlanRetryCandidate(input: {
   runDirPath: string;
   stageId: string;
@@ -735,31 +259,10 @@ export function preparePlanRetryCandidate(input: {
   const attemptIndex = sameActiveChain
     ? Math.max(input.attemptIndex, state.attempts.length + 1)
     : input.attemptIndex;
-  let effective = proposed;
-  let retainedStageIds: string[] = [];
-  let retainedRealityChecks = false;
-  if (sameActiveChain) {
-    const merged = mergePlanRetryPair(
-      readPairRef(input.runDirPath, state.incumbent),
-      proposed,
-      state.unsatisfied,
-      state.satisfied,
-    );
-    effective = merged.pair;
-    retainedStageIds = merged.retainedStageIds;
-    retainedRealityChecks = merged.retainedRealityChecks;
-    writeFileSync(dispatchPath, effective.dispatch, 'utf8');
-    const checksPath = join(input.runDirPath, 'reality_checks.md');
-    if (effective.realityChecks === undefined) {
-      try {
-        if (existsSync(checksPath)) unlinkSync(checksPath);
-      } catch {
-        // Validation observes any surviving file and remains fail-closed.
-      }
-    } else {
-      writeFileSync(checksPath, effective.realityChecks, 'utf8');
-    }
-  }
+  // Verify retained evidence, but never rewrite a complete replacement proposal.
+  // Ordinary admission examines its exact bytes independently of prior refusals.
+  if (sameActiveChain) readPairRef(input.runDirPath, state.incumbent);
+  const effective = proposed;
   return {
     stageId: input.stageId,
     iteration: input.iteration,
@@ -768,8 +271,6 @@ export function preparePlanRetryCandidate(input: {
     effective,
     proposedPairDigest: planRetryPairDigest(proposed),
     effectivePairDigest: planRetryPairDigest(effective),
-    retainedStageIds,
-    retainedRealityChecks,
   };
 }
 
@@ -782,19 +283,8 @@ function dedupeRequirements(requirements: readonly PlanRetryRequirement[]): Plan
 function observationDigest(requirements: readonly PlanRetryRequirement[]): string {
   // Requirement identity, not presentation text, defines a repeat. Validators
   // may improve or enrich a diagnostic without granting another planner call
-  // for the same effective bytes and the same stable obligations.
+  // for the same proposed bytes and the same stable obligations.
   return sha256(JSON.stringify(dedupeRequirements(requirements).map(({ id }) => id)));
-}
-
-function isRegressionAgainstIncumbent(
-  requirement: PlanRetryRequirement,
-  priorSatisfied: ReadonlySet<string>,
-): boolean {
-  // Mere component presence is not evidence that every validator phase has
-  // observed it passing. A newly exposed obligation on a never-admitted stage
-  // may advance the incumbent; once that stable ID is actually resolved, the
-  // satisfied ledger makes any later recurrence a mechanical regression.
-  return priorSatisfied.has(requirement.id);
 }
 
 function unresolvedSummary(requirements: readonly PlanRetryRequirement[]): string {
@@ -808,8 +298,6 @@ export function recordPlanRetryRefusal(input: {
   maxAttempts: number;
   unsatisfied: readonly PlanRetryRequirement[];
   satisfied?: readonly PlanRetryRequirement[];
-  /** Last atomically admitted check bytes may seed a rejected amendment's incumbent. */
-  incumbentOverride?: PlanRetryPair;
   /** Preserve legacy preflight three-strike escalation while dispatch refusals stop on repeats. */
   stopOnRepeat?: boolean;
 }): PlanRetryRefusalResult {
@@ -838,76 +326,22 @@ export function recordPlanRetryRefusal(input: {
   );
   const proposedRef = snapshotPair(input.runDirPath, root, 'proposed', input.prepared.proposed);
   const effectiveRef = snapshotPair(input.runDirPath, root, 'effective', input.prepared.effective);
-  const priorUnsatisfied = new Set(previous?.unsatisfied.map((requirement) => requirement.id) ?? []);
-  const currentUnsatisfied = new Set(unsatisfied.map((requirement) => requirement.id));
-  const resolved = [...priorUnsatisfied].filter((id) => !currentUnsatisfied.has(id)).sort();
-  const priorSatisfied = new Set(previous?.satisfied.map((requirement) => requirement.id) ?? []);
-  const regressed = previous
-    ? unsatisfied
-      .filter((requirement) => !priorUnsatisfied.has(requirement.id)
-        && isRegressionAgainstIncumbent(requirement, priorSatisfied))
-      .map((requirement) => requirement.id)
-      .sort()
-    : [];
-  const key = `${effectiveRef.pairDigest}:${observationDigest(unsatisfied)}`;
+  const currentIds = new Set(unsatisfied.map((requirement) => requirement.id));
+  const resolved = (previous?.unsatisfied ?? []).filter((requirement) => !currentIds.has(requirement.id)).map((requirement) => requirement.id).sort();
+  const key = `${proposedRef.pairDigest}:${observationDigest(unsatisfied)}`;
   const matchingIndexes = (previous?.attempts ?? [])
     .map((attempt, index) => ({ attempt, index }))
-    .filter(({ attempt }) => `${attempt.effective.pairDigest}:${attempt.observationDigest}` === key)
+    .filter(({ attempt }) => `${attempt.proposed.pairDigest}:${attempt.observationDigest}` === key)
     .map(({ index }) => index);
   const lastIndex = (previous?.attempts.length ?? 0) - 1;
-  const repeated = matchingIndexes.length > 0;
-  const identical = repeated && matchingIndexes.includes(lastIndex);
-  const cycled = repeated && !identical;
-
-  let disposition: PlanRetryAttemptRecord['disposition'];
-  let incumbent = !previous && input.incumbentOverride
-    ? snapshotPair(input.runDirPath, root, 'incumbent', input.incumbentOverride)
-    : effectiveRef;
-  let nextUnsatisfied = unsatisfied;
-  let nextSatisfied = dedupeRequirements(satisfied);
-  if (!previous) {
-    disposition = 'incumbent_initialized';
-  } else if (identical) {
-    disposition = 'identical_refusal';
-    incumbent = previous.incumbent;
-    nextUnsatisfied = previous.unsatisfied;
-    nextSatisfied = previous.satisfied;
-  } else if (cycled) {
-    disposition = 'cycle_refusal';
-    incumbent = previous.incumbent;
-    nextUnsatisfied = previous.unsatisfied;
-    nextSatisfied = previous.satisfied;
-  } else if (regressed.length > 0) {
-    disposition = 'regression_quarantined';
-    incumbent = previous.incumbent;
-    nextUnsatisfied = previous.unsatisfied;
-    nextSatisfied = previous.satisfied;
-  } else {
-    disposition = 'incumbent_advanced';
-    nextSatisfied = dedupeRequirements([
-      ...previous.satisfied,
-      ...previous.unsatisfied
-        .filter((requirement) => resolved.includes(requirement.id))
-        .map((requirement) => ({
-          ...requirement,
-          detail: `retained repair: ${requirement.detail}`,
-        })),
-      // A direct passing observation is the strongest support record and must
-      // win over the historical failure prose for the same stable identity.
-      ...satisfied,
-    ]);
-  }
-
+  const identical = matchingIndexes.includes(lastIndex) && lastIndex >= 0;
+  const cycled = matchingIndexes.length > 0 && !identical;
+  const disposition = identical ? 'identical_refusal' : cycled ? 'cycle_refusal'
+    : previous ? 'incumbent_advanced' : 'incumbent_initialized';
   const attempt: PlanRetryAttemptRecord = {
-    attemptIndex: input.prepared.attemptIndex,
-    proposed: proposedRef,
-    effective: effectiveRef,
-    observationDigest: observationDigest(unsatisfied),
-    unsatisfied,
-    satisfied,
-    disposition,
-    resolvedRequirementIds: resolved,
-    regressedRequirementIds: regressed,
+    attemptIndex: input.prepared.attemptIndex, proposed: proposedRef, effective: effectiveRef,
+    observationDigest: observationDigest(unsatisfied), unsatisfied, satisfied, disposition,
+    resolvedRequirementIds: resolved, regressedRequirementIds: [],
   };
   const attempts = [...(previous?.attempts ?? []), attempt];
   // The first refusal fixes the chain's immutable total-call bound. A later
@@ -919,7 +353,7 @@ export function recordPlanRetryRefusal(input: {
     const cycleKind = identical ? 'identical_refusal' : 'cycle_refusal';
     terminal = {
       disposition: cycleKind,
-      reason: `Plan retry stopped on an ${identical ? 'identical' : 'cycling'} refused candidate. Unsatisfied requirement(s): ${unresolvedSummary(nextUnsatisfied)}`,
+      reason: `Plan retry stopped on an ${identical ? 'identical' : 'cycling'} refused candidate. Unsatisfied requirement(s): ${unresolvedSummary(unsatisfied)}`,
     };
   } else if (attempts.length >= maxAttempts) {
     terminal = {
@@ -935,15 +369,14 @@ export function recordPlanRetryRefusal(input: {
     stageId: input.prepared.stageId,
     iteration: input.prepared.iteration,
     maxAttempts,
-    incumbent,
-    unsatisfied: nextUnsatisfied,
-    satisfied: nextSatisfied,
+    incumbent: effectiveRef,
+    unsatisfied,
+    satisfied,
     attempts,
     ...(terminal ? { terminal } : {}),
   };
   atomicWriteJson(join(input.runDirPath, root, 'observation.json'), attempt);
   atomicWriteJson(statePath(input.runDirPath), state);
-  if (!terminal) materializePlanRetryIncumbent(input.runDirPath, state);
   return { state, stop: Boolean(terminal), reason: terminal?.reason, disposition };
 }
 
@@ -979,16 +412,9 @@ export function recordPlanRetryAdmission(input: {
     ...prior,
     incumbent: effective,
     unsatisfied: [],
-    satisfied: dedupeRequirements([
-      ...prior.satisfied,
-      ...prior.unsatisfied.map((requirement) => ({
-        ...requirement,
-        detail: `retained repair: ${requirement.detail}`,
-      })),
-      ...(input.satisfied ?? []),
-    ]),
+    satisfied: dedupeRequirements(input.satisfied ?? []),
     attempts: [...prior.attempts, attempt],
-    terminal: { disposition: 'admitted', reason: 'The monotone incumbent passed complete plan admission.' },
+    terminal: { disposition: 'admitted', reason: 'The complete replacement proposal passed plan admission.' },
   };
   atomicWriteJson(join(input.runDirPath, root, 'observation.json'), attempt);
   atomicWriteJson(statePath(input.runDirPath), state);
@@ -1017,21 +443,13 @@ export function buildMonotonePlanRetryContext(
   readPairRef(runDirPath, state.incumbent);
   const used = state.attempts.length;
   const remaining = Math.max(0, state.maxAttempts - used);
-  const lines = [
-    'MONOTONE PLAN-RETRY INCUMBENT (scheduler-owned, digest-bound):',
-    `- dispatch edit base: ${join(runDirPath, state.incumbent.dispatchPath)} (sha256 ${state.incumbent.dispatchSha256})`,
-    state.incumbent.realityChecksPath
-      ? `- reality-check edit base: ${join(runDirPath, state.incumbent.realityChecksPath)} (sha256 ${state.incumbent.realityChecksSha256})`
-      : '- reality-check edit base: absent',
-    `- effective pair digest: ${state.incumbent.pairDigest}`,
+  return [
+    'PLAN-RETRY OBSERVATION (scheduler-owned, digest-bound):',
+    `- last refused dispatch: ${join(runDirPath, state.incumbent.dispatchPath)} (sha256 ${state.incumbent.dispatchSha256})`,
+    `- last observed pair digest: ${state.incumbent.pairDigest}`,
     `- remaining planner calls in this bounded chain: ${remaining}`,
-    'Still-unsatisfied requirements (repair these cumulatively):',
+    'Observed refusal requirements:',
     ...state.unsatisfied.map((requirement) => `- ${requirement.id}: ${requirement.detail}`),
-    'Already-satisfied requirements locked by the scheduler:',
-    ...(state.satisfied.length > 0
-      ? state.satisfied.map((requirement) => `- ${requirement.id}: ${requirement.detail}`)
-      : ['- the incumbent components not named by an unsatisfied requirement']),
-    `The scheduler has materialized this incumbent at ${join(runDirPath, 'dispatch.yaml')}${state.incumbent.realityChecksPath ? ` and ${join(runDirPath, 'reality_checks.md')}` : ''}. Repair that materialized base; do not recompose the proposal pair from scratch. Omission does not delete a locked stage or a passing check. An implicated stage may be explicitly removed with top-level retry_remove_stages: [stage_id]; the complete effective pair still has to pass every unchanged admission rule.`,
-  ];
-  return lines.join('\n');
+    'Write a complete replacement dispatch.yaml and reality_checks.md pair. Each replacement passes every admission rule independently; no prior component is merged or locked. Do not repeat the same refused bytes and requirements.',
+  ].join('\n');
 }

@@ -3,85 +3,12 @@ import { emptyArtifactContract, gateArtifactContract, planArtifactContract } fro
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { createRun, readRunState, runDir, writeRunState } from '../src/store.js';
 
-type Measurements = {
-  parallel_raw: {
-    wall_ms: number;
-    stage_duration_sum_ms: number;
-    run_status: string;
-    exit_code: number;
-  };
-  session_reuse_on_raw: {
-    brief_sha256: string;
-    wall_ms: number;
-    business_tokens_out: number;
-  };
-  session_reuse_off_raw: {
-    brief_sha256: string;
-    wall_ms: number;
-    business_tokens_out: number;
-  };
-  session_reuse: { wall_benefit_pct: number; recommendation: string };
-  supervisor: {
-    calls: number;
-    tokens_in: number;
-    tokens_out: number;
-    trace_calls: number;
-    run_json_calls: number;
-    summary_calls: number;
-    status_calls: number;
-    trace_tokens_out: number;
-    run_json_tokens_out: number;
-    summary_tokens_out: number;
-    status_tokens_out: number;
-  };
-  tmp_audit: { path: string; under_tmpdir: boolean; under_project: boolean };
-};
-
-const measurementPath = process.env.E6_MEASUREMENTS_PATH;
-const measured = measurementPath
-  ? JSON.parse(readFileSync(measurementPath, 'utf-8')) as Measurements
-  : undefined;
-const measuredIt = measurementPath ? it : it.skip;
-
-describe('recorded real-run acceptance evidence', () => {
-  measuredIt('demonstrates real parallel overlap mechanically', () => {
-    expect(measured!.parallel_raw).toMatchObject({ run_status: 'complete', exit_code: 0 });
-    expect(measured!.parallel_raw.wall_ms).toBeLessThan(measured!.parallel_raw.stage_duration_sum_ms);
-  });
-
-  measuredIt('recomputes the preregistered session-reuse recommendation', () => {
-    const on = measured!.session_reuse_on_raw;
-    const off = measured!.session_reuse_off_raw;
-    expect(on.brief_sha256).toBe(off.brief_sha256);
-    const benefit = (off.wall_ms - on.wall_ms) / off.wall_ms * 100;
-    expect(benefit).toBeCloseTo(measured!.session_reuse.wall_benefit_pct, 3);
-    expect(benefit).toBeGreaterThanOrEqual(10);
-    expect(measured!.session_reuse.recommendation).toBe('enable');
-    expect(on.business_tokens_out).toBeGreaterThan(off.business_tokens_out);
-  });
-
-  measuredIt('keeps supervisor usage consistent in every recorded ledger', () => {
-    const usage = measured!.supervisor;
-    expect([usage.trace_calls, usage.run_json_calls, usage.summary_calls, usage.status_calls])
-      .toEqual([usage.calls, usage.calls, usage.calls, usage.calls]);
-    expect([usage.trace_tokens_out, usage.run_json_tokens_out, usage.summary_tokens_out, usage.status_tokens_out])
-      .toEqual([usage.tokens_out, usage.tokens_out, usage.tokens_out, usage.tokens_out]);
-    expect(usage.tokens_in + usage.tokens_out).toBeGreaterThan(usage.tokens_out);
-  });
-
-  measuredIt('records the clean audit below the operating-system temporary root', () => {
-    const auditPath = measured!.tmp_audit.path;
-    expect(isAbsolute(auditPath)).toBe(true);
-    expect(relative(tmpdir(), auditPath)).not.toMatch(/^\.\.(?:\/|$)/);
-    expect(measured!.tmp_audit).toMatchObject({ under_tmpdir: true, under_project: false });
-  });
-});
 
 let projectDir: string;
 

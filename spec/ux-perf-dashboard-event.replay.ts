@@ -71,8 +71,8 @@ describe('reality-gate run-detail evidence replay', () => {
         detail: 'request path digest did not match the active execution',
       }],
       operational: {
-        runStatus: 'failed',
-        activeStages: [],
+        runStatus: 'running',
+        activeStages: [expect.objectContaining({ id: 'implement', execution: 2 })],
         latestReason: {
           type: 'scope_revision_decided',
           detail: 'request path digest did not match the active execution',

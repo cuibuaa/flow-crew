@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { auditReportUsage, parseAuditReportArgs } from '../src/cli-audit-report.js';
 import { createBriefAdmission, inspectBrief, verifyBriefAdmission } from '../src/brief-preflight.js';
 import { landUsage, parseLandArgs } from '../src/cli-land.js';
 import { parseShipSetupArgs, shipSetupUsage } from '../src/cli-ship-setup.js';
@@ -173,11 +172,9 @@ describe('autonomous launch CLI integration', () => {
   it('advertises setup, wrap-up, audit, and watch commands with pasteable examples', () => {
     expect(cliSource).toContain('ship-setup  Create a launch worktree, link declared inputs, and baseline validation');
     expect(cliSource).toContain('land      Audit terminal artifacts and every unique worktree item before safe removal');
-    expect(cliSource).toContain('audit-report  Re-derive supported numeric and path-bearing claims from a terminal report');
     expect(cliSource).toContain('watch     Report edge-triggered stall judgements for live runs');
     expect(cliSource).toContain('flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work');
     expect(cliSource).toContain('flowcrew land --run <run-id>');
-    expect(cliSource).toContain('flowcrew audit-report --report docs/final.md --run-dir <run-dir>');
     expect(cliSource).toContain('flowcrew watch --once');
   });
 
@@ -186,7 +183,6 @@ describe('autonomous launch CLI integration', () => {
     expect(dispatches).toEqual(expect.arrayContaining([
       expect.objectContaining({ command: 'ship-setup', module: './cli-ship-setup.js', handler: 'cmdShipSetup', invokesHandler: true }),
       expect.objectContaining({ command: 'land', module: './cli-land.js', handler: 'cmdLand', invokesHandler: true }),
-      expect.objectContaining({ command: 'audit-report', module: './cli-audit-report.js', handler: 'cmdAuditReport', invokesHandler: true }),
       expect.objectContaining({ command: 'watch', module: './cli-watch.js', handler: 'cmdWatch', invokesHandler: true }),
     ]));
     expect(dispatches
@@ -213,20 +209,14 @@ describe('autonomous launch CLI integration', () => {
     expect(() => parseWatchArgs(['watch', '--poll', '0'])).toThrow('between 1 and 3600 seconds');
   });
 
-  it('keeps land fail-closed and audit-report bound to an explicit report and run', () => {
+  it('keeps land fail-closed and bound to an explicit run', () => {
     expect(landUsage()).toContain('--run <run-id> [--remove] [--json]');
     expect(parseLandArgs(['land', '--run', 'run-123', '--remove'])).toMatchObject({
       run: 'run-123', remove: true,
     });
     expect(() => parseLandArgs(['land', '--remove'])).toThrow('--run is required');
 
-    expect(auditReportUsage()).toContain('--report <path> --run-dir <path> [--json]');
-    expect(auditReportUsage()).toContain('confirmed, contradicted, or not_checkable');
-    expect(parseAuditReportArgs([
-      'audit-report', '--report', 'docs/final.md', '--run-dir', '/tmp/run', '--json',
-    ])).toMatchObject({ report: 'docs/final.md', runDir: '/tmp/run', json: true });
-    expect(() => parseAuditReportArgs(['audit-report', '--report', 'docs/final.md']))
-      .toThrow('--run-dir is required');
+
   });
 
   it('binds ignored-input acknowledgement to exact project facts without host probes in the spec', () => {

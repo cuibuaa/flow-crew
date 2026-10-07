@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getItem, recordRequest, resolveRequest } from '../src/inbox.js';
 import { readJsonlFile, readJsonlFileWithDiagnostics } from '../src/jsonl.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, reserveRun } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 
 describe('tolerant shared JSONL reader', () => {
@@ -110,8 +110,8 @@ describe('tolerant shared JSONL reader', () => {
   });
 
   it('preserves inbox first-resolution-wins folding', () => {
-    const runId = 'approval-run';
     const projectDir = join(tempDir, 'project');
+    const { runId } = reserveRun(projectDir);
     recordRequest({
       runId,
       projectDir,

@@ -13,18 +13,7 @@ import {
   readGuidanceForStage,
   RUN_WIDE_GUIDANCE_TARGET,
 } from '../src/guidance.js';
-import {
-  consumeSupervisorReject,
-  decideRejectAction,
-  inspectDispatchAdmission,
-  inspectRealityCheckReachability,
-  parseDispatchedStageConfig,
-  readGateVerdict,
-  resolveDispatchDependencies,
-  researchAdvanceEligible,
-  tryAdvanceResearch,
-  tryTerminateOnTerminalState,
-} from '../src/scheduler.js';
+import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, readGateVerdict, resolveDispatchDependencies, researchAdvanceEligible, tryAdvanceResearch, tryTerminateOnTerminalState } from '../src/scheduler.js';
 import { inspectBriefOutputs } from '../src/ship-inputs.js';
 import { inspectBrief } from '../src/brief-preflight.js';
 import { inspectTemporalResearchTests } from '../src/temporal-test-guard.js';
@@ -483,46 +472,9 @@ describe('gate settlement and research evidence', () => {
     expect(readFileSync(join(taskRunDir, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
   });
 
-  it('never converts an exhausted or unaddressed REJECT into acceptance', () => {
-    expect(decideRejectAction({ targetStage: 'work', reason: 'still false' }, 'work', 2, 2).action).toBe('escalate');
-    expect(decideRejectAction({ targetStage: null, reason: 'unknown target' }, null, 0, 2).action).toBe('escalate');
-  });
+  
 
-  it('routes a supervisor-rejected gate through its admitted repair stage', () => {
-    const projectDir = temporaryRoot();
-    const previousStateRoot = fcGlobalDir();
-    setFcGlobalDir(join(projectDir, 'fc-home'));
-    try {
-      const runId = 'supervisor-gate-reject';
-      const taskRunDir = runDir(projectDir, runId);
-      mkdirSync(join(taskRunDir, 'signals'), { recursive: true });
-      const verify = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_verify.json" }], [], [], []), id: 'verify', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Audits work.' }, scope: [], is_gate: true });
-      const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair', role: 'coder', depends_on: ['verify'], dependency_reasons: { verify: 'Repairs rejection.' }, scope: ['src/**'], retry_to: ['verify'] });
-      const state = {
-        runId, workflowName: 'test', projectDir, status: 'running', startedAt: new Date().toISOString(),
-        stages: {
-          work: { status: 'complete', retries: 0 },
-          verify: { status: 'complete', retries: 0, completedAt: new Date().toISOString() },
-          repair: { status: 'skipped', retries: 0 },
-        },
-      } as StoreState;
-      writeRunState(projectDir, runId, state);
-      writeFileSync(join(taskRunDir, 'verdict_verify.json'), JSON.stringify({ pass: true }));
-      writeFileSync(join(taskRunDir, 'signals', 'reject_verify.json'), JSON.stringify({ stage: 'verify', reason: 'criterion evidence is incomplete' }));
-
-      expect(consumeSupervisorReject(state, [verify, repair], ['verify', 'repair'], {
-        projectDir, runId, runDirPath: taskRunDir, iteration: 1,
-      })).toBe(true);
-      expect(JSON.parse(readFileSync(join(taskRunDir, 'verdict_verify.json'), 'utf-8'))).toMatchObject({
-        pass: false, outcome: 'repair-required', source: 'supervisor_reject',
-      });
-      expect(state.stages.repair.status).toBe('pending');
-      expect(readFileSync(join(taskRunDir, 'supervisor_guidance.md'), 'utf-8')).toContain('"target":"repair"');
-      expect(existsSync(join(taskRunDir, 'supervisor_rejections', 'verify', 'reject_1', 'verdict_before.json'))).toBe(true);
-    } finally {
-      setFcGlobalDir(previousStateRoot);
-    }
-  });
+  
 
   it('rejects a terminal artifact that contradicts the settled research terminal path', async () => {
     const projectDir = temporaryRoot();
@@ -660,51 +612,7 @@ describe('persistent blockers and quiet active commands', () => {
     expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'b', repairDigest: 'repair-b' }).occurrence.consecutive).toBe(1);
   });
 
-  it('escalates the run on the third unchanged supervisor rejection', () => {
-    const projectDir = temporaryRoot();
-    const previousStateRoot = fcGlobalDir();
-    setFcGlobalDir(join(projectDir, 'fc-home'));
-    try {
-      const runId = 'unchanged-supervisor-reject';
-      const taskRunDir = runDir(projectDir, runId);
-      const work = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
-        id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['src/**'],
-      });
-      const state = {
-        runId, workflowName: 'test', projectDir, status: 'running',
-        startedAt: new Date().toISOString(),
-        campaignTriggers: { repeatedFailureAfter: 3 },
-        stages: { work: { status: 'complete', retries: 0, completedAt: new Date().toISOString() } },
-      } as StoreState;
-      mkdirSync(taskRunDir, { recursive: true });
-      writeRunState(projectDir, runId, state);
-      mkdirSync(join(taskRunDir, 'signals'), { recursive: true });
-      mkdirSync(join(taskRunDir, 'stages', 'work'), { recursive: true });
-      writeFileSync(join(taskRunDir, 'stages', 'work', 'output.md'), 'unchanged rejected evidence\n');
-
-      for (let observation = 1; observation <= 3; observation += 1) {
-        state.stages.work = {
-          ...state.stages.work,
-          status: 'complete',
-          completedAt: new Date().toISOString(),
-        };
-        writeRunState(projectDir, runId, state);
-        writeFileSync(join(taskRunDir, 'signals', 'reject_work.json'), JSON.stringify({
-          stage: 'work', reason: 'the same evidence is still invalid',
-        }));
-        const rework = consumeSupervisorReject(state, [work], ['work'], {
-          projectDir, runId, runDirPath: taskRunDir, iteration: observation,
-        });
-        expect(rework).toBe(observation < 3);
-      }
-
-      expect(state.status).toBe('escalated');
-      expect(state.failureReason).toContain('3 consecutive observations');
-      expect(existsSync(join(taskRunDir, 'signals', 'repeated_blockage.json'))).toBe(true);
-    } finally {
-      setFcGlobalDir(previousStateRoot);
-    }
-  });
+  
 
   it('protects only a current-attempt command between start and completion', () => {
     const runDir = temporaryRoot();

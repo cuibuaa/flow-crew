@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { execWithTimeout } from '../src/adapters/base.js';
+import { execWithStdin } from '../src/adapters/base.js';
 import {
   findAllReady,
   normalizeRetryGateRelationships,
@@ -696,7 +696,6 @@ describe('bounded timeout negotiation', () => {
       timeout_ms: 10_000,
       technicalRetry: {
         delaysMs: [0],
-        loadFallbackAdapter: async () => adapter,
       },
       projectDir,
       runId,
@@ -809,74 +808,9 @@ describe('bounded timeout negotiation', () => {
     expect(recoveredFromRetryLedger.status.status).toBe('complete');
   });
 
-  it('rejects a pre-deadline extension and keeps the attempt budget immutable', { timeout: 5_000 }, async () => {
-    const stageId = 'finite';
-    const { runId, runDirPath } = directRunDir(stageId);
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json'), JSON.stringify({
-        version: 1, kind: 'timeout_extension', requestId: 'finite-more', stageId: opts.stageId,
-        attemptIndex: 1, requestedAt: new Date().toISOString(),
-        requestedExtensionMs: 700, reason: 'verified final checks remain',
-      }));
-      await waitForDecision(join(opts.runDir, 'stages', opts.stageId), 'timeout_extension_decision_');
-      if (!opts.abortSignal?.aborted) {
-        await new Promise((resolve) => opts.abortSignal?.addEventListener('abort', resolve, { once: true }));
-      }
-      return { output: 'cancelled', exitCode: 137, duration_ms: 600 };
-    } };
-    const result = await runStage(adapter, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId, role, dependsOn: [], promptTemplate: 'finite', timeout_ms: 600,
-      projectDir, runId, runDir: runDirPath, retries: 0,
-    });
-    expect(result.exitCode).toBe(124);
-    const status = readStageStatus(projectDir, runId, stageId);
-    expect(status.timeout).toMatchObject({ budgetMs: 600, rejectedExtensionCount: 1, terminationCause: 'attempt_timeout' });
-    const decision = readJson(join(runDirPath, status.timeout!.decisionPaths[0]));
-    expect(decision).toMatchObject({
-      accepted: false,
-      requestedBy: 'stage',
-      decidedBy: 'worker-policy',
-      grantedExtensionMs: 0,
-      timingBasis: 'requested_at',
-      requestedAt: expect.any(String),
-      rejectionReason: 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch',
-    });
-  });
+  
 
-  it('never replays a stale timeout request or decision into a later attempt', { timeout: 5_000 }, async () => {
-    const stageId = 'attempt_local_timeout';
-    const { runId, runDirPath } = directRunDir(stageId);
-    const first: Adapter = { async run(_prompt, _agent, opts) {
-      const directory = join(opts.runDir, 'stages', opts.stageId);
-      writeFileSync(join(directory, 'timeout_extension_request.json'), JSON.stringify({
-        version: 1, kind: 'timeout_extension', requestId: 'first-only', stageId: opts.stageId,
-        attemptIndex: 1, requestedExtensionMs: 50, reason: 'attempt one has verified remaining work',
-      }));
-      await waitForDecision(directory, 'timeout_extension_decision_');
-      return { output: 'first complete', exitCode: 0, duration_ms: 1 };
-    } };
-    await runStage(first, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId, role, dependsOn: [], promptTemplate: 'first', timeout_ms: 100,
-      projectDir, runId, runDir: runDirPath, retries: 0,
-    });
-    let secondBudget = 0;
-    const second: Adapter = { async run(_prompt, _agent, opts) {
-      secondBudget = opts.timeout_ms;
-      return { output: 'second complete without request', exitCode: 0, duration_ms: 1 };
-    } };
-    await runStage(second, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId, role, dependsOn: [], promptTemplate: 'second', timeout_ms: 100,
-      projectDir, runId, runDir: runDirPath, retries: 0,
-    });
-    const status = readStageStatus(projectDir, runId, stageId);
-    expect(secondBudget).toBe(100);
-    expect(status.attempts?.[1].timeout).toMatchObject({
-      budgetMs: 100, rejectedExtensionCount: 0, decisionPaths: [],
-    });
-  });
+  
 
   it('always prepares a strictly larger timeout retry without a second balance', () => {
     const retry = createTechnicalRetryBudgetState({ initialBudgetMs: 50 });
@@ -1009,107 +943,9 @@ describe('bounded timeout negotiation', () => {
     expect(recorded.stages.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
   });
 
-  it('charges primary retries, bounded backoff, and fallback to one attempt deadline', { timeout: 5_000 }, async () => {
-    const stageId = 'adapter_chain';
-    const { runId, runDirPath } = directRunDir(stageId);
-    mkdirSync(join(projectDir, 'config'), { recursive: true });
-    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-      'adapter: fallback',
-      'model: default',
-      'reasoning_effort: default',
-    ].join('\n'));
-    const clock = new ManualAttemptDeadlineClock();
-    const adapterBudgets: number[] = [];
-    let primaryCalls = 0;
-    let fallbackCalls = 0;
-    const primary: Adapter = { async run(_prompt, _agent, opts) {
-      primaryCalls++;
-      adapterBudgets.push(opts.timeout_ms);
-      if (primaryCalls === 1) setImmediate(() => clock.advance(5));
-      if (primaryCalls === 2) setImmediate(() => clock.advance(7));
-      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
-        adapterError: true, adapterFailureKind: 'service_unavailable' };
-    } };
-    const fallback: Adapter = { async run(_prompt, _agent, opts) {
-      fallbackCalls++;
-      adapterBudgets.push(opts.timeout_ms);
-      const started = Date.now();
-      if (opts.abortSignal?.aborted) return { output: 'cancelled', exitCode: 137, duration_ms: 0 };
-      return new Promise<RunResult>((resolve) => {
-        opts.abortSignal?.addEventListener('abort', () => resolve({
-          output: 'cancelled', exitCode: 137, duration_ms: Date.now() - started,
-        }), { once: true });
-        setImmediate(() => clock.advance(90));
-      });
-    } };
-    const result = await runStage(primary, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId,
-      role: { ...role, adapter: 'primary' },
-      dependsOn: [],
-      promptTemplate: 'adapter chain',
-      timeout_ms: 90,
-      deadlineClock: clock,
-      technicalRetry: {
-        delaysMs: [5, 7],
-        loadFallbackAdapter: async (name) => {
-          expect(name).toBe('fallback');
-          return fallback;
-        },
-      },
-      projectDir,
-      runId,
-      runDir: runDirPath,
-      retries: 0,
-    });
-    expect(result.exitCode).toBe(124);
-    expect(primaryCalls).toBe(3);
-    expect(fallbackCalls).toBe(1);
-    expect(adapterBudgets).toEqual([90, 90, 90, 90]);
-    const status = readStageStatus(projectDir, runId, stageId);
-    expect(status.timeout?.terminationCause).toBe('attempt_timeout');
-    expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS);
-    expect(clock.monotonicNow()).toBe(102);
-    const ledgerName = readdirSync(join(runDirPath, 'stages', stageId))
-      .find((name) => name.startsWith('attempt_deadline_') && name.endsWith('.jsonl'));
-    expect(ledgerName).toBeTruthy();
-    const events = readFileSync(join(runDirPath, 'stages', stageId, ledgerName!), 'utf-8')
-      .trim().split('\n').map((line) => JSON.parse(line) as { type: string; attemptId: string });
-    expect(events.filter((event) => event.type === 'adapter_backoff_started')).toHaveLength(2);
-    expect(events.filter((event) => event.type === 'adapter_phase_started')).toHaveLength(4);
-    expect(new Set(events.map((event) => event.attemptId))).toEqual(new Set([status.timeout?.attemptId]));
-  });
+  
 
-  it('includes fallback loading itself in the attempt-deadline race', { timeout: 5_000 }, async () => {
-    const stageId = 'hanging_loader';
-    const { runId, runDirPath } = directRunDir(stageId);
-    mkdirSync(join(projectDir, 'config'), { recursive: true });
-    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-      'adapter: fallback', 'model: default', 'reasoning_effort: default',
-    ].join('\n'));
-    const primary: Adapter = { async run() {
-      return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
-        adapterError: true, adapterFailureKind: 'service_unavailable' };
-    } };
-    const clock = new ManualAttemptDeadlineClock();
-    const result = await runStage(primary, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId, role: { ...role, adapter: 'primary' }, dependsOn: [], promptTemplate: 'loader',
-      timeout_ms: 60,
-      deadlineClock: clock,
-      technicalRetry: {
-        delaysMs: [],
-        loadFallbackAdapter: async () => {
-          setImmediate(() => clock.advance(60));
-          return new Promise<Adapter>(() => {});
-        },
-      },
-      projectDir, runId, runDir: runDirPath, retries: 0,
-    });
-    expect(clock.monotonicNow()).toBe(60);
-    expect(result.exitCode).toBe(124);
-    expect(readStageStatus(projectDir, runId, stageId).timeout?.terminationCause).toBe('attempt_timeout');
-  });
+  
 
   it('waits for adapter cancellation settlement before recording child close', { timeout: 5_000 }, async () => {
     const stageId = 'child_close';
@@ -1163,7 +999,7 @@ describe('bounded timeout negotiation', () => {
       emit();
       const interval = setInterval(emit, requestCadenceMs);
       try {
-        return await execWithTimeout(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        return await execWithStdin(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], '', {
           cwd: projectDir, timeout_ms: 10_000, abortSignal: opts.abortSignal,
         });
       } finally {
@@ -1186,38 +1022,12 @@ describe('bounded timeout negotiation', () => {
     expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('attempt_timeout');
     expect(status.timeout?.deadlineReachedAt).toBeTruthy();
     expect(status.timeout?.budgetMs).toBe(initialBudgetMs);
-    expect(status.timeout?.rejectedExtensionCount).toBeGreaterThanOrEqual(2);
-    expect(decisions.length).toBeGreaterThanOrEqual(2);
+    expect(status.timeout?.rejectedExtensionCount).toBe(0);
+    expect(decisions).toEqual([]);
     expect(decisions.every((decision) => decision.accepted === false && decision.grantedExtensionMs === 0)).toBe(true);
     expect(status.timeout?.deadlineOverrunMs).toBeLessThanOrEqual(ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS);
     expect(elapsed).toBeLessThan(initialBudgetMs + (2 * ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS));
   });
 
-  it('keeps a current-attempt supervisor ABORT authoritative over an extension', { timeout: 5_000 }, async () => {
-    const stageId = 'abort_wins';
-    const { runId, runDirPath } = directRunDir(stageId);
-    writeFileSync(join(runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
-      version: 1, stageId, attemptIndex: 1, reason: 'verified repeated wrong direction',
-      timestamp: new Date().toISOString(), source: 'supervisor',
-    }));
-    writeFileSync(join(runDirPath, 'stages', stageId, 'timeout_extension_request.json'), JSON.stringify({
-      version: 1, kind: 'timeout_extension', requestId: 'cannot-cancel-abort', stageId,
-      attemptIndex: 1, requestedExtensionMs: 100, reason: 'more work remains',
-    }));
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      if (!opts.abortSignal?.aborted) await new Promise((resolve) => opts.abortSignal?.addEventListener('abort', resolve, { once: true }));
-      return { output: 'cancelled', exitCode: 137, duration_ms: 1 };
-    } };
-    const result = await runStage(adapter, {
-      artifactContract: fixtureArtifactContract(stageId),
-      stageId, role, dependsOn: [], promptTemplate: 'abort', timeout_ms: 200,
-      projectDir, runId, runDir: runDirPath, retries: 0,
-    });
-    expect(result.exitCode).toBe(137);
-    const status = readStageStatus(projectDir, runId, stageId);
-    expect(status.error).toContain('aborted by supervisor');
-    expect(status.timeout).toMatchObject({ rejectedExtensionCount: 1, terminationCause: 'supervisor_abort' });
-    const decision = readJson(findArtifact(join(runDirPath, 'stages', stageId), 'timeout_extension_decision_'));
-    expect(decision).toMatchObject({ accepted: false, rejectionReason: 'a current-attempt ABORT already exists' });
-  });
+  
 });

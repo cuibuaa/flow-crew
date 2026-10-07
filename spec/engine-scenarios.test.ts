@@ -440,52 +440,6 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     expect(second.error).toContain('already approved');
     expect(inbox.foldItems(state.runId!).get('race-1')?.resolution?.by).toBe('alice');
   }, 60000);
-
-  it('[C3] a project action rule auto-approves unknown risk and records its stable rule id', async () => {
-    const inbox = await import('../src/inbox.js');
-    const projectDir = makeProject();
-    const { rule } = inbox.addProjectActionStandingRule({
-      projectDir,
-      actionPattern: 'launch_*training*',
-      decision: 'approve',
-      grantedBy: 'tester',
-      grantedAt: new Date().toISOString(),
-    });
-
-    const { state, runDirPath } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id: 'act' }])) } }],
-      act: {
-        ...REQUEST('auto-1', { action: 'launch_long_training_job', risk: 'unknown' }),
-        projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'auto', result: 9.9 }) },
-      },
-      research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\nauto-approved result' } },
-    }, 8, { projectDir });
-
-    expect(state.status).not.toBe('parked');
-    expect(inbox.foldItems(state.runId!).get('auto-1')?.state).toBe('approved');
-    expect(inbox.foldItems(state.runId!).get('auto-1')?.resolution).toMatchObject({
-      by: 'standing-rule',
-      viaRule: rule.id,
-    });
-    const events = readFileSync(join(runDirPath, 'events.jsonl'), 'utf-8')
-      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'approval_resolved',
-      requestId: 'auto-1',
-      ruleId: rule.id,
-      decision: 'accepted',
-    }));
-
-    // "always" is only offered where it is bounded: external risk + exact target.
-    expect(inbox.standingRuleEligible({
-      kind: 'request', runId: 'r', projectDir, requestId: 'x', action: 'run_shell',
-      risk: 'exec', title: 't', createdAt: 'now',
-    }).ok).toBe(false);
-    expect(inbox.standingRuleEligible({
-      kind: 'request', runId: 'r', projectDir, requestId: 'y', action: 'deploy',
-      risk: 'external', title: 't', createdAt: 'now',
-    }).ok).toBe(false);   // no target
-  }, 60000);
 });
 
 // ---------------------------------------------------------------------------

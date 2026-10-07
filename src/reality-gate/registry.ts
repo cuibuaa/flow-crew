@@ -1,9 +1,6 @@
 import ExecScriptExitZeroCheck from './checks/exec-script-exit-zero.js';
 import FileExistsNonemptyCheck from './checks/file-exists-nonempty.js';
-import HttpReachabilityCheck from './checks/http-reachability.js';
 import JsonSchemaMatchCheck from './checks/json-schema-match.js';
-import StaticAstScanCheck from './checks/static-ast-scan.js';
-import VarianceFloorCheck from './checks/variance-floor.js';
 import type { RealityCheck } from './types.js';
 
 interface RealityCheckClass {
@@ -21,10 +18,7 @@ export interface RegisteredRealityCheck {
 const CHECK_CLASSES: ReadonlyArray<readonly [string, RealityCheckClass]> = [
   ['exec-script-exit-zero', ExecScriptExitZeroCheck],
   ['file-exists-nonempty', FileExistsNonemptyCheck],
-  ['http-reachability', HttpReachabilityCheck],
   ['json-schema-match', JsonSchemaMatchCheck],
-  ['static-ast-scan', StaticAstScanCheck],
-  ['variance-floor', VarianceFloorCheck],
 ];
 
 /**

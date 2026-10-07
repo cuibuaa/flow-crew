@@ -424,15 +424,7 @@ describe('campaign cost honesty', () => {
     expect(final.status).toBe('complete');
     expect(planCalls).toBe(2);
     expect(planPrompts[1]).not.toContain('PIVOT REQUIRED');
-    expect(replanEvents).toEqual([
-      expect.objectContaining({
-        type: 'supervisor_replan',
-        stageId: 'work_one',
-        assessmentId: expect.stringMatching(/^sa_[0-9a-f]{20}$/),
-        decision: 'discarded',
-      }),
-    ]);
-    expect(replanEvents[0]?.detail).toContain('target work_one execution 1 subsequently completed');
+    expect(replanEvents).toEqual([]);
     expect(cost).toEqual({
       tokens: 407,
       supervisorTokens: 0,
@@ -757,7 +749,6 @@ function runningSupervisorFixture(attemptIndex = 2) {
       assessment: SupervisorAssessment,
       progressSinceMs?: number,
       source?: 'supervisor' | 'operator',
-      observedDeliverables?: ReadonlyMap<string, never>,
       observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
       observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
       comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
@@ -838,14 +829,7 @@ describe('attempt- and source-scoped supervisor guidance', () => {
         guidanceIds: [guidanceId], delivered: true, source: 'worker',
       });
     }
-    const result = await internals.act({
-      verdict: 'ABORT', targetStage: 'review_design',
-      reason: 'the same wrong direction continues', guidance: null, directionKey,
-      evidenceIds: ['ev_cccccccccccccccccccc'], assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([['review_design', {
-      version: 1, stageId: 'review_design', attemptIndex: 2,
-      attemptStartedAt: attempt.startedAt, generation: 'c'.repeat(64),
-    }]]), undefined, new Map([['review_design', {
+    const actionEvidence = new Map([['review_design', {
       version: 1,
       stageId: 'review_design',
       attemptIndex: 2,
@@ -867,7 +851,15 @@ describe('attempt- and source-scoped supervisor guidance', () => {
         authority: 'action',
         text: 'npm test completed',
       }],
-    }]]));
+    }]]);
+    const result = await internals.act({
+      verdict: 'ABORT', targetStage: 'review_design',
+      reason: 'the same wrong direction continues', guidance: null, directionKey,
+      evidenceIds: ['ev_cccccccccccccccccccc'], assessedAt: new Date(now).toISOString(),
+    }, Date.now() + 1_000, 'supervisor', new Map([['review_design', {
+      version: 1, stageId: 'review_design', attemptIndex: 2,
+      attemptStartedAt: attempt.startedAt, generation: 'c'.repeat(64),
+    }]]), actionEvidence, actionEvidence);
     const signalPath = join(created.runDirPath, 'signals', 'abort_review_design.json');
     const signal = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, 'utf-8')) as { attemptIndex?: number } : null;
     expect({ verdict: result.verdict, signalAttempt: signal?.attemptIndex }).toEqual({ verdict: 'ABORT', signalAttempt: 2 });

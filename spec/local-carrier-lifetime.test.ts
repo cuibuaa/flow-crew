@@ -2,7 +2,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execWithStdin, execWithTimeout } from '../src/adapters/base.js';
+import { execWithStdin } from '../src/adapters/base.js';
 import { ArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
 import { captureStageArtifactContractPreimages, inspectStageArtifactContract, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { createRun, captureStageEvidence, readRunState, RUN_HISTORY_FILE, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
@@ -12,7 +12,6 @@ import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { runValidationCommand } from '../src/project-validation.js';
 import { runAllChecks } from '../src/reality-gate/index.js';
 import { generateRunSummary } from '../src/run-summary.js';
-import { createLiveCampaignDeps, scoutDirections } from '../src/campaign-loop-live.js';
 
 const roots: string[] = [];
 function fixture() {
@@ -44,7 +43,7 @@ describe('engine-owned local carrier lifetime', () => {
   native('denies fresh alias, hardlink, rename and unlink routes after native acknowledgement; permits legitimate directory publication', async () => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE);
     let ready = false;
-    const execution = withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', child(`
+    const execution = withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`
       const run=${JSON.stringify(f.runDir)}, project=${JSON.stringify(f.projectDir)};
       fs.writeFileSync(path.join(run,'notes/tmp'),'ordinary');fs.renameSync(path.join(run,'notes/tmp'),path.join(run,'notes/result'));
       console.log('ready');const poll=setInterval(()=>{if(!fs.existsSync(path.join(project,'continue')))return;clearInterval(poll);
@@ -56,7 +55,7 @@ describe('engine-owned local carrier lifetime', () => {
         ]){try{fn();attempts.push({name,refused:false})}catch(e){attempts.push({name,refused:true,code:e.code})}}
         console.log(JSON.stringify({attempts,history:fs.readFileSync(${JSON.stringify(history)},'utf8')}));
       },10);
-    `)], { cwd: f.projectDir, timeout_ms: 10_000, onStdout: (text) => { if (text.includes('ready')) ready = true; } }));
+    `)], '', { cwd: f.projectDir, timeout_ms: 10_000, onStdout: (text) => { if (text.includes('ready')) ready = true; } }));
     const deadline = Date.now() + 7_000;
     while (!ready && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
     expect(ready).toBe(true);
@@ -77,7 +76,7 @@ describe('engine-owned local carrier lifetime', () => {
   native('refuses unknown writable hard-link closure before the executable runs', async () => {
     const f = fixture(), source = join(f.projectDir, 'linked'), ran = join(f.projectDir, 'ran');
     writeFileSync(source, 'unknown'); linkSync(source, join(f.root, 'outside'));
-    const result = await withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', child(`fs.writeFileSync(${JSON.stringify(ran)},'ran')`)], { cwd: f.projectDir, timeout_ms: 5_000 }));
+    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.writeFileSync(${JSON.stringify(ran)},'ran')`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(125); expect(result.output).toContain('hard-link closure is unknown');
     expect(result.writeBoundary?.kind).toBe('refused'); expect(existsSync(ran)).toBe(false);
   });
@@ -89,7 +88,7 @@ describe('engine-owned local carrier lifetime', () => {
     if (!dangling) writeFileSync(target, 'engine');
     const hop = join(f.projectDir, 'hop'); symlinkSync(target, hop);
     const carrier = join(output, 'result.json'); symlinkSync(hop, carrier);
-    const result = await withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', child(`fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage');`)], { cwd: f.projectDir, timeout_ms: 5_000 }));
+    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage');`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(125);
     expect(result.writeBoundary?.kind).toBe('refused');
     if (!dangling) expect(readFileSync(carrier, 'utf8')).toBe('engine');
@@ -108,7 +107,7 @@ describe('engine-owned local carrier lifetime', () => {
     const f = fixture();
     f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'a', root: 'run', path: 'a', nonempty: false }, { id: 'b', root: 'run', path: 'b', nonempty: false }], groups: [{ id: 'one', mode: 'exactly_one', members: ['a', 'b'] }], reads: [], replays: [] });
     const input = { ...f, template: '', preimages: captureStageArtifactContractPreimages({ ...f, template: '' }) };
-    const result = await withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', 'process.exit(0)'], { cwd: f.projectDir, timeout_ms: 5_000 }));
+    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(0); expect(existsSync(join(f.runDir, 'a'))).toBe(false); expect(existsSync(join(f.runDir, 'b'))).toBe(false);
     expect(inspectStageArtifactContract(input).violations.map((x) => x.reason).join('\n')).toContain('ARTIFACT_EXACTLY_ONE');
   });
@@ -116,10 +115,10 @@ describe('engine-owned local carrier lifetime', () => {
   native('permits a declared shared-parent file write and precisely closes its atomic replacement', async () => {
     const f = fixture();
     f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'report.md' }], reads: [], replays: [] });
-    const result = await withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', child(`
+    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`
       const target=${JSON.stringify(join(f.runDir, 'report.md'))};fs.writeFileSync(target,'legitimate report');
       try{fs.writeFileSync(target+'.tmp','new');fs.renameSync(target+'.tmp',target);process.exitCode=9}catch(e){console.log(e.code)}
-    `)], { cwd: f.projectDir, timeout_ms: 5_000 }));
+    `)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(0); expect(result.output.trim()).toBe('EACCES'); expect(readFileSync(join(f.runDir, 'report.md'), 'utf8')).toBe('legitimate report');
   });
 
@@ -143,7 +142,7 @@ describe('engine-owned local carrier lifetime', () => {
   native('cannot weaken carrier protection through a directory view in the writable project', async () => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), before = readFileSync(history, 'utf8');
     symlinkSync(f.runDir, join(f.projectDir, 'view'), 'dir');
-    const result = await withEngineWriteBoundary(f, () => execWithTimeout(process.execPath, ['-e', child(`try{fs.writeFileSync(${JSON.stringify(join(f.projectDir, 'view', RUN_HISTORY_FILE))},'bad');process.exitCode=9}catch(e){console.log(e.code)}`)], { cwd: f.projectDir, timeout_ms: 5_000 }));
+    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`try{fs.writeFileSync(${JSON.stringify(join(f.projectDir, 'view', RUN_HISTORY_FILE))},'bad');process.exitCode=9}catch(e){console.log(e.code)}`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(0); expect(result.output.trim()).toBe('EACCES'); expect(readFileSync(history, 'utf8')).toBe(before);
   });
 
@@ -171,10 +170,10 @@ describe('engine-owned local carrier lifetime', () => {
   native('gives observer calls read-only project access and private adapter state without request authority', async () => {
     const f = fixture();
     await withEngineWriteBoundary({ ...f, stageId: '_supervisor', authority: 'observer', artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [], reads: [], replays: [] }) }, async () => {
-      const result = await execWithTimeout(process.execPath, ['-e', child(`
+      const result = await execWithStdin(process.execPath, ['-e', child(`
         const refused=[];for(const name of ${JSON.stringify([join(f.projectDir, 'unexpected'), join(f.runDir, RUN_HISTORY_FILE), join(f.runDir, 'knowledge_graph.json'), join(f.runDir, 'stages/_supervisor/approval_request.json')])}){try{fs.writeFileSync(name,'bad');refused.push(false)}catch(e){refused.push(e.code==='EACCES')}}
         fs.writeFileSync(${JSON.stringify(join(f.runDir, 'stages/_supervisor/codex_home/private'))},'private');console.log(JSON.stringify(refused));
-      `)], { cwd: f.projectDir, timeout_ms: 5_000 });
+      `)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
       expect(result.exitCode).toBe(0); expect(result.writeBoundary?.kind).toBe('installed'); expect(JSON.parse(result.output)).toEqual([true, true, true, true]);
     });
   });
@@ -204,7 +203,7 @@ describe('engine-owned local carrier lifetime', () => {
         mkdirSync(join(home, '.tmp'));symlinkSync(shared, join(home, '.tmp/plugins'));symlinkSync(shared, join(home, 'skills'));
         writeCodexConfig(home, { name: 'fixture', description: 'fixture', model: 'fixture', reasoning_effort: 'low', tools: [], prompt: 'fixture' });
         expect(lstatSync(join(home, 'skills')).isSymbolicLink()).toBe(false);
-        const result = await execWithTimeout(process.execPath, ['-e', child(`fs.writeFileSync(${JSON.stringify(join(home, '.tmp/plugins/asset'))},'private');fs.writeFileSync(${JSON.stringify(join(home, 'skills/asset'))},'private');`)], { cwd: f.projectDir, timeout_ms: 5_000 });
+        const result = await execWithStdin(process.execPath, ['-e', child(`fs.writeFileSync(${JSON.stringify(join(home, '.tmp/plugins/asset'))},'private');fs.writeFileSync(${JSON.stringify(join(home, 'skills/asset'))},'private');`)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
         expect(result.exitCode).toBe(0); expect(readFileSync(join(shared, 'asset'), 'utf8')).toBe('shared');
       });
     } finally { vi.unstubAllEnvs(); }
@@ -212,7 +211,6 @@ describe('engine-owned local carrier lifetime', () => {
 });
 
 describe('auxiliary command carrier boundaries', () => {
-  const role: AgentConfig = { name: 'fixture', description: 'fixture', model: 'fixture', reasoning_effort: 'low', tools: [], prompt: 'Owned native construction' };
 
   native.each(['validation', 'reality'])('confines actual %s execution while permitting configured project output', async (route) => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), prefix = readFileSync(history, 'utf8');
@@ -229,16 +227,13 @@ describe('auxiliary command carrier boundaries', () => {
     expect(readFileSync(history, 'utf8')).toBe(prefix); expect(readRunState(f.projectDir, f.runId).stageEvidence).toHaveLength(1);
   });
 
-  native.each(['summary', 'scout', 'proposer'])('binds actual %s adapter calls with the appropriate output authority', async (route) => {
+  native.each(['summary'])('binds actual %s adapter calls with the appropriate output authority', async (route) => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), prefix = readFileSync(history, 'utf8');
     updateRunState(f.projectDir, f.runId, (state) => { state.status = 'complete'; });
     const writable = route === 'scout';
     const code = child(`let historyDenied=false,projectDenied=false;try{fs.writeFileSync(${JSON.stringify(history)},'bad')}catch(e){historyDenied=e.code==='EACCES'}try{fs.writeFileSync('literature_scan.md','legitimate')}catch(e){projectDenied=e.code==='EACCES'}if(!historyDenied||projectDenied===${writable})process.exitCode=9;console.log(JSON.stringify({new_directions:['owned'],next_direction:'owned'}))`);
-    const adapter = { run: () => execWithTimeout(process.execPath, ['-e', code], { cwd: f.projectDir, timeout_ms: 5_000 }) } as unknown as Adapter;
-    const opts = { projectDir: f.projectDir, campaignId: 'owned', objective: { directions: [], contextRoots: [], baseline: 0, reportDir: f.projectDir }, adapter, runOpts: { timeout_ms: 5_000, workDir: f.projectDir, runDir: f.runDir, stageId: 'writer' } };
+    const adapter = { run: () => execWithStdin(process.execPath, ['-e', code], '', { cwd: f.projectDir, timeout_ms: 5_000 }) } as unknown as Adapter;
     if (route === 'summary') expect(await generateRunSummary(f.projectDir, f.runId, adapter)).toContain('"new_directions":["owned"]');
-    if (route === 'scout') expect(await scoutDirections({ ...opts, scoutRole: role })).toEqual(['owned']);
-    if (route === 'proposer') expect(await createLiveCampaignDeps({ ...opts, proposeRole: role, proposeRunOpts: opts.runOpts, readBest: () => 0, launchInner: async () => 'owned' }).propose([])).toBe('owned');
     expect(existsSync(join(f.projectDir, 'literature_scan.md'))).toBe(writable);
     expect(readFileSync(history, 'utf8')).toBe(prefix); expect(readRunState(f.projectDir, f.runId).stageEvidence).toHaveLength(1);
   });
@@ -252,7 +247,7 @@ describe('auxiliary command carrier boundaries', () => {
   native('gives project commands no request or knowledge-graph publication rights', async () => {
     const f = fixture();
     await withEngineCommandBoundary({ projectDir: f.projectDir, runDir: f.runDir, stageId: '_validation' }, async () => {
-      const result = await execWithTimeout(process.execPath, ['-e', child(`for(const p of ${JSON.stringify([join(f.runDir, 'knowledge_graph.json'), join(f.runDir, 'stages/_validation/approval_request.json')])}){try{fs.writeFileSync(p,'bad');process.exitCode=9}catch(e){if(e.code!=='EACCES')throw e}}`)], { cwd: f.projectDir, timeout_ms: 5_000 });
+      const result = await execWithStdin(process.execPath, ['-e', child(`for(const p of ${JSON.stringify([join(f.runDir, 'knowledge_graph.json'), join(f.runDir, 'stages/_validation/approval_request.json')])}){try{fs.writeFileSync(p,'bad');process.exitCode=9}catch(e){if(e.code!=='EACCES')throw e}}`)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
       expect(result.exitCode).toBe(0); expect(result.writeBoundary?.kind).toBe('installed');
     });
   });

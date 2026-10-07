@@ -68,11 +68,8 @@ hard behavior at the terminal boundary.
 
 | Type | Purpose |
 |---|---|
-| `http-reachability` | Verify URLs return expected status codes |
 | `file-exists-nonempty` | Verify artifacts exist and are not empty |
 | `json-schema-match` | Verify JSON result shape |
-| `variance-floor` | Detect suspiciously identical metric values |
-| `static-ast-scan` | Block forbidden source patterns |
 | `exec-script-exit-zero` | Run a project-specific deterministic script |
 
 ## Brief Example

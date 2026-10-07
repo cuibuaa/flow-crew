@@ -189,7 +189,6 @@ export class Orchestrator {
    * an uninitialized id is accepted only when its reservation marker validates.
    */
   private prepareRunBinding(task: TaskEntry): TaskEntry | undefined {
-    if (task.kind === 'campaign') return task;
     try {
       assertTaskBriefAdmission(task);
     } catch (err) {
@@ -210,7 +209,6 @@ export class Orchestrator {
   }
 
   private claimTaskLaunch(task: TaskEntry): boolean {
-    if (task.kind === 'campaign') return true;
     if (!task.run_id) return false;
     try {
       return claimLaunchIntent(task.projectDir, task.run_id, this.now().getTime()).claimed;
@@ -236,12 +234,13 @@ export class Orchestrator {
   }
 
   async register(input: TaskCreateInput): Promise<TaskEntry> {
-    if ((input.kind ?? (input.config_path ? 'campaign' : 'quick')) !== 'campaign') {
-      const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
-      const verification = verifyBriefAdmission(brief, input.brief_admission);
-      if (verification.status !== 'valid') {
-        throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
-      }
+    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
+      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    }
+    const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
+    const verification = verifyBriefAdmission(brief, input.brief_admission);
+    if (verification.status !== 'valid') {
+      throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
     }
     let task = this.registry.create(input);
     // Admission control (skip-on-overlap): single-in-flight per project used to
@@ -306,7 +305,7 @@ export class Orchestrator {
   async retry(id: number): Promise<TaskEntry> {
     let task = this.mustGet(id);
     const bound = this.readBoundRun(task);
-    if (task.kind !== 'campaign' && task.status !== TASK_STATUS.RUNNING
+    if (task.status !== TASK_STATUS.RUNNING
         && bound && isTerminalRunStatus(bound.status)) {
       // A manual retry explicitly asks for a fresh execution of the brief.
       // Keeping the terminal binding makes the queue drain reconcile that old
@@ -1656,6 +1655,9 @@ function readBoundRunBrief(task: TaskEntry): string | undefined {
 }
 
 function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: BriefAdmissionRecord } {
+  if (task.kind === 'campaign' || task.config_path !== undefined) {
+    throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+  }
   const brief = readBrief(task);
   const taskVerification = verifyBriefAdmission(brief, task.brief_admission);
   if (taskVerification.status !== 'valid' || !task.brief_admission) {
@@ -1698,16 +1700,14 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
     }
     userArgs.push(arg);
   }
-  const admitted = task.kind === 'campaign' ? undefined : assertTaskBriefAdmission(task);
-  const args = task.kind === 'campaign'
-    ? ['campaign', 'run', task.config_path ?? '', ...userArgs]
-    : ['quick',
+  const admitted = assertTaskBriefAdmission(task);
+  const args = ['quick',
        // The brief must survive shellJoin AND systemd's own ExecStart unescaping.
        // Passing it raw corrupted any brief containing a single quote, so the
        // relaunch recomputed a different digest than the one the operator
        // admitted and the launch was rejected before run creation. base64url is
        // the same byte-safe transport --brief-admission-record already uses.
-       '--brief-input-base64', Buffer.from(admitted!.brief, 'utf8').toString('base64url'),
+       '--brief-input-base64', Buffer.from(admitted.brief, 'utf8').toString('base64url'),
        '--project', task.projectDir,
        '--supervise', ...userArgs,
        '--brief-admission-record', Buffer.from(JSON.stringify(admitted!.admission), 'utf8').toString('base64url'),

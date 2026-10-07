@@ -65,7 +65,6 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
       <details className="section advanced-settings"><summary>Advanced paths</summary><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">runs root</span><span className="mono">~/.fc/runs/</span></div>
         <div className="sd-meta-row"><span className="k">campaigns log</span><span className="mono">~/.fc/campaigns/</span></div>
-        <div className="sd-meta-row"><span className="k">cross-camp KG</span><span className="mono">~/.fc/cross-campaign-kg/</span></div>
       </div></details>
         </>
       ) : null}

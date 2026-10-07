@@ -16,7 +16,6 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `clean` | Delete old run directories. |
 | `export` | Export a run as JSON. |
 | `campaign` | Run and manage configured campaigns. |
-| `campaign-loop` | Run the autonomous research direction loop. |
 | `daemon` | Operate the background orchestrator. |
 | `dashboard` | Query the running web dashboard. |
 | `task` | Inspect and control daemon tasks. |
@@ -26,7 +25,6 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `ship-preflight` | Gather prior-run, campaign, build, and declared-input facts before shipping. |
 | `ship-setup` | Create the declared launch worktree and fail closed on unreachable or invalid inputs. |
 | `land` | Audit terminal artifacts and unique worktree state; optionally remove a proven-safe linked worktree. |
-| `audit-report` | Re-derive supported numeric and path-bearing claims from a terminal report. |
 | `watch` | Report edge-triggered stall judgements for live runs. |
 | `events` | Read or follow the canonical, filterable run event feed. |
 | `rehearse` | Exercise a brief with the real scheduler and a scripted agent. |
@@ -51,8 +49,6 @@ flowcrew start                       # web dashboard only
 flowcrew daemon status               # background orchestrator identity/freshness
 flowcrew daemon restart              # reload the background orchestrator
 flowcrew dashboard status            # query the web dashboard listener
-flowcrew campaign run <config.yaml>
-flowcrew campaign-loop - --project <dir> --campaign <name>
 flowcrew task list
 flowcrew fc_tasks render
 flowcrew audit-reality
@@ -60,7 +56,6 @@ flowcrew inbox list
 flowcrew ship-preflight --brief docs/task_brief.md
 flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
 flowcrew land --run <run-id>
-flowcrew audit-report --report docs/final.md --run-dir <run-dir>
 flowcrew watch --once
 flowcrew events --follow
 flowcrew brief head <briefDir>
@@ -262,41 +257,6 @@ unconfirmed persistence outcome, and emits a guarded `flowcrew fc_tasks update` 
 right question. The operator reads and independently judges the result before requesting
 removal and optional ledger closure; the command enforces the mechanical preservation and exact
 identity boundaries around that explicit decision.
-
-## `flowcrew audit-report`
-
-Check a report's own arithmetic and artifact attributions against one run and its project:
-
-```bash
-flowcrew audit-report --report <path> --run-dir <path>
-flowcrew audit-report --report <path> --run-dir <path> --json
-```
-
-The report itself and every named artifact must resolve within the run or project root.
-Relative artifact paths are checked against both; if the same path exists in both, use
-`project:<path>` or `run:<path>` to make the attribution unambiguous. Symlinks and `..` cannot
-escape those roots. Report prose never executes commands. Declare executable evidence in a
-stage’s `artifact_contract.replays` field; the stage replay audit executes every accepted declaration. Numeric
-command claims in prose remain `not_checkable` and name `stages[].artifact_contract.replays`.
-
-These sentence forms are checkable (punctuation around them is optional):
-
-```markdown
-`project:guide/cli.md`: 509 lines.
-`artifacts/evidence` contains 14 files.
-`project:guide/cli.md`: 20 sections.
-`artifacts/result.json` field `metrics.percentile` = 97.
-`run:research_round_1.json` field `/series/0/mean` = -1.25.
-```
-
-Line counts use logical text lines, recursive file counts include regular files, and section
-counts include Markdown ATX headings outside fenced examples. JSON fields accept dotted paths
-or JSON Pointers and must resolve to a scalar. Other numeric sentences that name a path are
-retained as `not_checkable` instead of being silently ignored.
-
-Each claim is `confirmed`, `contradicted`, or `not_checkable`. Only a contradiction makes the
-command exit non-zero. Confirmation proves that the report repeated the measured value
-accurately; it deliberately does not prove that the chosen measurement or framing was sound.
 
 ## `flowcrew watch`
 
@@ -525,44 +485,18 @@ reversible default. Continuations retain their recorded choice.
 Research configuration belongs in the brief's leading YAML frontmatter. See
 [Brief and file contract](brief-contract.md).
 
-## Campaign Commands
+## Campaign ledger
 
-Validate and inspect a campaign configuration without launching it:
-
-```bash
-flowcrew campaign run examples/example_campaign.yaml --dry-run
-```
-
-The example prints the resolved campaign plan and exits with `Campaign hello-research-example: dry_run`. Its launch command is intentionally a placeholder; replace the launch settings before removing `--dry-run`.
-
-The complete subcommand set is:
+Launches with `--campaign` append to the campaign ledger. Read it with:
 
 ```bash
-flowcrew campaign run <config.yaml> [--dry-run] [--background]
 flowcrew campaign status <campaignId>
-flowcrew campaign stop <campaignId>
 flowcrew campaign pending <campaignId>
 flowcrew campaign review <campaignId>
 ```
 
-`pending` lists proposed brief patches. `review` interactively accepts,
-rejects, skips, or quits them; redirected standard input supplies scripted
-answers one per line.
-
-## `flowcrew campaign-loop`
-
-```bash
-flowcrew campaign-loop - --project <dir> --campaign <name> \
-  [--max-directions N] [--no-scout]
-flowcrew campaign-loop - --project <dir> --campaign <name> \
-  < research.brief.md
-```
-
-Use a `research:` frontmatter block. The outer parser also accepts the
-`objective:` alias, and spawned inner `quick` runs use the canonical parsed
-research configuration for workflow selection. Unless `--no-scout` is present,
-the configured literature scout may use live model and network access. This is
-a long-running live command, not a rehearsal.
+`review` applies operator decisions to pending brief patches; redirected standard
+input supplies one decision per line. Ledger history remains readable.
 
 ## `flowcrew doctor`
 
@@ -677,14 +611,12 @@ the original is replaced.
 ```bash
 flowcrew inbox list [--state pending|resolved|all] [--run <runId>]
 flowcrew inbox show <requestId> [--run <runId>]
-flowcrew inbox approve <requestId> [--reason "..."] [--always] [--no-resume]
+flowcrew inbox approve <requestId> [--reason "..."] [--no-resume]
 flowcrew inbox deny <requestId> [--reason "..."] [--no-resume]
-flowcrew inbox rules
-flowcrew inbox revoke <action> <target> [--project <dir>]
 ```
 
 See [Approval inbox](approvals.md) for park/resume, first-wins resolution, and
-standing-rule restrictions.
+manual resolution and resumed launch semantics.
 
 ## Versioned Briefs
 

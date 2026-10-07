@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { readDispatchDocument } from './dispatch-document.js';
 import { loadProjectDefaults } from './config.js';
 import { readOperatorCriterionRulings } from './guidance.js';
 import { STAGE_STATUS } from './store.js';
@@ -48,10 +48,8 @@ function strings(value: unknown): string[] {
 
 function readDispatchStages(runDir: string): DispatchStageShape[] {
   try {
-    const parsed = parseYaml(readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8')) as {
-      stages?: unknown;
-    };
-    return Array.isArray(parsed?.stages) ? parsed.stages as DispatchStageShape[] : [];
+    return readDispatchDocument(readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8')).stages
+      .filter((stage): stage is DispatchStageShape => Boolean(stage) && typeof stage === 'object');
   } catch {
     return [];
   }

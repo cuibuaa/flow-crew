@@ -70,5 +70,4 @@ prompt: |
   - Ask: "what would break this in production at 3am?" — test that scenario.
 
   # Run Memory Graph
-  If verification discovers reusable findings, failed approaches, evidence, decisions, or edge cases, update {run_dir}/knowledge_graph.json. Keep updates concise and evidence-backed.
 handoff_visibility: minimal

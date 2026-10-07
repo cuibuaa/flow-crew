@@ -4,7 +4,7 @@ import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { StageConfig, WorkflowConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { captureRepairRoundSnapshot } from '../sched_scope/snapshots.js';
-import { anyFailed, syncStageStatuses } from '../sched_scope/stage-group.js';
+import { syncStageStatuses } from '../sched_scope/stage-group.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { classifyGateRecoveryFact, collectGateRuntimeFacts, findGateRecoveryStages, gateIdsForRecoveryStages, gateRetryDiagnosticSnapshot } from '../sched_settlement/gate-recovery.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
@@ -14,7 +14,7 @@ import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
 import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
 import { recordRunEvent } from '../../run-events.js';
 import { executeIteration } from './iteration.js';
-import { admitScopedAuditRepairs, consumeSupervisorReject, runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
+import { admitScopedAuditRepairs, runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -30,20 +30,6 @@ export async function settleGateRetries(
 ): Promise<{kind: 'settled'; state: StoreState} | {
   kind: 'continue'; state: StoreState; maxInnerRetries: number; innerRetriesUsed: number;
 }> {
-    while (consumeSupervisorReject(
-      state,
-      sorted,
-      iterationDispatchedIds,
-      { projectDir, runId, runDirPath, iteration },
-    )) {
-      await executeIteration(
-        sorted, projectDir, runId, runDirPath, workflow, adapter, agents,
-        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
-        skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
-      );
-      state = readRunState(projectDir, runId);
-      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
-    }
     state = readRunState(projectDir, runId);
     if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
 
@@ -249,7 +235,7 @@ export async function settleGateRetries(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (retryStage, liveConstraintGuardFactory) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory),
+                (retryStage, liveConstraintGuardFactory, beforeSettlement) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory, beforeSettlement),
                 repairSnapshot,
               );
             }
@@ -318,7 +304,7 @@ export async function settleGateRetries(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (gate, liveConstraintGuardFactory) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeWorkRecoveryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory),
+                (gate, liveConstraintGuardFactory, beforeSettlement) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeWorkRecoveryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory, beforeSettlement),
               );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
@@ -384,27 +370,6 @@ export async function settleGateRetries(
         sorted.map((stage) => [stage.id, [state.stages[stage.id]?.status, state.stages[stage.id]?.attempts?.length ?? 0]]),
       ));
       revisitRuntimeFacts = beforeContinuation !== afterContinuation;
-    }
-    const supervisorReworked = !anyFailed(state) && !isTerminalRunStatus(state.status)
-      ? consumeSupervisorReject(
-          state,
-          sorted,
-          iterationDispatchedIds,
-          { projectDir, runId, runDirPath, iteration },
-        )
-      : false;
-    if (supervisorReworked) {
-      await executeIteration(
-        sorted, projectDir, runId, runDirPath, workflow, adapter, agents,
-        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
-        skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
-      );
-      state = readRunState(projectDir, runId);
-      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
-      revisitRuntimeFacts = true;
-    } else {
-      state = readRunState(projectDir, runId);
-      if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
     }
     }
   return {kind: 'continue', state, maxInnerRetries, innerRetriesUsed};

@@ -6,7 +6,8 @@ import { join, posix } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
-import { type ValidationPlanConflict, inspectValidationPlanConflicts } from '../../validation-plan-conflicts.js';
+import { readDispatchDocument } from '../../dispatch-document.js';
+import type { RealityCheckPreflightReport } from '../../reality-check-preflight.js';
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { inspectArtifactDeclarations } from '../../artifact-declarations.js';
@@ -91,14 +92,13 @@ export function parseDispatchBlock(
   const cleaned = output.replace(/^[-+ ] *\d*[, ]*\d* *: /gm, '');
   const match = cleaned.match(/## DISPATCH\s*\n```(?:yaml)?\s*\n([\s\S]*?)```/);
   if (!match) return [];
-  const items = parseYaml(match[1]);
-  if (!Array.isArray(items)) return [];
+  const items = readDispatchDocument(match[1]).stages as Record<string, unknown>[];
   const stages: StageConfig[] = [];
   const seenIds = new Set<string>();
   let refused = false;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (!item || typeof item !== 'object') { refused = true; continue; }
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.id !== 'string' || typeof item.role !== 'string') { refused = true; continue; }
     if (seenIds.has(item.id)) {
       log.warn({ id: item.id }, 'Duplicate stage ID in DISPATCH block, skipping');
       refused = true;
@@ -198,14 +198,8 @@ export interface DispatchAdmissionReport {
   /** Closed planning-time relation between configured-command runners and generated outputs. */
   configuredCommandScopes?: string[];
   configuredCommandStageRoles?: Record<string, string[]>;
-  /** Advisory-only literal negative assertions that intersect future write capabilities. */
-  validationPlanConflicts?: ValidationPlanConflict[];
-  validationAssertionScan?: {
-    sourceFiles: string[];
-    sourceBytes: number;
-    assertionCount: number;
-    truncated: boolean;
-  };
+  /** Same candidate's structured check findings; no second refusal pipeline. */
+  realityPreflight?: RealityCheckPreflightReport;
 }
 
 /** Materialize the admitted scope after subtracting exact framework-owned
@@ -307,12 +301,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
   }): DispatchAdmissionReport {
     const errors: string[] = [];
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
-    const validationPlanInspection = input.projectDir
-      ? inspectValidationPlanConflicts(input.projectDir, input.dispatched)
-      : undefined;
-    if (validationPlanInspection) {
-      warnings.push(...validationPlanInspection.conflicts.map((conflict) => conflict.message));
-    }
     const all = [...input.baseStages, ...input.dispatched];
     const byId = new Map(all.map((stage) => [stage.id, stage]));
     errors.push(...inspectArtifactDeclarations({
@@ -603,15 +591,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       frameworkReservedScopes: Object.fromEntries(frameworkReservedScopes),
       configuredCommandScopes,
       configuredCommandStageRoles: Object.fromEntries(configuredCommandStageRoles),
-      ...(validationPlanInspection ? {
-        validationPlanConflicts: validationPlanInspection.conflicts,
-        validationAssertionScan: {
-          sourceFiles: validationPlanInspection.sourceFiles,
-          sourceBytes: validationPlanInspection.sourceBytes,
-          assertionCount: validationPlanInspection.assertions.length,
-          truncated: validationPlanInspection.truncated,
-        },
-      } : {}),
       ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
     };
   });

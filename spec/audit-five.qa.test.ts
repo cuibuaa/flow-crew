@@ -9,10 +9,8 @@ import type { SupervisorConfig } from '../src/config.js';
 import type { RunEvent } from '../src/run-events.js';
 import {
   buildGateReevaluationPreamble,
-  evaluateSupervisorReplanFreshness,
   inspectRealityCheckReachability,
   type StageConfig,
-  type SupervisorReplanSignalV2,
 } from '../src/scheduler.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import {
@@ -68,7 +66,6 @@ interface SupervisorAct {
     assessment: SupervisorAssessment,
     progressSinceMs?: number,
     source?: 'supervisor' | 'operator',
-    observedDeliverables?: ReadonlyMap<string, never>,
     observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
     observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
   ): Promise<SupervisorAssessment>;
@@ -145,7 +142,6 @@ describe.sequential('five-instrument independent QA', () => {
       guideAssessment(command!.id),
       Date.now(),
       'supervisor',
-      undefined,
       undefined,
       new Map([['work', projection]]),
     );
@@ -352,40 +348,5 @@ describe.sequential('five-instrument independent QA', () => {
     expect(present).toContain('No rejected verdict was recorded');
     expect(legacy).toContain('INTERRUPTED EVALUATION (round 2)');
     expect(legacy).toContain('Exact input seen by the interrupted gate: unavailable');
-  });
-
-  it('discards only matching later REPLAN facts, not another attempt or unrelated gate', () => {
-    const signal: SupervisorReplanSignalV2 = {
-      version: 2,
-      assessmentId: 'sa_aaaaaaaaaaaaaaaaaaaa',
-      targetStage: 'work',
-      attemptIndex: 1,
-      attemptStartedAt: '2026-08-01T05:30:00.000Z',
-      evidenceIds: ['ev_aaaaaaaaaaaaaaaaaaaa'],
-      reason: 'wrong direction',
-      timestamp: '2026-08-01T05:31:00.000Z',
-    };
-    const stages: StageConfig[] = [
-      { artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
-      { artifact_contract: artifacts([], [], [], []), id: 'other', role: 'coder', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [] },
-      { artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_unrelated_gate.json" }], [], [], []), id: 'unrelated_gate', role: 'qa', depends_on: ['other'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
-      { artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_related_gate.json" }], [], [], []), id: 'related_gate', role: 'qa', depends_on: ['work'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: true, criterion_refs: [] },
-    ];
-    const wrongAttempt: RunEvent = {
-      type: 'stage_complete', runId: 'run', timestamp: '2026-08-01T05:40:00.000Z',
-      stageId: 'work', attemptIndex: 2, attemptStartedAt: '2026-08-01T05:35:00.000Z',
-    };
-    expect(evaluateSupervisorReplanFreshness({
-      signal,
-      events: [wrongAttempt],
-      stages,
-      passedGateIds: ['unrelated_gate'],
-    })).toMatchObject({ decision: 'replay', completedTarget: false, relatedAcceptedGateIds: [] });
-    expect(evaluateSupervisorReplanFreshness({
-      signal,
-      events: [{ ...wrongAttempt, attemptIndex: 1, attemptStartedAt: signal.attemptStartedAt }],
-      stages,
-      passedGateIds: ['related_gate'],
-    })).toMatchObject({ decision: 'discard', completedTarget: true, relatedAcceptedGateIds: ['related_gate'] });
   });
 });

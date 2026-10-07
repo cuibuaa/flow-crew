@@ -798,14 +798,6 @@ function forbiddenSearches(script: string): ForbiddenSearch[] {
 
 function exceptionConflict(declaration: Exclude<CheckDecl, { kind: 'invalid' }>, contract: BriefContractModel): ExceptionStatement | undefined {
   const params = record(declaration.params) ?? {};
-  if (declaration.type === 'static-ast-scan'
-      && typeof params.forbid_pattern === 'string'
-      && typeof params.glob === 'string') {
-    const fragments = literalFragments(params.forbid_pattern);
-    return contract.exceptions.find((statement) =>
-      fragments.some((fragment) => statement.text.includes(fragment))
-      && scopeCoversStatement(params.glob as string, statement));
-  }
   if (declaration.type !== 'exec-script-exit-zero' || typeof params.script !== 'string') return undefined;
   for (const search of forbiddenSearches(params.script)) {
     const fragments = search.patterns.flatMap(literalFragments);

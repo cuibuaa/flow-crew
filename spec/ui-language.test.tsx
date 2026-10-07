@@ -201,7 +201,7 @@ function inboxFixture(): { overview: InboxOverview; userText: string[] } {
         items: [{
           runId: 'approval-run', projectDir: '/fixture/project', requestId: 'approval-1', action: 'deploy',
           risk: 'external', title: userText[0], body: userText[1], createdAt: '2026-08-02T10:00:00.000Z',
-          state: 'pending', standingRuleEligible: { ok: true }, campaignId: 'language-campaign', campaignName: userText[2],
+          state: 'pending', campaignId: 'language-campaign', campaignName: userText[2],
         }],
         error: 'one approval source could not be read',
         coverage: { succeeded: 1, failed: 1 },

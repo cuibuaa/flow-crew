@@ -14,7 +14,6 @@ import { describe, expect, it } from 'vitest';
 import {
   ATTEMPT_TERMINATION_GRACE_MS,
   execWithStdin,
-  execWithTimeout,
   resolveChildTerminationTiming,
   type Adapter,
   type AgentConfig,
@@ -133,7 +132,7 @@ async function runCleanupTrial(
   const settlementStarted = performance.now();
   const execution = execKind === 'with-stdin'
     ? execWithStdin(process.execPath, args, 'fixture input', opts)
-    : execWithTimeout(process.execPath, args, opts);
+    : execWithStdin(process.execPath, args, '', opts);
 
   try {
     await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
@@ -222,9 +221,9 @@ async function runIgnoredSignalTrial(
   ].join('\n');
   const controller = timeoutThenAbort ? new AbortController() : undefined;
   const settlementStarted = performance.now();
-  const execution = execWithTimeout(process.execPath, [
+  const execution = execWithStdin(process.execPath, [
     '-e', fixture, readyPath, pidPath, termCountPath,
-  ], {
+  ], '', {
     cwd: root,
     timeout_ms: IGNORE_TERM_TIMEOUT_MS,
     env: {
@@ -380,10 +379,10 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       '}, 10);',
     ].join('\n');
     const settlementStarted = performance.now();
-    const execution = execWithTimeout(process.execPath, [
+    const execution = execWithStdin(process.execPath, [
       '-e', fixture, cleanupPath, readyPath, pidPath,
       descendantReadyPath, descendantPidPath, descendantTermPath,
-    ], {
+    ], '', {
       cwd: root,
       timeout_ms: DESCENDANT_FIXTURE_TIMEOUT_MS,
       env: { HOME: root, FC_HOME: join(root, 'fc-home') },
@@ -440,9 +439,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
         let adapterExecution: Promise<RunResult> | undefined;
         const adapter: Adapter = {
           async run(_prompt, _role, opts) {
-            adapterExecution = execWithTimeout(process.execPath, [
+            adapterExecution = execWithStdin(process.execPath, [
               '-e', fixture, cleanupPath, readyPath, pidPath,
-            ], {
+            ], '', {
               cwd: projectRoot,
               timeout_ms: opts.timeout_ms,
               abortSignal: opts.abortSignal,
@@ -533,9 +532,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     let adapterExecution: Promise<RunResult> | undefined;
     const adapter: Adapter = {
       async run(_prompt, _role, opts) {
-        adapterExecution = execWithTimeout(process.execPath, [
+        adapterExecution = execWithStdin(process.execPath, [
           '-e', fixture, cleanupPath, readyPath, pidPath,
-        ], {
+        ], '', {
           cwd: projectRoot,
           timeout_ms: opts.timeout_ms,
           abortSignal: opts.abortSignal,
@@ -595,7 +594,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     let hardExecution: Promise<RunResult> | undefined;
     try {
       const earlyAbort = new AbortController();
-      const early = await execWithTimeout(process.execPath, ['-e', 'process.exit(0)'], {
+      const early = await execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', {
         cwd: root,
         timeout_ms: ABORT_FIXTURE_TIMEOUT_MS,
         abortSignal: earlyAbort.signal,
@@ -604,7 +603,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       expect(early).toMatchObject({ exitCode: 0, timedOut: false });
       earlyAbort.abort('after_settlement');
 
-      const spawnFailure = await execWithTimeout(process.execPath, ['-e', 'process.exit(0)'], {
+      const spawnFailure = await execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', {
         cwd: join(root, 'missing-working-directory'),
         timeout_ms: ABORT_FIXTURE_TIMEOUT_MS,
         env: { HOME: root, FC_HOME: join(root, 'fc-home') },

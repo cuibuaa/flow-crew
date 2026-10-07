@@ -18,7 +18,6 @@ const approval: InboxItem = {
   body: "Impact: production traffic. Rollback: deploy the previous release.",
   createdAt: "2026-07-30T00:00:00.000Z",
   state: "pending",
-  standingRuleEligible: { ok: true },
   campaignId: "campaign-a",
   campaignName: "Campaign A",
 };
@@ -89,7 +88,7 @@ describe("operator Inbox", () => {
   beforeEach(() => {
     loadOverview.mockResolvedValue(makeOverview());
     loadBriefDiff.mockResolvedValue("--- v1\n+++ v2\n+ Require rollback evidence.");
-    resolveItem.mockResolvedValue({ ok: true, won: true, resumed: true });
+    resolveItem.mockResolvedValue({ ok: true, won: true, resumeRegistered: true });
     reviewPatch.mockResolvedValue({ remaining: 0, version: "v2" });
     markRunFailed.mockResolvedValue({ ok: true });
   });
@@ -102,7 +101,7 @@ describe("operator Inbox", () => {
 
   it("renders approval actions, omits permanent approval, and preserves an ended obligation", async () => {
     loadOverview.mockResolvedValue(makeOverview({
-      approvals: { status: "complete", items: [{ ...approval, risk: "write", standingRuleEligible: { ok: false, reason: "external only" } }] },
+      approvals: { status: "complete", items: [{ ...approval, risk: "write", }] },
     }));
 
     view();

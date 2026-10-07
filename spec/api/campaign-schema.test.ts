@@ -13,11 +13,6 @@ let homeDir: string;
 let oldHome: string | undefined;
 let runId: string;
 
-const metric = z.object({ name: z.string(), value: z.number().nullable(), format: z.enum(["currency_usd", "rating_0_to_10", "pct", "count", "duration_min", "raw"]), target: z.any().optional(), sublabel: z.string().optional() }).nullable();
-const campaign = z.object({
-  id: z.string(), name: z.string(), status: z.string(), badges: z.array(z.object({ text: z.string(), kind: z.string() })),
-  metric, iterations: z.array(z.any()).nullable(), phases: z.array(z.any()).nullable(), brief_revisions: z.array(z.any()).nullable(), runs: z.array(z.any()),
-});
 const runDetail = z.object({ runId: z.string(), projectDir: z.string(), workflowName: z.string(), status: z.string(), stages: z.array(z.any()), kg: z.object({ nodes: z.array(z.any()), edges: z.array(z.any()) }), events: z.array(z.any()), stage_outputs: z.record(z.string(), z.string()) });
 
 function writeJson(path: string, value: unknown) {
@@ -52,25 +47,17 @@ afterEach(async () => {
 });
 
 describe("workspace API contract", () => {
-  it("validates campaign endpoints and CORS", async () => {
-    const list = await app.inject({ method: "GET", url: "/api/campaigns" });
+  it("validates the operator campaign index and CORS", async () => {
+    const list = await app.inject({ method: "GET", url: "/api/campaigns/operator-index" });
     expect(list.statusCode).toBe(200);
     expect(list.headers["access-control-allow-origin"]).toBe("*");
-    const campaigns = z.array(campaign).parse(list.json());
-    expect(campaigns.length).toBeGreaterThanOrEqual(1);
-    expect(list.json()[0]).not.toHaveProperty("config");
-    expect(list.json()[0]).not.toHaveProperty("kg_node_count");
-    const one = await app.inject({ method: "GET", url: `/api/campaigns/${campaigns[0].id}` });
-    expect(one.statusCode).toBe(200);
-    campaign.parse(one.json());
+    expect(list.json()).toHaveProperty("campaigns");
   });
 
-  it("validates run, KG, standalone, and agents endpoints", async () => {
+  it("validates run, standalone, and agents endpoints", async () => {
     const runs = await app.inject({ method: "GET", url: `/api/runs/${runId}` });
     expect(runs.statusCode).toBe(200);
     runDetail.parse(runs.json());
-    expect(z.array(z.any()).parse((await app.inject({ method: "GET", url: "/api/cross-campaign-kg/nodes" })).json())).toBeDefined();
-    expect(z.array(z.any()).parse((await app.inject({ method: "GET", url: "/api/cross-campaign-kg/edges" })).json())).toBeDefined();
     expect(z.array(z.any()).parse((await app.inject({ method: "GET", url: "/api/standalone-runs" })).json())).toBeDefined();
     const agents = (await app.inject({ method: "GET", url: "/api/agents" })).json();
     expect(agents[0]).not.toHaveProperty("model");
@@ -78,7 +65,6 @@ describe("workspace API contract", () => {
 
   it("returns graceful missing values instead of 500", async () => {
     expect((await app.inject({ method: "GET", url: "/api/campaigns/missing" })).statusCode).toBe(404);
-    expect((await app.inject({ method: "GET", url: "/api/cross-campaign-kg/nodes" })).statusCode).toBe(200);
     expect((await app.inject({ method: "OPTIONS", url: "/api/campaigns" })).statusCode).toBe(204);
   });
 });

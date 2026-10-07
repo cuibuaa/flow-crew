@@ -258,12 +258,12 @@ describe('CLI adapter behavior', () => {
     expect(output).not.toContain('@anthropic/claude-code');
   });
 
-  it('does not rewrite defaults while start resolves an unavailable legacy choice', () => {
+  it('does not rewrite defaults while launch resolves an unavailable legacy choice', () => {
     const fixture = cliFixture();
     const defaultsPath = writeAdapterConfig(fixture, 'codex');
     const before = { content: readFileSync(defaultsPath, 'utf-8'), mtimeMs: statSync(defaultsPath).mtimeMs };
 
-    const result = runCli(fixture, ['start']);
+    const result = quickUntilWorkflowLookup(fixture);
 
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain('@anthropic-ai/claude-code');

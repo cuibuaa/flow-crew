@@ -45,7 +45,7 @@ export interface ProjectDefaults {
   stage_technical_retries: number;
   /** Bounded re-plan budget for a plan (dynamic_dispatch) stage that exits 0 but emits zero valid injected stages. See defaults.yaml. */
   plan_stage_retries: number;
-  /** Max times a supervisor REJECT verdict can force a single deliverable to be re-worked before the engine stops re-rejecting. See defaults.yaml. */
+  /** Retained numeric defaults-validator envelope field; production supervisor rejection is retired. */
   supervisor_max_rejects: number;
   model: string;
   reasoning_effort: string;
@@ -301,6 +301,9 @@ export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults
 
   const raw = readRaw(projectDir);
   const template = sourceDefaultsRaw();
+  if (Object.hasOwn(raw, 'default_supervisor_max_rejects')) {
+    process.stderr.write(`${p}: default_supervisor_max_rejects is retired and ignored; declare is_gate/retry_to for deliverable acceptance and repair.\n`);
+  }
   const rawPaths = raw.paths as Partial<FlowCrewPaths> | undefined;
   const templatePaths = template.paths as Partial<FlowCrewPaths> | undefined;
   const parsed: ProjectDefaults = {

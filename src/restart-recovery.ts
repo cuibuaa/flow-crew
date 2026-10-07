@@ -1,9 +1,10 @@
 import { join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { sha256Canonical as digest } from './runtime-negotiation.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
 import { processStartToken, type ProcessStartToken } from './run-lock.js';
-import { readHostBootId } from './resource-leases.js';
+
 import { RUN_STATUS, STAGE_STATUS, completedStageAttemptStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { planDigest } from './plan-revisions.js';
@@ -67,6 +68,12 @@ function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['s
   return ([STAGE_STATUS.FAILED, STAGE_STATUS.PENDING] as readonly string[]).includes(current.status)
     && digest(attempt) === digest(closedAttempt(stage, previous));
 }
+export function readHostBootId(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
+}
+
+
 export function engineGeneration(): string | undefined {
   return (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
 }

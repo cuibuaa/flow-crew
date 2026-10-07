@@ -22,7 +22,7 @@ import {
   publishBuildGeneration,
 } from '../src/build-manifest.js';
 import { findDeployedDistConsumers } from '../src/daemon-identity.js';
-import { processIsAlive } from '../src/run-lock.js';
+import { processIsAlive } from '../src/process-liveness.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cacheDir = join(projectRoot, '.cache');

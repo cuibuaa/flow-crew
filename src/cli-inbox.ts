@@ -1,7 +1,7 @@
 /**
  * `flowcrew inbox` — review and resolve the approval requests that parked runs.
  *
- * Verbs: list | show | approve | deny | rules [add] | revoke
+ * Verbs: list | show | approve | deny
  *
  * Approving does two things: it appends the (first-wins) resolution to the run's
  * append-only approvals log, and it RESUMES the parked run — same runId, same
@@ -10,11 +10,9 @@
  * wants the agent to continue and record the block, which resuming does).
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { join, resolve } from 'node:path';
-import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
+import { join } from 'node:path';
+import { approvalArtifactPath, approvalResumeArgs, isValidApprovalRequestId } from './approval-artifacts.js';
 import { isPausedRunStatus, readRunState, runsRoot } from './store.js';
-import { claimLaunchIntent, releaseLaunchIntent } from './run-lock.js';
 import { canonicalRunId } from './cancellation-policy.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
 import {
@@ -22,22 +20,9 @@ import {
   verifyBriefAdmission,
   type BriefAdmissionRecord,
 } from './brief-preflight.js';
-import {
-  addProjectActionStandingRule, foldItems, isProjectActionStandingRule,
-  listAll, listApprovalStandingRules, resolveRequest, revokeStandingRule,
-  standingRuleId,
-  standingRuleEligible, INBOX_FILTER_STATE, isPendingInboxItemState,
-  type InboxFilterState, type InboxItem,
-} from './inbox.js';
-
-type ResumeSpawner = (
-  command: string,
-  args: string[],
-  options: { detached: true; stdio: 'ignore' },
-) => { pid?: number; unref: () => void };
-
-const defaultResumeSpawner: ResumeSpawner = (command, args, options) =>
-  spawn(command, args, options);
+import { foldItems, listAll, resolveRequest, INBOX_FILTER_STATE, isPendingInboxItemState, type InboxFilterState, type InboxItem } from './inbox.js';
+import { defaultSocketPath, sendRpc, type RegisterRpcResponse } from './orchestrator-rpc.js';
+import type { TaskCreateInput } from './task-registry.js';
 
 function valueAfter(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -90,41 +75,6 @@ function captureResumeBriefAdmission(runId: string, projectDir: string, out: Nod
   return { exactBrief: brief, admission: state.briefAdmission, workflowName: state.workflowName };
 }
 
-/** Relaunch a parked run in the background, continuing the same runId. */
-function resumeRun(
-  runId: string,
-  projectDir: string,
-  snapshot: ResumeBriefSnapshot,
-  out: NodeJS.WriteStream,
-  spawnProcess: ResumeSpawner,
-): void {
-  runId = canonicalRunId(runsRoot(), runId);
-  const claim = claimLaunchIntent(projectDir, runId);
-  if (!claim.claimed) {
-    throw new Error(`Project launch already in progress (${claim.blockingOwnerRunId ?? 'unknown'})`);
-  }
-  const cliPath = resolve(import.meta.dirname ?? '.', 'cli.js');
-  const args = [
-    cliPath,
-    'quick',
-    '--project', projectDir,
-    '--brief-input-base64', Buffer.from(snapshot.exactBrief, 'utf8').toString('base64url'),
-    '--brief-admission-record', Buffer.from(JSON.stringify(snapshot.admission), 'utf8').toString('base64url'),
-    '--existing-run-id', runId,
-    '--no-campaign',
-  ];
-  if (snapshot.workflowName && snapshot.workflowName !== 'default') args.push('--workflow', snapshot.workflowName);
-  let child: ReturnType<ResumeSpawner>;
-  try {
-    child = spawnProcess(process.execPath, args, { detached: true, stdio: 'ignore' });
-  } catch (err) {
-    releaseLaunchIntent(projectDir, runId);
-    throw err;
-  }
-  child.unref();
-  out.write(`▶ resumed run ${runId} (pid ${child.pid})\n`);
-}
-
 export async function cmdInbox(
   args: string[],
   opts: {
@@ -132,8 +82,8 @@ export async function cmdInbox(
     stderr?: NodeJS.WriteStream;
     /** Test seam: production always uses the imported first-wins resolver. */
     resolveApproval?: typeof resolveRequest;
-    /** Test seam: production always uses node:child_process spawn. */
-    resumeSpawner?: ResumeSpawner;
+    /** The daemon owns resumed launches. */
+    registerTask?: (task: TaskCreateInput) => Promise<RegisterRpcResponse>;
   } = {},
 ): Promise<number> {
   const out = opts.stdout ?? process.stdout;
@@ -142,6 +92,14 @@ export async function cmdInbox(
   const positional = args[2];
 
   try {
+    if (args.includes('--help') || args.includes('-h')) {
+      out.write('Usage: flowcrew inbox list|show|approve|deny ...\n');
+      return 0;
+    }
+    if (args.includes('--always') || verb === 'rules' || verb === 'revoke') {
+      err.write('Standing approval rules were retired; use inbox approve or deny for each request.\n');
+      return 1;
+    }
     if (!verb || verb === 'list') {
       const state = (valueAfter(args, '--state') as InboxFilterState) ?? INBOX_FILTER_STATE.PENDING;
       const items = listAll({ state, runId: valueAfter(args, '--run') });
@@ -169,15 +127,12 @@ export async function cmdInbox(
         out.write(`\nresolved:  ${item.resolution.decision} by ${item.resolution.by} at ${item.resolution.at}`
           + `${item.resolution.reason ? ` — ${item.resolution.reason}` : ''}`
           + `${item.resolution.viaRule ? ` (standing rule ${item.resolution.viaRule})` : ''}\n`);
-      } else {
-        const eligible = standingRuleEligible(item);
-        out.write(`\nstanding rule: ${eligible.ok ? 'eligible (--always available)' : `not eligible — ${eligible.reason}`}\n`);
       }
       return 0;
     }
 
     if (verb === 'approve' || verb === 'deny') {
-      if (!positional) { err.write(`Usage: flowcrew inbox ${verb} <requestId> [--reason "..."] [--always] [--no-resume]\n`); return 1; }
+      if (!positional) { err.write(`Usage: flowcrew inbox ${verb} <requestId> [--reason "..."] [--no-resume]\n`); return 1; }
       const found = findByRequestId(positional, valueAfter(args, '--run'));
       if (!found) { err.write(`Unknown request: ${positional}\n`); return 1; }
       const { runId, item } = found;
@@ -186,21 +141,19 @@ export async function cmdInbox(
         return 1;
       }
       const decision = verb === 'approve' ? 'approve' : 'deny';
-      const always = args.includes('--always');
       const runState = existsSync(join(runsRoot(), runId, 'run.json'))
         ? JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')) as { status?: string }
         : {};
       let resumeSnapshot: ResumeBriefSnapshot | undefined;
       if (!args.includes('--no-resume') && runState.status && isPausedRunStatus(runState.status)) {
         // Capture once before consuming the first-wins approval record. The
-        // detached child receives these exact bytes and cannot drift to a
+        // daemon receives these exact bytes and cannot drift to a
         // later sidecar edit.
         resumeSnapshot = captureResumeBriefAdmission(runId, item.projectDir, out);
       }
       const res = (opts.resolveApproval ?? resolveRequest)(item.projectDir, runId, item.requestId, decision, {
         by: process.env.USER || 'operator',
         reason: valueAfter(args, '--reason'),
-        always,
       });
       if (!res.won) {
         const winner = res.item?.resolution;
@@ -213,8 +166,7 @@ export async function cmdInbox(
         return 1;
       }
       if (res.error) { err.write(`${res.error}\n`); return 1; }
-      out.write(`${decision === 'approve' ? '✓ approved' : '✗ denied'} ${item.requestId}`
-        + `${always ? ' (+ standing rule for this action→target)' : ''}\n`);
+      out.write(`${decision === 'approve' ? '✓ approved' : '✗ denied'} ${item.requestId}\n`);
 
       // The agent reads this file on resume; write it before relaunching.
       try {
@@ -227,78 +179,21 @@ export async function cmdInbox(
       if (args.includes('--no-resume')) {
         out.write('(not resuming — pass no flag to resume, or run `flowcrew quick --existing-run-id` yourself)\n');
       } else if (runState.status && isPausedRunStatus(runState.status)) {
-        resumeRun(runId, item.projectDir, resumeSnapshot!, out, opts.resumeSpawner ?? defaultResumeSpawner);
+        const state = readRunState(item.projectDir, runId);
+        const task: TaskCreateInput = {
+          kind: 'quick', run_id: canonicalRunId(runsRoot(), runId), projectDir: item.projectDir,
+          brief_text: resumeSnapshot!.exactBrief, brief_admission: resumeSnapshot!.admission,
+          launch_args: approvalResumeArgs(state),
+        };
+        const registered = await (opts.registerTask ?? ((task) => sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task })))(task);
+        out.write(`▶ registered resume for run ${runId} (task #${registered.id})\n`);
       } else {
         out.write(`(run ${runId} is ${runState.status ?? 'unknown'}, not parked — nothing to resume)\n`);
       }
       return 0;
     }
 
-    if (verb === 'rules') {
-      if (positional === 'add') {
-        const projectDir = valueAfter(args, '--project');
-        const actionPattern = valueAfter(args, '--action');
-        const positionals: string[] = [];
-        for (let index = 3; index < args.length; index += 1) {
-          const arg = args[index];
-          if (arg === '--project' || arg === '--action') {
-            index += 1;
-            continue;
-          }
-          if (arg.startsWith('--')) {
-            err.write(`Unknown rules add option: ${arg}\n`);
-            return 1;
-          }
-          positionals.push(arg);
-        }
-        if (!projectDir || !actionPattern || positionals.length !== 1) {
-          err.write("Usage: flowcrew inbox rules add --project <dir> --action '<pattern>' approve\n");
-          return 1;
-        }
-        if (positionals[0] !== 'approve') {
-          err.write('Standing action rules support only an explicit approve decision.\n');
-          return 1;
-        }
-        const { rule, created } = addProjectActionStandingRule({
-          projectDir,
-          actionPattern,
-          decision: 'approve',
-          grantedBy: process.env.USER || 'operator',
-        });
-        out.write(`${created ? '✓ added' : '= existing'} standing approval rule ${rule.id}: `
-          + `${rule.actionPattern} → approve (project ${rule.projectDir})\n`);
-        return 0;
-      }
-
-      const rules = listApprovalStandingRules();
-      if (rules.length === 0) { out.write('No standing approval rules.\n'); return 0; }
-      out.write(['RULE'.padEnd(38), 'ACTION'.padEnd(24), 'TARGET'.padEnd(16), 'GRANTED'.padEnd(22), 'PROJECT'].join(' ') + '\n');
-      for (const r of rules) {
-        const action = isProjectActionStandingRule(r) ? r.actionPattern : r.action;
-        const target = isProjectActionStandingRule(r) ? '*' : r.target;
-        out.write([
-          standingRuleId(r).padEnd(38),
-          action.padEnd(24),
-          target.padEnd(16),
-          r.grantedAt.padEnd(22),
-          r.projectDir,
-        ].join(' ') + '\n');
-      }
-      out.write("\nRevoke with: flowcrew inbox revoke <action-or-pattern> <target-or-'*'> [--project <dir>]\n");
-      return 0;
-    }
-
-    if (verb === 'revoke') {
-      const action = args[2];
-      const target = args[3];
-      if (!action || !target) { err.write('Usage: flowcrew inbox revoke <action> <target> [--project <dir>]\n'); return 1; }
-      const projectDir = valueAfter(args, '--project') ?? process.cwd();
-      const ok = revokeStandingRule(projectDir, action, target);
-      out.write(ok ? `✓ revoked ${action} → ${target}\n` : `no such rule: ${action} → ${target} (project ${projectDir})\n`);
-      return ok ? 0 : 1;
-    }
-
-    err.write('Usage: flowcrew inbox list|show|approve|deny|rules [add]|revoke ...\n');
+    err.write('Usage: flowcrew inbox list|show|approve|deny ...\n');
     return 1;
   } catch (e) {
     err.write(`${e instanceof Error ? e.message : String(e)}\n`);

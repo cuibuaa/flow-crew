@@ -30,6 +30,8 @@ export interface StageArtifactContractAudit {
   replayVerification?: 'pending' | 'verified' | 'refused' | 'not_requested';
   obligations: StageArtifactObligation[];
   producedPromptArtifacts: string[];
+  /** Quantities from the existing settled content inspection, never a second scan. */
+  observations?: Array<{ id: string; path: string; kind: 'file' | 'directory'; bytes: number; members?: number; sha256: string; fresh: boolean }>;
   replayExecutions: StageArtifactReplayExecution[];
   violations: StageArtifactContractViolation[];
 }

@@ -34,3 +34,18 @@ export function approvalArtifactPath(
   assertContained(approvalsDir, target);
   return target;
 }
+
+/** Existing-run approval resumes are registered with the daemon, with the same run identity. */
+export function approvalResumeArgs(state: {
+  workflowName?: string; maxIterations?: number; supervise?: boolean;
+  campaignId?: string; campaignStorageKey?: string; adapter?: unknown;
+}): string[] {
+  const args = ['--workflow', state.workflowName || 'default'];
+  if (state.maxIterations !== undefined) args.push('--max-iterations', String(state.maxIterations));
+  if (state.supervise === false) args.push('--no-supervise');
+  if (typeof state.adapter === 'string') args.push('--adapter', state.adapter);
+  const campaign = state.campaignId ?? state.campaignStorageKey;
+  if (campaign) args.push('--campaign', campaign);
+  else args.push('--no-campaign');
+  return args;
+}

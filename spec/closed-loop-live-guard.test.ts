@@ -30,7 +30,6 @@ import {
   setFcGlobalDir,
   writeRunState,
 } from '../src/store.js';
-import { loadClosedLoopEngineEvidence } from './test-support/closed-loop-engine-evidence.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
 import { createLiveGuardFactory } from '../src/scheduler/sched_scope/write-enforcement.js';
@@ -150,26 +149,6 @@ function seedInitializedGitlink(): string {
 }
 
 describe('portable live constraint guard', () => {
-  it('keeps the historical violation byte anchor self-contained', () => {
-    const evidence = loadClosedLoopEngineEvidence();
-    expect(evidence.baseFailures.behavior1).toEqual({
-      exitCode: 1,
-      logBytes: 1711,
-      logSha256: 'b4f439f6d985f43e98381a8bd3936ce2b08091bba1046346dc669c726e82c1d5',
-    });
-    expect(evidence.anchors.historicalConstraintAudit).toMatchObject({
-      bytes: 3086,
-      sha256: 'b848c74719dd4b4c2a829f246e04e63fad24d81deb3bf69cac9b3a7a788deb44',
-      unauthorizedPath: 'tests/test_happymj_explore7_round02_verification.py',
-      recordedElapsedMs: 5741999,
-      childCloseToAuditCompleteMs: 29023,
-      slice: {
-        byteStart: 1283,
-        byteEndExclusive: 2593,
-        sha256: '9a69e752a6f1bb04b4448b97c813aab8df1d9e40e6488c0bd14c36c98a7963dd',
-      },
-    });
-  });
 
   it.each([
     { label: 'non-empty', scope: ['src/allowed.ts'] },

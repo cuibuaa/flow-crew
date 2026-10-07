@@ -98,7 +98,8 @@ describe('safe guide targeting', () => {
     const result = runGuide('--run', 'run-alpha', 'use the isolated reproduction');
 
     expect(result.status).toBe(0);
-    expect(readFileSync(guidancePath('run-alpha'), 'utf-8')).toBe('use the isolated reproduction');
+    expect(parseGuidanceLedger(readFileSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'), 'utf-8'))).toEqual([expect.objectContaining({ target: '*', source: 'operator', body: 'use the isolated reproduction' })]);
+    expect(existsSync(guidancePath('run-alpha'))).toBe(false);
     expect(existsSync(guidancePath('run-beta'))).toBe(false);
   });
 
@@ -109,7 +110,8 @@ describe('safe guide targeting', () => {
     const result = runGuide('continue with the live task');
 
     expect(result.status).toBe(0);
-    expect(readFileSync(guidancePath('run-live'), 'utf-8')).toBe('continue with the live task');
+    expect(parseGuidanceLedger(readFileSync(join(runsDir, 'run-live', 'supervisor_guidance.md'), 'utf-8'))).toEqual([expect.objectContaining({ target: '*', source: 'operator', body: 'continue with the live task' })]);
+    expect(existsSync(guidancePath('run-live'))).toBe(false);
     expect(existsSync(guidancePath('run-finished'))).toBe(false);
   });
 

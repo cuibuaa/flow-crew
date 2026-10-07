@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderGuidanceEnvelope, type GuidanceEnvelope } from '../src/guidance.js';
-import { ResourceLeaseRegistry, type ResourceLeaseOwner } from '../src/resource-leases.js';
+import { recordedResourceRegistry, appendRecordedResourceLease } from './test-support/recorded-resource-registry.js';
+import { inspectStageArtifactContract, writeStageArtifactContractAudit } from '../src/stage-artifact-contract.js';
+import { ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { summarizeRunStateView } from '../src/run-state-access.js';
 import { invocationInputPath, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
 import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageInput, writeStageStatus, type StageAttempt } from '../src/store.js';
 
@@ -118,9 +121,8 @@ describe('versioned run state and immutable invocation inputs', () => {
     writeFileSync(join(project, 'docs', 'present.md'), 'produced');
     writeFileSync(join(project, 'missing.md'), 'wrong-root decoy');
     const registryPath = join(root, 'leases.sqlite');
-    const owner: ResourceLeaseOwner = { runId, stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, generation: 'test-generation', bootId: 'synthetic-boot', pid: process.pid, processStart: { kind: 'linux', value: 'synthetic-start' } };
-    const registry = new ResourceLeaseRegistry({ registryPath, now: () => observedAt, gpuInventory: () => ({ cardIds: ['synthetic-card'], observedAt }) });
-    expect(registry.acquire({ version: 1, requestId: 'state-lease', owner, gpuCards: ['synthetic-card'] }).ok).toBe(true);
+    recordedResourceRegistry(registryPath);
+    appendRecordedResourceLease(registryPath, runId, 'writer', startedAt);
     updateRunState(project, runId, (state) => {
       state.dispatchedStages = [{ id: 'writer', scope: ['docs/**'], artifacts: 'declared elsewhere' }];
       (state as QueryableStoreState).queryState = {
@@ -156,6 +158,21 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(snapshot.guidance[0].deliveryState).toBe('delivered');
     expect(snapshot.resources.status).toBe('available');
     if (snapshot.resources.status === 'available') expect(snapshot.resources.snapshot.leases[0].owner.runId).toBe(runId);
+  });
+
+  it('exposes settled file bytes and directory members without confusing them with later metadata', () => {
+    mkdirSync(join(project, 'large'));
+    writeFileSync(join(project, 'small.md'), 'abc');
+    writeFileSync(join(project, 'large/payload'), Buffer.alloc(32768, 65));
+    const audit = inspectStageArtifactContract({ stageId: 'writer', projectDir: project, runDir: directory,
+      writes: ['small.md', 'large/payload'], artifactContract: ArtifactContractSchema.parse({ version: 1,
+        produces: [{ id: 'small', root: 'project', path: 'small.md' }, { id: 'large', root: 'project', path: 'large', kind: 'directory' }], reads: [], replays: [] }) });
+    expect(audit.violations).toEqual([]);
+    writeStageArtifactContractAudit(directory, audit);
+    writeFileSync(join(project, 'small.md'), 'edited');
+    const summary = summarizeRunStateView(view()) as { artifacts: ReturnType<typeof view>['artifacts'] };
+    expect(summary.artifacts.find((entry) => entry.existence.path === join(project, 'small.md'))).toMatchObject({ existence: { bytes: 6 }, settlement: { bytes: 3, fresh: true, checkedAt: audit.checkedAt } });
+    expect(summary.artifacts.find((entry) => entry.existence.path === join(project, 'large'))?.settlement).toMatchObject({ bytes: 32768, members: 1, fresh: true });
   });
 
   it('does not treat unmeasured attempts as zero and avoids counting retired duplicate attempts twice', () => {

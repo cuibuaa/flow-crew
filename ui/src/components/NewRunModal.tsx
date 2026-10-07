@@ -135,7 +135,7 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
           </div>
         ) : null}
         <div className="form-row"><label htmlFor="new-run-project-dir">Working directory <span>(where agents read/write code · runs storage stays in ~/.fc/)</span></label><input id="new-run-project-dir" value={draft.projectDir} onChange={(event) => setDraft({ ...draft, projectDir: event.target.value })} /></div>
-        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="default">default (plan → execute → review)</option><option value="engineering">engineering (with QA gate retry)</option><option value="research-mode">research-mode (campaign-loop with greedy_stack)</option></select></div>
+        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="default">default (plan → execute → review)</option><option value="research">research (research workflow)</option></select></div>
         <div className="form-row"><label htmlFor="new-run-brief">Brief content</label><textarea id="new-run-brief" required value={draft.brief} onChange={(event) => updateBrief(event.target.value)} /></div>
         {preflight ? <BriefPreflightPanel preflight={preflight} acknowledged={acknowledged} onAcknowledgedChange={setAcknowledged} /> : null}
         <div className="form-row inline-controls">

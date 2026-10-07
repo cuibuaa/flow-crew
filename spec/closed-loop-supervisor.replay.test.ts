@@ -22,10 +22,6 @@ import {
 } from '../src/store.js';
 import { Supervisor } from '../src/supervisor.js';
 import { readTraceEvents } from '../src/trace.js';
-import {
-  loadClosedLoopEngineEvidence,
-  summarizeDistribution,
-} from './test-support/closed-loop-engine-evidence.js';
 
 const config: SupervisorConfig = {
   enabled: true,
@@ -75,71 +71,6 @@ afterEach(() => {
 });
 
 describe('deterministic supervisor event replay', () => {
-  it('replays the byte-anchored 120-call cutoff as 37 event calls with exact token totals', () => {
-    const evidence = loadClosedLoopEngineEvidence();
-    expect(evidence.baseFailures.behavior2).toEqual({
-      exitCode: 1,
-      logBytes: 934,
-      logSha256: '2ce54c2b125da72582696fdc1096e1380217e078c54fc23e95bd289eb94f44f2',
-    });
-    const replay = replayDeterministicSupervisorTimeline(evidence.calls);
-    expect(replay).toMatchObject({
-      beforeCalls: 120,
-      afterCalls: 37,
-      beforeTokensIn: 2_172_792,
-      afterTokensIn: 653_704,
-      beforeTokensOut: 9_840,
-      afterTokensOut: 3_427,
-    });
-    expect(replay.afterCalls).toBe(evidence.expectedCounterfactual.calls);
-    expect(replay.retained.every((row) => row.eventId && row.eventType)).toBe(true);
-    expect(evidence.finalHistoricalStateForDisclosure).toMatchObject({
-      calls: 121, tokensIn: 2_190_534,
-    });
-
-    const beforeTokens = summarizeDistribution({
-      name: 'historical_supervisor_input_tokens_per_call',
-      unit: 'tokens/call',
-      phase: 'before',
-      samples: evidence.calls.map((call) => call.tokensIn),
-    });
-    const afterTokens = summarizeDistribution({
-      name: 'counterfactual_supervisor_input_tokens_per_retained_call',
-      unit: 'tokens/call',
-      phase: 'after',
-      samples: replay.retained.map((call) => call.tokensIn),
-    });
-    for (const distribution of [beforeTokens, afterTokens]) {
-      expect(distribution.mean).toBeGreaterThan(0);
-      expect(distribution.median).toBeGreaterThan(0);
-      expect(distribution.reportedRank).toBeGreaterThan(0);
-      expect(distribution.reportedPercentile).toBeGreaterThan(0);
-      expect(distribution.method_was_not_adjusted_to_match_expectation).toBe(true);
-    }
-  });
-
-  it('separates the two historical false ABORT mechanisms', () => {
-    const evidence = loadClosedLoopEngineEvidence();
-    const replay = replayDeterministicSupervisorTimeline(evidence.calls);
-    const first = evidence.falseAborts.find((call) => call.index === 21)!;
-    const second = evidence.falseAborts.find((call) => call.index === 22)!;
-    expect(first).toMatchObject({
-      tokensIn: 18_941,
-      selectedByReconstructableEvent: true,
-      clockComparison: { stageElapsedMs: 5_452_486, activeAttemptElapsedMs: 292 },
-    });
-    expect(replay.retained.some((row) => row.callIndex === 21)).toBe(true);
-    expect(first.expectedCurrentDisposition).toContain('ABORT is invalid');
-    expect(second).toMatchObject({
-      tokensIn: 19_069,
-      selectedByReconstructableEvent: false,
-      clockComparison: { stageElapsedMs: 5_494_800, activeAttemptElapsedMs: 42_606 },
-      expectedCurrentDisposition: 'no model call',
-    });
-    expect(replay.omittedCallIndexes).toContain(22);
-    expect(evidence.anchors.falseAbort1.sha256).toBe('053622832acd0441624ce23d2bc809379543b3820947a6d2358ade87e455dd1b');
-    expect(evidence.anchors.falseAbort2.sha256).toBe('44a4f8e34e1d3dca0b0e6bd3ca2d9947156ddd6c737b87ea1119b22793566765');
-  });
 
   it('coalesces a deterministic event batch, suppresses duplicate ticks, and restores its cursor', () => {
     const types = [
@@ -258,20 +189,6 @@ describe('deterministic supervisor event replay', () => {
       })}\n`,
     );
     await tick();
-    expect(calls).toBe(2);
-    const deadlineUsage = JSON.parse(readFileSync(
-      join(runDir(projectDir, created.runId), 'stages', '_supervisor', 'status.json'),
-      'utf-8',
-    )) as { attempts: Array<{ trigger: ReturnType<typeof createSupervisorEvent> }> };
-    expect(deadlineUsage.attempts[1].trigger).toMatchObject({
-      type: 'deadline_margin',
-      source: 'attempt_deadline_ledger',
-      quantities: {
-        deadlineStageId: 'work',
-        deadlineAttemptIndex: 3,
-        deadlineMarginMs: 60_000,
-      },
-    });
-    expect(deadlineUsage.attempts[1].trigger.quantities.deadlineRemainingMs).toBeLessThanOrEqual(30_000);
+    expect(calls).toBe(1);
   });
 });

@@ -1,3 +1,4 @@
+import { runStageWave } from '../stage-wave.js';
 // Boundary: Select and execute one scope-safe ready wave, coordinate live monitors and settle technical/failure/validation outcomes before terminal decisions.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
@@ -10,7 +11,7 @@ import { log } from '../sched_admission/shared.js';
 import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { stageWithInheritedScope } from '../sched_scope/scope-revisions.js';
-import { enforceTemporalResearchTestContract, readmitScopeContinuation, recordThrownStageAttempt, settleScopeRevisionBoundary, uniqueStructuredWriteOwners } from '../sched_scope/stage-group.js';
+import { enforceTemporalResearchTestContract, readmitScopeContinuation, recordThrownStageAttempt, settleScopeRevisionBoundary, settleDeferredStageAttempt, scopeRevisionBeforeSettlement, uniqueStructuredWriteOwners } from '../sched_scope/stage-group.js';
 import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection } from '../../worker.js';
@@ -89,28 +90,17 @@ export async function executeReadyBatch(
       runId,
     );
     const activeScopeStageIds = new Set(toRun.map((stage) => stage.id));
-    let ordinaryBatchComplete = false;
-    const ordinaryScopeMonitor = monitorScopeRevisionRequests({
-      selected: toRun,
+    const wave = await runStageWave(toRun, {
       activeStageIds: activeScopeStageIds,
-      projectDir,
-      runId,
-      context: ordinaryScopeContext,
-      isComplete: () => ordinaryBatchComplete,
-    });
-    const ordinaryApprovalMonitor = monitorApprovalRequests({
-      selected: toRun,
-      projectDir,
-      runId,
-      runDirPath,
-      iteration: state.currentIteration ?? 1,
-      isComplete: () => ordinaryBatchComplete,
-    });
-    const results = await Promise.all(toRun.map(async (initialStage) => {
+      monitorScope: (isComplete) => monitorScopeRevisionRequests({ selected: toRun, activeStageIds: activeScopeStageIds, projectDir, runId, context: ordinaryScopeContext, isComplete }),
+      monitorApproval: (isComplete) => monitorApprovalRequests({ selected: toRun, projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, isComplete }),
+      execute: async (initialStage) => {
      let stage = initialStage;
+     let closedResult: RunResult | undefined;
      try {
       while (true) {
-        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory);
+        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, scopeRevisionBeforeSettlement({ stage, selected: toRun, activeStageIds: activeScopeStageIds, projectDir, runId, context: ordinaryScopeContext }, monitorScopeRevisionRequests));
+        closedResult = item.result;
         await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
         await monitorScopeRevisionRequests({ selected: toRun, activeStageIds: activeScopeStageIds,
           projectDir, runId, context: ordinaryScopeContext, isComplete: () => true });
@@ -121,9 +111,12 @@ export async function executeReadyBatch(
         if (reconciled.violation || enforceTemporalResearchTestContract(projectDir, runId, stage.id).violation) {
           item.result.exitCode = 1;
           item.result.timeoutTerminationCause = 'failed';
+          settleDeferredStageAttempt(projectDir, runId, stage.id, item.result, false);
           return item;
         }
-        if (!settleScopeRevisionBoundary({ stage, projectDir, runId, iteration: state.currentIteration ?? 1, reconciled })) return item;
+        const suspended = settleScopeRevisionBoundary({ stage, projectDir, runId, iteration: state.currentIteration ?? 1, reconciled });
+        settleDeferredStageAttempt(projectDir, runId, stage.id, item.result, suspended);
+        if (!suspended) return item;
         item.result.suspended = true;
         item.result.suspensionReason = 'scope_revision';
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
@@ -140,16 +133,16 @@ export async function executeReadyBatch(
        const retriesNow = state.stages[stage.id]?.retries ?? 0;
        const msg = err instanceof Error ? err.message : String(err);
        log.error({ stage: stage.id, err: msg }, 'Stage threw before completion — degrading to failed');
-       recordThrownStageAttempt(projectDir, runId, stage.id, retriesNow, err);
+       recordThrownStageAttempt(projectDir, runId, stage.id, retriesNow, err, closedResult);
        const failedResult: RunResult = { output: '', exitCode: 1, duration_ms: 0, timedOut: false, adapterError: false };
        return { stage, result: failedResult, currentRetries: retriesNow };
-     } finally {
-       activeScopeStageIds.delete(stage.id);
      }
-    }));
-    ordinaryBatchComplete = true;
-    await ordinaryScopeMonitor;
-    const parkedDuringExecution = await ordinaryApprovalMonitor;
+      },
+    });
+    const rejected = wave.results.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    const results = wave.results.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
+    const parkedDuringExecution = wave.parked;
     await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
     const temporalOwners = uniqueStructuredWriteOwners(
       projectDir,

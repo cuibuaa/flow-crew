@@ -1,10 +1,10 @@
-/** Approval slot ingestion, rule arbitration, parking, attempt suspension and active monitoring; receives the campaign writer only. */
+/** Approval slot ingestion, parking, attempt suspension and active monitoring; receives the campaign writer only. */
 import { APPROVAL_REQUEST_FILE, APPROVALS_DIR, approvalArtifactPath, isValidApprovalRequestId } from '../../approval-artifacts.js';
 import { existsSync, readdirSync, mkdirSync, unlinkSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite, type StoreState, isRunningStageStatus, RUN_STATUS, readStageStatus, suspendStageAttempt, writeRunState, readOperationalRunState } from '../../store.js';
 import { ABORT_SIGNAL_VERSION, type StageAbortSignal } from '../../abort-signal.js';
-import { type ApprovalRisk, INBOX_ITEM_STATE, foldItems, isPendingInboxItemState, matchStandingRule, recordRequest, resolveRequest } from '../../inbox.js';
+import { type ApprovalRisk, INBOX_ITEM_STATE, foldItems, isPendingInboxItemState, recordRequest } from '../../inbox.js';
 import { log } from '../sched_admission/shared.js';
 import { recordRunEvent } from '../../run-events.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
@@ -202,40 +202,8 @@ export function createApprovalMonitor(services: ApprovalMonitorServices) {
       }
     }
 
-    // Resolve every rule-covered request and materialize every settled decision
-    // before selecting the first still-pending item.
-    let items = [...foldItems(ctx.runId).values()];
-    for (const item of items) {
-      if (!isValidApprovalRequestId(item.requestId)) {
-        log.warn({ runId: ctx.runId, requestId: item.requestId }, 'unsafe stored approval request id — ignoring');
-        continue;
-      }
-      if (isPendingInboxItemState(item.state)) {
-        const rule = matchStandingRule(item);
-        if (rule) {
-          const resolution = resolveRequest(ctx.projectDir, ctx.runId, item.requestId, 'approve', {
-            by: 'standing-rule',
-            viaRule: rule.id,
-          });
-          if (resolution.won) {
-            recordRunEvent(ctx.projectDir, ctx.runId, {
-              type: 'approval_resolved',
-              runId: ctx.runId,
-              timestamp: new Date().toISOString(),
-              iteration: ctx.iteration,
-              stageId: item.stageId,
-              requestId: item.requestId,
-              ruleId: rule.id,
-              decision: 'accepted',
-              detail: `auto-approved ${item.action}${item.target ? ` → ${item.target}` : ''} via standing rule (${item.requestId})`,
-              source: 'scheduler',
-            });
-            log.info({ runId: ctx.runId, requestId: item.requestId, ruleId: rule.id }, 'Approval auto-granted by standing rule');
-          }
-        }
-      }
-    }
-    items = [...foldItems(ctx.runId).values()];
+    // Materialize settled decisions before selecting the first pending request.
+    const items = [...foldItems(ctx.runId).values()];
     for (const item of items) {
       if (!isValidApprovalRequestId(item.requestId) || isPendingInboxItemState(item.state)) continue;
       writeApprovalDecision(

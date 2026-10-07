@@ -11,7 +11,7 @@ import { STAGE_STATUS, type StageStatus } from './store.js';
  * would miss member edits, so settlement needs names, types and every file byte.
  * Links have no closed content identity: declare their referents as files instead.
  */
-export function readDeclaredArtifactIdentity(path: string, kind: 'file' | 'directory'): LiveConstraintContentIdentity {
+export function readDeclaredArtifactIdentity(path: string, kind: 'file' | 'directory'): LiveConstraintContentIdentity & { members?: number } {
   if (kind === 'file') return readLiveConstraintContentIdentity(path);
   try {
     const hash = createHash('sha256');
@@ -41,7 +41,7 @@ export function readDeclaredArtifactIdentity(path: string, kind: 'file' | 'direc
     for (const observation of observations) if (stamp(lstatSync(observation.path, { bigint: true })) !== observation.stamp) {
       throw new Error('directory changed during content inspection');
     }
-    return { state: 'present', type: 'directory', byteLength, sha256: hash.digest('hex') };
+    return { state: 'present', type: 'directory', byteLength, members: observations.length - 1, sha256: hash.digest('hex') };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !existsSync(path)) return { state: 'absent' };
     return { state: 'unavailable', reason: `could not establish directory content: ${String(error)}` };
@@ -81,6 +81,7 @@ export function inspectDeclaredStageArtifactContract(input: StageArtifactContrac
   const produced = new Set<string>();
   const obligations: StageArtifactObligation[] = [];
   const violations: StageArtifactContractAudit['violations'] = [];
+  const quantities: NonNullable<StageArtifactContractAudit['observations']> = [];
   const observations = new Map<string, { exists: boolean; fresh: boolean; obligation: StageArtifactObligation }>();
   for (const artifact of contract.produces) {
     const path = resolveArtifactLocation(artifact, input.projectDir, input.runDir);
@@ -98,6 +99,7 @@ export function inspectDeclaredStageArtifactContract(input: StageArtifactContrac
       const rel = relative(path, write);
       return write === path || (artifact.kind === 'directory' && rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
     }) || (before !== undefined && compareLiveConstraintContentIdentities(before, after) === 'different'));
+    if (after.state === 'present' && (after.type === 'file' || after.type === 'directory')) quantities.push({ id: artifact.id, path, kind: artifact.kind, bytes: after.byteLength, ...(artifact.kind === 'directory' ? { members: after.members } : {}), sha256: after.sha256, fresh });
     if (fresh) produced.add(path);
     observations.set(artifact.id, { exists: existsSync(path), fresh, obligation });
     const activation = artifactActivation(artifact.when, input.statuses ?? {});
@@ -114,5 +116,5 @@ export function inspectDeclaredStageArtifactContract(input: StageArtifactContrac
       violations.push({ ...obligation, reason: `ARTIFACT_EXACTLY_ONE: ${group.id} requires exactly one fresh output among ${group.members.join(', ')}; existing=${existing.join(', ') || 'none'}` });
     }
   }
-  return { version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(), ...(deferred ? { completionDeferred: true } : {}), obligations, producedPromptArtifacts: [...produced].sort(), replayExecutions: [], violations };
+  return { version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(), ...(deferred ? { completionDeferred: true } : {}), obligations, observations: quantities, producedPromptArtifacts: [...produced].sort(), replayExecutions: [], violations };
 }

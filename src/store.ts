@@ -90,7 +90,7 @@ export interface StageAttemptTimeoutSummary {
   rejectedExtensionCount: number;
   decisionPaths: string[];
   mismatchPaths: string[];
-  terminationCause?: 'complete' | 'supervisor_abort' | 'approval_suspension' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  terminationCause?: 'complete' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'attempt_timeout' | 'adapter_error' | 'failed';
   deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
@@ -1896,6 +1896,8 @@ export function beginStageAttempt(
 export interface CompleteStageAttemptInput extends InvocationUsage {
   invocations?: NativeInvocationUsage[];
   exitCode: number;
+  /** A closed child awaiting scheduler settlement must never advertise completion. */
+  suspended?: boolean;
   processExitCode?: number | null;
   processSignal?: NodeJS.Signals | null;
   providerFailure?: ProviderFailure;
@@ -1953,7 +1955,7 @@ export function completedStageAttemptStatus(
   attempts[currentIndex] = {
     ...current,
     completedAt,
-    status: completion.exitCode === 0 ? 'complete' : 'failed',
+    status: completion.suspended ? 'suspended' : completion.exitCode === 0 ? 'complete' : 'failed',
     duration_ms: completion.duration_ms,
     exitCode: completion.exitCode,
     processExitCode: completion.processExitCode,
@@ -1975,7 +1977,7 @@ export function completedStageAttemptStatus(
   };
   const writes = uniqueStrings(previous?.writes, completion.writes);
   const final: StageStatus = {
-    status: completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
+    status: completion.suspended ? STAGE_STATUS.PENDING : completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
     exitCode: completion.exitCode,
     processExitCode: completion.processExitCode,
     processSignal: completion.processSignal,
@@ -1984,8 +1986,8 @@ export function completedStageAttemptStatus(
     artifacts: uniqueStrings(previous?.artifacts, completion.artifacts),
     retries,
     startedAt: attempts[0]?.startedAt,
-    completedAt,
-    error: completion.error,
+    completedAt: completion.suspended ? undefined : completedAt,
+    error: completion.suspended ? undefined : completion.error,
     tokens_in: sumAttemptField(attempts, 'tokens_in'),
     tokens_out: sumAttemptField(attempts, 'tokens_out'),
     kgChanged: previous?.kgChanged === true || completion.kgChanged === true,

@@ -407,7 +407,6 @@ flowcrew ship-preflight --brief <brief.md>  # inspect inputs, history, and valid
 flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name>
 flowcrew watch                    # heartbeat plus edge-triggered live-run stall judgements
 flowcrew land --run <id>          # audit a finished run's workspace before removing it
-flowcrew audit-report --report <file> --run-dir <dir>  # re-derive a report's numbers and paths
 flowcrew status                   # latest run for the current project
 flowcrew status --all             # latest run across all projects
 flowcrew status --project ../app  # inspect another project explicitly

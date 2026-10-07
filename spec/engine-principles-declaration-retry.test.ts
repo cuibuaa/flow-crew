@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify, parse } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mergePlanRetryPair, planRetryRealityCheckName, planRetryRequirement } from '../src/plan-retry-monotone.js';
+import { planRetryRealityCheckName, planRetryRequirement } from '../src/plan-retry-monotone.js';
 import { runWorkflow, StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
@@ -15,7 +15,7 @@ beforeEach(()=>{root=mkdtempSync(join(tmpdir(),'flowcrew-declaration-retry-'));p
 afterEach(()=>{setFcGlobalDir(previous);rmSync(root,{recursive:true,force:true});});
 const contract={version:1,produces:[{id:'report',root:'project',path:'docs/final.md'}],reads:[], replays: [] };
 const rawStage={id:'work',role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Write the declared report.'};
-describe('typed declaration refusals are repairable without unlocking passing components',()=>{
+describe('typed declarations are repaired by complete independently admitted replacements',()=>{
   it('keeps a declared unconditional existence check hard without demanding a conditional branch',()=>{
     const check='## Reality checks\n```yaml\nchecks:\n - name: report\n   type: file-exists-nonempty\n   reads: [{id: report, root: project, path: docs/final.md, source: {kind: stage, stage: work, artifact: report}}]\n   params: {paths: [docs/final.md]}\n```\n';
     const plain=inspectRealityChecks('Produce verified evidence.',check);
@@ -25,7 +25,7 @@ describe('typed declaration refusals are repairable without unlocking passing co
     const conditional=ArtifactContractSchema.parse({...contract,produces:[{...contract.produces[0],when:{stage:'choice',field:'exitCode',equals:0}}]});
     expect(inspectRealityChecks('Produce verified evidence.',check,{artifactContracts:[conditional]}).advisoryFindings.map((finding)=>finding.code)).toContain('undeclared_artifact_existence');
   });
-  it('binds engine-coded names including escaped quotes and repairs only a missing contract',()=>{
+  it('binds engine-coded names including escaped quotes and keeps replacement fields explicit',()=>{
     const name='quoted "audit"';
     expect(planRetryRealityCheckName(`ARTIFACT_READ_UNREACHABLE: reality check ${JSON.stringify(name)}.report needs a producer`)).toBe(name);
     const requirement=planRetryRequirement('ARTIFACT_DECLARATION_REQUIRED: work.artifact_contract: declare it');
@@ -33,9 +33,12 @@ describe('typed declaration refusals are repairable without unlocking passing co
     const wrapped = 'work: invalid schema at ARTIFACT_DECLARATION_REQUIRED: work.artifact_contract: declare it';
     expect(planRetryRequirement(wrapped)).toMatchObject({ id: requirement.id, detail: wrapped });
     expect(planRetryRequirement(wrapped.replace(/^work:/, 'peer:')).id).toMatch(/^admission:/);
-    const merged=mergePlanRetryPair({dispatch:stringify([rawStage])},{dispatch:stringify([{...rawStage,artifact_contract:contract,role:'foreign',scope:['foreign/**']}])},[requirement]);
-    const document=parse(merged.pair.dispatch);const effective=(Array.isArray(document)?document:document.stages)[0];
-    expect(effective.artifact_contract).toEqual(contract);expect(effective.role).toBe('coder');expect(effective.scope).toEqual(['docs/**']);
+    // A complete replacement is validated as authored; no hidden merge changes
+    // its role or scope. Unknown roles are refused by whole-plan admission.
+    const replacement={...rawStage,artifact_contract:contract,role:'foreign',scope:['foreign/**']};
+    const effective=StageConfigSchema.parse(replacement);
+    expect(effective.artifact_contract?.produces[0].path).toBe('docs/final.md');
+    expect(effective.role).toBe('foreign');expect(effective.scope).toEqual(['foreign/**']);
   });
   it.each(['stage_contract','check_reads'] as const)('repairs %s through the public scheduler before any work is launched',async(failure)=>{
     const roles=new Map<string,AgentConfig>();

@@ -1,7 +1,6 @@
 import { StrictMode, Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import "xterm/css/xterm.css";
 import "./index.css";
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { err: Error | null }> {

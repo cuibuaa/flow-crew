@@ -109,6 +109,9 @@ function normalizeChecks(checks: unknown[]): CheckDecl[] {
     if (rec.reads === undefined) return invalidDeclaration(position, `REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(rec.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`, rec.name);
     const reads = ArtifactReadSchema.array().safeParse(rec.reads);
     if (reads && !reads.success) return invalidDeclaration(position, `reads must declare exact rooted inputs: ${reads.error.message}`, rec.name);
+    if (!REALITY_CHECK_REGISTRY.some(check => check.type === rec.type)) {
+      return invalidDeclaration(position, `has unsupported type ${JSON.stringify(rec.type)}; replace it with a type from the Reality-Gate check catalog`, rec.name);
+    }
     return {
       name: rec.name,
       type: rec.type,

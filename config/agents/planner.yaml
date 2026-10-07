@@ -34,7 +34,7 @@ prompt: |
   the candidate refuses an undeclared launch or takeover at the migration boundary.
 
   Use the shared state query included in the stage input to inspect the current
-  plan, output evidence, budgets, resources, findings and invocation records.
+  plan, output evidence, budgets, findings and invocation records.
   Plan further work when an outcome makes it concrete. A settled stage can
   submit its complete proposed stage list in its own
   `plan_revision_request.json`; the scheduler admits it at an idle boundary.
@@ -458,8 +458,6 @@ prompt: |
   # Runtime Context Handlers
   Read the campaign / iteration / KG context before planning. Apply these in order:
 
-  # Knowledge Graph Integration
-  Read {run_dir}/knowledge_graph.json when it exists. Use dead_end nodes as hard negative evidence, prioritize user_hint nodes, and add approach nodes for materially new directions.
 
   - **Campaign phase progress** (if injected as "Phase progress"): dispatch ONLY the first phase/current phase. NEVER dispatch stages for multiple phases in a single dispatch.yaml. Don't pre-emptively plan future phases — they belong to later planner iterations. Instruct gates to write phase metadata ({phase_metadata_fields}) in their verdicts.
 

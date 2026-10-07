@@ -274,10 +274,6 @@ describe('public autonomous launch documentation', () => {
     expect(normalizedGuide).toContain('terminal artifact unambiguously declares a status different from the persisted lifecycle status');
     expect(normalizedGuide).toContain('terminal and live runs are both covered');
     expect(normalizedGuide).toContain('display that artifact status beside the lifecycle status');
-    expect(cliGuide).toContain('flowcrew audit-report --report <path> --run-dir <path>');
-    expect(normalizedGuide).toContain('Each claim is `confirmed`, `contradicted`, or `not_checkable`');
-    expect(normalizedGuide).toContain('Only a contradiction makes the command exit non-zero');
-    expect(normalizedGuide).toContain('does not prove that the chosen measurement or framing was sound');
   });
 
   it('keeps one-off preservation probes out of the collected specification directory', () => {
