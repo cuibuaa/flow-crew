@@ -109,6 +109,8 @@ export interface OrchestratorOptions {
     RunCancellationOptions,
     'registry' | 'units' | 'now' | 'isLaunchInFlight'
   >>;
+  /** Supplied only by daemon serve; local cancellation/read constructors never sweep runs. */
+  reconcileOrphanRuns?: () => void;
   /** Durable daemon-log sink for automatic registry maintenance. */
   onMaintenanceEvent?: (event: RegistryMaintenanceEvent) => void;
 }
@@ -134,6 +136,7 @@ export class Orchestrator {
   private readonly allocateRun: typeof reserveRun;
   private readonly onMaintenanceEvent: (event: RegistryMaintenanceEvent) => void;
   private readonly cancellations: RunCancellationCoordinator;
+  private readonly reconcileOrphanRuns?: () => void;
   /** Tasks currently awaiting runUnit(). A tick must not interpret their unit
    *  as inactive and launch or reconcile them a second time. */
   private launchingTaskIds = new Set<number>();
@@ -143,6 +146,7 @@ export class Orchestrator {
   private lastRegistryCompactionAttempt?: string;
 
   constructor(opts: OrchestratorOptions = {}) {
+    this.reconcileOrphanRuns = opts.reconcileOrphanRuns;
     this.registry = opts.registry ?? new TaskRegistry();
     this.systemd = opts.systemd ?? new NodeSystemd(this.registry.baseDir);
     this.git = opts.git ?? new NodeGit();
@@ -233,7 +237,13 @@ export class Orchestrator {
     this.timer = undefined;
   }
 
-  async register(input: TaskCreateInput): Promise<TaskEntry> {
+  /** Persist admission before launch work. The daemon queue resumes after a restart. */
+  enqueue(input: TaskCreateInput): TaskEntry {
+    if (input.run_id) throw new Error('Queued registration requires a new run; omit acknowledgement for an existing-run resume.');
+    return this.createAdmittedTask({ ...input, status: TASK_STATUS.PENDING });
+  }
+
+  private createAdmittedTask(input: TaskCreateInput): TaskEntry {
     if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
       throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
     }
@@ -242,7 +252,11 @@ export class Orchestrator {
     if (verification.status !== 'valid') {
       throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
     }
-    let task = this.registry.create(input);
+    return this.registry.create(input);
+  }
+
+  async register(input: TaskCreateInput): Promise<TaskEntry> {
+    let task = this.createAdmittedTask(input);
     // Admission control (skip-on-overlap): single-in-flight per project used to
     // be enforced only INSIDE the launched run — the daemon spawned a second
     // unit anyway, the child killed itself on the conflict, systemd reported
@@ -376,6 +390,7 @@ export class Orchestrator {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      this.reconcileOrphanRuns?.();
       this.compactRegistryIfNeeded();
       const tasks = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE });
       // Pass 1 (serial, cheap): drain the launch queue. Serial on purpose —

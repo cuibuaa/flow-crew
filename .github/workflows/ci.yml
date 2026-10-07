@@ -37,13 +37,20 @@ jobs:
           sudo apt-get install -y -q python3-pytest
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
       - run: npm run build
-      - run: npm run build:ui
       - run: npm run lint
       - run: npm test
+      - name: Archive the combined runtime, preserving modes and hidden manifest
+        run: tar -czf runtime.tgz dist ui/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime
+          path: runtime.tgz
 
   public-spec-isolation:
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -57,10 +64,13 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Build the committed runtime generation
-        run: npm run build
+        run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+      - name: Restore the tested combined runtime
+        run: tar -xzf runtime.tgz
 
       - name: Pull isolated test image
         run: docker pull node:22-bookworm
@@ -105,6 +115,7 @@ jobs:
   #   absent   / absent  | macos (below) — the only axis that can prove a
   #                        signal actually reached the agent off Linux
   no-service-manager:
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -117,8 +128,13 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - run: npm ci
-      - run: npm run build
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+      - name: Restore the tested combined runtime
+        run: tar -xzf runtime.tgz
 
       # Symlink-farm a PATH without the systemd tools rather than deleting
       # /usr/bin/systemctl: reproducible, reversible, and it cannot leave the
@@ -164,6 +180,7 @@ jobs:
   # README currently disagree about which release `macos-latest` points at, and
   # the rotation is live, so the OS could change between merges.
   macos:
+    needs: quality
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -183,285 +200,19 @@ jobs:
           command -v systemctl || echo "systemctl: absent (expected)"
           test -d /proc && echo "/proc: present (unexpected)" || echo "/proc: absent (expected)"
 
-      - run: npm ci
-      - run: npm run build
-      - run: npm run build:ui
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+      - name: Restore the tested combined runtime
+        run: tar -xzf runtime.tgz
 
-      # Off Linux there is no /proc, so process identity comes from `ps`. BSD
-      # and GNU `ps` disagree about flags and output, and that disagreement is
-      # invisible from a Linux developer machine. Print what this platform
-      # actually returns so a failure downstream is diagnosable from the log
-      # instead of requiring a Mac to reproduce. Never fails the job.
-      - name: Probe the POSIX start-time source this platform provides
-        continue-on-error: true
-        run: |
-          echo "--- ps -ww -o lstart= ---"
-          ps -ww -o lstart= -p $$ ; echo "exit=$?"
-          echo "--- ps -o lstart= (no -ww) ---"
-          ps -o lstart= -p $$ ; echo "exit=$?"
-          echo "--- TZ/LC_ALL forced, as production does ---"
-          TZ=UTC LC_ALL=C ps -ww -o lstart= -p $$ ; echo "exit=$?"
-          echo "--- exactly what production calls ---"
-          node -e "
-            const { execFileSync } = require('node:child_process');
-            for (const args of [['-ww','-o','lstart=','-p'],['-o','lstart=','-p'],['-ww','-o','lstart','-p']]) {
-              try {
-                const out = execFileSync('ps', [...args, String(process.pid)], {
-                  encoding: 'utf-8', timeout: 2000,
-                  stdio: ['ignore','pipe','pipe'],
-                  env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
-                });
-                console.log(JSON.stringify(args), '->', JSON.stringify(out));
-              } catch (e) {
-                console.log(JSON.stringify(args), '-> THREW', e.message, '| stderr:', String(e.stderr ?? ''));
-              }
-            }
-          "
-
-      - name: Probe detached-process identity and signalling
-        continue-on-error: true
-        run: |
-          node --input-type=module -e '
-            import { execFileSync, spawn } from "node:child_process";
-            import { once } from "node:events";
-            import { setTimeout as delay } from "node:timers/promises";
-            import {
-              processArgumentsFromPs,
-              processCommandMatches,
-              processStartToken,
-            } from "./dist/run-lock.js";
-
-            const apostrophe = String.fromCharCode(39);
-            const escapedApostrophe = apostrophe + "\\" + apostrophe + apostrophe;
-            const shellJoin = (parts) => parts
-              .map((part) => apostrophe + part.split(apostrophe).join(escapedApostrophe) + apostrophe)
-              .join(" ");
-            const errorDetails = (error) => ({
-              name: error?.name,
-              message: error?.message,
-              code: error?.code,
-              errno: error?.errno,
-              syscall: error?.syscall,
-            });
-            const capture = (operation) => {
-              try { return { ok: true, value: operation() }; }
-              catch (error) { return { ok: false, error: errorDetails(error) }; }
-            };
-            const rawPs = (pid, format) => capture(() => execFileSync(
-              "ps",
-              ["-ww", "-o", format, "-p", String(pid)],
-              {
-                encoding: "utf-8",
-                timeout: 2000,
-                stdio: ["ignore", "pipe", "pipe"],
-                env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
-              },
-            ));
-            const signalProbe = (target) => capture(() => {
-              process.kill(target, 0);
-              return "signal-0 accepted";
-            });
-
-            const marker = "flowcrew-darwin-probe-" + process.pid
-              + "-apostrophe-" + apostrophe + "-value";
-            const childArgs = ["-e", "setInterval(() => {}, 1000)", marker];
-            const recordedCommand = shellJoin([process.execPath, ...childArgs]);
-            const child = spawn(process.execPath, childArgs, {
-              detached: true,
-              stdio: "ignore",
-            });
-            const started = process.hrtime.bigint();
-            const pid = child.pid;
-            child.unref();
-            child.once("error", (error) => {
-              console.log("DETACHED_PROBE_CHILD_ERROR " + JSON.stringify(errorDetails(error)));
-            });
-            console.log("DETACHED_PROBE_BEGIN");
-            console.log("DETACHED_PROBE_SETUP " + JSON.stringify({
-              pid,
-              expectedPgid: pid,
-              childArgs,
-              recordedCommand,
-            }));
-
-            const elapsedMs = () => Number(process.hrtime.bigint() - started) / 1e6;
-            try {
-              if (!Number.isInteger(pid) || pid <= 0) throw new Error("spawn returned no positive pid");
-              for (const targetMs of [0, 10, 25, 50, 100]) {
-                const remainingMs = targetMs - elapsedMs();
-                if (remainingMs > 0) await delay(remainingMs);
-                const sample = {
-                  targetMs,
-                  elapsedMs: elapsedMs(),
-                  startToken: processStartToken(pid),
-                };
-                console.log("DETACHED_PROBE_SAMPLE " + JSON.stringify(sample));
-              }
-              console.log("DETACHED_PROBE_IDENTITY " + JSON.stringify({
-                elapsedMs: elapsedMs(),
-                recordedCommand,
-                rawArgsPs: rawPs(pid, "args="),
-                parsedArgs: processArgumentsFromPs(pid),
-                commandMatches: processCommandMatches(pid, recordedCommand),
-              }));
-              console.log("DETACHED_PROBE_SIGNALS " + JSON.stringify({
-                elapsedMs: elapsedMs(),
-                pid,
-                expectedPgid: pid,
-                rawPgidPs: rawPs(pid, "pgid="),
-                groupSignalZero: signalProbe(-pid),
-                pidSignalZero: signalProbe(pid),
-              }));
-            } catch (error) {
-              console.log("DETACHED_PROBE_FATAL " + JSON.stringify(errorDetails(error)));
-            } finally {
-              if (Number.isInteger(pid) && pid > 0) {
-                const cleanup = { termGroup: capture(() => process.kill(-pid, "SIGTERM")) };
-                await Promise.race([once(child, "close").catch(() => undefined), delay(250)]);
-                if (signalProbe(-pid).ok) cleanup.killGroup = capture(() => process.kill(-pid, "SIGKILL"));
-                if (signalProbe(pid).ok) cleanup.killPid = capture(() => process.kill(pid, "SIGKILL"));
-                console.log("DETACHED_PROBE_CLEANUP " + JSON.stringify(cleanup));
-              }
-              console.log("DETACHED_PROBE_END");
-            }
-          '
-
-      - name: Probe the real portable supervision lifecycle
-        continue-on-error: true
-        run: |
-          node --input-type=module -e '
-            import { execFileSync } from "node:child_process";
-            import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-            import { tmpdir } from "node:os";
-            import { join } from "node:path";
-            import { setTimeout as delay } from "node:timers/promises";
-            import { NodeSystemd } from "./dist/orchestrator.js";
-            import {
-              processArgumentsFromPs,
-              processCommandMatches,
-              processIsAlive,
-              processStartToken,
-              processStartTokensMatch,
-            } from "./dist/run-lock.js";
-            import {
-              readSupervisionExit,
-              readSupervisionRunning,
-              runningRecordBindsShim,
-              supervisionPaths,
-            } from "./dist/supervision.js";
-
-            const capture = (operation) => {
-              try { return { ok: true, value: operation() }; }
-              catch (error) {
-                return { ok: false, error: {
-                  name: error?.name,
-                  message: error?.message,
-                  code: error?.code,
-                  errno: error?.errno,
-                  syscall: error?.syscall,
-                } };
-              }
-            };
-            const rawArgs = (pid) => capture(() => execFileSync(
-              "ps",
-              ["-ww", "-o", "args=", "-p", String(pid)],
-              {
-                encoding: "utf-8",
-                timeout: 2000,
-                stdio: ["ignore", "pipe", "pipe"],
-                env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
-              },
-            ));
-            const apostrophe = String.fromCharCode(39);
-            const escapedApostrophe = apostrophe + "\\" + apostrophe + apostrophe;
-            const shellJoin = (parts) => parts
-              .map((part) => apostrophe + part.split(apostrophe).join(escapedApostrophe) + apostrophe)
-              .join(" ");
-            const waitUntil = async (predicate, timeoutMs = 5000) => {
-              const deadline = Date.now() + timeoutMs;
-              while (Date.now() < deadline) {
-                if (predicate()) return true;
-                await delay(25);
-              }
-              return predicate();
-            };
-
-            const root = mkdtempSync(join(tmpdir(), "flowcrew-real-shim-probe-"));
-            const unit = "flowcrew-real-shim-probe.service";
-            const backend = new NodeSystemd(root, {
-              shellPath: "/bin/sh",
-              shimPath: join(process.cwd(), "src", "supervise-shim.ts"),
-              shutdownGraceMs: 100,
-            });
-            const paths = supervisionPaths(root, unit);
-            let running;
-            console.log("REAL_SHIM_PROBE_BEGIN");
-            try {
-              await backend.runUnit({
-                unit,
-                workingDirectory: root,
-                command: shellJoin([
-                  process.execPath,
-                  "-e",
-                  "setInterval(() => {}, 1000)",
-                  "flowcrew-real-shim-probe",
-                ]),
-              });
-              const initialized = await waitUntil(() => existsSync(paths.running));
-              running = readSupervisionRunning(paths.running);
-              console.log("REAL_SHIM_PROBE_RECORD " + JSON.stringify({
-                initialized,
-                rawRunning: capture(() => readFileSync(paths.running, "utf-8")),
-                running,
-              }));
-              if (running) {
-                const currentShimToken = processStartToken(running.shimPid);
-                console.log("REAL_SHIM_PROBE_IDENTITY " + JSON.stringify({
-                  shimPid: running.shimPid,
-                  recordedShimToken: running.shimToken,
-                  currentShimToken,
-                  tokenMatches: processStartTokensMatch(running.shimToken, currentShimToken),
-                  recordedShimCommand: running.shimCommand,
-                  rawShimArgsPs: rawArgs(running.shimPid),
-                  parsedShimArgs: processArgumentsFromPs(running.shimPid),
-                  shimCommandMatches: processCommandMatches(running.shimPid, running.shimCommand),
-                  runningRecordBindsShim: runningRecordBindsShim(running),
-                  shimAlive: processIsAlive(running.shimPid),
-                  agentAlive: processIsAlive(running.agentPid),
-                }));
-              }
-              let stopResult;
-              try {
-                await backend.stopUnit(unit);
-                stopResult = { ok: true };
-              } catch (error) {
-                stopResult = { ok: false, error: {
-                  name: error?.name,
-                  message: error?.message,
-                  code: error?.code,
-                  errno: error?.errno,
-                  syscall: error?.syscall,
-                } };
-              }
-              await delay(250);
-              console.log("REAL_SHIM_PROBE_STOP " + JSON.stringify({
-                stopResult,
-                exit: readSupervisionExit(paths.exit),
-                status: await backend.isActive(unit),
-                shimAlive: running ? processIsAlive(running.shimPid) : undefined,
-                agentAlive: running ? processIsAlive(running.agentPid) : undefined,
-              }));
-            } finally {
-              if (running) {
-                capture(() => process.kill(running.shimPid, "SIGKILL"));
-                capture(() => process.kill(-running.agentPid, "SIGKILL"));
-              }
-              await delay(100);
-              rmSync(root, { recursive: true, force: true });
-              console.log("REAL_SHIM_PROBE_END");
-            }
-          '
-
+      # JavaScript/declarations and browser assets are platform-independent;
+      # dependencies install natively here and lifecycle tests run on macOS.
+      # Blocking lifecycle and Darwin contracts cover process identity, signals
+      # and supervision fate; separate best-effort probes duplicated them and
+      # could hide a missing runtime export.
       # No pipe and no `|| true`: a masked exit code here would make the job
       # green while macOS is broken, which is the failure this job exists to catch.
       - name: Run the portable lifecycle and process-identity contracts
@@ -495,6 +246,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
           && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -507,21 +259,24 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+      - name: Restore the tested combined runtime
+        run: tar -xzf runtime.tgz
 
-      # `npm pack` runs `prepare`, so the tarball is built from this commit and
-      # is byte-equivalent to what `npm publish` would upload. Installing THAT
+      # Packing consumes the same tested artifact; source compilation belongs to install.
+      # Installing the tarball
       # is the only way to exercise the `files` allowlist: a directory missing
       # from it is invisible to every in-repo test.
       - name: Pack and install globally, as a published release would be
         run: |
           set -euo pipefail
-          # Build explicitly and then pack with --ignore-scripts. `prepare`
-          # would otherwise run the vite build inside the command substitution,
-          # and its stdout interleaves with the tarball name npm prints, so
-          # $TGZ ends up holding a build log instead of a filename.
-          npm run build
-          npm run build:ui
+          # Source installation uses postinstall; there is no prepare hook for
+          # npm pack to rebuild the artifact, even on npm versions whose directory
+          # prepare ignores --ignore-scripts. Keep other pack hooks disabled.
           TGZ=$(npm pack --silent --ignore-scripts | tail -n 1)
           echo "packed: $TGZ"
           test -f "$TGZ" || { echo "npm pack did not produce a readable tarball"; exit 1; }
@@ -570,7 +325,7 @@ jobs:
           node-version: "22"
 
       # Deliberately NOT actions/checkout: this job exists to walk README step 1
-      # exactly as written, over HTTPS, into an empty directory, with a cold npm
+      # over HTTPS, into an empty directory, with a cold npm
       # cache. Cloning the ref under test rather than the default branch.
       - name: Clone over HTTPS and follow README step 1
         run: |
@@ -581,7 +336,8 @@ jobs:
           npm install
           test -f dist/cli.js      || { echo "npm install did not build dist/"; exit 1; }
           test -f ui/dist/index.html || { echo "npm install did not build ui/dist/"; exit 1; }
-          npm link
+          # Installation already built the generation; linking must only link.
+          npm link --ignore-scripts
           which flowcrew
           flowcrew doctor || echo "doctor reported attention items (non-fatal here; the install itself is what this job proves)"
 
@@ -595,6 +351,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
           && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -611,8 +368,13 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - run: npm ci
-      - run: npm run build
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts --prefix ui
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime
+      - name: Restore the tested combined runtime
+        run: tar -xzf runtime.tgz
 
       # Stand-in CLIs rather than the real ones: adapter DETECTION only asks
       # whether the name resolves on PATH, and the real CLIs would need

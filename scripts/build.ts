@@ -28,7 +28,9 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cacheDir = join(projectRoot, '.cache');
 const lockPath = join(cacheDir, 'build.lock');
 const checkoutKey = createHash('sha256').update(projectRoot).digest('hex').slice(0, 16);
-const stagingDist = join(tmpdir(), `flowcrew-build-${checkoutKey}`, 'dist');
+const stagingRoot = join(tmpdir(), `flowcrew-build-${checkoutKey}`);
+const stagingDist = join(stagingRoot, 'dist');
+const stagingUi = join(stagingRoot, 'ui-dist');
 
 function acquireBuildLock(): number {
   mkdirSync(cacheDir, { recursive: true });
@@ -98,19 +100,43 @@ function compileGeneration(): void {
   chmodSync(stagedCli, 0o755);
 }
 
+function compileUi(): string | undefined {
+  const uiRoot = join(projectRoot, 'ui');
+  if (!existsSync(join(uiRoot, 'package.json'))) return undefined;
+  const uiRequire = createRequire(join(uiRoot, 'package.json'));
+  const compiler = uiRequire.resolve('typescript/bin/tsc');
+  for (const config of ['tsconfig.json', 'tsconfig.node.json']) {
+    const result = spawnSync(process.execPath, [compiler, '--noEmit', '-p', join(uiRoot, config)], {
+      cwd: uiRoot, stdio: 'inherit', env: process.env,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`UI type check exited ${result.status ?? 'without a status'}`);
+  }
+  rmSync(stagingUi, { recursive: true, force: true });
+  const vite = join(dirname(uiRequire.resolve('vite/package.json')), 'bin', 'vite.js');
+  const result = spawnSync(process.execPath, [vite, 'build', '--outDir', stagingUi], {
+    cwd: uiRoot, stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' },
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`UI compilation exited ${result.status ?? 'without a status'}`);
+  return stagingUi;
+}
+
 function main(): void {
   const lockFd = acquireBuildLock();
   try {
     warnAboutDeployedConsumers();
     const before = computeBuildInputDigest(projectRoot);
     compileGeneration();
-    const manifest = createBuildManifest(projectRoot, stagingDist);
+    const stagedUiDir = compileUi();
+    const manifest = createBuildManifest(projectRoot, stagingDist, { stagedUiDir });
     if (manifest.inputs.hash !== before.hash) {
       throw new Error('Build inputs changed during compilation; rerun `npm run build` against a settled source tree.');
     }
     publishBuildGeneration({
       projectRoot,
       stagedDistDir: stagingDist,
+      stagedUiDir,
       cacheDir,
       manifest,
       onPhase: (phase, detail) => {

@@ -7,8 +7,7 @@
     "flowcrew": "dist/cli.js"
   },
   "scripts": {
-    "postinstall": "(cd ui && npm install || true)",
-    "prepare": "npm run build && npm run build:ui",
+    "postinstall": "node -e \"const fs=require('node:fs'), cp=require('node:child_process'); if(fs.existsSync('scripts/build.ts')) { if(fs.existsSync('ui/package.json')) cp.execSync('npm install --prefix ui', {stdio:'inherit'}); cp.execSync('npm run build', {stdio:'inherit'}); }\"",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "node --import tsx scripts/build.ts",
     "build:clean": "npm run clean && npm run build",

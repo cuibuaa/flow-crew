@@ -1183,7 +1183,7 @@ type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskShowEntry[]>;
 type DashboardRunCanceller = (runId: string) => Promise<CancellationResult>;
 
 async function registerTaskWithDaemon(task: TaskCreateInput): Promise<RegisterRpcResponse> {
-  return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task });
+  return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
 }
 
 async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskShowEntry[]> {

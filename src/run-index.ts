@@ -333,7 +333,9 @@ export function countStandaloneRunsFromIndex(projectDir: string): number | null 
 
 /** Run ids whose status is 'running' (for orphan reconciliation), newest first. */
 export function listRunningRunIdsFromIndex(projectDir: string): string[] | null {
-  ensureIndexSeeded(projectDir);
+  // Daemon recovery must discover a newly restored run inside the seed TTL.
+  // As with operational queries, only a changed directory count hydrates history.
+  ensureIndexSeeded(projectDir, true);
   const db = openDb(projectDir);
   if (!db) return null;
   return db.prepare("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id DESC")

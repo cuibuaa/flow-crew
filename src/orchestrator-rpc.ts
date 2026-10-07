@@ -40,7 +40,7 @@ export function rpcErrorExitCode(error: unknown): number {
 }
 
 export type RpcRequest =
-  | { cmd: 'register'; task: TaskCreateInput }
+  | { cmd: 'register'; task: TaskCreateInput; acknowledgement?: 'persisted' }
   | { cmd: 'list'; filter?: TaskListFilter }
   | { cmd: 'show'; id: number; raw?: boolean }
   | { cmd: 'cancel'; id: number }
@@ -56,6 +56,8 @@ export interface RegisterRpcResponse {
   unit: string;
   pid: number;
   build: string;
+  /** New unbound task persisted; launch is drained independently by the daemon. */
+  acknowledgement?: 'persisted';
 }
 
 export interface TaskListRpcResponse {
@@ -123,6 +125,8 @@ export interface RpcHandlerError {
 }
 
 export interface RpcServerOptions {
+  /** Runs after the response has been queued, including a disconnected client. */
+  onResponse?: (request: RpcRequest, response: RpcResponse) => void;
   onHandlerError?: (failure: RpcHandlerError) => void;
 }
 
@@ -259,6 +263,7 @@ export async function startRpcServer(
       try {
         const res = await handler(req);
         safeEnd(JSON.stringify(res));
+        try { opts.onResponse?.(req, res); } catch { /* durable queue survives notification failure */ }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         try { opts.onHandlerError?.({ request: req, error }); } catch { /* logging must not hide the RPC error */ }

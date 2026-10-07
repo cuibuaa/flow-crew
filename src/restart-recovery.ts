@@ -83,11 +83,12 @@ export function captureEngineCheckpoint(projectDir: string, runId: string): Engi
 }
 
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
-export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string } = {}): StoreState {
+export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   let state = readRunState(projectDir, runId);
   if (state.status !== RUN_STATUS.RUNNING || (!state.engineCheckpoint && !state.recoveryIntent)) return state;
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || state.engineCheckpoint.version !== 1 || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');
+  if (evidence.expectedCheckpoint && digest(state.engineCheckpoint) !== digest(evidence.expectedCheckpoint)) throw new Error('RECOVERY_STATE_CHANGED: checkpoint changed since daemon observation');
   const boot = evidence.currentBootId ?? readHostBootId();
   const generation = evidence.currentGeneration ?? engineGeneration();
   const previous = state.engineCheckpoint;
@@ -142,6 +143,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       // Persist authority before either stage-ledger or run-projection publication.
       state = updateRunState(projectDir, runId, (current) => {
         if (current.status !== RUN_STATUS.RUNNING) return;
+        evidence.assertSchedulerAbsent?.();
         if (digest(current) !== snapshot) throw new Error('RECOVERY_STATE_CHANGED: run changed before interruption intent was committed');
         current.recoveryIntent = intent;
       });
@@ -152,6 +154,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     const authority = intent;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {
       if (current.status !== RUN_STATUS.RUNNING) return undefined;
+      evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       // A closed failed143 attempt is retained, never completed a second time.
       return ledger.attempts!.at(-1)!.status === STAGE_STATUS.RUNNING
@@ -162,6 +165,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     if (state.status !== RUN_STATUS.RUNNING) return state;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {
       if (current.status !== RUN_STATUS.RUNNING) return undefined;
+      evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       return rependStageStatus(ledger, stage.retries);
     });
@@ -173,6 +177,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     published = false;
     // This also fences the blocked/error route and the no-interrupted-work case.
     if (current.status !== RUN_STATUS.RUNNING) return;
+    evidence.assertSchedulerAbsent?.();
     if (digest(binding(current)) !== digest(binding(state))) throw new Error('RECOVERY_STATE_CHANGED: checkpoint, plan or budgets changed before recovery commit');
     if (!errors.length && intent) {
       assertIntentAuthority(current, intent);

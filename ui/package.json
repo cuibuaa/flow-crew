@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "build": "node --import tsx ../scripts/build.ts",
     "preview": "vite preview"
   },
   "dependencies": {

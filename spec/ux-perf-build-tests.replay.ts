@@ -1,10 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -257,10 +259,20 @@ describe('transactional build and truthful fast-test contracts', () => {
   liveBuildTest('unchanged-base seam: a live gate survives npm run build and the operator sees the affected run', { timeout: 60_000 }, async () => {
     expect(EVIDENCE.exit.sha256).toHaveLength(64);
     const root = temporaryRoot('flowcrew-item12-live-build-');
+    const projectRoot = join(root, 'project');
+    mkdirSync(join(projectRoot, 'scripts'), { recursive: true });
+    // This is the backend live-generation regression. Rebuild a private copy,
+    // so the suite never republishes the checkout whose runtime it is testing.
+    for (const path of ['src', 'dist', 'tsconfig.json', 'package.json', 'package-lock.json', 'scripts/build.ts']) {
+      cpSync(join(repositoryRoot, path), join(projectRoot, path), { recursive: true });
+    }
+    symlinkSync(join(repositoryRoot, 'node_modules'), join(projectRoot, 'node_modules'), 'dir');
+    const checkoutKey = createHash('sha256').update(realpathSync(projectRoot)).digest('hex').slice(0, 16);
+    cleanupRoots.push(join(tmpdir(), `flowcrew-build-${checkoutKey}`));
     const readyPath = join(root, 'gate.ready');
     const releasePath = join(root, 'gate.release');
     const terminalPath = join(root, 'terminal.json');
-    const gateIndex = pathToFileURL(join(repositoryRoot, 'dist', 'reality-gate', 'index.js')).href;
+    const gateIndex = pathToFileURL(join(projectRoot, 'dist', 'reality-gate', 'index.js')).href;
     const gateSource = [
       "const fs = await import('node:fs');",
       "const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
@@ -277,7 +289,7 @@ describe('transactional build and truthful fast-test contracts', () => {
       '--input-type=module', '-e', gateSource, '--',
       '--existing-run-id', 'item12-live-build-replay',
     ], {
-      cwd: repositoryRoot,
+      cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...environment,
@@ -293,7 +305,7 @@ describe('transactional build and truthful fast-test contracts', () => {
 
     const npmCli = process.env.npm_execpath!;
     const buildChild = spawn(process.execPath, [npmCli, 'run', 'build'], {
-      cwd: repositoryRoot,
+      cwd: projectRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...environment,
@@ -305,7 +317,7 @@ describe('transactional build and truthful fast-test contracts', () => {
     let buildOutput = '';
     buildChild.stdout?.on('data', (chunk) => { buildOutput += String(chunk); });
     buildChild.stderr?.on('data', (chunk) => { buildOutput += String(chunk); });
-    const checksDirectory = join(repositoryRoot, 'dist', 'reality-gate', 'checks');
+    const checksDirectory = join(projectRoot, 'dist', 'reality-gate', 'checks');
     let missingObserved = false;
     const gapProbe = setInterval(() => {
       if (!existsSync(checksDirectory)) missingObserved = true;

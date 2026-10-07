@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { readBuildManifest } from './build-manifest.js';
 
 export const DAEMON_METADATA_FILENAME = 'daemon.json';
 export const STALE_DAEMON_MESSAGE = 'STALE: dist is newer than the running daemon — its fixes are NOT loaded';
@@ -77,10 +78,46 @@ export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint
     hash.update(content);
   }
 
+  const uiRoot = join(root, '..', 'ui', 'dist');
+  const manifest = readBuildManifest(root);
+  // Backend-only packages retain their historical fingerprint. A real served
+  // bundle contributes every asset, including HTML, CSS and public files.
+  const uiFiles: string[] = [];
+  const walkUi = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walkUi(path);
+      else if (entry.isFile()) uiFiles.push(path);
+      else throw new Error(`Cannot fingerprint nonregular UI output: ${path}`);
+    }
+  };
+  if (existsSync(uiRoot)) walkUi(uiRoot);
+  if ((existsSync(join(root, '..', 'ui', 'package.json')) || uiFiles.length > 0) && !manifest?.ui) {
+    throw new Error('Cannot fingerprint served UI without a combined build manifest');
+  }
+  if (manifest?.ui) {
+    for (const record of manifest.ui.outputs) {
+      const path = join(uiRoot, record.path);
+      if (!existsSync(path)) throw new Error(`Cannot fingerprint incomplete UI generation: ${record.path}`);
+      const bytes = readFileSync(path);
+      if (bytes.byteLength !== record.bytes || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+        throw new Error(`Cannot fingerprint modified UI generation: ${record.path}`);
+      }
+    }
+    hash.update(`ui-generation:${manifest.generation}:`);
+  }
+  for (const path of uiFiles.sort((a, b) => a.localeCompare(b))) {
+    const name = `ui/dist/${relative(uiRoot, path).split(sep).join('/')}`;
+    const bytes = readFileSync(path);
+    newestMtimeMs = Math.max(newestMtimeMs, statSync(path).mtimeMs);
+    hash.update(`${Buffer.byteLength(name)}:${name}:${bytes.byteLength}:`);
+    hash.update(bytes);
+  }
+
   return {
     algorithm: 'sha256',
     hash: hash.digest('hex'),
-    files: files.length,
+    files: files.length + uiFiles.length,
     newestMtimeMs,
   };
 }
