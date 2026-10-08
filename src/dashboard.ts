@@ -4,7 +4,7 @@ import { readFileSync,readdirSync,writeFileSync,existsSync,statSync,mkdirSync,un
 import { join,extname,dirname,resolve } from "node:path";
 import { createHmac,randomBytes,timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from 'node:http';
-import { homedir, networkInterfaces, userInfo, type NetworkInterfaceInfo } from 'node:os';
+import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { parse as parseYaml } from "yaml";
 import {
 campaignsRoot,extractTaskTitle,
@@ -1550,7 +1550,7 @@ export function dashboardListenHosts(input: {
   interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>;
 } = {}): string[] {
   const hosts = ['127.0.0.1'];
-  if (!isOperatorStateRoot(input.home ?? homedir(), input.store ?? fcGlobalDir(), input.loginHome ?? userInfo().homedir)) return hosts;
+  if (!isOperatorStateRoot(input.home ?? homedir(), input.store ?? fcGlobalDir(), input.loginHome)) return hosts;
   for (const [name, addresses] of Object.entries(input.interfaces ?? networkInterfaces())) {
     if (!/^tailscale\d+$/.test(name)) continue;
     for (const entry of addresses ?? []) {

@@ -54,7 +54,16 @@ export function resolveControlPath(path: string): string {
   }
 }
 
-export function isOperatorStateRoot(home: string, store: string, loginHome = userInfo().homedir): boolean {
+/** The login account's home from the passwd database, or undefined when the
+ * running uid has no entry there (a container started with `--user`, for one).
+ * With no login account there is no operator state root to recognise, so every
+ * caller treats undefined as private rather than failing. */
+export function loginHomeDirectory(): string | undefined {
+  try { return userInfo().homedir; } catch { return undefined; }
+}
+
+export function isOperatorStateRoot(home: string, store: string, loginHome: string | undefined = loginHomeDirectory()): boolean {
+  if (loginHome === undefined) return false;
   return resolveControlPath(home) === resolveControlPath(loginHome)
     && resolveControlPath(store) === resolveControlPath(join(loginHome, '.fc'));
 }
@@ -80,8 +89,8 @@ export function assertUnixSocketPath(socketPath: string, platform: NodeJS.Platfo
 export function assertCommandSocketAuthority(socketPath: string, home: string, store: string): void {
   assertUnixSocketPath(socketPath);
   const selected = resolveControlPath(socketPath);
-  const loginHome = userInfo().homedir;
-  if (!isOperatorStateRoot(home, store, loginHome)
+  const loginHome = loginHomeDirectory();
+  if (loginHome !== undefined && !isOperatorStateRoot(home, store, loginHome)
       && resolveControlPath(dirname(socketPath)) === resolveControlPath(join(loginHome, '.fc'))) {
     throw new Error('Refusing the operator daemon socket from a private engine. Select a private daemon socket.');
   }
