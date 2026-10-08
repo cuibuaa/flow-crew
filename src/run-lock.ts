@@ -566,6 +566,8 @@ export type RunSchedulerObservation =
  * Classify the scheduler marker without treating an arbitrary live PID as the
  * run owner. Recovery may proceed only for missing/dead/reused observations;
  * corrupt or unreadable identity evidence remains fail-closed.
+ * Index derivation also uses this read-only observation: keep it free of index
+ * writes and run locks, including while a rebuild holds its SQLite transaction.
  */
 export function inspectRunScheduler(runId: string, runPath: string): RunSchedulerObservation {
   try {

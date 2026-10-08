@@ -10,7 +10,7 @@ import {
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  defaultSocketPath,
+  commandSocketPath,
   rpcErrorExitCode,
   sendRpc,
   type RpcRequest,
@@ -65,11 +65,11 @@ export async function cmdTask(
     stdout.write(`${taskUsage(sub)}\n`);
     return 0;
   }
-  const socketPath = opts.socketPath ?? socketFromArgs(args);
+  try {
+  const socketPath = commandSocketPath(opts.socketPath ?? valueAfter(args, '--port') ?? valueAfter(args, '--socket'));
   const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
     sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
   );
-  try {
     if (sub === 'list') {
       const status = valueAfter(args, '--status') as TaskListStatus | undefined;
       const limitRaw = valueAfter(args, '--limit');
@@ -274,10 +274,6 @@ function printTask(
   } else {
     stdout.write('Raw ticks: hidden (pass --raw)\n');
   }
-}
-
-function socketFromArgs(args: string[]): string {
-  return valueAfter(args, '--port') ?? valueAfter(args, '--socket') ?? process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
 }
 
 function parseId(raw: string | undefined): number {

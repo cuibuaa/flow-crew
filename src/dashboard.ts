@@ -3,6 +3,8 @@ import fastifyStatic from "@fastify/static";
 import { readFileSync,readdirSync,writeFileSync,existsSync,statSync,mkdirSync,unlinkSync,renameSync,openSync,readSync,closeSync } from "node:fs";
 import { join,extname,dirname,resolve } from "node:path";
 import { createHmac,randomBytes,timingSafeEqual } from "node:crypto";
+import { createServer, type Server } from 'node:http';
+import { homedir, networkInterfaces, userInfo, type NetworkInterfaceInfo } from 'node:os';
 import { parse as parseYaml } from "yaml";
 import {
 campaignsRoot,extractTaskTitle,
@@ -13,6 +15,7 @@ readRunState,readStageStatus,resolveRunStatus,updateRunState,
 runDir,
 RUN_STATUS,
 runsRoot,
+fcGlobalDir,
 STAGE_STATUS
 } from "./store.js";
 import type { RunStatus,StoreState } from "./store.js";
@@ -65,7 +68,7 @@ import { inspectApprovalRunStanding } from './run-standing.js';
 import { readOptionalJsonlFile as readJsonlFile } from './jsonl.js';
 import { z } from "zod";
 import pino from "pino";
-import { computeBuildFingerprint,type DaemonBuildFingerprint } from './daemon-identity.js';
+import { computeBuildFingerprint,isOperatorStateRoot,type DaemonBuildFingerprint } from './daemon-identity.js';
 import {
 CampaignNotFoundError,readCampaignOperatorIndex,
 readCampaignOperatorView,
@@ -1536,6 +1539,32 @@ function parseStreamJsonToText(raw: string, state?: { lineBuf: string }): string
   return output.join('');
 }
 
+/** Private dashboards have loopback authority only. The operator's dashboard
+ * also serves addresses on a named Tailscale interface, never a LAN/wildcard
+ * listener. Interface names are essential: CGNAT address space alone does not
+ * prove a route is Tailscale. No external command or new CLI setting is needed. */
+export function dashboardListenHosts(input: {
+  home?: string;
+  store?: string;
+  loginHome?: string;
+  interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>;
+} = {}): string[] {
+  const hosts = ['127.0.0.1'];
+  if (!isOperatorStateRoot(input.home ?? homedir(), input.store ?? fcGlobalDir(), input.loginHome ?? userInfo().homedir)) return hosts;
+  for (const [name, addresses] of Object.entries(input.interfaces ?? networkInterfaces())) {
+    if (!/^tailscale\d+$/.test(name)) continue;
+    for (const entry of addresses ?? []) {
+      const octets = entry.address.split('.').map(Number);
+      const tailscaleV4 = entry.family === 'IPv4' && octets.length === 4
+        && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127
+        && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255);
+      const tailscaleV6 = entry.family === 'IPv6' && /^fd7a:115c:a1e0:/i.test(entry.address);
+      if (!entry.internal && (tailscaleV4 || tailscaleV6)) hosts.push(entry.address);
+    }
+  }
+  return [...new Set(hosts)];
+}
+
 export async function startDashboard(projectDir: string, port = 3000, options: DashboardOptions = {}) {
   const runtimeDistDir = resolve(options.distDir ?? join(import.meta.dirname ?? '.', '..', 'dist'));
   let loadedBuild: DaemonBuildFingerprint | null = null;
@@ -1561,7 +1590,30 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     renameSync(oldDir, newDir);
   }
 
-  const app = Fastify({ logger: false });
+  // One Fastify router owns all listeners and hooks. Separate server instances
+  // are necessary to bind explicit addresses without a wildcard socket.
+  let createListener: () => Server;
+  const extraListeners: Server[] = [];
+  const app = Fastify({ logger: false, serverFactory: (handler, options) => {
+    // A serverFactory bypasses Fastify's HTTP defaults; keep those settings on
+    // every explicit listener rather than reverting to Node's different ones.
+    createListener = () => {
+      const server = createServer(options.http ?? {}, handler);
+      if (typeof options.keepAliveTimeout === 'number') server.keepAliveTimeout = options.keepAliveTimeout;
+      if (typeof options.requestTimeout === 'number') server.requestTimeout = options.requestTimeout;
+      if (typeof options.connectionTimeout === 'number') server.setTimeout(options.connectionTimeout);
+      if (typeof options.maxRequestsPerSocket === 'number' && options.maxRequestsPerSocket > 0) server.maxRequestsPerSocket = options.maxRequestsPerSocket;
+      return server;
+    };
+    return createListener();
+  } });
+  app.addHook('onClose', async () => {
+    await Promise.all(extraListeners.map((server) => new Promise<void>((resolveClose, rejectClose) => {
+      if (!server.listening) { resolveClose(); return; }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      server.closeAllConnections();
+    })));
+  });
   const briefReceiptSecret = randomBytes(32);
   const issueBriefReceipt = (report: BriefPreflightReport): string => createHmac('sha256', briefReceiptSecret)
     .update(`flowcrew-dashboard-brief-preflight:v${report.version}:${report.digest}`, 'utf8')
@@ -2244,8 +2296,24 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   try {
-    await app.listen({ port, host: "0.0.0.0" });
+    const [localHost, ...remoteHosts] = dashboardListenHosts();
+    await app.listen({ port, host: localHost });
+    const address = app.server.address();
+    const sharedPort = typeof address === 'object' && address ? address.port : port;
+    for (const host of remoteHosts) {
+      const server = createListener!();
+      for (const handler of app.server.listeners('clientError')) server.on('clientError', handler);
+      extraListeners.push(server);
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen);
+        server.listen(sharedPort, host, () => {
+          server.off('error', rejectListen);
+          resolveListen();
+        });
+      });
+    }
   } catch (err: unknown) {
+    await app.close();
     cleanup();
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('EADDRINUSE')) {

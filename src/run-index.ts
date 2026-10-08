@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fcGlobalDir, runsRoot, type StoreState } from './store.js';
 import { TERMINAL_STATUSES } from './lifecycle-status.js';
 import { registerEngineOwnedSqlitePath, RUN_INDEX_FILENAME } from './engine-owned-carriers.js';
+import { inspectRunScheduler } from './run-lock.js';
 
 const require = createRequire(import.meta.url);
 
@@ -175,7 +176,7 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
     const runJson = join(runsRoot(projectDir), state.runId, 'run.json');
     const jsonMtime = existsSync(runJson) ? statSync(runJson).mtimeMs : Date.now();
     const campaignStorageKey = campaignStorageKeyForState(state);
-    const schedulerActive = existsSync(join(runsRoot(projectDir), state.runId, 'scheduler.pid')) ? 1 : 0;
+    const schedulerActive = schedulerCandidate(projectDir, state.runId);
     db.prepare(`
       INSERT INTO runs (
         run_id, status, workflow_name, task_description, started_at, completed_at,
@@ -220,6 +221,14 @@ export function deleteRunIndex(projectDir: string, runId: string): void {
   db.prepare('DELETE FROM runs WHERE run_id = ?').run(runId);
 }
 
+/** Derive candidates from the existing ownership observation, never marker
+ * existence. Unknown fate stays visible; this read does not take a run lock or
+ * update the index. Explicit claim/removal updates still own conflict rows. */
+function schedulerCandidate(projectDir: string, runId: string): number {
+  const observation = inspectRunScheduler(runId, join(runsRoot(projectDir), runId));
+  return ['missing', 'dead', 'reused'].includes(observation.kind) ? 0 : 1;
+}
+
 export function rebuildRunIndex(projectDir: string): number {
   const db = openDb(projectDir);
   if (!db) return 0;
@@ -252,7 +261,7 @@ export function rebuildRunIndex(projectDir: string): number {
             state.campaignName ?? null,
             state.campaignSeq ?? null,
             state.campaignIteration ?? null,
-            existsSync(join(runsRoot(projectDir), runId, 'scheduler.pid')) ? 1 : 0,
+            schedulerCandidate(projectDir, runId),
             jsonMtime,
             Date.now(),
           );

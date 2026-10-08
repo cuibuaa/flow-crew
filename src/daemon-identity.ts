@@ -4,14 +4,16 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readlinkSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { readBuildManifest } from './build-manifest.js';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { homedir, userInfo } from 'node:os';
+import { readBuildManifest, collectBuildArtifacts, assertBuildArtifactInventory } from './build-manifest.js';
 
 export const DAEMON_METADATA_FILENAME = 'daemon.json';
 export const STALE_DAEMON_MESSAGE = 'STALE: dist is newer than the running daemon — its fixes are NOT loaded';
@@ -29,7 +31,72 @@ export interface DaemonIdentity {
   socketPath: string;
   /** Exact deployed runtime root. Optional only for legacy metadata. */
   distDir?: string;
+  /** Additive control provenance; absent on older daemons. */
+  homeDir?: string;
+  storeDir?: string;
   build: DaemonBuildFingerprint;
+}
+
+/** Resolve existing ancestors too, so an absent socket below an alias has the
+ * same authority as its eventual target. No filesystem mutation is involved. */
+export function resolveControlPath(path: string): string {
+  const absolute = resolve(path);
+  let ancestor = absolute;
+  const suffix: string[] = [];
+  for (;;) {
+    try { return join(realpathSync(ancestor), ...suffix); } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      suffix.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+export function isOperatorStateRoot(home: string, store: string, loginHome = userInfo().homedir): boolean {
+  return resolveControlPath(home) === resolveControlPath(loginHome)
+    && resolveControlPath(store) === resolveControlPath(join(loginHome, '.fc'));
+}
+
+/** Node otherwise silently truncates sockaddr_un paths on some hosts. Check
+ * the supplied, absolute and alias-resolved spelling before any side effect.
+ * BSD reserves more bytes than Linux; Windows named pipes have another ABI. */
+export function assertUnixSocketPath(socketPath: string, platform: NodeJS.Platform = process.platform): void {
+  if (!socketPath || socketPath.includes('\0')) throw new Error('Invalid daemon socket path: use a nonempty filesystem path without NUL bytes.');
+  if (platform === 'win32') return;
+  const limit = platform === 'linux' ? 108 : 104;
+  const paths = [socketPath, resolve(socketPath), resolveControlPath(socketPath)];
+  if (paths.some((path) => Buffer.byteLength(path) >= limit)) {
+    throw new Error(`Daemon socket path is too long (${limit - 1} bytes maximum); use a shorter state root or socket path.`);
+  }
+}
+
+/** Keep deliberate custom/private fuses. A different path alone says nothing
+ * about its owner. Refuse the login store from a private engine, and optional
+ * daemon provenance that positively identifies a different home, without
+ * connecting to the socket to learn who it is. Legacy custom sockets remain
+ * unverified until their daemon publishes provenance. */
+export function assertCommandSocketAuthority(socketPath: string, home: string, store: string): void {
+  assertUnixSocketPath(socketPath);
+  const selected = resolveControlPath(socketPath);
+  const loginHome = userInfo().homedir;
+  if (!isOperatorStateRoot(home, store, loginHome)
+      && resolveControlPath(dirname(socketPath)) === resolveControlPath(join(loginHome, '.fc'))) {
+    throw new Error('Refusing the operator daemon socket from a private engine. Select a private daemon socket.');
+  }
+  let identity: DaemonIdentity | undefined;
+  try { identity = readDaemonIdentity(socketPath); } catch { return; /* status diagnoses legacy/unreadable metadata */ }
+  if (identity && resolveControlPath(identity.socketPath) === selected
+      && identity.homeDir !== undefined
+      && resolveControlPath(identity.homeDir) !== resolveControlPath(home)) {
+    throw new Error('Refusing a daemon socket attested to another home. Select a daemon in this engine home.');
+  }
+  if (identity && resolveControlPath(identity.socketPath) === selected
+      && identity.storeDir !== undefined
+      && resolveControlPath(identity.storeDir) !== resolveControlPath(dirname(socketPath))) {
+    throw new Error('Refusing a daemon socket with inconsistent store provenance. Select its recorded state root.');
+  }
 }
 
 export interface SocketOwnerLookupOptions {
@@ -54,20 +121,25 @@ export interface DeployedDistConsumerOptions {
 }
 
 /**
- * Fingerprint every runtime JavaScript module, not a hand-maintained subset.
+ * Fingerprint the entire published payload, including retained resources.
  * Paths are included so moving/replacing a module changes the loaded identity.
  * mtimes are deliberately diagnostic-only: identical rebuilds remain fresh.
  */
 export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint {
   const root = resolve(distDir);
-  const files = collectJavaScriptFiles(root).sort((a, b) => a.localeCompare(b));
+  const uiRoot = join(root, '..', 'ui', 'dist');
+  const manifest = readBuildManifest(root);
+  const inventory = manifest ? assertBuildArtifactInventory(root, manifest)
+    : { backend: collectBuildArtifacts(root, true), ui: collectBuildArtifacts(uiRoot) };
+  const files = inventory.backend.filter((record) => record.path.endsWith('.js'));
   if (files.length === 0) {
     throw new Error(`Cannot fingerprint daemon build: no JavaScript files found under ${root}`);
   }
 
   const hash = createHash('sha256');
   let newestMtimeMs = 0;
-  for (const path of files) {
+  for (const record of inventory.backend) {
+    const path = join(root, record.path);
     const relativePath = relative(root, path).split(sep).join('/');
     const content = readFileSync(path);
     const stat = statSync(path);
@@ -78,34 +150,16 @@ export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint
     hash.update(content);
   }
 
-  const uiRoot = join(root, '..', 'ui', 'dist');
-  const manifest = readBuildManifest(root);
-  // Backend-only packages retain their historical fingerprint. A real served
-  // bundle contributes every asset, including HTML, CSS and public files.
-  const uiFiles: string[] = [];
-  const walkUi = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) walkUi(path);
-      else if (entry.isFile()) uiFiles.push(path);
-      else throw new Error(`Cannot fingerprint nonregular UI output: ${path}`);
-    }
-  };
-  if (existsSync(uiRoot)) walkUi(uiRoot);
+  // File count remains the runtime JS/UI diagnostic; the hash covers the full
+  // payload. Bare legacy backend-only packages still have no UI contribution.
+  const uiFiles = inventory.ui.map((record) => join(uiRoot, record.path));
   if ((existsSync(join(root, '..', 'ui', 'package.json')) || uiFiles.length > 0) && !manifest?.ui) {
     throw new Error('Cannot fingerprint served UI without a combined build manifest');
   }
   if (manifest?.ui) {
-    for (const record of manifest.ui.outputs) {
-      const path = join(uiRoot, record.path);
-      if (!existsSync(path)) throw new Error(`Cannot fingerprint incomplete UI generation: ${record.path}`);
-      const bytes = readFileSync(path);
-      if (bytes.byteLength !== record.bytes || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
-        throw new Error(`Cannot fingerprint modified UI generation: ${record.path}`);
-      }
-    }
     hash.update(`ui-generation:${manifest.generation}:`);
   }
+  if (manifest?.uiPresence) hash.update(`ui-presence:${manifest.uiPresence}:`);
   for (const path of uiFiles.sort((a, b) => a.localeCompare(b))) {
     const name = `ui/dist/${relative(uiRoot, path).split(sep).join('/')}`;
     const bytes = readFileSync(path);
@@ -128,16 +182,20 @@ export function createDaemonIdentity(input: {
   pid?: number;
   startedAt?: string;
 }): DaemonIdentity {
+  assertUnixSocketPath(input.socketPath);
   return {
     pid: input.pid ?? process.pid,
     startedAt: input.startedAt ?? new Date().toISOString(),
     socketPath: resolve(input.socketPath),
     distDir: resolve(input.distDir),
+    homeDir: resolveControlPath(homedir()),
+    storeDir: resolveControlPath(dirname(input.socketPath)),
     build: computeBuildFingerprint(input.distDir),
   };
 }
 
 export function daemonMetadataPath(socketPath: string): string {
+  assertUnixSocketPath(socketPath);
   return join(dirname(resolve(socketPath)), DAEMON_METADATA_FILENAME);
 }
 
@@ -203,6 +261,7 @@ function recordedDaemonPidIfAlive(socketPath: string, opts: SocketOwnerLookupOpt
  * `daemon start`, `status` and `restart` all unusable off Linux.
  */
 export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLookupOptions = {}): number | undefined {
+  assertUnixSocketPath(socketPath, opts.platform ?? process.platform);
   const platform = opts.platform ?? process.platform;
   if (platform !== 'linux') {
     return recordedDaemonPidIfAlive(socketPath, opts);
@@ -420,16 +479,6 @@ export function findDeployedDistConsumers(
   return [...consumers.values()].sort((left, right) => left.pid - right.pid);
 }
 
-function collectJavaScriptFiles(root: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) files.push(...collectJavaScriptFiles(path));
-    else if (entry.isFile() && entry.name.endsWith('.js')) files.push(path);
-  }
-  return files;
-}
-
 function isDaemonIdentity(value: unknown): value is DaemonIdentity {
   if (!value || typeof value !== 'object') return false;
   const identity = value as Partial<DaemonIdentity>;
@@ -439,6 +488,8 @@ function isDaemonIdentity(value: unknown): value is DaemonIdentity {
     && typeof identity.socketPath === 'string'
     && (identity.distDir === undefined
       || (typeof identity.distDir === 'string' && identity.distDir.length > 0))
+    && (identity.homeDir === undefined || (typeof identity.homeDir === 'string' && isAbsolute(identity.homeDir)))
+    && (identity.storeDir === undefined || (typeof identity.storeDir === 'string' && isAbsolute(identity.storeDir)))
     && build?.algorithm === 'sha256'
     && typeof build.hash === 'string' && /^[a-f0-9]{64}$/.test(build.hash)
     && Number.isInteger(build.files) && (build.files ?? -1) >= 0

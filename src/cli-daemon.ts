@@ -15,7 +15,7 @@ import { Orchestrator } from './orchestrator.js';
 import { createDaemonReconciler } from './daemon-reconciliation.js';
 import {
   DaemonUnavailableError,
-  defaultSocketPath,
+  commandSocketPath,
   rpcErrorExitCode,
   sendRpc as sendRpcRequest,
   startRpcServer,
@@ -58,12 +58,11 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     stdout.write(`${daemonUsage()}\n`);
     return 0;
   }
-  const socketPath = resolve(
+  try {
+  const socketPath = resolve(commandSocketPath(
     valueAfter(args, '--port')
-      ?? valueAfter(args, '--socket')
-      ?? process.env.FLOWCREW_DAEMON_SOCKET
-      ?? defaultSocketPath(),
-  );
+      ?? valueAfter(args, '--socket'),
+  ));
   const baseDir = dirname(socketPath);
   const logPath = join(baseDir, 'daemon.log');
   const distDir = resolve(opts.distDir ?? (import.meta.dirname ?? '.'));
@@ -76,7 +75,6 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     ...opts.controls,
   };
 
-  try {
     if (sub === 'start') {
       if (await isRunning(socketPath, controls.sendRpc)) {
         stdout.write(`daemon already running at ${socketPath}; use "flowcrew daemon restart" to load a new build\n`);

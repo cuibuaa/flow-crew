@@ -25,6 +25,65 @@ function fixture() {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('one backend and UI build identity', () => {
+  it('attests retained backend and UI resources without deleting them', () => {
+    const f = fixture();
+    writeFileSync(join(f.root, 'dist/retained.txt'), 'older runtime resource');
+    writeFileSync(join(f.root, 'ui/dist/older.html'), 'older UI resource');
+    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
+    expect(manifest.artifacts?.backend.some(r => r.path === 'retained.txt')).toBe(true);
+    expect(manifest.artifacts?.ui.some(r => r.path === 'older.html')).toBe(true);
+    expect(assertDistFresh(f.root).generation).toBe(manifest.generation);
+    writeFileSync(join(f.root, 'ui/dist/extra.html'), 'undeclared');
+    expect(() => assertDistFresh(f.root)).toThrow('undeclared outputs');
+    expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('undeclared outputs');
+    const next = publishBuildGeneration({ projectRoot: f.root, ...f });
+    expect(next.generation).not.toBe(manifest.generation);
+    expect(assertDistFresh(f.root).generation).toBe(next.generation);
+    expect(readFileSync(join(f.root, 'dist/retained.txt'), 'utf8')).toBe('older runtime resource');
+  });
+
+  it('refuses incomplete inventories, digest tampering and false absence provenance', () => {
+    const f = fixture();
+    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
+    const marker = join(f.root, 'dist', BUILD_MANIFEST_FILENAME);
+    writeFileSync(marker, JSON.stringify({ ...manifest, generation: '0'.repeat(64) }));
+    expect(() => assertDistFresh(f.root)).toThrow('generation digest is invalid');
+    writeFileSync(marker, JSON.stringify({ ...manifest, uiPresence: 'absent' }));
+    expect(() => assertDistFresh(f.root)).toThrow('absence attestation conflicts');
+    writeFileSync(marker, JSON.stringify(manifest));
+    writeFileSync(join(f.root, 'dist/extra.dat'), 'extra backend payload');
+    expect(() => assertDistFresh(f.root)).toThrow('undeclared outputs');
+    expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('undeclared outputs');
+  });
+
+  it('rejects UI removal from a required build and keeps genuine absence explicit', () => {
+    const f = fixture();
+    publishBuildGeneration({ projectRoot: f.root, ...f });
+    rmSync(join(f.root, 'ui'), { recursive: true });
+    expect(() => assertDistFresh(f.root)).toThrow();
+    expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('incomplete UI');
+    const absent = publishBuildGeneration({ projectRoot: f.root, stagedDistDir: f.stagedDistDir });
+    expect(absent.uiPresence).toBe('absent');
+    expect(assertDistFresh(f.root).ui).toBeUndefined();
+  });
+
+  it('refuses linked payloads and a late extra before committing the marker', () => {
+    const f = fixture();
+    const first = publishBuildGeneration({ projectRoot: f.root, ...f });
+    const linked = join(f.root, 'ui/dist/linked.css');
+    symlinkSync(join(f.root, 'ui/dist/assets/view.css'), linked);
+    expect(() => assertDistFresh(f.root)).toThrow('Nonregular build artifact');
+    expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow();
+    rmSync(linked);
+    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
+    const late = join(f.root, 'ui/dist/late.html');
+    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
+      if (phase === 'runtime_files_published') writeFileSync(late, 'late unowned file');
+    } })).toThrow('undeclared outputs');
+    rmSync(late);
+    expect(assertDistFresh(f.root).generation).toBe(first.generation);
+  });
+
   it('covers UI source, public files, recipe and served HTML/CSS with unchanged roots', () => {
     const f = fixture();
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('without a combined build manifest');

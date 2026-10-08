@@ -6,6 +6,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { homedir, userInfo } from 'node:os';
+import { isOperatorStateRoot, resolveControlPath } from './daemon-identity.js';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -1170,11 +1172,44 @@ export class NodeSystemd implements SupervisorBackend {
     });
   }
 
+  /** A private store cannot delegate to the login manager: that manager starts
+   * children with its own environment outside the caller's write boundary.
+   * Keep the operator backend and private stub/systemd-less tests; a private
+   * runtime with no session bus cannot select the login manager implicitly.
+   * Check each outlet, rather than caching authority across environment changes. */
+  private managerRefusal(): string | undefined {
+    try {
+      if (isOperatorStateRoot(homedir(), this.baseDir)) return undefined;
+      if (process.env.DBUS_SESSION_BUS_ADDRESS !== undefined) {
+        return 'private engine inherited a session bus';
+      }
+      const runtime = process.env.XDG_RUNTIME_DIR;
+      if (!runtime || !isAbsolute(runtime)) return 'private engine has no private runtime directory';
+      const resolved = resolveControlPath(runtime);
+      if (resolved === resolveControlPath(`/run/user/${userInfo().uid}`)) {
+        return 'private engine inherited the login runtime directory';
+      }
+      if (existsSync(join(runtime, 'bus')) || existsSync(join(runtime, 'systemd', 'private'))) {
+        return 'private engine runtime contains a manager endpoint';
+      }
+      return undefined;
+    } catch {
+      return 'manager routing authority could not be established';
+    }
+  }
+
+  private requireManagerAuthority(): void {
+    const reason = this.managerRefusal();
+    if (reason) throw new Error(`Refusing per-user systemd manager: ${reason}. Use a private runtime without an inherited session bus.`);
+  }
+
   async isActive(unit: string): Promise<UnitStatus> {
     const portable = this.portableState(unit);
     // An atomically-written exit status is the only backend-independent result
     // and therefore outranks even a systemd unit that has not been reaped yet.
     if (portable.kind === 'terminal') return portable;
+    const refusal = this.managerRefusal();
+    if (refusal) return { kind: 'unobservable', reason: `Refusing per-user systemd manager: ${refusal}` };
     try {
       const { stdout } = await execFileAsync(
         'systemctl',
@@ -1227,6 +1262,7 @@ export class NodeSystemd implements SupervisorBackend {
   }
 
   async runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void> {
+    this.requireManagerAuthority();
     gcSupervisionDirectories(this.baseDir, {
       nowMs: this.now().getTime(),
       retentionMs: this.retentionMs,
@@ -1282,6 +1318,7 @@ export class NodeSystemd implements SupervisorBackend {
   }
 
   async stopUnit(unit: string): Promise<void> {
+    this.requireManagerAuthority();
     let systemctlError: unknown;
     try {
       await execFileAsync('systemctl', ['--user', 'stop', unit], { encoding: 'utf-8', timeout: 1_000 });
@@ -1407,6 +1444,7 @@ export class NodeSystemd implements SupervisorBackend {
     if (existsSync(logPath)) {
       return this.readFileLogSnapshot(logPath, lines).output;
     }
+    this.requireManagerAuthority();
     try {
       const { stdout } = await execFileAsync('journalctl', ['--user', '-u', unit, '-n', String(lines), '--no-pager']);
       return stdout;
@@ -1447,6 +1485,8 @@ export class NodeSystemd implements SupervisorBackend {
     if (existsSync(this.fallbackPath(unit)) || existsSync(fallbackLogPath)) {
       return { kind: 'file', path: fallbackLogPath };
     }
+    const refusal = this.managerRefusal();
+    if (refusal) return { kind: 'unavailable', reason: `Refusing per-user systemd manager: ${refusal}` };
     return { kind: 'journal', unit };
   }
 

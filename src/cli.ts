@@ -266,8 +266,8 @@ function writeAdapterSetting(projectDir: string, adapter: AdapterName | 'auto'):
 }
 
 async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
-  const { defaultSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
-  const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
+  const { commandSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
+  const socketPath = commandSocketPath();
   const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
   console.log(formatDaemonRegistration(response));
 }
@@ -865,17 +865,22 @@ async function cmdDoctor() {
 async function cmdStart() {
   const projectDir = detectProjectDir();
   const port = parseInt(process.env.PORT || '3000', 10);
+  const { dashboardListenHosts, startDashboard } = await import('./dashboard.js');
   const net = await import('node:net');
-  const portAvailable = await new Promise<boolean>((resolve) => {
-    const server = net.createServer();
-    server.once('error', () => resolve(false));
-    server.once('listening', () => server.close(() => resolve(true)));
-    server.listen(port, '0.0.0.0');
-  });
-  if (!portAvailable) {
-    console.error(`❌ Port ${port} is already in use. Either stop the other process or use a different port:`);
-    console.error(`   PORT=${port + 1} flowcrew start`);
-    process.exit(1);
+  // Preserve refusal before the optional UI build writes anything. The actual
+  // listeners still arbitrate races; the probe uses their same authority set.
+  for (const host of dashboardListenHosts()) {
+    const portAvailable = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.once('listening', () => server.close(() => resolve(true)));
+      server.listen(port, host);
+    });
+    if (!portAvailable) {
+      console.error(`❌ Port ${port} is already in use. Either stop the other process or use a different port:`);
+      console.error(`   PORT=${port + 1} flowcrew start`);
+      process.exit(1);
+    }
   }
 
   // Build UI if dist doesn't exist
@@ -892,7 +897,6 @@ async function cmdStart() {
     }
   }
 
-  const { startDashboard } = await import('./dashboard.js');
   await startDashboard(projectDir, port);
 }
 

@@ -6,6 +6,7 @@ import {
   existsSync,
   fsyncSync,
   mkdirSync,
+  lstatSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -39,6 +40,10 @@ export interface BuildManifest {
   outputs: BuildFileRecord[];
   /** Served at the existing ui/dist root; absent for backend-only packages. */
   ui?: { outputs: BuildFileRecord[] };
+  /** New builds explicitly attest UI intent; legacy backend-only roots remain readable. */
+  uiPresence?: 'required' | 'absent';
+  /** Complete published payload, including resources retained for older consumers. */
+  artifacts?: { backend: BuildFileRecord[]; ui: BuildFileRecord[] };
 }
 
 export type BuildPublicationPhase =
@@ -92,6 +97,59 @@ function digestRecords(records: BuildFileRecord[]): string {
     hash.update(`${record.bytes}:${record.sha256}\n`);
   }
   return hash.digest('hex');
+}
+
+/** One inventory for publication, freshness and identity. No links or special
+ * nodes can supply served bytes outside the attested roots. The manifest is the
+ * commit record, so its own bytes cannot be part of its content digest. */
+export function collectBuildArtifacts(root: string, excludeCommitRecord = false): BuildFileRecord[] {
+  const paths: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) paths.push(path);
+      else throw new Error(`Nonregular build artifact: ${path}`);
+    }
+  };
+  let rootStat;
+  try { rootStat = lstatSync(root); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return [];
+  }
+  if (!rootStat.isDirectory()) throw new Error(`Nonregular build artifact root: ${root}`);
+  walk(root);
+  return paths.filter((path) => !excludeCommitRecord || portableRelative(root, path) !== BUILD_MANIFEST_FILENAME)
+    .map((path) => hashFile(path, root)).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function assertArtifactRecords(actual: BuildFileRecord[], expected: BuildFileRecord[], label: string): void {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`${label} artifact inventory is modified, partial or contains undeclared outputs`);
+  }
+}
+
+export function assertBuildArtifactInventory(distDir: string, manifest: BuildManifest): NonNullable<BuildManifest['artifacts']> {
+  const backend = collectBuildArtifacts(resolve(distDir), true);
+  const ui = collectBuildArtifacts(join(resolve(distDir), '..', 'ui', 'dist'));
+  const uiByPath = new Map(ui.map((record) => [record.path, record]));
+  for (const record of manifest.ui?.outputs ?? []) {
+    const actual = uiByPath.get(record.path);
+    if (!actual) throw new Error(`Cannot fingerprint incomplete UI generation: ${record.path}`);
+    if (actual.bytes !== record.bytes || actual.sha256 !== record.sha256) {
+      throw new Error(`Cannot fingerprint modified UI generation: ${record.path}`);
+    }
+  }
+  // Even legacy manifests must cover all physical outputs. Old retained files
+  // require a new publication to attest them, not deletion during validation.
+  assertArtifactRecords(backend, manifest.artifacts?.backend ?? manifest.outputs, 'dist');
+  assertArtifactRecords(ui, manifest.artifacts?.ui ?? manifest.ui?.outputs ?? [], 'UI');
+  if (manifest.uiPresence === 'required' && !manifest.ui) throw new Error('UI presence requires UI outputs');
+  if (manifest.uiPresence === 'absent' && (manifest.ui || ui.length)) throw new Error('UI absence attestation conflicts with served outputs');
+  if (generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts) !== manifest.generation) {
+    throw new Error('dist manifest generation digest is invalid');
+  }
+  return { backend, ui };
 }
 
 export function collectBuildInputRecords(projectRoot: string): BuildFileRecord[] {
@@ -169,16 +227,20 @@ export function createBuildManifest(
     );
   }
   const outputs = expected.map((path) => hashFile(join(root, path), root));
+  // Incremental compiler metadata belongs to scratch, not the published payload.
+  const staged = collectBuildArtifacts(root, true).filter((record) => record.path !== '.tsbuildinfo');
+  assertArtifactRecords(staged, outputs, 'Staged backend');
   const inputs = computeBuildInputDigest(projectRoot);
-  const ui = options.stagedUiDir ? { outputs: collectRegularFiles(options.stagedUiDir, () => true)
-    .map((path) => hashFile(path, options.stagedUiDir!)) } : undefined;
+  const ui = options.stagedUiDir ? { outputs: collectBuildArtifacts(options.stagedUiDir) } : undefined;
   if (existsSync(join(projectRoot, 'ui', 'package.json')) && !ui) {
     throw new Error('UI build inputs require a staged UI bundle');
   }
   if (ui && !ui.outputs.some((record) => record.path === 'index.html')) {
     throw new Error('UI generation is incomplete: index.html is missing');
   }
-  const generation = generationDigest(inputs.hash, outputs, ui);
+  const uiPresence = ui ? 'required' : 'absent';
+  const artifacts = { backend: outputs, ui: ui?.outputs ?? [] };
+  const generation = generationDigest(inputs.hash, outputs, ui, uiPresence, artifacts);
   return {
     version: BUILD_MANIFEST_VERSION,
     generation,
@@ -186,12 +248,17 @@ export function createBuildManifest(
     inputs,
     outputs,
     ...(ui ? { ui } : {}),
+    uiPresence,
+    artifacts,
   };
 }
 
-function generationDigest(inputs: string, outputs: BuildFileRecord[], ui?: BuildManifest['ui']): string {
+function generationDigest(inputs: string, outputs: BuildFileRecord[], ui?: BuildManifest['ui'],
+  uiPresence?: BuildManifest['uiPresence'], artifacts?: BuildManifest['artifacts']): string {
   return createHash('sha256').update(`${inputs}\n${digestRecords(outputs)}`
-    + (ui ? `\nui:${digestRecords(ui.outputs)}` : '')).digest('hex');
+    + (ui ? `\nui:${digestRecords(ui.outputs)}` : '')
+    + (uiPresence ? `\nui-presence:${uiPresence}` : '')
+    + (artifacts ? `\nartifacts:${digestRecords(artifacts.backend)}:${digestRecords(artifacts.ui)}` : '')).digest('hex');
 }
 
 function isFileRecord(value: unknown): value is BuildFileRecord {
@@ -226,7 +293,11 @@ export function isBuildManifest(value: unknown): value is BuildManifest {
     && manifest.outputs.every(isFileRecord)
     && (manifest.ui === undefined || (!!manifest.ui && Array.isArray(manifest.ui.outputs)
       && manifest.ui.outputs.every(isFileRecord)
-      && manifest.ui.outputs.some((record) => record.path === 'index.html')));
+      && manifest.ui.outputs.some((record) => record.path === 'index.html')))
+    && (manifest.uiPresence === undefined || ['required', 'absent'].includes(manifest.uiPresence))
+    && (manifest.artifacts === undefined || (!!manifest.artifacts
+      && Array.isArray(manifest.artifacts.backend) && manifest.artifacts.backend.every(isFileRecord)
+      && Array.isArray(manifest.artifacts.ui) && manifest.artifacts.ui.every(isFileRecord)));
 }
 
 export function readBuildManifest(distDir: string): BuildManifest | undefined {
@@ -283,6 +354,7 @@ export function assertDistFresh(projectRoot: string, distDir = join(projectRoot,
       }
     }
   }
+  assertBuildArtifactInventory(distDir, manifest);
   return manifest;
 }
 
@@ -308,16 +380,17 @@ function validateManifestForPublication(
   if (JSON.stringify(actualOutputs) !== JSON.stringify(manifest.outputs)) {
     throw new Error('Refusing to publish a manifest whose output hashes do not match the staged generation');
   }
+  assertArtifactRecords(collectBuildArtifacts(stagedDistDir, true).filter((record) => record.path !== '.tsbuildinfo'), manifest.outputs, 'Staged backend');
   if (manifest.ui) {
     if (!stagedUiDir) throw new Error('Refusing to publish UI without a staged bundle');
-    const actual = collectRegularFiles(stagedUiDir, () => true).map((path) => hashFile(path, stagedUiDir));
+    const actual = collectBuildArtifacts(stagedUiDir);
     if (JSON.stringify(actual) !== JSON.stringify(manifest.ui.outputs)) {
       throw new Error('Refusing to publish UI whose output set or hashes differ from the staged generation');
     }
   } else if (existsSync(join(projectRoot, 'ui', 'package.json'))) {
     throw new Error('Refusing to publish backend-only identity for a UI checkout');
   }
-  const generation = generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui);
+  const generation = generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts);
   if (generation !== manifest.generation) {
     throw new Error('Refusing to publish a manifest with an invalid generation digest');
   }
@@ -386,16 +459,32 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
   const cacheDir = resolve(options.cacheDir ?? join(projectRoot, '.cache'));
   ensureOsTemporaryStaging(stagedDistDir);
   if (options.stagedUiDir) ensureOsTemporaryStaging(options.stagedUiDir);
-  const manifest = options.manifest ?? createBuildManifest(projectRoot, stagedDistDir, { stagedUiDir: options.stagedUiDir });
+  let manifest = options.manifest ?? createBuildManifest(projectRoot, stagedDistDir, { stagedUiDir: options.stagedUiDir });
   if (!isBuildManifest(manifest)) throw new Error('Refusing to publish an invalid build manifest');
   validateManifestForPublication(projectRoot, stagedDistDir, manifest, options.stagedUiDir);
+
+  const merge = (prior: BuildFileRecord[], current: BuildFileRecord[]): BuildFileRecord[] => {
+    const records = new Map(prior.map((record) => [record.path, record]));
+    for (const record of current) records.set(record.path, record);
+    return [...records.values()].sort((a, b) => a.path.localeCompare(b.path));
+  };
+  const uiRoot = join(projectRoot, 'ui', 'dist');
+  const artifacts = {
+    backend: merge(collectBuildArtifacts(distDir, true), manifest.outputs),
+    ui: merge(collectBuildArtifacts(uiRoot), manifest.ui?.outputs ?? []),
+  };
+  if (!manifest.ui && artifacts.ui.length) {
+    throw new Error('Refusing backend-only publication while retained UI is still served');
+  }
+  const uiPresence = manifest.ui ? 'required' : 'absent';
+  manifest = { ...manifest, uiPresence, artifacts,
+    generation: generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, uiPresence, artifacts) };
 
   mkdirSync(distDir, { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
   const manifestPath = join(distDir, BUILD_MANIFEST_FILENAME);
   let priorManifest: BuildManifest | undefined;
   try { priorManifest = readBuildManifest(distDir); } catch { /* legacy/corrupt marker is archived byte-for-byte */ }
-  const uiRoot = join(projectRoot, 'ui', 'dist');
   const files = [
     ...manifest.outputs.map((record) => ({ key: record.path, source: join(stagedDistDir, record.path), target: join(distDir, record.path), record })),
     ...(manifest.ui?.outputs ?? []).map((record) => ({ key: `ui-dist/${record.path}`, source: join(options.stagedUiDir!, record.path), target: join(uiRoot, record.path), record })),
@@ -408,8 +497,8 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
   const touched = [...changedOutputs.map(({ key, target }) => ({ key, target })),
     { key: BUILD_MANIFEST_FILENAME, target: manifestPath }];
   const archiveFiles = [
-    ...collectRegularFiles(distDir, (path) => /\.(?:js|d\.ts)$/.test(path)).map((target) => ({ key: portableRelative(distDir, target), target })),
-    ...(manifest.ui ? collectRegularFiles(uiRoot, () => true).map((target) => ({ key: `ui-dist/${portableRelative(uiRoot, target)}`, target })) : []),
+    ...collectBuildArtifacts(distDir, true).map(({ path }) => ({ key: path, target: join(distDir, path) })),
+    ...collectBuildArtifacts(uiRoot).map(({ path }) => ({ key: `ui-dist/${path}`, target: join(uiRoot, path) })),
     { key: BUILD_MANIFEST_FILENAME, target: manifestPath },
   ];
   const previousGeneration = priorManifest?.generation ?? legacyGeneration(distDir, archiveFiles.filter(({ key }) => !key.startsWith('ui-dist/')).map(({ key }) => key));
@@ -460,6 +549,11 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
       renameSync(file.temporary, file.target);
     }
     options.onPhase?.('runtime_files_published', manifest.generation);
+    // Reobserve retained payloads too. Only our exact pending commit record is
+    // excluded; an unrelated late file cannot be silently blessed as fresh.
+    assertArtifactRecords(collectBuildArtifacts(distDir, true)
+      .filter((record) => record.path !== basename(manifestTemporary)), artifacts.backend, 'dist');
+    assertArtifactRecords(collectBuildArtifacts(uiRoot), artifacts.ui, 'UI');
     renameSync(manifestTemporary, manifestPath);
     manifestCommitted = true;
     options.onPhase?.('manifest_committed', manifest.generation);
