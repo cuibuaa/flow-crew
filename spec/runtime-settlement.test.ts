@@ -169,7 +169,12 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         const config = workflow(), created = createRun(project, config.name, 'name: settlement', ['work']);
         let calls = 0;
         const adapter: Adapter = { async run() { calls++; return { output: 'closed child output', exitCode: 0, duration_ms: 1 }; } };
-        const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => { }, createSchedulerLiveConstraintGuardFactory, reconcileCompletedStageAttempts: () => { throw Error('fixture reconciliation failure'); } });
+        const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => { }, createSchedulerLiveConstraintGuardFactory, reconcileCompletedStageAttempts: () => {
+            const closed = readStageStatus(project, created.runId, 'work');
+            expect(closed.status).toBe('pending');
+            expect(closed.attempts?.at(-1)?.status).toBe('suspended');
+            throw Error('fixture reconciliation failure');
+        } });
         await expect(runner.runScopeSafeStageGroup(config.stages, project, created.runId, 1, async (stage, _guard, beforeSettlement) => runStage(adapter, { stageId: stage.id, role, dependsOn: [], promptTemplate: 'current duties', artifactContract: stage.artifact_contract, projectDir: project, runId: created.runId, runDir: created.runDirPath, timeout_ms: 60000, retries: 0, beforeSettlement, deferSettlement: true }))).rejects.toThrow('fixture reconciliation failure');
         const status = readStageStatus(project, created.runId, 'work'), events = readRunEvents(project, created.runId).filter(e => e.stageId === 'work');
         console.log('RUNTIME_EXCEPTION ' + JSON.stringify({ calls, attempts: status.attempts?.map(a => a.status), events: events.map(e => ({ type: e.type, status: e.status, attemptIndex: e.attemptIndex })) }));

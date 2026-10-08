@@ -8,6 +8,8 @@ import type { ProviderFailure } from './provider-result.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'stage_environment_wait_started'
+  | 'stage_environment_wait_finished'
   | 'resource_lease_decided'
   | 'resource_lease_retained'
   | 'resource_lease_wait_started'

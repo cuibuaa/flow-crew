@@ -48,7 +48,7 @@ describe('independent artifact destination audit', () => {
     expect(deferred.producedPromptArtifacts).toEqual([...expected].sort());
     const final = inspectStageArtifactContract({ ...input, priorProducedPromptArtifacts: deferred.producedPromptArtifacts });
     expect(final.obligations.map(o => o.path)).toEqual(expected);
-    expect(final.violations).toEqual([]);
+    expect(final.violations.map(v => v.path)).toEqual(expected);
   });
 
   it('keeps equal basenames at distinct named destinations as two obligations', () => {
@@ -97,7 +97,7 @@ describe('independent artifact destination audit', () => {
     put(demanded, '{"new":true}\n');
     const deferred = captureDeferredStageArtifactContract({ ...input, preimages });
     expect(deferred.producedPromptArtifacts).toEqual([demanded]);
-    expect(inspectStageArtifactContract({ ...input, priorProducedPromptArtifacts: deferred.producedPromptArtifacts }).violations).toEqual([]);
+    expect(inspectStageArtifactContract({ ...input, priorProducedPromptArtifacts: deferred.producedPromptArtifacts }).violations[0].reason).toContain('ARTIFACT_OUTPUT_ABSENT_OR_STALE');
   });
 
 

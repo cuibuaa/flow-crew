@@ -65,8 +65,9 @@ import {
   captureStageArtifactContractPreimages,
   verifyStageArtifactContract,
   writeStageArtifactContractAudit,
+  stageArtifactProduction,
 } from './stage-artifact-contract.js';
-import { readRecordedArtifactContract } from './recorded-artifact-contract.js';
+import { readRecordedArtifactContract, reusableStageArtifactProduction } from './recorded-artifact-contract.js';
 import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
 
 function getDefaultTimeout(projectDir: string): string {
@@ -575,11 +576,15 @@ async function runStageWithWriterLease(
         artifactContract: opts.artifactContract,
       })
     : [];
-  let priorProducedPromptArtifacts: string[] = [];
+  const production = artifactDeclarationErrors(opts.artifactContract, opts.stageId).length === 0 ? stageArtifactProduction({
+    runId: opts.runId, stageId: opts.stageId, projectDir: opts.projectDir, runDir: opts.runDir,
+    template: opts.artifactObligationTemplate ?? '', artifactContract: opts.artifactContract,
+    isGate: opts.isGate, planRevision: opts.planRevision, attemptIndex, attemptStartedAt,
+  }) : undefined;
   const priorAudit = readRecordedArtifactContract(artifactContractPath);
-  if (priorAudit.status === 'readable' && priorAttempt?.status === 'suspended') {
-    priorProducedPromptArtifacts = priorAudit.record.producedPromptArtifacts.filter((path): path is string => typeof path === 'string');
-  }
+  const priorProducedArtifacts = production && priorAudit.status === 'readable'
+    ? reusableStageArtifactProduction(production, opts.stageId, priorAudit.record, runningStatus.attempts ?? [], artifactContractPreimages)
+    : [];
 
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
@@ -1298,7 +1303,7 @@ async function runStageWithWriterLease(
   if (opts.beforeSettlement && !aggregateAbortSignal.aborted) {
     scopeRevisionBoundaryReached ||= await opts.beforeSettlement();
   }
-  if (result.exitCode === 0) {
+  if (result.exitCode === 0 || (production && invocationIndex > 0 && !childCloseUnverified)) {
     try {
       const artifactInput = {
         attemptIndex,
@@ -1309,16 +1314,16 @@ async function runStageWithWriterLease(
         runDir: opts.runDir,
         writes: result.writes,
         preimages: artifactContractPreimages,
-        priorProducedPromptArtifacts,
+        priorProducedArtifacts,
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
       const replayAbort = new AbortController();
-      const replayMonitor = !scopeRevisionBoundaryReached && opts.artifactContract?.replays?.length
+      const replayMonitor = result.exitCode === 0 && !scopeRevisionBoundaryReached && opts.artifactContract?.replays?.length
         ? liveConstraintGuard?.beginInvocation(++invocationIndex, (reason) => replayAbort.abort(reason)) : undefined;
       let audit: Awaited<ReturnType<typeof verifyStageArtifactContract>>;
       try {
-        audit = scopeRevisionBoundaryReached
+        audit = scopeRevisionBoundaryReached || result.exitCode !== 0
           ? captureDeferredStageArtifactContract(artifactInput)
           : await verifyStageArtifactContract(artifactInput, {
             remainingMs: () => attemptDeadline.remainingMs(),
@@ -1343,6 +1348,7 @@ async function runStageWithWriterLease(
           audit.violations.push(...reasons.map((reason) => ({ kind: 'declared_replay' as const, source: 'declaration' as const, mention: 'artifact_contract.replays', path: opts.projectDir, reason })));
         }
       }
+      if (production && !childCloseUnverified) audit.production = production;
       if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
       if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
         const detail = audit.violations.map((violation) => violation.reason).join('; ');

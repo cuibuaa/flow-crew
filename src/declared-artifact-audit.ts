@@ -77,7 +77,7 @@ export function inspectDeclaredStageArtifactContract(input: StageArtifactContrac
   const preimages = new Map((input.preimages ?? []).map((entry) => [resolve(entry.path), entry.identity]));
   const writes = (input.writes ?? []).map((write) => write.startsWith('run:')
     ? resolve(input.runDir, write.slice(4)) : isAbsolute(write) ? resolve(write) : resolve(input.projectDir, write));
-  const prior = new Set(input.priorProducedPromptArtifacts ?? []);
+  const prior = new Map((input.priorProducedArtifacts ?? []).map((entry) => [resolve(entry.path), entry.identity]));
   const produced = new Set<string>();
   const obligations: StageArtifactObligation[] = [];
   const violations: StageArtifactContractAudit['violations'] = [];
@@ -95,7 +95,10 @@ export function inspectDeclaredStageArtifactContract(input: StageArtifactContrac
     const before = preimages.get(path);
     const after = readDeclaredArtifactIdentity(path, artifact.kind);
     if (artifact.kind === 'directory') valid = valid && after.state === 'present' && after.type === 'directory';
-    const fresh = valid && (prior.has(path) || writes.some((write) => {
+    // Adjudication is execution evidence, not a reusable stage product.
+    const reusable = !(input.isGate && artifact.root === 'run' && artifact.path === `verdict_${input.stageId}.json`)
+      && prior.has(path) && compareLiveConstraintContentIdentities(prior.get(path)!, after) === 'equal';
+    const fresh = valid && (reusable || writes.some((write) => {
       const rel = relative(path, write);
       return write === path || (artifact.kind === 'directory' && rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
     }) || (before !== undefined && compareLiveConstraintContentIdentities(before, after) === 'different'));

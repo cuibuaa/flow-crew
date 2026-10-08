@@ -3,7 +3,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import type { AddressInfo } from 'node:net';
+import { createServer, type AddressInfo } from 'node:net';
+// @ts-expect-error Test-only helper is shared with native Node child fixtures.
+import { loopbackListenRequests } from './test-support/loopback-listen.mjs';
 import type { FastifyInstance } from 'fastify';
 import type { PoolOptions, PoolWorker, WorkerRequest } from 'vitest/node';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
@@ -105,6 +107,14 @@ afterAll(() => {
 });
 
 describe('root-suite file isolation', () => {
+  it('refuses unknown wildcard and omitted-host listeners before binding', () => {
+    for (const options of [{ port: 0, host: '0.0.0.0' }, { port: 0 }, { port: 0, host: '192.0.2.1' }]) {
+      const server = createServer();
+      expect(() => server.listen(options)).toThrow('Test listener policy refuses non-loopback');
+      expect(server.listening).toBe(false);
+    }
+  });
+
   it('points business modules at an explicit disposable FC root', () => {
     expect(existsSync(explicitRoot)).toBe(true);
     expect(fcGlobalDir()).toBe(join(explicitRoot, 'fc-home'));
@@ -214,6 +224,10 @@ describe('root-suite file isolation', () => {
       expect(address).not.toBeNull();
       expect(address?.port).toBeGreaterThan(0);
       expect(address?.port).not.toBe(3000);
+      expect(address?.address).toBe('127.0.0.1');
+      expect(loopbackListenRequests()).toContainEqual(expect.objectContaining({
+        requestedHost: expect.any(String), actualHost: '127.0.0.1', refused: false,
+      }));
       expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore + 1);
       expect(process.listenerCount('SIGINT')).toBe(sigintBefore + 1);
 

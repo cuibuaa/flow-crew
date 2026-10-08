@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
+import { readRunRecordFields } from './run-record-fields.js';
 import {
   isActiveTaskStatus,
   isKnownTaskStatus,
@@ -294,7 +295,15 @@ const MAX_LEDGER_TOTAL_BYTES = 16 * 1024 * 1024;
 const MAX_TASK_TEXT_BYTES = 256 * 1024;
 const MAX_TASK_RELATIONSHIPS = DEFAULT_MAX_ENTRIES;
 const MAX_LEDGER_GRAPH_ERRORS = DEFAULT_MAX_ENTRIES;
-const MAX_ENGINE_RUN_RECORD_BYTES = 1024 * 1024;
+const MAX_ENGINE_RESERVATION_BYTES = 1024 * 1024;
+// Raw JSON bounds allow fully escaped status/path strings; semantic bounds
+// below still apply to decoded values. Admission is retained only for its digest.
+const ENGINE_RUN_FIELD_LIMITS = {
+  runId: 64 * 1024 * 6 + 2,
+  status: 4 * 1024 * 6 + 2,
+  projectDir: 64 * 1024 * 6 + 2,
+  briefAdmission: 1024 * 1024,
+} as const;
 const MAX_ENGINE_STATUS_BYTES = 4 * 1024;
 const MAX_ENGINE_PROJECT_PATH_BYTES = 64 * 1024;
 const MAX_ENGINE_TASK_SNAPSHOT_BYTES = MAX_LEDGER_TOTAL_BYTES;
@@ -546,11 +555,18 @@ function sameContainedDirectory(
   return current !== undefined && current.dev === expected.dev && current.ino === expected.ino;
 }
 
-type BoundedFileRead =
-  | { ok: true; text: string; byteLength: number }
+type RegularFileRead<T> =
+  | { ok: true; value: T; byteLength: number }
   | { ok: false; reason: 'missing' | 'oversized' | 'unsafe' | 'unreadable'; detail: string };
 
-function readBoundedRegularFile(path: string, maximumBytes: number): BoundedFileRead {
+type BoundedFileRead =
+  | { ok: true; text: string; byteLength: number }
+  | Extract<RegularFileRead<never>, { ok: false }>;
+
+function readRegularFile<T>(
+  path: string,
+  read: (descriptor: number, size: number) => { value: T; byteLength: number },
+): RegularFileRead<T> {
   let before;
   try {
     before = lstatSync(path);
@@ -568,32 +584,23 @@ function readBoundedRegularFile(path: string, maximumBytes: number): BoundedFile
   try {
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+    const unchanged = (stat: typeof opened) => stat.isFile() && !stat.isSymbolicLink()
+      && stat.dev === opened.dev && stat.ino === opened.ino && stat.size === opened.size
+      && stat.mtimeMs === opened.mtimeMs && stat.ctimeMs === opened.ctimeMs;
+    if (!unchanged(before)) {
       return { ok: false, reason: 'unsafe', detail: 'file changed between inspection and open' };
     }
-    if (opened.size > maximumBytes) {
-      return { ok: false, reason: 'oversized', detail: `file exceeds the ${maximumBytes}-byte limit` };
-    }
-    const bytes = Buffer.allocUnsafe(maximumBytes + 1);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
-      if (count === 0) break;
-      offset += count;
-    }
-    if (offset > maximumBytes) {
-      return { ok: false, reason: 'oversized', detail: `file grew beyond the ${maximumBytes}-byte limit` };
-    }
-    const after = lstatSync(path);
-    if (!after.isFile() || after.isSymbolicLink()
-        || after.dev !== opened.dev || after.ino !== opened.ino) {
+    const result = read(descriptor, opened.size);
+    if (!unchanged(fstatSync(descriptor)) || !unchanged(lstatSync(path))
+        || result.byteLength !== opened.size) {
       return { ok: false, reason: 'unsafe', detail: 'file changed while it was being read' };
     }
-    return { ok: true, text: bytes.subarray(0, offset).toString('utf-8'), byteLength: offset };
+    return { ok: true, ...result };
   } catch (error) {
     return {
       ok: false,
-      reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable',
+      reason: error instanceof RangeError ? 'oversized'
+        : (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'unsafe' : 'unreadable',
       detail: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -601,6 +608,22 @@ function readBoundedRegularFile(path: string, maximumBytes: number): BoundedFile
       try { closeSync(descriptor); } catch { /* the read has already failed closed */ }
     }
   }
+}
+
+function readBoundedRegularFile(path: string, maximumBytes: number): BoundedFileRead {
+  const result = readRegularFile(path, (descriptor, size) => {
+    if (size > maximumBytes) throw new RangeError(`file exceeds the ${maximumBytes}-byte limit`);
+    const bytes = Buffer.allocUnsafe(maximumBytes + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > maximumBytes) throw new RangeError(`file grew beyond the ${maximumBytes}-byte limit`);
+    return { value: bytes.subarray(0, offset).toString('utf-8'), byteLength: offset };
+  });
+  return result.ok ? { ok: true, text: result.value, byteLength: result.byteLength } : result;
 }
 
 function resolveEngineRun(
@@ -629,10 +652,9 @@ function resolveEngineRun(
     return { state: 'stale', taskId: task.id, detail: 'bound run directory is not a real contained directory' };
   }
 
-  let rawRun: unknown;
-  const runRecord = readBoundedRegularFile(
+  const runRecord = readRegularFile(
     join(runPath, 'run.json'),
-    MAX_ENGINE_RUN_RECORD_BYTES,
+    (descriptor) => readRunRecordFields(descriptor, ENGINE_RUN_FIELD_LIMITS),
   );
   if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {
     return { state: 'stale', taskId: task.id, detail: 'bound run directory changed while it was inspected' };
@@ -646,7 +668,7 @@ function resolveEngineRun(
     }
     const reservationRecord = readBoundedRegularFile(
       join(runPath, '.run-reservation.json'),
-      MAX_ENGINE_RUN_RECORD_BYTES,
+      MAX_ENGINE_RESERVATION_BYTES,
     );
     if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {
       return { state: 'stale', taskId: task.id, detail: 'bound run directory changed while it was inspected' };
@@ -678,12 +700,7 @@ function resolveEngineRun(
       runId: expectedRunId,
     };
   }
-  try {
-    rawRun = JSON.parse(runRecord.text) as unknown;
-  } catch {
-    return { state: 'stale', taskId: task.id, detail: 'bound run record is unreadable' };
-  }
-
+  const rawRun = runRecord.value;
   if (!isObject(rawRun)
       || (rawRun.runId !== undefined && rawRun.runId !== expectedRunId)
       || typeof rawRun.status !== 'string'

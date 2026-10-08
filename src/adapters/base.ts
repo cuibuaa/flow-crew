@@ -234,7 +234,10 @@ function createChildTerminator(
   };
 
   const settleAfterChildClose = (): Promise<void> => {
-    if (!terminationStarted || terminationCompleted || !groupIsAlive()) {
+    // A normal leader exit can leave children with closed/ignored stdio alive.
+    // Retire that owned group before the adapter can remove its credentials.
+    if (!terminationStarted && groupIsAlive()) terminateGracefully();
+    if (terminationCompleted || !groupIsAlive()) {
       completeTermination();
       return Promise.resolve();
     }
@@ -286,12 +289,16 @@ export function execWithStdin(
     let timedOut = false;
     let aborted = false;
     const launch = confineEngineChild(cmd, args);
+    const environment = { ...process.env, ...opts.env };
+    // Daemon transport belongs to the scheduler/operator, never a stage child.
+    // Delete after merging so neither inheritance nor adapter overrides restore it.
+    delete environment.FLOWCREW_DAEMON_SOCKET;
     const child = spawn(launch.command, launch.args, {
       cwd: opts.cwd,
       stdio: launch.receiptPath ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
       shell: false,
       detached: process.platform !== 'win32',
-      env: { ...process.env, ...opts.env },
+      env: environment,
     });
     let writeBoundary: EngineChildBoundaryReceipt | undefined;
     let boundarySpawnError: RunResult['spawnError'];
@@ -306,7 +313,7 @@ export function execWithStdin(
     const timer = setTimeout(() => {
       timedOut = true;
       terminator.terminateGracefully();
-    }, Math.max(1, opts.timeout_ms));
+    }, Math.max(1, opts.timeout_ms - (Date.now() - start)));
     const onAbort = () => {
       aborted = true;
       clearTimeout(timer);
@@ -335,9 +342,10 @@ export function execWithStdin(
     const finish = (code: number | null, signal?: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       void terminator.settleAfterChildClose().then(() => {
-        const boundaryUnverified = launch.receiptPath && !writeBoundary;
+        // The deadline also covers original-group retirement after leader close.
+        clearTimeout(timer);
+        const boundaryUnverified = launch.receiptPath && (!writeBoundary || (writeBoundary.kind === 'waiting' && !timedOut && !aborted));
         const boundaryRefused = writeBoundary?.kind === 'refused';
         const boundaryDiagnostic = boundaryUnverified ? '\nENGINE_WRITE_BOUNDARY_UNVERIFIED: launcher closed without enforcement receipt; child fate is unknown\n'
           : writeBoundary?.kind === 'refused' && writeBoundary.message.startsWith('ENGINE_WRITE_BOUNDARY_UNVERIFIED') ? `\n${writeBoundary.message}\n` : '';

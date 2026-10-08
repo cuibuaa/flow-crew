@@ -188,7 +188,10 @@ describe('dashboard signal shutdown', () => {
     const childHome = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-home-'));
     const childProject = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-project-'));
     const dashboardUrl = pathToFileURL(join(process.cwd(), 'dist', 'dashboard.js')).href;
+    const listenerPolicyUrl = pathToFileURL(join(process.cwd(), 'spec', 'test-support', 'loopback-listen.mjs')).href;
     const source = `
+      import { installLoopbackListenFence } from ${JSON.stringify(listenerPolicyUrl)};
+      installLoopbackListenFence('engine-truthfulness.test.ts');
       import { startDashboard } from ${JSON.stringify(dashboardUrl)};
       await startDashboard(process.env.P6_PROJECT_DIR, 0, { distDir: process.env.P6_DIST_DIR });
     `;

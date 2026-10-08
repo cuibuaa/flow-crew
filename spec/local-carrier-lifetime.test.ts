@@ -77,8 +77,8 @@ describe('engine-owned local carrier lifetime', () => {
     const f = fixture(), source = join(f.projectDir, 'linked'), ran = join(f.projectDir, 'ran');
     writeFileSync(source, 'unknown'); linkSync(source, join(f.root, 'outside'));
     const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.writeFileSync(${JSON.stringify(ran)},'ran')`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
-    expect(result.exitCode).toBe(125); expect(result.output).toContain('hard-link closure is unknown');
-    expect(result.writeBoundary?.kind).toBe('refused'); expect(existsSync(ran)).toBe(false);
+    expect(result.exitCode).toBe(124); expect(result.timedOut).toBe(true); expect(result.output).toContain('hard-link closure is unknown');
+    expect(result.writeBoundary?.kind).toBe('waiting'); expect(existsSync(ran)).toBe(false);
   });
 
   native.each([false, true])('refuses a protected link through a mutable intermediate hop (dangling=%s)', async (dangling) => {
@@ -89,8 +89,8 @@ describe('engine-owned local carrier lifetime', () => {
     const hop = join(f.projectDir, 'hop'); symlinkSync(target, hop);
     const carrier = join(output, 'result.json'); symlinkSync(hop, carrier);
     const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage');`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
-    expect(result.exitCode).toBe(125);
-    expect(result.writeBoundary?.kind).toBe('refused');
+    expect(result.exitCode).toBe(124); expect(result.timedOut).toBe(true);
+    expect(result.writeBoundary?.kind).toBe('waiting');
     if (!dangling) expect(readFileSync(carrier, 'utf8')).toBe('engine');
     expect(lstatSync(hop).isSymbolicLink()).toBe(true);
   });
@@ -240,8 +240,11 @@ describe('auxiliary command carrier boundaries', () => {
 
   native('refuses an unknown validation hard-link closure before executing project code', async () => {
     const f = fixture(), path = join(f.projectDir, 'linked'); writeFileSync(path, 'unknown'); linkSync(path, join(f.root, 'external'));
+    mkdirSync(join(f.projectDir, 'config'));
+    writeFileSync(join(f.projectDir, 'config', 'defaults.yaml'), 'default_validation_timeout_ms: 800\n');
     const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', "require('node:fs').writeFileSync('ran','ran')"], display: 'owned', cwd: f.projectDir, runDir: f.runDir });
-    expect(result.exitCode).toBe(125); expect(result.error).toContain('hard-link closure is unknown'); expect(existsSync(join(f.projectDir, 'ran'))).toBe(false);
+    expect(result.exitCode).toBeNull(); expect(result.error).toContain('ENGINE_WRITE_BOUNDARY_WAITING:');
+    expect(result.error).toContain('hard-link closure is unknown'); expect(existsSync(join(f.projectDir, 'ran'))).toBe(false);
   });
 
   native('gives project commands no request or knowledge-graph publication rights', async () => {

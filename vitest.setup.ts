@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validationEnvironment } from "./src/validation-environment.js";
+// @ts-expect-error Test-only JavaScript helper is also a native Node preload.
+import { installLoopbackListenFence } from "./spec/test-support/loopback-listen.mjs";
 
 interface VitestFileIsolation {
   root: string;
@@ -77,6 +79,7 @@ const previousUserProfile = process.env.USERPROFILE;
 const previousFcHome = process.env.FC_HOME;
 const previousIsolationRoot = process.env.FLOWCREW_VITEST_ROOT;
 const isolation = createVitestFileIsolation();
+installLoopbackListenFence(() => expect.getState().testPath);
 
 // Apply the same control/credential separation before loading engine modules.
 // The process already has its test-runner preload; it must not pass that ambient

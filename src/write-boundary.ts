@@ -3,11 +3,12 @@ import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node
 import type { Readable } from 'node:stream';
 import { closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ArtifactContractSchema, producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { containsEngineOwnedRunPath, engineOwnedGlobalCarriers, isEngineOwnedRunPath } from './engine-owned-carriers.js';
 import { LINUX_ENGINE_WRITE_BOUNDARY } from './write-boundary-linux.js';
+import type { RunEvent } from './run-events.js';
 import { appendTextRecord } from './append-boundary.js';
 import { fcGlobalDir } from './store.js';
 
@@ -25,7 +26,10 @@ export interface EngineWriteBoundaryInput {
   authority?: 'stage' | 'observer' | 'project-command';
 }
 export type EngineChildBoundaryReceipt =
-  | { kind: 'installed'; abi: number; pid: number; fileCapabilities: number; directoryCapabilities: number }
+  | { kind: 'installed'; abi: number; pid: number; fileCapabilities: number; directoryCapabilities: number;
+      /** Absent in historical receipts: no retrospective scope claim. */
+      scopes?: { signal: 'enforced' | 'unavailable'; abstractUnixSocket: 'enforced' | 'unavailable' } }
+  | { kind: 'waiting'; phase: 'pre_execution'; pid: number; message: string }
   | { kind: 'refused'; message: string }
   | { kind: 'spawn_error'; message: string; code?: string; syscall: string; path: string; cwd: string };
 export interface EngineCommandBoundaryInput {
@@ -38,6 +42,7 @@ export interface EngineCommandBoundaryInput {
 interface BoundaryPolicy {
   input: EngineWriteBoundaryInput;
   scratch: string;
+  scratchDirectories: string[];
   directories: string[];
   files: string[];
 }
@@ -92,16 +97,17 @@ export function spawnEngineChild(command: string, args: string[], options: {
   const child = spawn(launch.command, launch.args, {
     ...options, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   });
-  let installed = false, failure: string | undefined;
+  let installed = false, failure: string | undefined, waiting: string | undefined;
   observeEngineChildBoundary(child, launch.receiptPath, (receipt) => {
-    if (receipt.kind === 'installed') installed = true;
+    if (receipt.kind === 'installed') { installed = true; waiting = undefined; }
+    else if (receipt.kind === 'waiting') waiting = receipt.message;
     else failure = receipt.message;
   });
   const stop = (): void => {
     try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* owned group already closed */ }
   };
   child.once('close', stop);
-  return { child, stop, boundaryError: () => failure ?? (installed ? undefined
+  return { child, stop, boundaryError: () => failure ?? waiting ?? (installed ? undefined
     : 'ENGINE_WRITE_BOUNDARY_UNVERIFIED: launcher closed without enforcement receipt; child fate is unknown') };
 }
 export function engineChildAdapterHome(): string | undefined {
@@ -112,6 +118,15 @@ const inside = (root: string, path: string): boolean => {
   const rel = relative(root, path);
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
 };
+
+/** Disposable IPC must not survive a killed parent inside a durable tree.
+ * Resolve both roots physically; a lexical alias cannot change the purpose. */
+function requireSeparateScratch(input: Pick<EngineWriteBoundaryInput, 'projectDir' | 'runDir'>, scratch: string): void {
+  const temporary = realpathSync(scratch);
+  if ([input.projectDir, input.runDir].map(root => realpathSync(root)).some(root => inside(root, temporary) || inside(temporary, root))) {
+    throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: TMPDIR/temporary capability must be separate from durable project/run trees');
+  }
+}
 
 /** Namespace ownership is evaluated anew before each actual subprocess launch.
  * Parents are entries, not recursive grants; only wholly owned trees recurse. */
@@ -168,7 +183,15 @@ export function confineEngineChild(command: string, args: string[], newSession =
 export function observeEngineChildBoundary(child: ChildProcess, receiptPath: string | undefined, observe: (receipt: EngineChildBoundaryReceipt) => void): void {
   if (!receiptPath) return;
   const pipe = child.stdio[3] as Readable | null;
-  let pending = '', failed = false;
+  let pending = '', failed = false, installed = false;
+  let waiting: string | undefined;
+  const policy = activeBoundary.getStore();
+  const environmentEvent = (type: 'stage_environment_wait_started' | 'stage_environment_wait_finished', detail: string): void => {
+    if (!policy) return;
+    const event: RunEvent = { type, runId: basename(policy.input.runDir), stageId: policy.input.stageId,
+      attemptIndex: policy.input.attemptIndex, timestamp: new Date().toISOString(), detail, status: 'running' };
+    appendTextRecord(join(policy.input.runDir, 'events.jsonl'), JSON.stringify(event));
+  };
   const refuse = (error: unknown): void => {
     if (failed) return;
     failed = true;
@@ -183,6 +206,15 @@ export function observeEngineChildBoundary(child: ChildProcess, receiptPath: str
     for (const line of lines) {
       try {
         const receipt = parseEngineChildBoundaryReceipt(line, child.pid);
+        if (receipt.kind === 'waiting') {
+          if (installed) throw new Error('prerequisite wait after enforcement');
+          if (waiting !== receipt.message) environmentEvent('stage_environment_wait_started', receipt.message);
+          waiting = receipt.message;
+        } else if (receipt.kind === 'installed') {
+          installed = true;
+          if (waiting) environmentEvent('stage_environment_wait_finished', 'Prerequisite cleared; renewed enforcement installed before execution');
+          waiting = undefined;
+        }
         mkdirSync(dirname(receiptPath), { recursive: true });
         appendTextRecord(receiptPath, JSON.stringify({ at: new Date().toISOString(), childPid: child.pid, ...receipt }));
         observe(receipt);
@@ -200,7 +232,21 @@ export function parseEngineChildBoundaryReceipt(line: string, childPid?: number)
   if (receipt.kind === 'installed' && 'abi' in receipt && typeof receipt.abi === 'number' && receipt.abi >= 3 &&
     'pid' in receipt && typeof receipt.pid === 'number' && receipt.pid === childPid &&
     'fileCapabilities' in receipt && Number.isInteger(receipt.fileCapabilities) &&
-    'directoryCapabilities' in receipt && Number.isInteger(receipt.directoryCapabilities)) return receipt as EngineChildBoundaryReceipt;
+    'directoryCapabilities' in receipt && Number.isInteger(receipt.directoryCapabilities)) {
+    if ('scopes' in receipt) {
+      const expected = receipt.abi >= 6 ? 'enforced' : 'unavailable';
+      const scopes = receipt.scopes;
+      if (!scopes || typeof scopes !== 'object' ||
+        !('signal' in scopes) || scopes.signal !== expected ||
+        !('abstractUnixSocket' in scopes) || scopes.abstractUnixSocket !== expected) {
+        throw new Error('invalid launcher scope receipt');
+      }
+    }
+    return receipt as EngineChildBoundaryReceipt;
+  }
+  if (receipt.kind === 'waiting' && 'phase' in receipt && receipt.phase === 'pre_execution' &&
+    'pid' in receipt && typeof receipt.pid === 'number' && receipt.pid === childPid &&
+    'message' in receipt && typeof receipt.message === 'string') return receipt as EngineChildBoundaryReceipt;
   if (receipt.kind === 'refused' && 'message' in receipt && typeof receipt.message === 'string') return receipt as EngineChildBoundaryReceipt;
   if (receipt.kind === 'spawn_error' && 'message' in receipt && typeof receipt.message === 'string' &&
     'syscall' in receipt && typeof receipt.syscall === 'string' && 'path' in receipt && typeof receipt.path === 'string' &&
@@ -247,7 +293,10 @@ export function execEngineChildSync(command: string, args: string[], timeout: nu
 export function withEngineWriteBoundaryDirectory<T>(directory: string, action: () => T): T {
   const policy = activeBoundary.getStore();
   if (!policy) throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: replay launch has no stage authority');
-  return activeBoundary.run({ ...policy, directories: [...policy.directories, realpathSync(directory)] }, action);
+  const scratch = realpathSync(directory);
+  requireSeparateScratch(policy.input, scratch);
+  return activeBoundary.run({ ...policy, directories: [...policy.directories, scratch],
+    scratchDirectories: [...policy.scratchDirectories, scratch] }, action);
 }
 
 /** Positive native capabilities for the child's entire lifetime. Shared history
@@ -289,6 +338,7 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
     files.push(path);
   };
   try {
+    requireSeparateScratch({ projectDir: project, runDir: run }, scratch);
     for (const name of ['tmp', 'cache', 'state', 'npm']) mkdirSync(join(scratch, name));
     for (const artifact of contract.produces) {
       if (artifact.root !== 'run') continue; // project scopes retain their live monitor
@@ -316,7 +366,7 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
       const directory = join(run, 'stages', owner, 'codex_home');
       makeDirectory(directory); directories.push(directory);
     }
-    return await activeBoundary.run({ input, scratch, directories, files }, action);
+    return await activeBoundary.run({ input, scratch, scratchDirectories: [scratch], directories, files }, action);
   } finally {
     for (const previous of created) {
       try {

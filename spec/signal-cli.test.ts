@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const COLD_START_READY_TIMEOUT_MS = 45_000;
@@ -61,9 +62,11 @@ describe('flowcrew start signal lifecycle', () => {
       }
       mkdirSync(join(projectDir, 'config'), { recursive: true });
       writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'adapter: mock\n', 'utf-8');
+      const listenerPolicyUrl = pathToFileURL(join(process.cwd(), 'spec', 'test-support', 'loopback-listen.mjs')).href;
+      const listenerPreload = `import { installLoopbackListenFence } from ${JSON.stringify(listenerPolicyUrl)}; installLoopbackListenFence('signal-cli.test.ts');`;
       const child = spawn(
         process.execPath,
-        [join(process.cwd(), 'dist', 'cli.js'), 'start'],
+        ['--import', `data:text/javascript,${encodeURIComponent(listenerPreload)}`, join(process.cwd(), 'dist', 'cli.js'), 'start'],
         {
           cwd: process.cwd(),
           env: {

@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { join, resolve } from 'node:path';
 import type { LiveConstraintContentIdentity } from './live-constraint-guard.js';
 import { ArtifactContractSchema, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import type { StageStatus } from './store.js';
@@ -25,6 +26,8 @@ export interface StageArtifactContractAudit {
   stageId: string;
   checkedAt: string;
   completionDeferred?: boolean;
+  /** Engine-owned production identity; archived observations alone grant nothing. */
+  production?: StageArtifactProduction;
   /** Legacy advisories stay readable, but no new prose inference produces them. */
   advisories?: Array<{ mention: string; reason: string }>;
   replayVerification?: 'pending' | 'verified' | 'refused' | 'not_requested';
@@ -34,6 +37,33 @@ export interface StageArtifactContractAudit {
   observations?: Array<{ id: string; path: string; kind: 'file' | 'directory'; bytes: number; members?: number; sha256: string; fresh: boolean }>;
   replayExecutions: StageArtifactReplayExecution[];
   violations: StageArtifactContractViolation[];
+}
+
+export interface StageArtifactProduction {
+  runId: string;
+  projectDir: string;
+  runDir: string;
+  declarationDigest: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+}
+
+/** Content may survive an execution; its admitted duties must survive as well.
+ * Deleting freshness would accept unrelated preexisting files. One binding on
+ * the protected audit replaces the suspension-only path exception. */
+export function stageArtifactProduction(input: StageArtifactContractInput & {
+  runId: string; attemptIndex: number; attemptStartedAt: string;
+  planRevision?: { revision: number; digest: string };
+}): StageArtifactProduction {
+  return {
+    runId: input.runId, projectDir: resolve(input.projectDir), runDir: resolve(input.runDir),
+    declarationDigest: createHash('sha256').update(JSON.stringify({
+      stageId: input.stageId, template: input.template, isGate: input.isGate === true,
+      planRevision: input.planRevision ? { revision: input.planRevision.revision, digest: input.planRevision.digest } : null,
+      contract: ArtifactContractSchema.parse(input.artifactContract),
+    })).digest('hex'),
+    attemptIndex: input.attemptIndex, attemptStartedAt: input.attemptStartedAt,
+  };
 }
 
 export interface StageArtifactReplayExecution {
@@ -74,6 +104,9 @@ export interface StageArtifactContractInput {
   runDir: string;
   writes?: readonly string[];
   preimages?: readonly StageArtifactContractPreimage[];
+  /** Verified by the worker from its protected prior audit and attempt ledger. */
+  priorProducedArtifacts?: readonly StageArtifactContractPreimage[];
+  /** Legacy caller surface, retained but never an authorization. */
   priorProducedPromptArtifacts?: readonly string[];
   artifactContract?: ArtifactContract;
   statuses?: Record<string, StageStatus>;
