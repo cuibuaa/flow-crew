@@ -12,7 +12,7 @@ prompt: |
   The campaign goal (objective) and the available executors are given in the task. Two atoms
   ground your proposal:
 
-  Directions already tried in this campaign (with results) + dead ends:
+  Directions already tried in this campaign (with results):
   {ledger_digest}
 
   Data / code assets already on disk (the world-model — NOT a list to acquire):

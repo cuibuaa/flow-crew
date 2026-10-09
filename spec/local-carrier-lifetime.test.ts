@@ -171,10 +171,10 @@ describe('engine-owned local carrier lifetime', () => {
     const f = fixture();
     await withEngineWriteBoundary({ ...f, stageId: '_supervisor', authority: 'observer', artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [], reads: [], replays: [] }) }, async () => {
       const result = await execWithStdin(process.execPath, ['-e', child(`
-        const refused=[];for(const name of ${JSON.stringify([join(f.projectDir, 'unexpected'), join(f.runDir, RUN_HISTORY_FILE), join(f.runDir, 'knowledge_graph.json'), join(f.runDir, 'stages/_supervisor/approval_request.json')])}){try{fs.writeFileSync(name,'bad');refused.push(false)}catch(e){refused.push(e.code==='EACCES')}}
+        const refused=[];for(const name of ${JSON.stringify([join(f.projectDir, 'unexpected'), join(f.runDir, RUN_HISTORY_FILE), join(f.runDir, 'stages/_supervisor/approval_request.json')])}){try{fs.writeFileSync(name,'bad');refused.push(false)}catch(e){refused.push(e.code==='EACCES')}}
         fs.writeFileSync(${JSON.stringify(join(f.runDir, 'stages/_supervisor/codex_home/private'))},'private');console.log(JSON.stringify(refused));
       `)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
-      expect(result.exitCode).toBe(0); expect(result.writeBoundary?.kind).toBe('installed'); expect(JSON.parse(result.output)).toEqual([true, true, true, true]);
+      expect(result.exitCode).toBe(0); expect(result.writeBoundary?.kind).toBe('installed'); expect(JSON.parse(result.output)).toEqual([true, true, true]);
     });
   });
 
@@ -247,10 +247,10 @@ describe('auxiliary command carrier boundaries', () => {
     expect(result.error).toContain('hard-link closure is unknown'); expect(existsSync(join(f.projectDir, 'ran'))).toBe(false);
   });
 
-  native('gives project commands no request or knowledge-graph publication rights', async () => {
+  native('gives project commands no request publication rights', async () => {
     const f = fixture();
     await withEngineCommandBoundary({ projectDir: f.projectDir, runDir: f.runDir, stageId: '_validation' }, async () => {
-      const result = await execWithStdin(process.execPath, ['-e', child(`for(const p of ${JSON.stringify([join(f.runDir, 'knowledge_graph.json'), join(f.runDir, 'stages/_validation/approval_request.json')])}){try{fs.writeFileSync(p,'bad');process.exitCode=9}catch(e){if(e.code!=='EACCES')throw e}}`)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
+      const result = await execWithStdin(process.execPath, ['-e', child(`for(const p of ${JSON.stringify([join(f.runDir, 'stages/_validation/approval_request.json')])}){try{fs.writeFileSync(p,'bad');process.exitCode=9}catch(e){if(e.code!=='EACCES')throw e}}`)], '', { cwd: f.projectDir, timeout_ms: 5_000 });
       expect(result.exitCode).toBe(0); expect(result.writeBoundary?.kind).toBe('installed');
     });
   });

@@ -30,7 +30,6 @@ function fixture(status: string): RunDetailData {
         ? [{ index: 1, status: "failed", startedAt: "2026-01-01T00:00:00.000Z", duration_ms: 1_000 }]
         : [{ index: 1, status: "complete", startedAt: "2026-01-01T00:00:00.000Z", duration_ms: 1_000 }],
     }],
-    kg: { nodes: [{ id: "internal", type: "finding", label: "planner-only finding" }], edges: [] },
     events: [
       { ts: "2026-01-01T00:00:00.000Z", event: "stage_complete", stage: "implementation" },
       { ts: "2026-01-01T00:00:01.000Z", event: "attempt_summary_refresh_requested" },
@@ -99,7 +98,6 @@ describe("run-page canonical scenes", () => {
       ...fixture("complete"),
       stages: [...fixture("complete").stages, { id: "_supervisor", role: "supervisor", depends_on: [], status: "complete", tokens_in: 50, tokens_out: 25 }],
     });
-    expect(out).not.toContain("planner-only finding");
     expect(out).not.toContain("_supervisor");
     expect(out).not.toContain("events.jsonl");
     expect(out).not.toContain("stage_complete");

@@ -12,7 +12,7 @@ prompt: |
 
   The campaign goal/problem is in the task. Two atoms ground you:
 
-  Directions already tried (with results) + dead ends — do NOT re-surface these:
+  Directions already tried (with results) — do NOT re-surface these:
   {ledger_digest}
 
   Data / code assets already on disk (what a candidate may use — NOT a list to acquire):

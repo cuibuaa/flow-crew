@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { runDir, stageDir } from './store.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 
-export type TraceEventType = 'llm_call' | 'tool_use' | 'web_search' | 'file_read' | 'file_write' | 'kg_update';
+export type TraceEventType = 'llm_call' | 'tool_use' | 'web_search' | 'file_read' | 'file_write';
 
 export interface TraceEvent {
   timestamp: string;
@@ -15,7 +15,6 @@ export interface TraceEvent {
   tokensOut?: number;
   costUsd?: number;
   durationMs: number;
-  kgNodesAdded?: string[];
 }
 
 function tracePath(projectDir: string, runId: string, stageId: string): string {

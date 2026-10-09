@@ -361,7 +361,6 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
         fileSlot(join(run, 'stages', input.stageId, name));
       }
       if (!input.structuredResult) fileSlot(join(run, `handoff_${input.stageId}.md`));
-      fileSlot(join(run, 'knowledge_graph.json'));
     }
     for (const owner of new Set([input.stageId, input.sessionOwnerStageId].filter((id): id is string => id !== undefined))) {
       if (!/^_?[a-z][a-z0-9_]*$/.test(owner)) throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: invalid adapter-home stage identity');

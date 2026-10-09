@@ -13,7 +13,7 @@ let homeDir: string;
 let oldHome: string | undefined;
 let runId: string;
 
-const runDetail = z.object({ runId: z.string(), projectDir: z.string(), workflowName: z.string(), status: z.string(), stages: z.array(z.any()), kg: z.object({ nodes: z.array(z.any()), edges: z.array(z.any()) }), events: z.array(z.any()), stage_outputs: z.record(z.string(), z.string()) });
+const runDetail = z.object({ runId: z.string(), projectDir: z.string(), workflowName: z.string(), status: z.string(), stages: z.array(z.any()), events: z.array(z.any()), stage_outputs: z.record(z.string(), z.string()) });
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, JSON.stringify(value, null, 2), "utf-8");
@@ -58,6 +58,7 @@ describe("workspace API contract", () => {
     const runs = await app.inject({ method: "GET", url: `/api/runs/${runId}` });
     expect(runs.statusCode).toBe(200);
     runDetail.parse(runs.json());
+    expect(runs.json()).not.toHaveProperty('kg');
     expect(z.array(z.any()).parse((await app.inject({ method: "GET", url: "/api/standalone-runs" })).json())).toBeDefined();
     const agents = (await app.inject({ method: "GET", url: "/api/agents" })).json();
     expect(agents[0]).not.toHaveProperty("model");

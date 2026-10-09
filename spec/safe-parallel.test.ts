@@ -23,7 +23,6 @@ import {
   type WriteAttribution,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { writeKG } from '../src/knowledge-graph.js';
 
 let projectDir: string;
 
@@ -129,8 +128,6 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
   ].join('\n');
   const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
-  const now = new Date().toISOString();
-  writeKG(projectDir, created.runId, { nodes: [], edges: [], metadata: { createdAt: now, updatedAt: now } });
   writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   mkdirSync(join(projectDir, 'src'), { recursive: true });
 
@@ -363,8 +360,8 @@ describe('safe scope batching', () => {
   });
 
   it('preserves an identical ../ factual write in both the event and summary warning', async () => {
-    const reported = '../fc-home/runs/example/./knowledge_graph.json';
-    const canonical = '../fc-home/runs/example/knowledge_graph.json';
+    const reported = '../fc-home/runs/example/./notes.json';
+    const canonical = '../fc-home/runs/example/notes.json';
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], [reported]);
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
     expect(measured.maxActive).toBe(2);
@@ -379,7 +376,7 @@ describe('safe scope batching', () => {
   });
 
   it('requires structured evidence from both sides across every attribution pairing', () => {
-    const shared = '../fc-home/runs/example/knowledge_graph.json';
+    const shared = '../fc-home/runs/example/notes.json';
     const attributions: WriteAttribution[] = ['structured', 'snapshot', 'unknown'];
     const outcomes: Record<string, string[]> = {};
     for (const leftAttribution of attributions) {

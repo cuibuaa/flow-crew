@@ -91,24 +91,7 @@ describe('readAllTraceEvents', () => {
   });
 });
 
-// 4. kgNodesAdded field is preserved
-describe('kgNodesAdded field', () => {
-  it('preserves kgNodesAdded through write/read cycle', () => {
-    const event = makeEvent({ kgNodesAdded: ['node-1', 'node-2', 'node-3'] });
-    appendTraceEvent(projectDir, runId, 'stage-1', event);
-    const events = readTraceEvents(projectDir, runId, 'stage-1');
-    expect(events[0].kgNodesAdded).toEqual(['node-1', 'node-2', 'node-3']);
-  });
-
-  it('handles event without kgNodesAdded', () => {
-    const event = makeEvent();
-    appendTraceEvent(projectDir, runId, 'stage-1', event);
-    const events = readTraceEvents(projectDir, runId, 'stage-1');
-    expect(events[0].kgNodesAdded).toBeUndefined();
-  });
-});
-
-// 5. summarizeTrace computes correct totals
+// 4. summarizeTrace computes correct totals
 describe('summarizeTrace', () => {
   it('returns zeroed summary for empty events', () => {
     const summary = summarizeTrace([]);
@@ -125,7 +108,7 @@ describe('summarizeTrace', () => {
       makeEvent({ type: 'llm_call', tokensIn: 100, tokensOut: 50, costUsd: 0.01, durationMs: 200 }),
       makeEvent({ type: 'llm_call', tokensIn: 200, tokensOut: 100, costUsd: 0.02, durationMs: 300 }),
       makeEvent({ type: 'tool_use', tokensIn: 10, tokensOut: 5, costUsd: 0.001, durationMs: 50 }),
-      makeEvent({ type: 'kg_update', durationMs: 20 }),
+      makeEvent({ type: 'file_write', durationMs: 20 }),
     ];
     const summary = summarizeTrace(events);
     expect(summary.totalEvents).toBe(4);
@@ -133,6 +116,6 @@ describe('summarizeTrace', () => {
     expect(summary.totalTokensOut).toBe(155);
     expect(summary.totalCostUsd).toBeCloseTo(0.031);
     expect(summary.totalDurationMs).toBe(570);
-    expect(summary.byType).toEqual({ llm_call: 2, tool_use: 1, kg_update: 1 });
+    expect(summary.byType).toEqual({ llm_call: 2, tool_use: 1, file_write: 1 });
   });
 });

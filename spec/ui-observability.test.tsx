@@ -18,7 +18,6 @@ function runDetail(stage: RunStage, extra: Partial<RunDetailData> = {}): RunDeta
     workflowName: "observability-test",
     status: "complete",
     stages: [stage],
-    kg: { nodes: [], edges: [] },
     events: [],
     stage_outputs: {},
     ...extra,

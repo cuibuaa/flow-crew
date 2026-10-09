@@ -3,7 +3,6 @@ import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { isSessionReuseEnabled } from '../../config.js';
-import { readKG, summarizeKG } from '../../knowledge-graph.js';
 import { LiveConstraintGuardFactory } from '../../live-constraint-guard.js';
 import { recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
@@ -305,11 +304,6 @@ export async function executeSingleStage(
       });
     } catch { /* non-fatal */ }
   } catch { /* status file missing — should not happen */ }
-
-  // After stage completion, check for KG updates
-  try {
-    readKG(state.projectDir, state.runId);
-  } catch { /* no KG yet, that's fine */ }
   return result;
 }
 
@@ -322,11 +316,6 @@ export function appendStageExecutionContracts(
   state: Pick<StoreState, 'research' | 'terminalStates'>,
   projectDir: string, runId: string, runDirPath: string,
 ): string {
-  try {
-    const kgSummary = summarizeKG(readKG(projectDir, runId));
-    if (kgSummary) resolvedPrompt = kgSummary + '\n\n' + resolvedPrompt;
-  } catch { /* no KG yet */ }
-
   resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
   resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
   resolvedPrompt = appendResearchTemporalPathContract(resolvedPrompt, state.research, state.terminalStates);

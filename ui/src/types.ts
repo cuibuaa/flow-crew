@@ -239,32 +239,6 @@ export interface InboxOverview {
   campaignCount: number | null;
 }
 
-export interface CampaignKGNode {
-  id: string;
-  type: string;
-  label?: string;
-  text?: string;
-  score?: number;
-  timestamp?: string;
-  meta?: string;
-  source?: string;
-  runId?: string;
-  campaign?: string;
-  campaignId?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface CampaignKGEdge {
-  id?: string;
-  source?: string;
-  target?: string;
-  from?: string;
-  to?: string;
-  kind?: string;
-  relation?: string;
-  type?: string;
-}
-
 export interface RunStage {
   id: string;
   role: string;
@@ -383,7 +357,6 @@ export interface RunDetailData {
   stageHistory?: RunStageHistory[];
   budget?: { tokens: { knownInputTokens: number; knownOutputTokens: number; complete: boolean } };
   supervisor?: SupervisorUsage;
-  kg: { nodes: CampaignKGNode[]; edges: CampaignKGEdge[] };
   events: RunEvent[];
   operational?: OperationalProjection;
   stage_outputs: Record<string, string>;

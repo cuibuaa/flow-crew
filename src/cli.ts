@@ -1925,7 +1925,6 @@ function cmdExport() {
     }
     bundle.stages = stages;
   }
-  try { bundle.knowledgeGraph = JSON.parse(readFileSync(join(runDir, 'knowledge_graph.json'), 'utf-8')); } catch { /* non-critical */ }
   try { bundle.supervisorLog = readFileSync(join(runDir, 'supervisor_log.md'), 'utf-8'); } catch { /* non-critical */ }
   try { bundle.progress = readFileSync(join(runDir, 'progress.md'), 'utf-8'); } catch { /* non-critical */ }
   try { bundle.dispatch = readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8'); } catch { /* non-critical */ }

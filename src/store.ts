@@ -157,7 +157,6 @@ export interface StageStatus {
   error?: string;
   tokens_in?: number;
   tokens_out?: number;
-  kgChanged?: boolean;
   /** Append-only execution ledger. Top-level timing/token fields aggregate this array. */
   attempts?: StageAttempt[];
   /** Number of executions after the first; deliberately distinct from technical retries. */
@@ -1918,7 +1917,6 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   adapterFailureKind?: AdapterFailureKind;
   tokens_in?: number;
   tokens_out?: number;
-  kgChanged?: boolean;
   writes?: string[];
   writeAttribution?: WriteAttribution;
   validationGeneratedWrites?: string[];
@@ -2000,7 +1998,6 @@ export function completedStageAttemptStatus(
     error: completion.suspended ? undefined : completion.error,
     tokens_in: sumAttemptField(attempts, 'tokens_in'),
     tokens_out: sumAttemptField(attempts, 'tokens_out'),
-    kgChanged: previous?.kgChanged === true || completion.kgChanged === true,
     attempts,
     reruns: Math.max(0, attempts.length - 1),
     writes,

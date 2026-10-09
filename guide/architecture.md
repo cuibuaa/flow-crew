@@ -12,10 +12,10 @@ brief
   -> QA gates write verdicts
   -> fix stages repair failures and gates re-evaluate
   -> supervisor observes and can guide, abort, replan, or mark early success
-  -> run summary and knowledge graph are persisted
+  -> run summary is persisted
 ```
 
-The supervisor is backend-driven. It uses the configured adapter and model, reads run state, stage output, and knowledge graph updates, then emits steering signals. It never edits code or runs shell commands directly.
+The supervisor is backend-driven. It uses the configured adapter and model, reads run state and stage output, then emits steering signals. It never edits code or runs shell commands directly.
 
 ## Process supervision and platform behaviour
 
@@ -56,7 +56,7 @@ This keeps one implementation execution from being treated as a final answer.
 The outer loop handles campaign-level convergence:
 
 - Related runs share campaign history.
-- Metrics, failures, and dead ends are carried forward.
+- Metrics, failures, and tried directions are carried forward.
 - Regressions and plateaus can force a different strategy.
 - Later planners receive context about approaches already tried.
 
@@ -70,7 +70,6 @@ Runs live under the global FlowCrew directory so one dashboard can show every pr
 ~/.fc/runs/<runId>/run.json
 ~/.fc/runs/<runId>/task_brief.md
 ~/.fc/runs/<runId>/dispatch.yaml
-~/.fc/runs/<runId>/knowledge_graph.json
 ~/.fc/runs/<runId>/events.jsonl
 ~/.fc/runs/<runId>/progress.md
 ~/.fc/runs/<runId>/supervisor_log.md

@@ -40,7 +40,7 @@ A complete autonomous loop needs exactly eight primitives. Four already exist as
 | **Candidate** | one proposed unit → artifact(s) + a schema-validated result | a mechanism → `round_result` | a change → `{build_ok, tests_passed, ac_status[]}` | implicit → **promote to first-class** |
 | **Verdict (Check)** | a deterministic pass/fail + score on an artifact | 9 gates + gate-gated metric | build / tests / reality-gate checks | ✅ reality-gate atoms |
 | **Policy** | `(history of verdicts) → continue \| ship \| stop` | best_of_n + beat/halt + significance margin | ship-when-AC-pass; fix-and-retry; stuck→escalate after N no-progress | ✅ research-policy → **generalize to `LoopPolicy`** |
-| **Ledger** | append-only `{candidate, verdict, decision, scope}`; the frontier | tried directions + results | tried approaches + dead-ends + failing tests | partial (KG + campaign entries) → **promote + inject** |
+| **Ledger** | append-only `{candidate, verdict, decision, scope}`; the frontier | tried directions + results | tried approaches + dead-ends + failing tests | partial (research journals + campaign entries) → **promote + inject** |
 | **Context** | the world-model: available data/code/tools + prior work | data inventory + prior V's | repo map + tool list + test suite | ❌ brief hand-feeds → **auto-inventory atom** |
 | **Terminal / Escalation** | the done/stuck/blocked vocabulary + the operator-handoff contract | shipped / ceiling / need-new-data | shipped / blocked / needs-decision | ✅ terminal-vocab → **add escalation contract** |
 | **Role** | an executor that realizes a candidate (planner composes, roles execute) | researcher / implementer / qa | coder / reviewer / qa / doc_* | ✅ full set kept |
@@ -50,7 +50,7 @@ A complete autonomous loop needs exactly eight primitives. Four already exist as
 - **Objective** (brief frontmatter / `contract.yaml`): `{ kind: metric|acceptance, done: <condition>, progress: <how the policy reads progress>, ... }`. Research `kind: metric` reuses today's `baseline/beat/higher_is_better/margin`. Engineering `kind: acceptance` lists the checks that constitute "done."
 - **Candidate**: `{ label, artifacts: [...], result }` where `result` conforms to the brief's `result_schema` atom (already single-sourced + engine-validated per iteration).
 - **Policy**: a registered descriptor (like `RESEARCH_POLICIES`) exposing `decide(history, objective) → {action, reason}`. Research and engineering register different policies; the engine calls the same interface.
-- **Ledger**: typed view over `knowledge-graph.json` + campaign entries; injected as `{ledger_digest}` (compact "what's been tried + verdict") — always-on even under `--no-inherit-campaign` (it is the dedup ledger, not verbose narrative).
+- **Ledger**: typed view over each run's `research_journal.json` + campaign entries; injected as `{ledger_digest}` (compact "what's been tried + verdict") — always-on even under `--no-inherit-campaign` (it is the dedup ledger, not verbose narrative).
 - **Context**: engine scans configurable `context_roots` (default `data/`, the repo) → `{context_inventory}` (paths/schemas/tools + `prior_work_digest`). The proposer must consult it before signposting "acquire X."
 - **Terminal/Escalation**: a `blocked`/`needs_decision` terminal carries `escalation: { blocked_on, needed, options }` for a clean operator handoff.
 
@@ -90,7 +90,7 @@ runLoop(objective, policy, context, ledger, scope):
 | Candidate | `round_result.json` + `result_schema` | promote to a typed loop concept |
 | Verdict | `reality-gate/checks/*` + `evaluateResearch` gate | keep; reuse for engineering checks |
 | Policy | `research-policy.ts` (`RESEARCH_POLICIES`) | generalize → `LoopPolicy` registry |
-| Ledger | `knowledge-graph.ts` + `campaigns.ts:writeCampaignEntry` | typed view + `{ledger_digest}` injection |
+| Ledger | `campaign-ledger.ts` (research journals) + `campaigns.ts:writeCampaignEntry` | typed view + `{ledger_digest}` injection |
 | Context | — (brief hand-fed) | NEW `data-inventory.ts` + `campaign-ledger.ts` |
 | Terminal | `store.ts` TERMINAL_STATUSES | add escalation contract |
 | Role | `config/agents/*` + roleRegistry | keep |

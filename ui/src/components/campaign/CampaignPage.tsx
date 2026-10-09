@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchOlderCampaignRuns } from "./client";
 import { formatDuration, formatTokens, statusClass } from "./format";
-import { BriefHistoryDisclosure, ResearchKnowledgeSummary } from "./LazyEvidence";
+import { BriefHistoryDisclosure } from "./LazyEvidence";
 import RunTitleDisclosure from "./RunTitleDisclosure";
 import SourceNotice, { IssueNotice } from "./SourceNotice";
 import { simulationSource } from "../../lib/simulation-source";
@@ -92,8 +92,7 @@ function ResearchGroup({ group }: { group: ResearchMetricGroup }) {
   );
 }
 
-function ResearchPanel({ campaignId, source }: { campaignId: string; source: SourceResult<ResearchNarrative | null> }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
+function ResearchPanel({ source }: { source: SourceResult<ResearchNarrative | null> }) {
   return (
     <div className="campaign-conclusion-panel" data-testid="research-conclusion">
       <h3>Research measurements</h3>
@@ -103,11 +102,10 @@ function ResearchPanel({ campaignId, source }: { campaignId: string; source: Sou
       ) : null}
       {source.value?.selected ? <ResearchGroup group={source.value.selected} /> : <ErrorOrEmpty unavailable={source.status === "unavailable"} empty="No accepted measurement evidence" />}
       {source.value ? (
-        <details className="campaign-evidence-details" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+        <details className="campaign-evidence-details">
           <summary>Research evidence details</summary>
           {source.value.otherMetrics.map((group) => <ResearchGroup group={group} key={group.metricKey} />)}
           {source.value.confirmNotes.map((note) => <p className="campaign-negative-note" key={note}>{note}</p>)}
-          <ResearchKnowledgeSummary campaignId={campaignId} active={detailsOpen} />
         </details>
       ) : null}
     </div>
@@ -170,9 +168,9 @@ function Conclusions({ view }: { view: CampaignOperatorView }) {
         </div>
       ) : null}
       <div className={`campaign-conclusion-layout ${kind}`}>
-        {(kind === "research" || kind === "mixed") ? <ResearchPanel campaignId={view.identity.id} source={view.research} /> : null}
+        {(kind === "research" || kind === "mixed") ? <ResearchPanel source={view.research} /> : null}
         {(kind === "engineering" || kind === "mixed") ? <EngineeringPanel source={view.engineering} /> : null}
-        {kind === "unknown" && view.research.value ? <ResearchPanel campaignId={view.identity.id} source={view.research} /> : null}
+        {kind === "unknown" && view.research.value ? <ResearchPanel source={view.research} /> : null}
         {kind === "unknown" && view.engineering.value ? <EngineeringPanel source={view.engineering} /> : null}
       </div>
     </section>

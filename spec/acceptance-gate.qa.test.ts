@@ -15,7 +15,6 @@ import {
   formatCampaignContextBlock,
   selectRelevantCampaignContext,
 } from '../src/campaign-context.js';
-import { summarizeLedger } from '../src/campaign-ledger.js';
 import type { CampaignHistoryEntry } from '../src/campaigns.js';
 import { startDashboard } from '../src/dashboard.js';
 import {
@@ -59,48 +58,6 @@ describe('acceptance gate: campaign relevance boundaries', () => {
 
     expect(selection.recommendedPhase).toBeUndefined();
     expect(formatCampaignContextBlock({ campaignLabel: 'finished-chain', selection })).toBe('');
-  });
-
-  it('keeps every deduplicated dead end even when tried directions are capped to one', () => {
-    const sandbox = mkdtempSync(join(tmpdir(), 'flowcrew-acceptance-ledger-'));
-    const previousFcDir = fcGlobalDir();
-    const projectDir = join(sandbox, 'project');
-    const campaignId = 'uncapped-dead-ends';
-    const runId = 'terminal-ledger-run';
-    try {
-      setFcGlobalDir(join(sandbox, 'fc-home'));
-      mkdirSync(join(projectDir, '.fc', 'campaigns'), { recursive: true });
-      writeFileSync(
-        join(projectDir, '.fc', 'campaigns', `${campaignId}.jsonl`),
-        `${JSON.stringify(campaignEntry({ runId, kind: 'task_ended', status: RUN_STATUS.COMPLETE }))}\n`,
-        'utf-8',
-      );
-      const runPath = join(runsRoot(), runId);
-      mkdirSync(runPath, { recursive: true });
-      writeFileSync(join(runPath, 'research_journal.json'), JSON.stringify({
-        rounds: [
-          { label: 'first tried direction', result: 1 },
-          { label: 'second tried direction', result: 2 },
-        ],
-      }), 'utf-8');
-      const deadEnds = Array.from({ length: 25 }, (_, index) => `durable dead end ${index + 1}`);
-      writeFileSync(join(runPath, 'knowledge_graph.json'), JSON.stringify({
-        nodes: [
-          ...deadEnds.map((text) => ({ type: 'dead_end', text })),
-          { type: 'dead_end', text: deadEnds[0] },
-        ],
-      }), 'utf-8');
-
-      const digest = summarizeLedger(projectDir, campaignId, { cap: 1 });
-
-      expect(digest).toContain('first tried direction');
-      expect(digest).not.toContain('second tried direction');
-      for (const deadEnd of deadEnds) expect(digest).toContain(`- ${deadEnd}`);
-      expect(digest).toContain(`Dead ends (${deadEnds.length} — avoid)`);
-    } finally {
-      setFcGlobalDir(previousFcDir);
-      rmSync(sandbox, { recursive: true, force: true });
-    }
   });
 });
 

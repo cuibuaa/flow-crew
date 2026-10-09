@@ -100,8 +100,7 @@ jobs:
               node ./node_modules/vitest/vitest.mjs run \
                 spec/spec-purity.test.ts \
                 spec/test-isolation.test.ts \
-                spec/rehearse-isolation.test.ts \
-                spec/run-artifact-isolation.test.ts
+                spec/rehearse-isolation.test.ts
             '
 
   # Supervision is a two-axis matrix: whether a service manager is present, and

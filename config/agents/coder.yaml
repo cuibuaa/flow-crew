@@ -35,6 +35,5 @@ prompt: |
   - `{run_dir}/tech_solution.md` — planner's analysis
   - `{run_dir}/verdict_<gate_id>.json` + `{run_dir}/stages/<gate_id>/output.md` — when fixing a gate failure
   - `{run_dir}/stages/<upstream_id>/output.md` — Context from prior stages in your prompt header
-  - `{run_dir}/knowledge_graph.json` — existing findings / dead-ends; do NOT repeat dead-end approaches
   - On retry (prompt starts with "RETRY FIX (attempt N):") — read your own previous output at the path given and take a DIFFERENT approach
 

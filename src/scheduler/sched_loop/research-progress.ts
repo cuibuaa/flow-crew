@@ -1,13 +1,11 @@
 // Boundary: Publish iteration accounting, advance only fully settled research evidence, and dispatch admitted policy finalizers before deciding to continue.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
-import { ratchetCheck, updateMetadata } from '../../knowledge-graph.js';
 import { recordRunEvent } from '../../run-events.js';
 import { generateRunSummary } from '../../run-summary.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
 import { clearGateContinuationsForStages } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
-import { findCampaignMetric } from '../sched_policy/campaign.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
 import { anyFailed } from '../sched_scope/stage-group.js';
 import { collectGateRuntimeFacts, recoverVerifiedResearchSettlement, researchAdvanceEligible } from '../sched_settlement/gate-recovery.js';
@@ -40,23 +38,6 @@ export async function advanceSettledResearch(
     // Append iteration log
     appendIterationLog(projectDir, runId, iteration, state, iterationDispatchedIds, baseStages.map(s => s.id), innerRetriesUsed, maxInnerRetries);
     writeCampaignEntry(projectDir, state);
-
-    // Update KG metadata with campaign metric
-    try {
-      const metricForKG = findCampaignMetric(projectDir, state);
-      if (metricForKG) updateMetadata(projectDir, runId, metricForKG.score, metricForKG.metric);
-    } catch { /* non-fatal */ }
-
-    // Ratchet check: update knowledge graph with iteration score
-    try {
-      const metric = findCampaignMetric(projectDir, state);
-      if (metric) {
-        const result = ratchetCheck(projectDir, runId, metric.score, metric.metric, metric.gate);
-        log.info({ runId, iteration, improved: result.improved, score: metric.score, previousBest: result.previousBest }, 'Ratchet check completed');
-      }
-    } catch (err) {
-      log.warn({ runId, iteration, err }, 'Ratchet check failed (non-fatal)');
-    }
 
     recordRunEvent(projectDir, runId, {
       type: 'iteration_completed',

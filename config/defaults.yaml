@@ -102,5 +102,5 @@ supervisor:
   stuck_threshold_ms: 600000
 
 # Keep a stable campaign name when related tasks should inherit prior campaign
-# context and knowledge-graph findings instead of planning each task in isolation.
+# context and tried directions instead of planning each task in isolation.
 campaign: flow-crew-refactor-2026h2

@@ -102,10 +102,6 @@ themselves once the work runs longer than you are willing to sit and watch it.`,
     );
   });
 
-  it('preserves the inert source row verbatim', () => {
-    expect(readme).toContain('| `source` | an external reference cited during research | **nothing yet** — it is captured and stored, but no engine path or view reads it back |');
-  });
-
   it('preserves the crew-authority paragraph verbatim', () => {
     expect(readme).toContain(
       `**The same population of models writes the work,
@@ -146,7 +142,6 @@ constraints it derives from the goal. Nothing in the crew can lower it.`,
   it.each([
     ['node:sqlite', readme],
     ['ps -o lstart=', architecture],
-    ['0.815', readme],
   ])('preserves the concrete marker %s', (marker, document) => {
     expect(document).toContain(marker);
   });

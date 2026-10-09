@@ -486,10 +486,10 @@ Stage execution duration is configured only by
 fails with a migration hint instead of silently creating a second control.
 
 Campaign ownership and planner context are separate dimensions. `--no-campaign` makes the run fully
-standalone: it writes no campaign telemetry, contributes no campaign KG aggregation, and appears
-ungrouped in the dashboard. `--campaign-context=skip` keeps the run attached and grouped, but omits the
-verbose prior-run score/phase block from planner prompts. The compact deduplicated ledger, including all
-known dead ends, remains available. `--no-inherit-campaign` is retained only as a compatibility alias for
+standalone: it writes no campaign telemetry and appears ungrouped in the dashboard.
+`--campaign-context=skip` keeps the run attached and grouped, but omits the verbose prior-run
+score/phase block from planner prompts. The compact deduplicated ledger of tried directions remains
+available. `--no-inherit-campaign` is retained only as a compatibility alias for
 `--campaign-context=skip`; new commands and scripts should use the explicit context form.
 When neither context flag is supplied, `quick` consumes the same campaign-hygiene decision shown by
 `ship-preflight`: three or more adverse endings among the ten most recent completed campaign tasks

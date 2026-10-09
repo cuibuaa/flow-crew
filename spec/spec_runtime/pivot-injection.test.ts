@@ -48,7 +48,6 @@ describe('native planner pivot injection', () => {
       expect(observed).toContain(alertType);
       expect(observed).toContain('measured synthetic campaign alert');
       expect(observed).toContain('research stage');
-      expect(observed).toContain('dead_end');
     } else expect(observed).not.toContain('PIVOT REQUIRED');
   });
 });

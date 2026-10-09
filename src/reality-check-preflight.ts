@@ -392,9 +392,6 @@ function deriveBriefContract(brief: string): BriefContractModel {
   if (researchReportDir && CEILING_DELIVERABLE.test(frontmatter.body)) {
     rawArtifacts.push(posix.join(researchReportDir, 'ceiling_report.md'));
   }
-  if (/(?:\b(?:update|write|record|persist)\b.{0,80}\b(?:knowledge\s+graph|KG)\b)|(?:\b(?:knowledge\s+graph|KG)\b.{0,80}\b(?:must|required|update|write|record|persist)\b)|(?:更新|写入|记录).{0,40}(?:knowledge\s+graph|知识图谱|\bKG\b)/i.test(frontmatter.body)) {
-    rawArtifacts.push('**/knowledge_graph.json');
-  }
   const requiredArtifacts = [...new Set(
     rawArtifacts
       .map(normalizeArtifactPath)

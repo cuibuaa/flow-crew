@@ -36,7 +36,6 @@ import {
   isRecognizedGeneratedCachePath,
 } from '../src/generated-path-policy.js';
 import { buildStagePrompt } from '../src/handoff.js';
-import { writeKG, type KnowledgeGraph } from '../src/knowledge-graph.js';
 import {
   matchesLiveConstraintExemptPattern,
   scopeRevisionPathsForViolations,
@@ -274,11 +273,6 @@ async function waitForFile(directory: string, accept: (name: string) => boolean)
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`timed out waiting for fixture file in ${directory}`);
-}
-
-function emptyKnowledgeGraph(): KnowledgeGraph {
-  const at = '2026-09-19T00:00:00.000Z';
-  return { nodes: [], edges: [], metadata: { createdAt: at, updatedAt: at } };
 }
 
 afterEach(() => {
@@ -696,7 +690,6 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     appendRunEvent(projectDir, unknownId, {
       type: 'stage_complete', runId: unknownId, timestamp: new Date().toISOString(),
     });
-    writeKG(projectDir, 'unknown-kg-target', emptyKnowledgeGraph());
     const iterationLogId = 'unknown-iteration-target';
     appendIterationLog(
       projectDir,
@@ -706,7 +699,6 @@ describe('engine remediation after-state, controls, and reach counts', () => {
       [],
     );
     expect(existsSync(join(stateRoot, 'runs', unknownId, RUN_RESERVATION_FILE))).toBe(true);
-    expect(existsSync(join(stateRoot, 'runs', 'unknown-kg-target', RUN_RESERVATION_FILE))).toBe(true);
     expect(existsSync(join(stateRoot, 'runs', iterationLogId, RUN_RESERVATION_FILE))).toBe(true);
     const escapedDirectory = join(stateRoot, 'escape');
     write(join(escapedDirectory, 'run.json'), JSON.stringify({ runId: '../escape' }));
@@ -732,7 +724,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     expect(existsSync(initializedReservation.runDirPath)).toBe(false);
     expect(existsSync(activeReservation.runDirPath)).toBe(true);
     expect(existsSync(opaque)).toBe(true);
-    recordAfter(9, 'changed', 'exercise reservation, initialization, proposer scratch, and arbitrary event/KG identifiers', {
+    recordAfter(9, 'changed', 'exercise reservation, initialization, proposer scratch, and arbitrary event/iteration-log identifiers', {
       activeReservationMarker: true, initializedState: true, arbitraryMutatorsClassified: true,
       proposerOutsideRunsRoot: true, traversalWriteBlocked, cleanExit: cleaned.status,
     }, {

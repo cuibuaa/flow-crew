@@ -34,7 +34,7 @@ a separate archive-read error.
 | `failed` | Yes | No | The scheduler on unrecoverable stage failure; the dashboard on orphan reconciliation (scheduler process gone), staleness (no progress within the timeout), or a detached launch that never started | Read the failure reason and failed stage output, fix the cause, then rerun or submit a corrected brief. |
 | `awaiting_approval` | No | No | No current write path; retained for legacy plan-approval records | Use the dashboard's legacy plan approval/re-execute controls. New consequential-action approvals use `parked` instead. |
 | `shipped` | Yes | Yes | The research policy after a target beat survives `research.confirm`, or the scheduler after a declared `shipped` artifact passes its gates | Inspect the ship report, confirmation record, and Reality-Gate evidence before consuming the result. |
-| `ceiling_hit` | Yes | Yes | The research policy after an honest stop, a budget path with enough measured rounds, or a declared `ceiling_hit` artifact | Treat the negative result as a valid deliverable. Read the ceiling report and dead ends before choosing a genuinely new direction. |
+| `ceiling_hit` | Yes | Yes | The research policy after an honest stop, a budget path with enough measured rounds, or a declared `ceiling_hit` artifact | Treat the negative result as a valid deliverable. Read the ceiling report and the measured rounds before choosing a genuinely new direction. |
 | `escalated` | Yes | No | The scheduler when planning is unsatisfiable/exhausted, or when it detects a declared `escalated` artifact | Read the escalation artifact or failure reason, resolve the named blocker, and launch a revised brief. |
 | `reality_gate_failed` | Yes | No | The Reality-Gate when a requested successful terminal state fails a hard deterministic check | Fix the evidence, implementation, or incorrect check declaration; do not treat the original success claim as valid. |
 | `phase_complete` | Yes | No | The scheduler after detecting a declared `phase_complete` artifact | Inspect the phase artifact and program ledger. Verify any post-termination hook before advancing the next phase. |
@@ -79,7 +79,7 @@ interruption from a crash; a repeated normalized command is reported separately.
 
 A research policy can exhaust a well-measured search without beating its target.
 That is a result, not an engine failure. FlowCrew writes a ceiling report,
-preserves the measured rounds and dead ends, and returns a successful process
+preserves the measured rounds, and returns a successful process
 exit so an outer campaign does not retry it as a crash.
 
 ### `incomplete` is budget exhaustion, not a crash

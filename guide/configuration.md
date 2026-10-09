@@ -137,11 +137,11 @@ Campaign context is independent of that ownership decision:
 ```text
 flowcrew quick "task" --campaign-context=inherit -> attached; explicitly inject relevant planner history
 flowcrew quick "task" --campaign-context=skip    -> attached; omit verbose planner history
-flowcrew quick "task" --no-campaign              -> standalone; no campaign telemetry, KG aggregation, or grouping
+flowcrew quick "task" --no-campaign              -> standalone; no campaign telemetry or grouping
 ```
 
 `--campaign-context=skip` does not remove the campaign ID or its telemetry. It is an escape hatch for
-planner context only; the compact deduplicated ledger still carries all known dead ends. The legacy
+planner context only; the compact deduplicated ledger of tried directions is still injected. The legacy
 `--no-inherit-campaign` spelling remains accepted as an alias for `--campaign-context=skip`, but the
 explicit context form is recommended for new scripts.
 With no context flag, `quick` inherits context unless campaign hygiene finds at least three adverse

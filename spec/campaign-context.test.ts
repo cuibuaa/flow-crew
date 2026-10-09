@@ -186,7 +186,7 @@ describe('campaign context relevance selector', () => {
 });
 
 describe('campaign context production path', () => {
-  it('keeps every dead end even when the tried-direction display is capped', () => {
+  it('caps the tried-direction display and leaves a run knowledge_graph.json unread', () => {
     const runId = 'ledger-run';
     writeCampaignEntries([
       historyEntry({ runId, status: RUN_STATUS.COMPLETE }),
@@ -200,23 +200,17 @@ describe('campaign context production path', () => {
       ],
     }), 'utf-8');
     writeFileSync(join(runPath, 'knowledge_graph.json'), JSON.stringify({
-      nodes: [
-        { type: 'dead_end', text: 'dead end alpha' },
-        { type: 'dead_end', text: 'dead end beta' },
-        { type: 'dead_end', text: 'dead end gamma' },
-      ],
+      nodes: [{ type: 'dead_end', text: 'dead end alpha' }],
     }), 'utf-8');
 
     const digest = summarizeLedger(projectDir, CAMPAIGN_ID, { cap: 1 });
 
     expect(digest).toContain('first direction');
     expect(digest).not.toContain('second direction');
-    expect(digest).toContain('dead end alpha');
-    expect(digest).toContain('dead end beta');
-    expect(digest).toContain('dead end gamma');
+    expect(digest).not.toContain('dead end alpha');
   });
 
-  it('does not mislead a new task with a terminal phase, while preserving its dead ends', async () => {
+  it('does not mislead a new task with a terminal phase, while preserving its tried directions', async () => {
     const oldRunId = 'old-terminal-run';
     const oldRunPath = join(fcHome, 'runs', oldRunId);
     mkdirSync(oldRunPath, { recursive: true });
@@ -232,10 +226,10 @@ describe('campaign context production path', () => {
       campaignStorageKey: CAMPAIGN_ID,
     }), 'utf-8');
     writeFileSync(join(oldRunPath, 'iteration_log.md'), 'OLD ITERATION PATH CONTENT', 'utf-8');
-    writeFileSync(join(oldRunPath, 'knowledge_graph.json'), JSON.stringify({
-      nodes: [
-        { type: 'dead_end', text: 'never retry the terminal dead-end mechanism' },
-        { type: 'dead_end', text: 'preserve this second dead end too' },
+    writeFileSync(join(oldRunPath, 'research_journal.json'), JSON.stringify({
+      rounds: [
+        { label: 'never retry the terminal mechanism', result: 1 },
+        { label: 'preserve this second direction too', result: 2 },
       ],
     }), 'utf-8');
     writeCampaignEntries([
@@ -314,8 +308,8 @@ describe('campaign context production path', () => {
     expect(fullPrompt).not.toContain('OLD ARTIFACT MUST DISAPPEAR');
     expect(fullPrompt).not.toContain(join(oldRunPath, 'iteration_log.md'));
     expect(fullPrompt).not.toContain('old-misleading-next-phase');
-    expect(planCall!.systemPrompt).toContain('never retry the terminal dead-end mechanism');
-    expect(planCall!.systemPrompt).toContain('preserve this second dead end too');
+    expect(planCall!.systemPrompt).toContain('never retry the terminal mechanism');
+    expect(planCall!.systemPrompt).toContain('preserve this second direction too');
   });
 });
 

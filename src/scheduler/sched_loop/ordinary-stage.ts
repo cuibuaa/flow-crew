@@ -63,7 +63,7 @@ export async function executeOrdinaryStage(
         // Context primitive: inject the on-disk data/asset inventory so the planner's Propose
         // step works from the real world-model (never signposts acquiring data already present).
         contextInventory = summarizeContext(projectDir, state.research?.contextRoots ?? ['data']);
-        // Ledger primitive: inject the campaign's tried directions + dead-ends so Propose does
+        // Ledger primitive: inject the campaign's tried directions so Propose does
         // not repeat prior work. Always computed (not gated by --no-inherit: it is the compact
         // dedup ledger, not the verbose narrative context that flag suppresses).
         ledgerDigest = summarizeLedger(projectDir, state.campaignId);
@@ -98,7 +98,7 @@ export async function executeOrdinaryStage(
         }
         // Campaign context: prepend only fresh, non-terminal, active-phase history.
         // --campaign-context=skip (and its legacy alias) suppresses this verbose block;
-        // campaign ownership, telemetry and the compact dead-end ledger remain intact.
+        // campaign ownership, telemetry and the compact tried-direction ledger remain intact.
         const campaignStorageKey = resolveCampaignStorageKey({
           campaignId: state.campaignId,
           campaignStorageKey: state.campaignStorageKey,
@@ -129,7 +129,7 @@ export async function executeOrdinaryStage(
 
       // Pivot context: inject into planner prompt when research injection is active
       if (state.researchInjection && (stage.depends_on ?? []).length === 0) {
-        resolvedPrompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${state.researchInjection.alertType}. ${state.researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation. Check dead_end nodes in the knowledge graph to understand what has been tried and failed.\n\n` + resolvedPrompt;
+        resolvedPrompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${state.researchInjection.alertType}. ${state.researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation.\n\n` + resolvedPrompt;
       }
 
       resolvedPrompt = appendStageExecutionContracts(resolvedPrompt, stage, sorted, state, projectDir, runId, runDirPath);

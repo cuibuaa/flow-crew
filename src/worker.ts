@@ -165,7 +165,6 @@ function literalScopeRoot(scope: string): string | undefined {
 function snapshotScopedContent(
   projectDir: string,
   scopes: readonly string[],
-  extraFiles: string[] = [],
 ): Map<string, LiveConstraintContentIdentity> {
   const snap = new Map<string, LiveConstraintContentIdentity>();
   function walk(dir: string, depth: number) {
@@ -192,10 +191,6 @@ function snapshotScopedContent(
       else snap.set(absolute, readLiveConstraintContentIdentity(absolute));
     } catch { /* an exact declared output may not exist yet */ }
   }
-  for (const file of extraFiles) {
-    const identity = readLiveConstraintContentIdentity(file);
-    if (identity.state !== 'absent') snap.set(file, identity);
-  }
   return snap;
 }
 
@@ -203,18 +198,13 @@ function diffScopedArtifacts(
   before: Map<string, LiveConstraintContentIdentity>,
   projectDir: string,
   scopes: readonly string[],
-  extraFiles: string[] = [],
-  runDirectory?: string,
 ): string[] {
-  const after = snapshotScopedContent(projectDir, scopes, extraFiles);
+  const after = snapshotScopedContent(projectDir, scopes);
   const changed: string[] = [];
   const absent: LiveConstraintContentIdentity = { state: 'absent' };
   for (const path of new Set([...before.keys(), ...after.keys()])) {
     if (compareLiveConstraintContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
-    const runRelative = runDirectory ? relative(runDirectory, path) : undefined;
-    changed.push(runRelative !== undefined && runRelative !== '' && !runRelative.startsWith('..')
-      ? `run:${runRelative.replace(/\\/g, '/')}`
-      : relative(projectDir, path).replace(/\\/g, '/'));
+    changed.push(relative(projectDir, path).replace(/\\/g, '/'));
   }
   return changed.sort();
 }
@@ -233,7 +223,7 @@ export function freshRunningStageProjection(
   };
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
-    'kgChanged', 'writes', 'writeAttribution', 'constraintAudit', 'timeout',
+    'writes', 'writeAttribution', 'constraintAudit', 'timeout',
   ] as const) delete next[field];
   return next;
 }
@@ -570,14 +560,13 @@ async function runStageWithWriterLease(
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
   if (opts.outputSchema) {
-    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.dynamicDispatch ? ' and dispatch.yaml' : opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff or verdict-file instructions. Put human-readable documents only at paths the task asks people to read. Evidence references name reproducible files or commands. Update the task-local knowledge_graph.json with concise evidence-backed continuity findings when useful.`;
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.dynamicDispatch ? ' and dispatch.yaml' : opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff or verdict-file instructions. Put human-readable documents only at paths the task asks people to read. Evidence references name reproducible files or commands.`;
   }
   prompt += `\n\n${runStateContext(opts.projectDir, opts.runId, opts.planRevision)}`;
   if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract)}`;
 
-  const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
-  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope, [kgPath]);
+  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope);
   const artifactContractPath = join(opts.runDir, 'stages', opts.stageId, 'artifact_contract.json');
   const artifactContractPreimages = opts.artifactContract || opts.artifactObligationTemplate?.trim()
     ? captureStageArtifactContractPreimages({
@@ -1482,7 +1471,7 @@ async function runStageWithWriterLease(
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
-  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope, [kgPath], opts.runDir);
+  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const writes = structuredWrites ?? artifacts;
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
@@ -1541,7 +1530,6 @@ async function runStageWithWriterLease(
     tokenUsage: result.tokenUsage,
     invocations: result.invocations,
     adapterFailureKind: result.adapterFailureKind,
-    kgChanged: artifacts.some(a => a.endsWith('knowledge_graph.json')),
     writes,
     writeAttribution,
     validationGeneratedWrites: result.validationGeneratedWrites,

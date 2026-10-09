@@ -328,30 +328,3 @@ export async function fetchCampaignBriefRevisions(id: string): Promise<CampaignB
 export function fetchCampaignBriefDiff(id: string, from: string, to: string): Promise<string> {
   return requestText(`${BASE}/${encodeURIComponent(id)}/brief-diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
 }
-
-export interface CampaignResearchKnowledgeItem {
-  id: string;
-  type: "finding" | "dead_end" | "insight";
-  text: string;
-  runId?: string;
-}
-
-export async function fetchCampaignResearchKnowledge(id: string): Promise<CampaignResearchKnowledgeItem[]> {
-  const value = await request(`${BASE}/${encodeURIComponent(id)}/kg`);
-  if (!isRecord(value) || !Array.isArray(value.nodes)) throw new CampaignPageRequestError("Research knowledge summary response has no nodes", 200);
-  const acceptedTypes = new Set<CampaignResearchKnowledgeItem["type"]>(["finding", "dead_end", "insight"]);
-  const seen = new Set<string>();
-  const items: CampaignResearchKnowledgeItem[] = [];
-  for (const raw of value.nodes) {
-    if (!isRecord(raw) || !acceptedTypes.has(raw.type as CampaignResearchKnowledgeItem["type"])) continue;
-    const type = raw.type as CampaignResearchKnowledgeItem["type"];
-    const itemText = typeof raw.text === "string" ? raw.text.trim() : typeof raw.label === "string" ? raw.label.trim() : "";
-    if (!itemText) continue;
-    const key = `${type}\u0000${itemText.toLocaleLowerCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const runId = typeof raw.runId === "string" ? raw.runId : typeof raw.meta === "string" ? raw.meta : undefined;
-    items.push({ id: typeof raw.id === "string" ? raw.id : key, type, text: itemText, ...(runId ? { runId } : {}) });
-  }
-  return items;
-}

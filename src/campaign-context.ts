@@ -48,7 +48,7 @@ function isPhaseEntry(entry: CampaignHistoryEntry): boolean {
  * Select the campaign narrative that is still relevant to a new planner turn.
  *
  * This deliberately does not touch the compact campaign ledger: tried directions
- * and KG dead ends have a separate, durable retention policy.
+ * have a separate, durable retention policy.
  */
 export function selectRelevantCampaignContext(
   entries: CampaignHistoryEntry[],

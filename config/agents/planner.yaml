@@ -27,9 +27,9 @@ prompt: |
   Available existing assets:
   {context_inventory}
   Check existing assets before proposing acquisition. Name any missing asset and why the
-  existing evidence is insufficient. Prior directions and dead ends:
+  existing evidence is insufficient. Directions already tried, with results:
   {ledger_digest}
-  Read campaign, iteration and knowledge context. NEVER dispatch stages for multiple phases in a single dispatch.yaml; with no settled phase, dispatch ONLY the first phase; build on findings without repeating dead ends.
+  Read campaign and iteration context. NEVER dispatch stages for multiple phases in a single dispatch.yaml; with no settled phase, dispatch ONLY the first phase; build on findings without repeating dead ends.
 
   Choose real data dependencies. Independent work can run in parallel; overlapping writes
   do not justify invented data dependencies. The scheduler serializes scopes whose disjointness it cannot prove.

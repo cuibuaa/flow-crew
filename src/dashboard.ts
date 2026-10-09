@@ -54,7 +54,6 @@ TASK_STATUS,
 type TaskCreateInput,
 type TaskListFilter,
 } from './task-registry.js';
-import { readKGSafe } from './knowledge-graph.js';
 import { consumePendingReview,readPendingReviews,ReviewConflictError,summarizePatch } from './campaign-review.js';
 import type { PendingReviewEntry } from './campaign-review.js';
 import { readOperatorEvents,readOperationalProjection,type EventLike } from './cli-events.js';
@@ -313,15 +312,6 @@ function readBestScore(projectDir: string, runId: string): { bestScore?: number;
         } catch { /* skip */ }
       }
     }
-    // Check knowledge graph bestScore
-    try {
-      const kgPath = join(runPath, 'knowledge_graph.json');
-      const kgData = JSON.parse(readFileSync(kgPath, 'utf-8'));
-      if (typeof kgData?.metadata?.bestScore === 'number' && (best === undefined || kgData.metadata.bestScore > best)) {
-        best = kgData.metadata.bestScore;
-        name = kgData.metadata.metricName ?? name;
-      }
-    } catch { /* no KG or parse error */ }
     // Cache result
     try {
       const mtime = statSync(join(runPath, 'run.json')).mtimeMs;
@@ -716,7 +706,6 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
       tokens_out: state.supervisor.tokens_out,
     });
   }
-  const kg = readKGSafe(projectDir, state.runId);
   const runDirectory = join(runsRoot(), state.runId);
   const stageHistoryDiagnostics: Array<{ code: string; path?: string; detail: string }> = [];
   const stageHistory = projectRunStageHistory(state, diagnostic => stageHistoryDiagnostics.push(diagnostic));
@@ -745,7 +734,6 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     stageHistory,
     stageHistoryDiagnostics,
     budget: budgetView(state, new Date().toISOString()),
-    kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
     events: readRunEvents(state.runId),
     operational: readOperationalProjection(runDirectory, { state }),
     stage_outputs: readStageOutputPreviews(state.runId),

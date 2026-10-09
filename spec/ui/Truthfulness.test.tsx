@@ -481,7 +481,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "parked",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -499,7 +498,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "awaiting_approval",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -661,7 +659,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "running",
       stages: [{ id: "implement", role: "coder", depends_on: [], status: "running", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -710,7 +707,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "complete",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -731,7 +727,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "running",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -767,7 +762,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "complete",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -794,7 +788,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "failed",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "failed", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -815,7 +808,6 @@ describe("dashboard truthfulness", () => {
       status: "reality_gate_failed",
       failureReason: "Reality gate blocked: required-build-proof",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
       realityGate: {
@@ -880,7 +872,6 @@ describe("dashboard truthfulness", () => {
       startedAt: "2026-08-01T00:00:00.000Z",
       completedAt: "2026-08-01T00:01:00.000Z",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -901,7 +892,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "incomplete",
       stages: [{ id: "research", role: "researcher", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: { research: "useful partial result" },
     };

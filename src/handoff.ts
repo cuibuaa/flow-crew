@@ -130,7 +130,6 @@ export function buildStagePrompt(opts: HandoffOpts): string {
   const vars: Record<string, string> = {
     project: opts.projectDir,
     run_dir: opts.runDir,
-    kg_path: join(opts.runDir, 'knowledge_graph.json'),
     skills: opts.skills ?? '',
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',

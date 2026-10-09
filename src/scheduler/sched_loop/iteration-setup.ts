@@ -1,7 +1,6 @@
 // Boundary: Consume settled supervisor/terminal signals and reset the iteration DAG with immutable obligation/evidence retirement and campaign health projections.
 import { Adapter } from '../../adapters/base.js';
 import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
-import { markDeadEnd, readKG } from '../../knowledge-graph.js';
 import { generateRunSummary } from '../../run-summary.js';
 import { recordRunEvent } from '../../run-events.js';
 import { StageConfig } from '../sched_admission/configuration.js';
@@ -226,13 +225,6 @@ export async function prepareWorkflowIteration(
           detail: `${alert.type}: ${alert.message}`,
         });
         log.info({ runId, alert: alert.type }, 'Campaign health alert — researcher will be injected via planner context');
-        // Auto-mark current approach nodes as dead ends
-        try {
-          const kg = readKG(projectDir, runId);
-          for (const node of kg.nodes.filter(n => n.type === 'approach')) {
-            markDeadEnd(projectDir, runId, node.id, `Marked dead_end by campaign health: ${alert.message}`);
-          }
-        } catch { /* non-fatal */ }
       } else if (state.campaignAlert) {
         state.campaignAlert = undefined;
         writeRunState(projectDir, runId, state);

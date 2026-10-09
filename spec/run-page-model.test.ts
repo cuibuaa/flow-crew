@@ -20,7 +20,6 @@ function run(overrides: Partial<RunDetailData> = {}): RunDetailData {
     runId: "fixture-run",
     status: "complete",
     stages: [],
-    kg: { nodes: [], edges: [] },
     events: [],
     stage_outputs: {},
     ...overrides,

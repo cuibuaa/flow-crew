@@ -470,11 +470,6 @@ describe('historical planner syntax regressions', () => {
       paths: ['/workspace/reports/v17/summary.md', '/workspace/state/RETURN_REPORT.md'],
     },
     {
-      label: 'the framework knowledge graph required by the brief',
-      brief: '# Deliverable\nUpdate the run-local knowledge graph (KG) with the result.',
-      paths: ['/workspace/run/knowledge_graph.json'],
-    },
-    {
       label: 'a result_file key in a legacy metadata block',
       brief: '# Contract\nresult_file: docs/round/round_result.json',
       paths: ['docs/round/round_result.json'],

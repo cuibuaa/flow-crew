@@ -240,17 +240,17 @@ rather than a metric. Its `confirm.command` is what must pass, for example
 
 ### Unknown bug hunt
 
-A **campaign** groups related runs and carries outcomes, approaches, failures, dead ends, and
-pivots across attempts.
+A **campaign** groups related runs and carries outcomes, tried directions, failures, and pivots
+across attempts.
 
 ```text
 > Find the root cause of the intermittent checkout failure. Add a reproducer
-> that fails before the fix, then make it pass 50× consecutively. Don't
-> re-try a hypothesis this campaign already marked a dead end.
+> that fails before the fix, then make it pass 50× consecutively.
 > /ship
 ```
 
-Dead ends from earlier runs in the campaign are handed to the planner as facts, not suggestions.
+The directions earlier runs in the campaign already tried, with their measured results, reach the
+planner with an instruction not to propose them again.
 
 See [Brief and file contract](guide/brief-contract.md) for every frontmatter and runtime
 artifact field, and [`examples/README.md`](examples/README.md) for the tracked example and the
@@ -317,7 +317,7 @@ conducted from your session)
 | You author the control flow (the stage DAG) | The planner generates the stage DAG from a plain-language brief |
 | **You** hold terminal authority — read each result, decide what's next | The **engine** self-governs done / ship / ceiling / rework |
 | Verification is whatever you script in | Verify-before-trust + Reality-Gate are built in |
-| Results return to you; no cross-run memory | Persistent run memory + campaign knowledge graph |
+| Results return to you; no cross-run memory | Persistent run records + a campaign ledger of tried directions |
 | Best for a bounded fan-out you drive now | Best for fire-and-forget autonomous research/engineering |
 
 They are complementary. Reach for a Workflow to reason inside a conversation; reach for
@@ -328,26 +328,12 @@ is genuinely done.
 
 ## Run memory
 
-FlowCrew records *why* a run made decisions, not just what changed. A run captures goals, approaches, findings, insights, results, cited sources, and dead ends as a knowledge graph, and the engine reads it back: a dead end marked in one round is one the planner is told not to re-propose in the next.
-
-Across a campaign those graphs roll up into a **knowledge digest** — findings and insights in one list, disproved approaches in another, deduped across runs by substance so the same finding reported three times collapses to one entry, each linking back to the run that produced it. Alongside it the campaign page names the best measurement per direction, and says plainly when the evidence is not enough to name one.
-
-<p align="center">
-  <img src="assets/screenshot_knowledge_digest.png" width="800" alt="Campaign knowledge digest on the campaign page: nine accepted nDCG measurements ending in ceiling_hit with the best at 0.815, seven key findings and two disproved approaches, each linking back to the run that produced it" />
-</p>
-
-The full graph is per run, on that run's page. Node types, and what reads each one back:
-
-| Type | Recorded when | What reads it back |
-|---|---|---|
-| `goal` | the objective a run is pursuing | summarised into every later stage's prompt |
-| `approach` | a strategy the planner chose | same, carrying its score; retired to a dead end when the campaign stops improving |
-| `result` | a measured outcome | plateau detection and the improvement ratchet |
-| `dead_end` | a direction that failed | the planner, as a direction not to propose again — plus the campaign digest |
-| `user_hint` | guidance you gave mid-flight | summarised into every later stage's prompt |
-| `finding` | evidence discovered during work | the campaign digest |
-| `insight` | a reusable lesson | the campaign digest |
-| `source` | an external reference cited during research | **nothing yet** — it is captured and stored, but no engine path or view reads it back |
+FlowCrew keeps each run's record on disk under `~/.fc/runs/<runId>/`: the brief, the plan, every
+stage's prompt, output and status, the gate verdicts, the event log and a summary. Across a
+campaign, the directions already tried and the best result measured for each roll up into a compact
+ledger that later planners read, so a direction measured in one run is not proposed again in the
+next. Alongside it the campaign page names the best measurement per metric, and says plainly when
+the evidence is not enough to name one.
 
 ## Configuration
 
@@ -439,7 +425,7 @@ Defects reproduced on the current release. Fixes land in the [changelog](CHANGEL
 - [Brief and File Contract](guide/brief-contract.md): frontmatter and agent-engine artifacts.
 - [Approval Inbox](guide/approvals.md): park/resume, decisions, CLI, dashboard, and standing rules.
 - [Zero-token Rehearsal](guide/rehearse.md): what the wind tunnel proves and what it cannot prove.
-- [Campaigns and Run Memory](guide/campaigns.md): campaigns, plateaus, pivots, knowledge graph.
+- [Campaigns and Run Memory](guide/campaigns.md): campaigns, plateaus, pivots, the tried-direction ledger.
 - [Reality-Gate](guide/reality-gate.md): deterministic evidence checks before terminal success.
 - [Configuration](guide/configuration.md): defaults, adapters, per-role overrides, supervisor settings.
 - [Agent Skills](guide/skills.md): Claude Code slash commands, Codex skills, and installation.

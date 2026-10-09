@@ -544,7 +544,6 @@ describe('operator dashboard vocabulary', () => {
         pendingScope: [{ requestId: 'scope-1', stageId: 'implement' }],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
-      kg: { nodes: [], edges: [] },
       events: [{
         timestamp: '2026-09-03T10:01:30.000Z', type: 'admission_rejected', stageId: 'implement',
         attemptIndex: 2, detail: 'the proposal omitted a declared producer',
@@ -582,7 +581,6 @@ describe('operator dashboard vocabulary', () => {
         pendingScope: [],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
-      kg: { nodes: [], edges: [] },
       events: [{
         timestamp: '2026-09-03T10:02:00.000Z', type: 'run_status_changed',
         runStatus: 'complete', detail: 'all declared gates passed',
@@ -682,7 +680,7 @@ describe('operator dashboard vocabulary', () => {
     });
   });
 
-  it('unchanged-base seam: omits cache noise and labels run-local artifacts through runStage', async () => {
+  it('unchanged-base seam: omits cache noise and keeps scoped writes through runStage', async () => {
     const runId = 'operator-artifact-paths';
     const stageId = 'implement';
     const runDirectory = join(fcHome, 'runs', runId);
@@ -694,7 +692,7 @@ describe('operator dashboard vocabulary', () => {
         const cachePath = join(project, 'fixture-root', '.pytest_cache', 'v', 'cache', 'nodeids');
         mkdirSync(dirname(cachePath), { recursive: true });
         writeFileSync(cachePath, '[]\n', 'utf-8');
-        writeFileSync(join(runDirectory, 'knowledge_graph.json'), '{"nodes":[],"edges":[]}\n', 'utf-8');
+        writeFileSync(join(project, 'fixture-root', 'result.txt'), 'done\n', 'utf-8');
         return { output: 'complete', exitCode: 0, duration_ms: 1, timedOut: false };
       },
     };
@@ -713,9 +711,9 @@ describe('operator dashboard vocabulary', () => {
       projectWriteScope: ['fixture-root/**'],
     });
     expect({
-      runArtifact: result.writes?.includes('run:knowledge_graph.json') ?? false,
+      scopedWrite: result.writes?.includes('fixture-root/result.txt') ?? false,
       cacheNoise: result.writes?.some((path) => path.includes('.pytest_cache')) ?? false,
-    }).toEqual({ runArtifact: true, cacheNoise: false });
+    }).toEqual({ scopedWrite: true, cacheNoise: false });
   });
 
   it('unchanged-base seam: operator guides describe the enforced admission and surface contracts', () => {
