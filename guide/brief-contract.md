@@ -559,6 +559,13 @@ That reader is not execution authority: the new generation refuses an undeclared
 static launch or historical takeover before work, with
 `DECLARED_INPUT_MIGRATION_REQUIRED`.
 
+A workflow may carry this document as its `dispatch:` field. Its plan stage then answers
+with that fixed plan instead of calling the planner, and the answer goes through the same
+admission, gates, repair loop and re-plan. `--workflow direct` ships one: an authoring stage
+with whole-project scope does the brief, a read-only gate reviews every criterion, and a
+repair answers a rejection. Admission refuses it for a brief that declares `inputs:` (that scope
+overlaps them) or `terminal_states` (no stage after the gate can own them); run those planned.
+
 At run start the scheduler extracts explicitly numbered or named criteria from
 the admitted brief into `brief_criteria.json`. Each criterion must be assigned
 through `criterion_refs` to at least one capable work/finalizer stage and to a

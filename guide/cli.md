@@ -467,7 +467,7 @@ Common flags:
 |---|---|---|
 | `--project <path>` | cwd | Project directory |
 | `--adapter <name>` | `defaults.yaml` | Registered adapter: `auto`, `codex`, `claude`, or `mock` |
-| `--workflow <name>` | `default` | Workflow from `config/workflows/` |
+| `--workflow <name>` | `default` | Workflow from `config/workflows/`; `direct` runs a fixed author, gate and repair plan without a planner call |
 | `--max-iterations <n>` | config | Max plan-execute-review cycles |
 | `--supervise` | on | Enable supervisor |
 | `--no-supervise` | off | Disable supervisor for this run |

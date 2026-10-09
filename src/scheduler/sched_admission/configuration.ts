@@ -75,6 +75,11 @@ export const WorkflowConfigSchema = z.object({
     max_iterations: z.number().optional(),
   }).optional().default({}),
   stages: z.array(StageConfigSchema).min(1),
+  /** A fixed plan. The dynamic_dispatch stage answers with it instead of calling its role, and the
+   * answer is admitted, executed, repaired and re-planned exactly like a planner's. */
+  dispatch: z.array(z.unknown()).min(1).optional(),
+}).refine((workflow) => !workflow.dispatch || workflow.stages.some((stage) => stage.dynamic_dispatch), {
+  path: ['dispatch'], message: 'a fixed dispatch is the answer of a dynamic_dispatch stage; declare that stage',
 });
 
 export type StageConfig = z.infer<typeof StageConfigSchema>;

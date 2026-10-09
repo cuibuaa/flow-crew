@@ -1,0 +1,26 @@
+name: direct
+description: >
+  A fixed plan instead of a planner call: one authoring stage does the whole
+  brief, one independent read-only gate reviews it against every brief
+  criterion, and a repair runs only when that gate rejects. The plan is the
+  plan stage's answer, so it is admitted, executed, repaired and re-planned
+  exactly like a planner's; a brief it cannot satisfy is refused at admission.
+stages:
+  - id: plan
+    role: planner
+    dynamic_dispatch: true
+    artifact_contract: {version: 1, produces: [], reads: [], groups: [], replays: []}
+dispatch:
+  - id: implement
+    role: coder
+    scope: ["**"]
+  - id: review
+    role: qa
+    depends_on: [implement]
+    is_gate: true
+    scope: []
+  - id: repair
+    role: coder
+    depends_on: [review]
+    retry_to: [review]
+    scope: ["**"]
