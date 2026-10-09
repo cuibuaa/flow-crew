@@ -5,6 +5,8 @@ description: >
   criterion, and a repair runs only when that gate rejects. The plan is the
   plan stage's answer, so it is admitted, executed, repaired and re-planned
   exactly like a planner's; a brief it cannot satisfy is refused at admission.
+# The author and repair may install dependencies: `**` does not authorize dot paths, and package managers write
+# some (node_modules/.bin, node_modules/.package-lock.json, .venv), so their directories are named.
 stages:
   - id: plan
     role: planner
@@ -13,7 +15,7 @@ stages:
 dispatch:
   - id: implement
     role: coder
-    scope: ["**"]
+    scope: ["**", "node_modules/", ".venv/"]
   - id: review
     role: qa
     depends_on: [implement]
@@ -23,4 +25,4 @@ dispatch:
     role: coder
     depends_on: [review]
     retry_to: [review]
-    scope: ["**"]
+    scope: ["**", "node_modules/", ".venv/"]
