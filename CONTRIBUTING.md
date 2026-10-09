@@ -1,5 +1,8 @@
 # Contributing to FlowCrew
 
+Read [AGENTS.md](AGENTS.md) first: the design principle there (the simplest architecture that solves the problem, and
+no new mechanism that does not replace at least as much as it adds) decides what a change should look like.
+
 FlowCrew requires Node.js 22.5 or newer. Install exactly from the lockfile and
 run the same quality sequence expected by CI:
 
