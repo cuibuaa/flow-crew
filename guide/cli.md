@@ -28,6 +28,7 @@ The current `src/cli.ts` dispatcher exposes these commands:
 | `watch` | Report edge-triggered stall judgements for live runs. |
 | `events` | Read or follow the canonical, filterable run event feed. |
 | `rehearse` | Exercise a brief with the real scheduler and a scripted agent. |
+| `plan-check` | Check a draft `dispatch.yaml` against a brief and the real admission, without launching anything. |
 | `brief` | Inspect, diff, or roll back a versioned brief. |
 | `doctor` | Check the runtime, configuration, builds, and agent CLIs. |
 | `start` | Start the web dashboard. |
@@ -347,6 +348,19 @@ The default command parses the brief and then runs the real scheduler with an in
 An exit-zero report ends with `✅ Contract ready`. The static section also prints the exact brief digest and whether live admission requires an explicit acknowledgement. This verifies the engine-to-brief contract—frontmatter, research result consumption, stop rules, terminal paths, and confirmation wiring—not the truth or quality of a future research result. A `✗` is a contract failure that should be fixed before launch; a `⚠` is a review item that may be intentional.
 
 See [Zero-token rehearsal](rehearse.md) for the complete boundary.
+
+
+## `flowcrew plan-check`
+
+```bash
+flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>
+```
+
+Runs a draft plan through the admission a planner's plan has to pass, without a scheduler, an adapter, the daemon or a
+model. It prints one JSON document (`pass`, `errors`, the parsed `stages`) and exits 0 when the draft is admissible and 1
+when it is not or cannot be read. A `reality_checks.md` next to the draft is checked as well. Roles and the workflow come
+from the project's `config/` when it has one, otherwise from the engine's. The plan's schema is the one in
+`src/plan-interface.ts`, which a planner's input also carries.
 
 ## `flowcrew adapter`
 
