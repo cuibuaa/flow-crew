@@ -10,7 +10,7 @@ import { appendTraceEvent } from '../../trace.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
 import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
-import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { gateContinuationSessionForStage, sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
@@ -167,7 +167,9 @@ export async function executeSingleStage(
   }
 
   const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
+  const maxFailureRetries = failureRetryLimit(stage, workflow, projectDir);
   let retries = 0;
+  let failureRetries = 0;
   const sessionReuseEnabled = isSessionReuseEnabled(projectDir);
   const gateSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined);
   let result: RunResult | undefined;
@@ -275,6 +277,14 @@ export async function executeSingleStage(
         return;
       }
       transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
+    }
+    // A fix or re-evaluation that failed for an ordinary reason gets the retries an ordinary stage gets in the batch,
+    // with its failure in the retry preamble, instead of ending the iteration and discarding the plan.
+    if (!retryableTechnicalFailure && result.exitCode !== 0 && !result.suspended && failureRetries < maxFailureRetries) {
+      failureRetries++;
+      retries++;
+      log.warn({ stage: stage.id, retry: retries }, 'Retrying failed stage (inner loop)');
+      continue;
     }
 
     break;

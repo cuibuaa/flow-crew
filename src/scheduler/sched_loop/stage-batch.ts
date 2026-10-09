@@ -5,7 +5,7 @@ import { AttemptDeadlineClock, TechnicalRetryBudgetState, transitionTechnicalRet
 import { evaluateCondition } from '../../condition.js';
 import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
 import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
-import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
 import { detectParallelWriteConflicts, selectRunnableBatch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
@@ -184,9 +184,7 @@ export async function executeReadyBatch(
         log.info({ stage: stage.id, reason: result.suspensionReason }, 'Stage suspended at control boundary; re-dispatching');
         continue;
       }
-      const maxFailureRetries = Math.max(0, Math.floor(Number(
-        stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit(projectDir),
-      )));
+      const maxFailureRetries = failureRetryLimit(stage, workflow, projectDir);
       const maxTechnicalRetries = configuredTechnicalRetryLimit(projectDir);
       const isAttemptTimeout = result.timedOut && result.timeoutTerminationCause === 'attempt_timeout';
       const isAdapterFailure = result.adapterFailureKind !== undefined;

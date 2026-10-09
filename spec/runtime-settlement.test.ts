@@ -185,3 +185,29 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
     });
 });
 import { readdirSync as requireNames } from 'node:fs';
+
+describe('ordinary failure in the gate loop', () => {
+    it.each([1, 0])('reruns a failed single stage in place up to max_retries=%s instead of ending the iteration', async (limit) => {
+        const config = workflow();
+        config.defaults.max_retries = limit;
+        const created = createRun(project, config.name, 'name: settlement', ['work']);
+        const state = readRunState(project, created.runId);
+        state.status = 'running';
+        writeRunState(project, created.runId, state);
+        let calls = 0;
+        let prompt = '';
+        const transport = { run: async (p: string, _a: AgentConfig, o: import('../src/adapters/base.js').RunOpts) => {
+                if (++calls === 1)
+                    return fixtureResult({ output: 'configured checks failed', exitCode: 1, duration_ms: 1 }, o);
+                prompt = p;
+                return fixtureResult({ output: 'fixed', exitCode: 0, duration_ms: 1 }, o);
+            } } as Adapter;
+        await executeSingleStage(config.stages[0], project, created.runId, created.runDirPath, config, transport, new Map([['coder', role]]), join(project, 'config', 'agents'), state, config.stages);
+        expect(calls).toBe(limit + 1);
+        expect(readStageStatus(project, created.runId, 'work').status).toBe(limit ? 'complete' : 'failed');
+        if (limit) {
+            expect(prompt).toContain('Previous execution failed');
+            expect(prompt).not.toContain('timed out');
+        }
+    });
+});

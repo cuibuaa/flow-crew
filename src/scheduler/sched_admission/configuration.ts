@@ -14,6 +14,11 @@ export function configuredTechnicalRetryLimit(projectDir?: string): number {
   return Math.max(0, Math.floor(Number(loadDefaults(projectDir).stage_technical_retries)));
 }
 
+/** How often a stage that failed for an ordinary reason runs again; the same in the batch and in the gate loop. */
+export function failureRetryLimit(stage: StageConfig, workflow: WorkflowConfig, projectDir: string): number {
+  return Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit(projectDir))));
+}
+
 const AgentConfigSchema = z.object({
   name: z.string(),
   description: z.string().default(''),
