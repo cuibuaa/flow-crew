@@ -21,6 +21,19 @@ function reusableDirectSuccessors(stage: StageConfig, allStages: StageConfig[]):
   );
 }
 
+/**
+ * The author a repair continues: its retry route names exactly one gate, that gate has no other repair route, and the
+ * gate reviewed exactly one non-validation stage of the repair's role. The repair resumes that author's session, so the
+ * stage that wrote the change fixes it with the context it already has. Gates never take part.
+ */
+function repairedAuthor(stage: StageConfig, allStages: StageConfig[]): StageConfig | undefined {
+  if (isValidationStage(stage) || stage.retry_to?.length !== 1) return undefined;
+  const gate = allStages.find((candidate) => candidate.id === stage.retry_to![0] && candidate.is_gate === true);
+  if (!gate || allStages.filter((candidate) => candidate.retry_to?.includes(gate.id)).length !== 1) return undefined;
+  const authors = allStages.filter((candidate) => gate.depends_on.includes(candidate.id) && !isValidationStage(candidate));
+  return authors.length === 1 && authors[0].role === stage.role ? authors[0] : undefined;
+}
+
 export function canReuseCodexSession(input: {
   stage: StageConfig;
   predecessor: StageConfig;
@@ -58,6 +71,14 @@ export function sessionResumeForStage(
       && existsSync(join(runDirPath, 'stages', stage.id, 'codex_home'))
       && (state.stages[stage.id]?.attempts?.length ?? 0) > 0) {
     return { sessionId: own.sessionId, ownerStageId: stage.id };
+  }
+  const author = repairedAuthor(stage, allStages);
+  if (author) {
+    const authored = readCodexSession(runDirPath, author.id);
+    return authored?.ownerStageId === author.id && state.stages[author.id]?.status === STAGE_STATUS.COMPLETE
+      && existsSync(join(runDirPath, 'stages', author.id, 'codex_home'))
+      ? { sessionId: authored.sessionId, ownerStageId: author.id }
+      : undefined;
   }
   if (!enabled || stage.depends_on.length !== 1) return undefined;
   const predecessor = allStages.find((candidate) => candidate.id === stage.depends_on[0]);
@@ -135,6 +156,11 @@ export function clearGateContinuationsForStages(runDirPath: string, stages: Stag
       clearGateContinuationArtifacts(runDirPath, gate.id);
     }
   }
+  // The bounded repair loop is over, so no repair will continue an author kept for it.
+  for (const stage of stages) {
+    const author = repairedAuthor(stage, stages);
+    if (author) try { rmSync(join(runDirPath, 'stages', author.id, 'codex_home'), { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 }
 
 export function gateContinuationSessionForStage(
@@ -161,6 +187,9 @@ export function shouldPreserveSession(stage: StageConfig, allStages: StageConfig
   if (stage.is_gate === true) {
     return allStages.some((candidate) => candidate.retry_to?.includes(stage.id));
   }
+  // An author keeps its session while a repair may continue it, and that repair keeps it while its gate may send the
+  // work back; clearGateContinuationsForStages removes it when the repair loop ends.
+  if (repairedAuthor(stage, allStages) || allStages.some((candidate) => repairedAuthor(candidate, allStages)?.id === stage.id)) return true;
   if (!enabled || isValidationStage(stage)) return false;
   // Dynamic children do not exist until this stage returns; retain its home
   // provisionally, then the eligibility check still requires exactly one child.

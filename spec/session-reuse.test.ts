@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage } from '../src/invocation-usage.js';
@@ -14,7 +14,7 @@ import {
   type StageConfig,
 } from '../src/scheduler.js';
 import type { StageStatus, StoreState } from '../src/store.js';
-import { sessionResumeForStage } from '../src/scheduler/sched_admission/sessions.js';
+import { clearGateContinuationsForStages, sessionResumeForStage, shouldPreserveSession } from '../src/scheduler/sched_admission/sessions.js';
 import { isSessionReuseEnabled } from '../src/config.js';
 import { classifyAdapterFailure } from '../src/worker.js';
 
@@ -228,6 +228,39 @@ describe('own-stage continuation', () => {
       expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });
       expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('repair continues its author', () => {
+  it('resumes the reviewed author only for a sole same-role repair route, keeps both homes for the loop, and clears them after it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-repair-session-'));
+    try {
+      const implement = stage('implement');
+      const review = stage('review', { role: 'qa', is_gate: true, depends_on: ['implement'] });
+      const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
+      const all = [implement, review, repair];
+      const state = { stages: { implement: successfulStatus() } } as StoreState;
+      mkdirSync(join(root, 'stages', 'implement', 'codex_home'), { recursive: true });
+      writeFileSync(join(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
+
+      // Independent of the predecessor-reuse opt-in, and never for the gate.
+      expect(sessionResumeForStage(repair, all, state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'implement' });
+      expect(sessionResumeForStage(review, all, state, root, false)).toBeUndefined();
+      expect(shouldPreserveSession(implement, all, false)).toBe(true);
+      expect(shouldPreserveSession(repair, all, false)).toBe(true);
+      expect(shouldPreserveSession(implement, [implement, review], false)).toBe(false);
+
+      // Ambiguous or foreign continuations start fresh.
+      const otherRole = [stage('implement', { role: 'doc_writer' }), review, repair];
+      expect(sessionResumeForStage(repair, otherRole, state, root, false)).toBeUndefined();
+      const secondRoute = [...all, stage('repair_scoped', { depends_on: ['review'], retry_to: ['review'] })];
+      expect(sessionResumeForStage(repair, secondRoute, state, root, false)).toBeUndefined();
+      expect(sessionResumeForStage(repair, all, { stages: { implement: successfulStatus({ status: 'failed' }) } } as StoreState, root, false)).toBeUndefined();
+
+      clearGateContinuationsForStages(root, all);
+      expect(existsSync(join(root, 'stages', 'implement', 'codex_home'))).toBe(false);
+      expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
