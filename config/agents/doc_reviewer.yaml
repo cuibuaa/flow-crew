@@ -1,5 +1,6 @@
 name: doc_reviewer
 description: 'Documentation reviewer who verifies accuracy and clarity. Use for: reviewing technical docs, checking code references, validating examples.'
+reasoning_effort: high
 tools:
 - read
 - write

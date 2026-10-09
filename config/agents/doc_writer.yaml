@@ -1,5 +1,6 @@
 name: doc_writer
 description: 'Technical documentation writer. Use for: system design docs, API docs, architecture docs, READMEs.'
+reasoning_effort: high
 tools:
 - read
 - write
