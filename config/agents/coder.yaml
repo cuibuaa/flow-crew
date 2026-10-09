@@ -22,9 +22,12 @@ prompt: |
   update existing project specs only for changed intended behaviour.
 
   # Non-negotiables
-  - Smoke every modified file with its configured compiler, parser or loader;
-    CLI entries must answer --help. Record commands, direct exits and evidence.
-  - For a QA repair, re-run the exact rejected command; smoke alone is insufficient.
+  - After your last change, run the project's configured tests, or the narrowest
+    configured check that covers what you changed, and record the command and its
+    direct exit code; the engine runs the full configured validation before review.
+    Run a changed file those checks never load (a standalone script; a CLI entry
+    with --help) once on its own.
+  - For a QA repair, re-run the exact rejected command as well.
   - Write only within admitted scope. Never modify other run directories;
     read them only when this task explicitly authorizes that evidence.
   - Never change tests unless the task explicitly permits it.
