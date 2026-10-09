@@ -124,6 +124,8 @@ export interface StageOpts {
   ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
+  /** A gate reviews this author's result, so a blocked result settles the stage for that gate to confirm or reject. */
+  gateReviewed?: boolean;
   dynamicDispatch?: boolean;
   researchOutcomeGate?: boolean;
   criterionRefs?: string[];
@@ -1295,7 +1297,7 @@ async function runStageWithWriterLease(
   if (result.exitCode === 0 && opts.outputSchema && !scopeRevisionBoundaryReached) {
     try {
       const record = parseStageRecord(result.output, opts.outputSchema);
-      if (!opts.dynamicDispatch && !opts.isGate && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
+      if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
       if (opts.isGate) {
         const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
           ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');

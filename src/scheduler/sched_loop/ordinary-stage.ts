@@ -18,7 +18,7 @@ import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.
 import { initializeGateMetricAttempt } from '../sched_scope/gate-attempt.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { buildGateDispatchPreamble } from '../sched_settlement/gate-archives.js';
-import { isResearchOutcomeGate } from '../sched_settlement/gate-recovery.js';
+import { gateReviewedAuthorIds, isGateReviewed, isResearchOutcomeGate } from '../sched_settlement/gate-recovery.js';
 import { appendGateMetricInstruction, appendStageExecutionContracts, createSchedulerTechnicalRetryState, gateAttemptCoordinate, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult, stageInitialTimeout } from '../sched_settlement/stage-execution.js';
 import { StoreState, readStageStatus, runDir } from '../../store.js';
 import { runStage } from '../../worker.js';
@@ -142,6 +142,7 @@ export async function executeOrdinaryStage(
           gateId: stage.id,
           evaluationRound: priorAttemptCount + 1,
           priorAttemptCount,
+          authorIds: gateReviewedAuthorIds(stage, sorted),
         })}\n\n${resolvedPrompt}`;
         resolvedPrompt = appendGateMetricInstruction(resolvedPrompt, runDirPath, stage.id, currentGateAttempt!);
       }
@@ -198,6 +199,7 @@ export async function executeOrdinaryStage(
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
+        gateReviewed: isGateReviewed(stage, sorted),
         dynamicDispatch: stage.dynamic_dispatch,
         researchOutcomeGate: isResearchOutcomeGate(stage, sorted, state.research),
         criterionRefs: stage.criterion_refs,

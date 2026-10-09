@@ -458,6 +458,25 @@ export function gateIdsForRecoveryStages(
   )));
 }
 
+/** The authors whose results a gate reviews: its non-gate ancestors up to the nearest gates, which review the rest. */
+export function gateReviewedAuthorIds(gate: StageConfig, allStages: StageConfig[]): string[] {
+  const byId = new Map(allStages.map((stage) => [stage.id, stage]));
+  const reviewed = new Set<string>();
+  const queue = [...(gate.depends_on ?? [])];
+  while (queue.length > 0) {
+    const stage = byId.get(queue.shift()!);
+    if (!stage || stage.is_gate || reviewed.has(stage.id)) continue;
+    reviewed.add(stage.id);
+    queue.push(...(stage.depends_on ?? []));
+  }
+  return [...reviewed];
+}
+
+/** A gate confirms or rejects this author's result: one that reviews the author, or the gate its repair returns to. */
+export function isGateReviewed(stage: StageConfig, allStages: StageConfig[]): boolean {
+  return Boolean(stage.retry_to?.length) || allStages.some((gate) => gate.is_gate && gateReviewedAuthorIds(gate, allStages).includes(stage.id));
+}
+
 /** Bind research outcome semantics only to a gate whose dependency closure
  * contains an ordinary stage that owns the mutable result/sidecar slot. */
 export function isResearchOutcomeGate(

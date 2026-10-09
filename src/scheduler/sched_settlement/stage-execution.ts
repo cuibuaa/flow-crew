@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { gateArchiveArtifactPath, archivedGateVerdictWritePath, buildGateDispatchPreamble, buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
-import { isResearchOutcomeGate } from './gate-recovery.js';
+import { isGateReviewed, isResearchOutcomeGate } from './gate-recovery.js';
 import { recordGateValidationDelta, bindReviewedGateValidation } from './gate-validation.js';
 
 export function stageInitialTimeout(projectDir: string): number {
@@ -227,6 +227,7 @@ export async function executeSingleStage(
       availableSkills,
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
+      gateReviewed: isGateReviewed(stage, allStages),
       dynamicDispatch: stage.dynamic_dispatch,
       researchOutcomeGate: isResearchOutcomeGate(stage, allStages, state.research),
       criterionRefs: stage.criterion_refs,

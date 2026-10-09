@@ -238,7 +238,36 @@ export function archivedGateRejections(runDirPath: string, gateId: string): Arch
     .sort((left, right) => left.iteration - right.iteration || left.round - right.round);
 }
 
-export function buildGateDispatchPreamble(input: {
+/** Frame a gate's evaluation, and name any blocker reported by the authors it reviews (by default its fix stages). */
+export function buildGateDispatchPreamble(input: Parameters<typeof gateEvaluationFraming>[0] & { authorIds?: readonly string[] }): string {
+  return [gateEvaluationFraming(input), reportedBlockerNotice(input.runDirPath, input.authorIds ?? input.fixStageIds ?? [])]
+    .filter(Boolean).join('\n\n');
+}
+
+/** An author may answer "blocked" instead of delivering; its gate is the independent check of that claim. */
+function reportedBlockerNotice(runDirPath: string, authorIds: readonly string[]): string {
+  const reports = authorIds.flatMap((id) => {
+    const path = join(runDirPath, 'stages', id, 'output.md');
+    try {
+      const record = JSON.parse(readFileSync(path, 'utf-8')) as {
+        status?: unknown; summary?: string; caveats?: string[]; checks?: Array<{ command: string; exit_code: number; evidence: string }>;
+      };
+      return record.status !== 'blocked' ? [] : [`- ${id}: ${record.summary} (complete record: ${path})`,
+        ...(record.caveats ?? []).map((caveat) => `  - ${caveat}`),
+        ...(record.checks ?? []).map((check) => `  - \`${check.command}\` exited ${check.exit_code}: ${check.evidence}`)];
+    } catch { return []; }
+  });
+  return reports.length === 0 ? '' : [
+    'REPORTED BLOCKER: each author below answered "blocked" instead of delivering, with this stated reason and evidence:',
+    ...reports,
+    'Judge each blocker from your own reproduction, not from the author\'s account:',
+    '- Real, and the brief does not accept a blocked report as a valid outcome: reject with repairability "irreparable", say in the reason that the blocker is confirmed, and give evidence that reproduces it. The run then ends escalated for the operator.',
+    '- Not real: reject with repairability "repairable" and findings that show how the brief can be met; the repair then has to do that work.',
+    '- Pass only if every assigned criterion holds, for instance because the brief explicitly accepts a blocked report as a valid outcome.',
+  ].join('\n');
+}
+
+function gateEvaluationFraming(input: {
   runDirPath: string;
   gateId: string;
   evaluationRound: number;
