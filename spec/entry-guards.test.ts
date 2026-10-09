@@ -191,7 +191,7 @@ describe('Dashboard admission handshake', () => {
     expect(registrations).toBe(0);
   });
 
-  it('keeps the captured brief through the scheduler instead of rereading a changed sidecar', async () => {
+  it('keeps the captured brief in settled state and the terminal report when a sidecar changes', async () => {
     const brief = '# Goal\nUse the captured scheduler input marker.\n## What the report must show\n1. Preserve the captured scheduler input.\n';
     const changed = '# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n## What the report must show\n1. Preserve the captured scheduler input.\n';
     const admission = explicitAdmission(brief);
@@ -210,8 +210,8 @@ describe('Dashboard admission handshake', () => {
     const prompts: string[] = [];
     const adapter: Adapter = {
       async run(prompt, _role, options) {
+        prompts.push(options.stageId);
         if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
-        prompts.push(prompt);
         return fixtureResult({ output: 'completed', exitCode: 0, duration_ms: 1 }, options);
       },
     };
@@ -242,8 +242,11 @@ describe('Dashboard admission handshake', () => {
       admission,
     );
 
-    expect(prompts.join('\n'), JSON.stringify({ status: final.status, reason: final.failureReason, stages: final.stages })).toContain('captured scheduler input marker');
-    expect(prompts.join('\n')).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
+    expect(final.taskDescription).toBe(brief);
+    const report = readFileSync(join(runsRoot(), runId, 'summary.md'), 'utf8');
+    expect(report).toContain('captured scheduler input marker');
+    expect(report).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
+    expect(prompts).not.toContain('_summary');
   });
 
   it('replaces a same-digest invalid record before consuming an Inbox decision', async () => {

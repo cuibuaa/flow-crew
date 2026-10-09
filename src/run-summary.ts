@@ -1,21 +1,24 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
-import type { Adapter, AgentConfig } from './adapters/base.js';
-import { projectRunStageHistory, recordInvocationInput } from './run-state-view.js';
-import { withEngineCommandBoundary } from './write-boundary.js';
+import { join, relative } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
+import type { Adapter } from './adapters/base.js';
+import { projectRunStageHistory } from './run-state-view.js';
+import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
+import { PLAN_SCHEMA } from './plan-interface.js';
+import type { ValidationCommandResult } from './project-validation.js';
 import {
   resolveRunStatus,
   readRunState,
-  updateRunState,
-  STAGE_STATUS,
   RUN_STATUS,
+  STAGE_STATUS,
   runsRoot,
   TERMINAL_STATUSES as STORE_TERMINAL_STATUSES,
 } from './store.js';
-import type { RunStatus, StoreState } from './store.js';
+import type { RunStatus, StageStatus, StoreState } from './store.js';
 import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
 import { readRunEvents } from './run-events.js';
+import { archivedGateRejections } from './scheduler/sched_settlement/gate-archives.js';
 // Re-exported for back-compat + the unit test. The codex adapter now applies this
 // at the source (output.md/handoff/summary all get clean text); re-applying it
 // here is idempotent.
@@ -49,34 +52,6 @@ export const RESEARCH_SUMMARY_DECISION_LABELS = {
   [RUN_STATUS.STOPPED]: RUN_STATUS.STOPPED,
   [RUN_STATUS.INCOMPLETE]: RUN_STATUS.INCOMPLETE,
 } as const satisfies Record<RunStatus, string>;
-
-const CODE_NARRATIVE_PROMPT = `You are summarizing a multi-agent coding run for the operator who launched it.
-Write ONLY the following markdown sections, in this order, and nothing else:
-
-## What was done
-- 2-5 bullets describing WHAT changed and WHY (not the process). One line each.
-
-## Key decisions
-- notable choices the agents made (e.g. "used a lock instead of async", "split into 3 stages"). Omit this whole section if there were none worth noting.
-
-## Risks / Notes
-- anything the operator should verify or be aware of. Omit this whole section if none.
-
-Hard rules:
-- Do NOT write "Files changed", "Tests", or "Stages" sections — those are appended automatically from real data. Don't repeat file lists or test counts.
-- Be concise, one line per bullet. Output ONLY the markdown sections above, no preamble, no closing remarks.`;
-
-const RESEARCH_NARRATIVE_PROMPT = `You are summarizing a research / optimization run for the operator who launched it.
-The metric outcome, per-round results, ship/ceiling decision, and changed files are appended automatically — do NOT repeat any of those numbers.
-Write ONLY the following markdown sections, in this order, and nothing else:
-
-## What was tried & learned
-- 2-5 bullets: the directions/ideas explored across rounds and what the results imply. One line each.
-
-## Next steps
-- 1-3 bullets: what the operator should do next given the decision. One line each.
-
-Be concise. Output ONLY the markdown sections above, no preamble.`;
 
 // ---------------------------------------------------------------------------
 // Git: compute the REAL set of changed files since the run started.
@@ -115,7 +90,7 @@ function runGit(projectDir: string, args: string[]): string | null {
 /**
  * Diff the working tree against the commit recorded at run start. Captures both
  * committed and uncommitted changes plus untracked files, so the summary reflects
- * exactly what the run touched. Returns hasGit:false (→ LLM fallback) when there
+ * exactly what the run touched. Returns hasGit:false (→ labelled unavailable measurement) when there
  * is no base commit or the project is not a git repo.
  */
 function collectGitChanges(projectDir: string, baseCommit?: string): GitChanges {
@@ -162,7 +137,7 @@ function collectGitChanges(projectDir: string, baseCommit?: string): GitChanges 
 }
 
 function renderFilesSection(g: GitChanges): string {
-  if (!g.hasGit) return '';
+  if (!g.hasGit) return '## Files changed\n\nGit measurement unavailable; stage-reported paths appear in the results.';
   if (g.files.length === 0) {
     return '## Files changed\n_No file changes since run start._';
   }
@@ -176,32 +151,6 @@ function renderFilesSection(g: GitChanges): string {
     out += `\n\n**Commits (${g.commits.length}):**\n` + g.commits.map((c) => `- ${c}`).join('\n');
   }
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Tests: best-effort detection of test-result lines in stage outputs.
-// ---------------------------------------------------------------------------
-
-const TEST_LINE_RE = /(\d+\s+(passed|failed|passing|failing|skipped|errors?))|(=+\s*\d+\s+(passed|failed))|(\btest files?\b.*\d)/i;
-
-function detectTestResults(stageOutputs: string[]): string[] {
-  const hits = new Set<string>();
-  for (const out of stageOutputs) {
-    for (const raw of out.split('\n')) {
-      const line = raw.trim().replace(/^[#>*\-\s]+/, '').trim();
-      if (line.length === 0 || line.length > 160) continue;
-      if (/\d/.test(line) && TEST_LINE_RE.test(line)) hits.add(line);
-      if (hits.size >= 8) break;
-    }
-    if (hits.size >= 8) break;
-  }
-  return [...hits];
-}
-
-function renderTestsSection(stageOutputs: string[]): string {
-  const hits = detectTestResults(stageOutputs);
-  if (hits.length === 0) return '## Tests\n_No test results detected in stage outputs._';
-  return `## Tests\n` + hits.map((h) => `- ${h}`).join('\n');
 }
 
 function renderStagesSection(state: StoreState): string {
@@ -264,21 +213,19 @@ function readJson<T>(path: string): T | null {
   }
 }
 
-function renderRealityGateAdvisories(runDir: string): string {
-  const report = readJson<{
-    results?: Array<{ name?: unknown; type?: unknown; pass?: unknown; advisory?: unknown; details?: unknown }>;
-  }>(join(runDir, '.reality-gate.json'));
-  const advisories = Array.isArray(report?.results)
-    ? report.results.filter((item) => item.advisory === true && item.pass === false)
-    : [];
-  if (advisories.length === 0) return '';
-  const lines = advisories.map((item) => {
-    const name = typeof item.name === 'string' ? item.name : 'unnamed check';
-    const type = typeof item.type === 'string' ? ` (${item.type})` : '';
-    const details = typeof item.details === 'string' ? `: ${item.details}` : '';
-    return `- ${name}${type}${details}`;
-  });
-  return `## Reality-Gate advisories\n${lines.join('\n')}`;
+function renderRealityGateChecks(runDir: string): string {
+  const report = readJson<{ results?: Array<{ name?: string; type?: string; pass?: boolean;
+    advisory?: boolean; details?: string; evidence?: { command?: string; exit?: { code?: number | null } } }> }>(join(runDir, '.reality-gate.json'));
+  if (!Array.isArray(report?.results)) return '';
+  const render = (items: NonNullable<typeof report>['results']): string => (items ?? []).map(item => {
+    const command = typeof item.evidence?.command === 'string' ? `; command: \`${item.evidence.command}\`` : '';
+    const exit = item.evidence?.exit;
+    return `- ${item.name ?? 'unnamed check'} (${item.type ?? 'unknown type'}): ${item.pass === true ? 'PASS' : item.pass === false ? 'FAIL' : 'unknown'} — ${item.details ?? 'no details'}${command}${exit ? `; direct exit ${exit.code ?? 'unknown'}` : ''}`;
+  }).join('\n');
+  const hard = report.results.filter(item => item && item.advisory !== true);
+  const advisory = report.results.filter(item => item && item.advisory === true && item.pass === false);
+  return [hard.length ? `## Reality-Gate checks\n\nReceipt: \`.reality-gate.json\`\n\n${render(hard)}` : '',
+    advisory.length ? `## Reality-Gate advisories\n\n${render(advisory)}` : ''].filter(Boolean).join('\n\n');
 }
 
 function readResearchData(runDir: string): ResearchData {
@@ -346,135 +293,161 @@ function renderRoundsSection(data: ResearchData): string {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Stage-output collection (shared by both summary types).
-// ---------------------------------------------------------------------------
-
-function collectStageOutputs(runDir: string, state: StoreState): { joined: string; raw: string[] } {
-  const blocks: string[] = [];
-  const raw: string[] = [];
-  const stagesDir = join(runDir, 'stages');
-  const appendOutput = (outputPath: string, heading: string, status: string, durationMs?: number): void => {
-    if (!existsSync(outputPath)) return;
-    let output = readFileSync(outputPath, 'utf-8');
-    raw.push(output);
-    if (output.length > 3000) output = output.slice(0, 1500) + '\n...(truncated)...\n' + output.slice(-1500);
-    const duration = durationMs ? `${Math.round(durationMs / 1000)}s` : '';
-    blocks.push(`## ${heading} (${status}${duration ? ', ' + duration : ''})\n${output}`);
+// Records retain their execution identity: a rejected review or failed check
+// stays visible even when a later repair succeeds. Legacy prose is linked, never
+// mined for guessed commands, exits or test counts.
+function renderStageRecords(runDir: string, state: StoreState): { details: string; conclusions: string } {
+  const sections: string[] = [];
+  const conclusions: string[] = [];
+  const append = (id: string, status: StageStatus, outputPath: string | undefined,
+    attemptPaths: Array<{ attemptIndex: number; path: string }>, archived = ''): void => {
+    const attempts = status.attempts ?? [];
+    const records = attempts.length ? attempts.map((attempt, index) => ({
+      label: `${id}${archived}, execution ${attempt.index} (${attempt.status}, exit ${attempt.exitCode ?? 'unknown'})`,
+      path: attemptPaths.find(entry => entry.attemptIndex === attempt.index && existsSync(join(runDir, entry.path)))?.path
+        ?? (index === attempts.length - 1 ? outputPath : undefined),
+      error: attempt.error, latest: index === attempts.length - 1,
+    })) : [{ label: `${id}${archived} (${status.status}, exit ${status.exitCode ?? 'unknown'})`, path: outputPath, error: status.error, latest: true }];
+    for (const entry of records) {
+      const lines = [`### ${entry.label}`];
+      if (entry.error) lines.push(`Failure: ${entry.error}`);
+      if (!entry.path || !existsSync(join(runDir, entry.path))) {
+        lines.push('Result unavailable; no checks inferred.');
+        sections.push(lines.join('\n\n'));
+        continue;
+      }
+      lines.push(`Record: \`${entry.path}\``);
+      try {
+        const output = readFileSync(join(runDir, entry.path), 'utf8');
+        const value = JSON.parse(output) as Record<string, unknown>;
+        if (Array.isArray(value.stages)) {
+          const plan = parseStageRecord(output, PLAN_SCHEMA);
+          lines.push(`Plan: ${(plan.stages as Array<{ id: string }>).map(stage => stage.id).join(', ')}.`);
+        } else if (typeof value.pass === 'boolean') {
+          const record = parseStageRecord(output, stageRecordSchema({ isGate: true,
+            criterionRefs: Object.keys(value.criteria ?? {}), extendedVerdict: true }));
+          lines.push(`Independent verdict: ${record.pass ? 'PASS' : 'FAIL'} — ${record.reason}`);
+          const criteria = record.criteria as Record<string, { status: string; evidence: string }>;
+          for (const [id, criterion] of Object.entries(criteria)) lines.push(`- ${id}: ${criterion.status} — ${criterion.evidence}`);
+          const findings = record.audit_findings as { findings: Array<{ id: string; reason: string; paths: string[] }> };
+          for (const finding of findings.findings) lines.push(`- Finding ${finding.id}: ${finding.reason} (${finding.paths.join(', ')})`);
+          if (record.repairability) {
+            const repair = record.repairability as { disposition: string; evidence: string };
+            lines.push(`Repairability: ${repair.disposition} — ${repair.evidence}`);
+          }
+        } else {
+          const record = parseStageRecord(output, HANDOFF_SCHEMA);
+          const conclusion = `${id}${archived}: ${record.status} — ${record.summary}`;
+          if (entry.latest) conclusions.push(`- ${conclusion}`);
+          else lines.push(conclusion);
+          const files = record.files_modified as string[];
+          if (files.length) lines.push(`Reported files: ${files.map(file => `\`${file}\``).join(', ')}`);
+          const checks = record.checks as Array<{ command: string; exit_code: number; evidence: string }>;
+          if (checks.length) lines.push('Stage-reported checks:\n' + checks.map(check =>
+            `- \`${check.command}\` — exit ${check.exit_code}; evidence: ${check.evidence}`).join('\n'));
+          else lines.push('No stage-reported checks.');
+          const caveats = record.caveats as string[];
+          if (caveats.length) lines.push('Caveats / open work:\n' + caveats.map(caveat => `- ${caveat}`).join('\n'));
+        }
+      } catch {
+        lines.push('Typed result unavailable or invalid; read the record for legacy output or diagnostics. No checks inferred.');
+      }
+      sections.push(lines.join('\n\n'));
+    }
   };
-
-  if (state.stageEvidence?.length) {
-    for (const evidence of state.stageEvidence) {
-      if (!evidence.outputPath) continue;
-      appendOutput(
-        join(runDir, evidence.outputPath),
-        `Stage: ${evidence.stageId} [iteration ${evidence.iteration}, archived]`,
-        evidence.status.status,
-        evidence.status.duration_ms,
-      );
-    }
-    for (const [stageId, status] of Object.entries(state.stages)) {
-      appendOutput(join(stagesDir, stageId, 'output.md'), `Stage: ${stageId}`, status.status, status.duration_ms);
-    }
-  } else if (existsSync(stagesDir)) {
-    // Legacy runs have no iteration-addressed ledger. Preserve their historical
-    // directory scan so summaries remain backward compatible.
-    for (const stageId of readdirSync(stagesDir)) {
-      const outputPath = join(stagesDir, stageId, 'output.md');
-      if (!existsSync(outputPath)) continue;
-      const status = state.stages[stageId]?.status ?? 'unknown';
-      appendOutput(outputPath, `Stage: ${stageId}`, status, state.stages[stageId]?.duration_ms);
-    }
+  for (const evidence of state.stageEvidence ?? []) append(evidence.stageId, evidence.status,
+    evidence.outputPath, evidence.attemptOutputPaths, ` [iteration ${evidence.iteration}, archived]`);
+  for (const [id, status] of Object.entries(state.stages)) {
+    if (status.status === STAGE_STATUS.SKIPPED || status.status === STAGE_STATUS.PENDING) continue;
+    const directory = `stages/${id}`;
+    append(id, status, `${directory}/output.md`, (status.attempts ?? []).map(attempt =>
+      ({ attemptIndex: attempt.index, path: `${directory}/output_attempt_${attempt.index}.md` }))
+      .filter(entry => existsSync(join(runDir, entry.path))));
   }
-  return { joined: blocks.join('\n\n'), raw };
+  return { details: '## Stage results\n\n' + (sections.join('\n\n') || 'No stage results recorded.'),
+    conclusions: '## What was done\n\n' + (conclusions.join('\n') || 'No typed work summaries recorded; see stage results.') };
 }
 
-// ---------------------------------------------------------------------------
-// LLM narrative.
-// ---------------------------------------------------------------------------
-
-async function generateNarrative(
-  projectDir: string,
-  runDir: string,
-  runId: string,
-  state: StoreState,
-  systemPrompt: string,
-  factsBlock: string,
-  stageOutputs: string,
-  adapter: Adapter,
-): Promise<string | null> {
-  const prompt = `Summarize this run.
-
-# Run Info
-- Run ID: ${runId}
-- Project: ${state.projectDir}
-- Status: ${state.status}
-- Task: ${(state.taskDescription ?? '').slice(0, 500)}
-- Iterations: ${state.currentIteration ?? 1}/${state.maxIterations ?? '?'}
-
-# Already-known facts (do NOT repeat these in your output)
-${factsBlock || '(none)'}
-
-# Stage Results
-${stageOutputs || '(none)'}
-
-# Dispatch Plan
-${existsSync(join(runDir, 'dispatch.yaml')) ? readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8').slice(0, 2000) : '(none)'}
-`;
-
-  const summaryAgent: AgentConfig = {
-    name: 'summarizer',
-    description: 'Run summary generator',
-    // Use the adapter's default model rather than hardcoding 'sonnet': codex on a
-    // ChatGPT account rejects 'sonnet' with a 400, which silently broke every
-    // summary narrative. 'default' lets each adapter use whatever its account supports.
-    model: 'default',
-    reasoning_effort: 'low',
-    tools: [],
-    prompt: systemPrompt,
-  };
-
-  const startedAt = new Date().toISOString();
-  const attemptIndex = (state.auxiliaryAttempts?._summary?.length ?? 0) + 1;
-  let invocationIndex = 0;
-  const finish = (result?: import('./adapters/base.js').RunResult, error?: string): void => {
-    updateRunState(projectDir, runId, (current) => {
-      const attempt = current.auxiliaryAttempts?._summary?.find((entry) => entry.index === attemptIndex && entry.startedAt === startedAt);
-      if (attempt) Object.assign(attempt, { status: result?.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED, completedAt: new Date().toISOString(), exitCode: result?.exitCode ?? 1, duration_ms: result?.duration_ms ?? Math.max(0, Date.now() - Date.parse(startedAt)), tokens_in: result?.tokens_in, tokens_out: result?.tokens_out, tokenUsage: result?.tokenUsage ?? (result?.tokens_in !== undefined && result.tokens_out !== undefined ? 'known' : 'unknown'), tokens_cached: result?.tokens_cached, tokens_reasoning: result?.tokens_reasoning, invocations: result?.invocations, error });
-    });
-  };
-  const capture = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
-    recordInvocationInput(runDir, { runId, stageId: '_summary', attemptIndex, attemptStartedAt: startedAt, invocationIndex: ++invocationIndex, boundary, adapter: 'configured-summary-adapter', model: input.model ?? summaryAgent.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, transport: input.transport, resumeSessionId: input.resumeSessionId });
-  };
-  try {
-    updateRunState(projectDir, runId, (current) => { current.auxiliaryAttempts ??= {}; current.auxiliaryAttempts._summary ??= []; current.auxiliaryAttempts._summary.push({ index: attemptIndex, startedAt, status: 'running' }); });
-    capture({ systemPrompt: summaryAgent.prompt, userPrompt: prompt }, 'adapter');
-    const result = await withEngineCommandBoundary({ projectDir, runDir, stageId: '_summary',
-      authority: 'observer', attemptIndex }, () => adapter.run(prompt, summaryAgent, {
-      timeout_ms: 30000,
-      workDir: projectDir,
-      runDir,
-      stageId: '_summary',
-      attemptIndex,
-      attemptStartedAt: startedAt,
-      onInvocationInput: (input) => capture(input, 'model'),
-    }));
-    finish(result);
-    if (result.exitCode !== 0 || !result.output.trim()) {
-      log.warn({ runId, exitCode: result.exitCode }, 'Narrative generation failed');
-      return null;
+/** Preserve the scheduler's archived conclusion separately from the authored
+ * verdict, including after a repair or replan succeeds. */
+function renderEngineGateConclusions(runDir: string, state: StoreState): string {
+  const sections: string[] = [];
+  const ids = new Set([...Object.keys(state.stages),
+    ...(state.stageEvidence ?? []).map(entry => entry.stageId),
+    ...(state.retiredStageUsage ?? []).map(entry => entry.stageId)]);
+  for (const id of ids) {
+    for (const archive of archivedGateRejections(runDir, id)) {
+      const lines = [`### ${id} [${archive.iteration ? `iteration ${archive.iteration}` : 'legacy iteration unknown'}, round ${archive.round}]`,
+        `Engine record: \`${relative(runDir, archive.effectiveVerdictPath)}\`; authored verdict: \`${relative(runDir, archive.verdictPath)}\`.`];
+      const record = readJson<{ gateId: string; written_verdict_pass: boolean | null;
+        engine_effective_pass: boolean; engine_rejection_reason: string | null }>(archive.effectiveVerdictPath);
+      if (!record || record.gateId !== id || typeof record.engine_effective_pass !== 'boolean'
+        || (record.written_verdict_pass !== null && typeof record.written_verdict_pass !== 'boolean')
+        || (record.engine_rejection_reason !== null && typeof record.engine_rejection_reason !== 'string')) {
+        lines.push('Engine conclusion unavailable or invalid; archived rejection remains recorded. No effective verdict inferred.');
+      } else {
+        lines.push(`Archived authored verdict: ${record.written_verdict_pass === null ? 'unknown' : record.written_verdict_pass ? 'PASS' : 'FAIL'}.`,
+          `Engine effective verdict: ${record.engine_effective_pass ? 'PASS' : 'FAIL'} — ${record.engine_rejection_reason || 'Reason unavailable in engine record.'}`);
+      }
+      sections.push(lines.join('\n\n'));
     }
-    const cleaned = extractFinalMessage(result.output);
-    if (!cleaned) {
-      log.warn({ runId }, 'Narrative empty after cleaning transcript');
-      return null;
-    }
-    return cleaned;
-  } catch (err) {
-    try { finish(undefined, err instanceof Error ? err.message : String(err)); } catch { /* preserve existing optional-summary failure behavior */ }
-    log.warn({ runId, err }, 'Narrative generation threw');
-    return null;
   }
+  return sections.length ? '## Engine gate conclusions\n\n' + sections.join('\n\n') : '';
+}
+
+/** Render command receipts, not test claims recovered from agent prose. Alias
+ * receipts name their immutable version so a reader can reproduce this view.
+ * Keep earlier validation failures; bound aliases of the same execution deduplicate. */
+function renderValidation(runDir: string): string {
+  const sections: string[] = [];
+  const seen = new Set<string>();
+  for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
+    const receipt = readJson<{ stageId: string; checkedAt: string; pass: boolean;
+      immutablePath?: string; current: ValidationCommandResult[];
+      delta: Array<{ role: string; state: string; reason: string }> }>(join(runDir, name));
+    if (!receipt || !Array.isArray(receipt.current) || !Array.isArray(receipt.delta)) {
+      sections.push(`- ${name}: validation receipt unavailable or invalid.`);
+      continue;
+    }
+    const identity = JSON.stringify([receipt.stageId, receipt.checkedAt, receipt.current, receipt.delta]);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const lines = [`### ${receipt.stageId} — comparison ${receipt.pass ? 'passed' : 'failed/unresolved'}`,
+      `Checked: ${receipt.checkedAt ?? 'unknown'}; receipt: \`${receipt.immutablePath || name}\`.`];
+    for (const result of receipt.current) {
+      if (!result || typeof result.output !== 'string' || !Array.isArray(result.failureIdentifiers)) {
+        lines.push('Command receipt unavailable or invalid; no exit or totals inferred.');
+        continue;
+      }
+      lines.push(`- \`${result.display ?? result.role}\` — ${result.state}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms${result.reason ? `; ${result.reason}` : ''}`);
+      // These are labelled raw collector excerpts, never a synthesized total.
+      const totals = stripVTControlCharacters(result.output).split('\n').filter(line => /^(?:\s*(?:Test Files|Tests)\s+\d|# (?:tests|pass|fail|cancelled|skipped|todo) \d|.*\b\d+ (?:passed|failed|skipped).* in [\d.]+s)/.test(line));
+      if (totals.length) lines.push('Collector test totals:\n```text\n' + totals.join('\n') + '\n```');
+      else if (result.role === 'test') lines.push('Test totals unavailable in collector output; see receipt.');
+      for (const failure of result.failureIdentifiers) lines.push(`  - Failure: ${failure}`);
+    }
+    for (const delta of receipt.delta) lines.push(delta
+      ? `- ${delta.role} baseline comparison: ${delta.state} — ${delta.reason}`
+      : 'Baseline comparison entry unavailable or invalid.');
+    sections.push(lines.join('\n\n'));
+  }
+  return '## Configured validation\n\n' + (sections.join('\n\n') || 'No engine validation receipts recorded; configured verification is unreported.');
+}
+
+function renderRunOutcome(state: StoreState): string {
+  const lines = [`## Run outcome`, `Status: **${state.status}**`, `Run: \`${state.runId}\``];
+  if (state.taskDescription) {
+    const task = state.taskDescription.replace(/\s+/g, ' ').trim();
+    lines.push(`Recorded task${task.length > 500 ? ' (excerpt)' : ''}: ${task.slice(0, 500)}${task.length > 500 ? '…' : ''}`);
+  }
+  if (state.failureReason) lines.push(`Failure / open work: ${state.failureReason}`);
+  if (state.startedAt && state.completedAt) {
+    const elapsed = Date.parse(state.completedAt) - Date.parse(state.startedAt);
+    if (Number.isFinite(elapsed)) lines.push(`Elapsed run wall time: ${elapsed}ms. Stage durations below are cumulative execution time, not elapsed run time.`);
+  }
+  const unfinished = Object.entries(state.stages).filter(([, status]) => status.status === STAGE_STATUS.PENDING || status.status === STAGE_STATUS.RUNNING || status.status === STAGE_STATUS.FAILED);
+  if (unfinished.length) lines.push('Unfinished / failed stages: ' + unfinished.map(([id, status]) => `${id}: ${status.status}`).join(', '));
+  return lines.join('\n\n');
 }
 
 function assemble(parts: (string | null | undefined)[]): string {
@@ -484,7 +457,7 @@ function assemble(parts: (string | null | undefined)[]): string {
 export async function generateRunSummary(
   projectDir: string,
   runId: string,
-  adapter: Adapter,
+  _adapter?: Adapter,
 ): Promise<string | null> {
   const runDir = join(runsRoot(), runId);
   if (!existsSync(join(runDir, 'run.json'))) return null;
@@ -493,10 +466,13 @@ export async function generateRunSummary(
     const state: StoreState = readRunState(projectDir, runId);
     if (!TERMINAL_STATUSES.has(state.status)) return null;
 
-    const { joined: stageOutputs, raw: rawOutputs } = collectStageOutputs(runDir, state);
+    const records = renderStageRecords(runDir, state);
+    const engineGateSection = renderEngineGateConclusions(runDir, state);
+    const validationSection = renderValidation(runDir);
+    const runOutcome = renderRunOutcome(state);
     const git = collectGitChanges(projectDir, state.baseCommit);
     const filesSection = renderFilesSection(git);
-    const advisorySection = renderRealityGateAdvisories(runDir);
+    const advisorySection = renderRealityGateChecks(runDir);
     const orchestrationSection = renderOrchestrationEvents(projectDir, runId);
     const stagesSection = renderStagesSection(state);
     const isResearch = !!state.research || existsSync(join(runDir, 'research_journal.json'));
@@ -507,33 +483,31 @@ export async function generateRunSummary(
       const research = readResearchData(runDir);
       const outcomeSection = renderResearchOutcome(state, research);
       const roundsSection = renderRoundsSection(research);
-      const factsBlock = [outcomeSection, roundsSection, advisorySection, orchestrationSection, stagesSection, filesSection].filter(Boolean).join('\n\n');
-      const narrative = await generateNarrative(
-        projectDir, runDir, runId, state, RESEARCH_NARRATIVE_PROMPT, factsBlock, stageOutputs, adapter,
-      );
       summary = assemble([
         '# Research Summary',
+        runOutcome,
         outcomeSection,
         roundsSection,
         advisorySection,
         orchestrationSection,
-        narrative ?? '## What was tried & learned\n_Summary narrative unavailable; see rounds and stage outputs above._',
+        records.conclusions,
+        records.details,
+        engineGateSection,
+        validationSection,
         filesSection,
         stagesSection,
       ]);
     } else {
-      const testsSection = renderTestsSection(rawOutputs);
-      const factsBlock = [advisorySection, orchestrationSection, filesSection, testsSection, stagesSection].filter(Boolean).join('\n\n');
-      const narrative = await generateNarrative(
-        projectDir, runDir, runId, state, CODE_NARRATIVE_PROMPT, factsBlock, stageOutputs, adapter,
-      );
       summary = assemble([
         '# Run Summary',
-        narrative ?? '## What was done\n_Summary narrative unavailable; see stages and files below._',
+        runOutcome,
+        records.conclusions,
+        records.details,
+        engineGateSection,
         advisorySection,
         orchestrationSection,
         filesSection,
-        testsSection,
+        validationSection,
         stagesSection,
       ]);
     }

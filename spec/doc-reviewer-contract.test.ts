@@ -11,7 +11,7 @@ function reviewerPrompt(): string {
 }
 
 describe('doc reviewer design contract', () => {
-  it('turns a deliberately weak design proposal into a counted gate failure', () => {
+  it('returns findings and a rejecting typed verdict for a deliberately weak design proposal', () => {
     const prompt = reviewerPrompt();
     const proposalStandards = [
       'Purpose traceability',
@@ -27,10 +27,12 @@ describe('doc reviewer design contract', () => {
     ];
 
     // A proposal that puts an unmotivated internal score in the primary view is
-    // explicitly a finding, and every finding contributes to the gate metric.
+    // explicitly a finding, and every finding remains in the independently returned verdict.
     expect(prompt).toContain('every element the design places in the primary view must be traceable');
-    expect(prompt).toContain('Count each violation below in doc_issues');
-    expect(prompt).toContain('pass = true only if score == 0');
+    expect(prompt).toContain('Include each violation below in the findings');
+    expect(prompt).toContain('Reject when critical inaccuracies or missing required sections remain');
+    expect(prompt).toContain("Return the scheduler's typed verdict");
+    expect(prompt).not.toContain('ALWAYS write the verdict file');
     for (const standard of proposalStandards) expect(prompt).toContain(`- ${standard}:`);
   });
 

@@ -25,18 +25,18 @@ prompt: |
   - Examples must be correct and runnable.
   - Check for missing sections and dead links.
   - Clear structure with logical flow.
-  - If used as a gate stage, ALWAYS write the verdict file — even if the review cannot be completed. A missing verdict causes confusing errors.
-  - Verdict format (ALL fields required):
-    {"pass": true/false, "reason": "...", "score": <number>, "metric": "doc_issues", "threshold": 0}
-    score = number of critical inaccuracies or missing required sections found.
-    pass = true only if score == 0 (no critical issues).
-    reason must be structured: "Checked: [sections] | Issues: [list] | Missing: [list]"
+  - Return the scheduler's typed verdict as your final answer; the engine publishes
+    the verdict file and terminal summary. Include criterion evidence and concrete
+    findings; if review cannot be completed, report the unresolved criteria honestly.
+    Reject when critical inaccuracies or missing required sections remain.
+    Numeric scores belong in the verdict only when the supplied contract requires them.
+    Write a separate human review only when the brief asks people to read it.
   # Design proposals — additional standards. Apply ONLY when the document under review
   # PROPOSES a design (information architecture, UI/UX, data-fetch strategy, or a product
   # decision) rather than describing an existing system. Do NOT apply these to READMEs,
   # API references, or changelogs. For a design proposal, accuracy and clarity are
   # NECESSARY BUT NOT SUFFICIENT: a document can be accurate, complete and well-structured
-  # and still propose a bad design. Count each violation below in doc_issues.
+  # and still propose a bad design. Include each violation below in the findings.
   - Purpose traceability: every element the design places in the primary view must be traceable to a stated user question or goal. An element that cannot be named against one, yet still occupies the primary view, is a finding.
   - Data-driven distinctions: if the design branches behaviour by category, that category must be derivable from data. Dependence on manual classification or a human-set flag is a finding. The design must state its criterion AND a counter-example where the criterion misclassifies.
   - No normalisation of meaningful states: states that mean different things must stay distinguishable. Collapsing distinct outcomes into one visual treatment for the sake of simplicity is a finding.
@@ -59,5 +59,5 @@ prompt: |
   - Scan-length/readability: a single row or line must not become long enough to prevent scanning; complete detail needs a reachable disclosure.
   - Label-content truthfulness: labels must accurately describe the content and outcome they introduce.
   - Uninterrupted primary reading flow: empty or secondary sections must not break the main operator decision path.
-  - Write output to its exact declared path. Follow the shared base prompt's run-record boundary.
+  - Write requested human documents to their exact declared paths. Follow the shared base prompt's run-record boundary.
   - Never modify other run directories; read them only when this task explicitly authorizes that evidence.

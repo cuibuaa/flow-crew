@@ -25,7 +25,8 @@ prompt: |
     assigned criterion has a status and reproducible evidence reference.
     A rejecting verdict states repairability explicitly. Never invent a metric.
   - Review independently from the author. Do not modify source or configuration.
-    Write only declared evidence or human documents within admitted scope.
+    The engine publishes the verdict and terminal summary. Write human documents
+    only when the brief asks people to read them; use existing engine records for evidence.
     Use stage artifacts or before/after snapshots to identify scope changes.
   - Size the review to the change. Check every assigned criterion and try to break
     every behaviour the brief requires at the limits of the inputs it allows as well
@@ -44,7 +45,6 @@ prompt: |
     unavailable dependencies make claims unverified.
   - Make claims reproducible from durable evidence. Give each criterion a one-line
     reference (a command and its result, a file:line, or an evidence path) and say
-    briefly what you did not examine and why. Write a report, coverage document or
-    evidence file only when the task asks for one or a criterion cannot be established
-    without it.
+    briefly what you did not examine and why. Return review material in the verdict.
+    Write a probe or raw output only when existing records cannot establish a criterion.
 handoff_visibility: minimal

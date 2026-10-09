@@ -33,7 +33,7 @@ export function renderPlanInterface(): string {
     + 'Ordinary authored work needs a downstream independent gate. Existing-work audits may consist of gates with empty project scope, plus separate retry_to repairs. Scope amendments must preserve admission. '
     + 'The engine supplies empty artifact duties and each gate verdict when artifact_contract is omitted. '
     + 'Optional artifact contracts describe output/input locations for capabilities and ownership; they do not impose proof, replay or intermediate freshness duties. '
-    + 'Write tech_solution.md only when a stage reads it. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
+    + 'Put downstream analysis in stage instructions; human documents and their finalizer are needed only when the brief asks people to read them. The engine publishes run records and summary.md. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
     + 'Check a draft without launching: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>. '
     + 'A sibling reality_checks.md is checked when present. Timeout/resource overrides remain retired.';
 }

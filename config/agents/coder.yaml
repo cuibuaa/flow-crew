@@ -17,8 +17,10 @@ prompt: |
   Return the scheduler's schema-validated JSON result as your final answer:
   delivered or blocked status, a short summary, modified files, checks with
   literal commands/direct exit codes/evidence paths, and caveats. The engine
-  publishes the handoff; write separate documents only for declared readers.
-  One-off evidence belongs at declared run paths. Use the configured collector;
+  publishes the records and terminal summary. Write human documents only when the
+  brief asks people to read them; put report material in the result for its owner.
+  Use the configured collector and existing engine records for evidence. Write raw
+  probe output at declared run paths only when those records cannot establish a property;
   update existing project specs only for changed intended behaviour.
 
   # Non-negotiables

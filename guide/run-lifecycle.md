@@ -51,6 +51,39 @@ Operator terminology is intentionally unambiguous: a daemon task may have multip
 **re-evaluation**. `flowcrew status`, task list/show, the dashboard, and `flowcrew events`
 all expose the same bounded operational projection and the latest reason-bearing event.
 
+## Run records and terminal summary
+
+Stages return the scheduler's typed result (or an independent gate verdict); the
+engine validates and publishes the existing output, dispatch, verdict and handoff
+carriers. Stage instructions carry downstream planning analysis. Agents write
+human documents only when the brief asks people to read them, with one admitted
+owner for each requested report. A finalizer is not needed solely to publish run
+records. Raw probes are needed only for properties the existing records cannot
+establish, within their declared capabilities.
+
+At terminal settlement, `summary.md` is assembled without a model invocation.
+The operator receives the lifecycle outcome and failure reason, stage summaries,
+reported files, literal commands with reported direct exits and evidence locators,
+caveats, independent criterion verdicts and findings, configured validation
+receipts with collector test-total excerpts, Git measurements, and cumulative
+stage timing. Stage-reported checks are labelled separately from engine validation.
+Earlier executions and retired iteration results retain their identity, so a
+later repair does not erase failed checks or rejected findings. Missing or legacy
+results are linked and labelled unavailable; prose is never mined for guessed
+commands, exits or counts. Research outcomes and the list of tried directions
+remain derived from the engine journal and campaign ledger.
+Archived engine gate conclusions retain their iteration and round, concrete
+rejection reason and record locator alongside the independent authored verdict.
+An authored PASS does not conceal an engine rejection, including after repair.
+
+Readers remain unchanged: downstream stages and the supervisor consume stage
+records; the scheduler consumes dispatches and verdicts; CLI and dashboard
+readers consume `summary.md`; people consume the reports requested by the brief.
+Historical `tech_solution.md` remains readable for resumed runs, but new plans
+put needed analysis in stage instructions. Optional `reality_checks.md` is an
+executable declaration consumed by the independent deterministic gate, not a
+prose evidence report.
+
 ## Stage readiness and settlement
 
 Stage status answers two different questions. For dispatch readiness, only a

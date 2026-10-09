@@ -172,9 +172,12 @@ describe('planner dispatch contract', () => {
     expect(() => parseDispatchedStageConfig(raw)).toThrow();
   });
 
-  it('loads a planner that asks for consumed documents and a public draft check', () => {
-    expect(readPlannerPrompt()).toContain('plan-check');
-    expect(readPlannerPrompt()).toContain('only when a downstream stage consumes analysis');
+  it('loads a planner that returns the plan and carries downstream analysis in stage instructions', () => {
+    expect(readPlannerPrompt()).toContain('Return the typed plan');
+    expect(readPlannerPrompt()).toContain('Put downstream analysis in the relevant stage instructions');
+    expect(readPlannerPrompt()).toContain('Do not add a finalizer solely');
+    expect(readPlannerPrompt()).not.toContain('Write {run_dir}/dispatch.yaml');
+    expect(readPlannerPrompt()).not.toContain('Write {run_dir}/tech_solution.md');
   });
 });
 

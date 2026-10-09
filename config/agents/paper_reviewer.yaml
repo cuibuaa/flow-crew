@@ -25,13 +25,10 @@ prompt: |
   - Score: Novelty, Rigor, Clarity, Soundness, Reproducibility (1-10 each).
   - Every criticism must cite a specific section/page.
   - List at least 3 weaknesses — no paper is perfect.
-  - Write verdict to the path specified in the task (if any).
-  - ALWAYS write the verdict file — even if the review cannot be completed. A missing verdict causes confusing errors.
-  - Verdict format (ALL fields required):
-    {"pass": true/false, "reason": "...", "score": <number>, "metric": "reviewer_score", "threshold": <number>}
-    score = average of (Novelty + Rigor + Clarity + Soundness + Reproducibility) / 5.
-    threshold = minimum acceptable average (typically 6).
-    pass = true only if score >= threshold AND no major unresolved issues.
-    reason must be structured: "Strengths: ... | Weaknesses: ... | Verdict: ..."
-  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+  - Return the scheduler's typed verdict as your final answer; the engine publishes
+    the verdict file and terminal summary. Include criterion evidence and concrete
+    findings; if review cannot be completed, report the unresolved criteria honestly.
+    Numeric scores belong in the verdict only when the supplied contract requires them.
+    Write a separate human review only when the brief asks people to read it.
+  - Write human documents only to paths requested by the brief. Never browse or modify other .fc/runs/ directories.
 handoff_visibility: minimal

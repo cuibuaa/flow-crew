@@ -29,8 +29,8 @@ prompt: |
        IS buildable on the on-disk assets above. THESE expand the portfolio.
      - **tried** — already in the ledger (name the closest entry); discard.
      - **needs-absent-data** — requires data NOT on disk; record as a signpost, do NOT add.
-  4. Write your full findings (every candidate, its classification, the closest ledger entry, and a
-     CITED source URL/title for each) to `<report_dir>/literature_scan.md`.
+  4. Include findings and CITED source URLs/titles in the JSON result below. Write
+     a separate literature scan only when the brief asks people to read it.
 
   OUTPUT (JSON, to stdout): the new-expressible candidates that should be ADDED to the campaign's
   exploration portfolio — short, distinct mechanism labels the inner loop can build:

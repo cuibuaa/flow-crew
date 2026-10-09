@@ -201,15 +201,19 @@ describe('auxiliary command carrier boundaries', () => {
     expect(readFileSync(history, 'utf8')).toBe(prefix); expect(readRunState(f.projectDir, f.runId).stageEvidence).toHaveLength(1);
   });
 
-  native.each(['summary'])('binds actual %s adapter calls with the appropriate output authority', async (route) => {
+  it('assembles the terminal summary without granting an adapter any output authority', async () => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), prefix = readFileSync(history, 'utf8');
     updateRunState(f.projectDir, f.runId, (state) => { state.status = 'complete'; });
-    const writable = route === 'scout';
-    const code = child(`let historyDenied=false,projectDenied=false;try{fs.writeFileSync(${JSON.stringify(history)},'bad')}catch(e){historyDenied=e.code==='EACCES'}try{fs.writeFileSync('literature_scan.md','legitimate')}catch(e){projectDenied=e.code==='EACCES'}if(!historyDenied||projectDenied===${writable})process.exitCode=9;console.log(JSON.stringify({new_directions:['owned'],next_direction:'owned'}))`);
-    const adapter = { run: () => execWithStdin(process.execPath, ['-e', code], '', { cwd: f.projectDir, timeout_ms: 5_000 }) } as unknown as Adapter;
-    if (route === 'summary') expect(await generateRunSummary(f.projectDir, f.runId, adapter)).toContain('"new_directions":["owned"]');
-    expect(existsSync(join(f.projectDir, 'literature_scan.md'))).toBe(writable);
-    expect(readFileSync(history, 'utf8')).toBe(prefix); expect(readRunState(f.projectDir, f.runId).stageEvidence).toHaveLength(1);
+    const run = vi.fn(async () => {
+      writeFileSync(history, 'bad');
+      writeFileSync(join(f.projectDir, 'literature_scan.md'), 'unexpected');
+      throw new Error('Summary must not invoke the adapter');
+    });
+    expect(await generateRunSummary(f.projectDir, f.runId, { run })).toContain('Status: **complete**');
+    expect(run).not.toHaveBeenCalled();
+    expect(existsSync(join(f.projectDir, 'literature_scan.md'))).toBe(false);
+    expect(readFileSync(history, 'utf8')).toBe(prefix);
+    expect(readRunState(f.projectDir, f.runId).stageEvidence).toHaveLength(1);
   });
 
   native('refuses an unknown validation hard-link closure before executing project code', async () => {

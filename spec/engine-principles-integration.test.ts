@@ -165,9 +165,11 @@ describe('proven restart recovery', () => {
     expect(result.status).toBe('complete'); expect(calls).toBe(1); expect(result.currentIteration).toBe(2); expect(result.maxIterations).toBe(4);
     expect(result.stages.writer.attempts?.[0]).toMatchObject({ status: 'failed', exitCode: 143 });
     const settled = readRunState(project, runId);
-    expect(settled.auxiliaryAttempts?._summary).toHaveLength(1);
+    expect(settled.auxiliaryAttempts?._summary).toBeUndefined();
+    expect(readFileSync(join(directory, 'summary.md'), 'utf8')).toContain('writer: delivered — resumed');
     const view = readRunStateView(project, runId, { includePromptText: true });
-    expect(view.prompts.invocations.some((entry) => entry.record?.stageId === '_summary' && entry.integrity === 'verified' && entry.attemptBinding === 'matched' && entry.record.userPrompt?.includes('Summarize this run.'))).toBe(true);
+    expect(view.prompts.invocations.some((entry) => entry.record?.stageId === '_summary')).toBe(false);
+    expect(view.prompts.invocations.some((entry) => entry.record?.stageId === 'writer' && entry.integrity === 'verified' && entry.attemptBinding === 'matched')).toBe(true);
   });
   it('refuses same-boot unknown consumers through the public resume entry before invoking an adapter', async () => {
     const agents = configuredAgents(); let calls = 0;

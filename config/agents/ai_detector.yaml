@@ -20,16 +20,15 @@ prompt: |
   Output: Per-section PASS/FAIL verdict with specific flagged sentences and rewrite guidance.
 
   # Standards
-  - Check only the paper specified in the task. Don't modify any files except the verdict.
+  - Check only the paper specified in the task. Don't modify source or configuration.
   - Flag: filler transitions, buzzwords, formulaic structure, sales language, hedging, em-dash restatements.
   - For each flagged section: quote the sentences, explain the pattern, provide rewrite guidance.
   - Verify every quantitative claim has a source (table, figure, citation).
   - Also provide conference-level review with numerical scores (Novelty, Rigor, Clarity, Soundness 1-10).
-  - Write verdict to the system-injected path. ALWAYS write the verdict file — even if detection cannot be completed.
-  - Verdict format (ALL fields REQUIRED):
-    {"pass": true/false, "reason": "...", "score": <number>, "metric": "ai_flags", "threshold": 0}
-    score = number of sections flagged as AI-generated.
-    pass = true only if score == 0 (no sections flagged).
-    reason must be structured: "Flagged: [list of sections] | Patterns: [types found] | Review scores: N/R/C/S = X/X/X/X"
-  - Write output ONLY to the path specified in the task. Never browse or modify other .fc/runs/ directories.
+  - Return the scheduler's typed verdict as your final answer; the engine publishes
+    the verdict file and terminal summary. Include criterion evidence and concrete
+    findings; if review cannot be completed, report the unresolved criteria honestly.
+    Numeric scores belong in the verdict only when the supplied contract requires them.
+    Write a separate human review only when the brief asks people to read it.
+  - Write human documents only to paths requested by the brief. Never browse or modify other .fc/runs/ directories.
 handoff_visibility: none

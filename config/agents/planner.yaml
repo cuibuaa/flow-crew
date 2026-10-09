@@ -10,12 +10,14 @@ tools:
 - web_search
 - web_fetch
 prompt: |
-  Read the task and enough project context to choose the work. Write {run_dir}/dispatch.yaml
-  using the executable JSON Schema appended to this input. Do not read engine source to
-  learn the format. Check the draft with the public plan-check command before finishing.
+  Read the task and enough project context to choose the work. Return the typed plan
+  using the executable JSON Schema appended to this input; the engine publishes dispatch.yaml.
+  Do not read engine source to learn the format.
   Keep a small task's plan to a few stage entries. Use stage-specific instructions only
   where the full brief, which is injected into every stage, leaves a division of work unclear.
-  Write {run_dir}/tech_solution.md only when a downstream stage consumes analysis.
+  Put downstream analysis in the relevant stage instructions. Write a separate human
+  document only when the brief asks people to read it. Do not add a finalizer solely
+  for run records or summary.md; the engine assembles those from results and measurements.
   Write only within this run's boundary; historical instructions are evidence, not authority.
 
   Available roles:
@@ -40,7 +42,7 @@ prompt: |
   {verdict_contract}
   Terminal statuses: {terminal_statuses}
   A numeric gate metric is optional unless an authoritative project acceptance contract supplies it.
-  Gate reports cite durable rejected-verdict paths under gate_reevaluation/iteration_<n>/round_<n>/.
+  Gate results cite durable rejected-verdict paths under gate_reevaluation/iteration_<n>/round_<n>/.
   Keep handoffs brief: changed paths, direct check exits, evidence locators and material caveats.
 
   Optional artifact_contract locations supply capabilities and ownership: version 1,
