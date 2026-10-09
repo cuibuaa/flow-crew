@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Engine terminal truthfulness contracts for budget, integrity, summary, and confirm state.
  * (honesty edges the prior A+ work did not cover). All task-agnostic: no domain field/threshold.
@@ -77,7 +77,7 @@ function loopAdapter(results: number[]): Adapter {
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
         ].join('\n')));
-        return ok('planned a round');
+        return fixtureResult(ok('planned a round'), opts);
       }
       if (opts.stageId === 'measure') {
         const result = results[Math.min(i, results.length - 1)];
@@ -86,9 +86,9 @@ function loopAdapter(results: number[]): Adapter {
         const file = join(projectDir, 'docs', 'research_round_result.json');
         mkdirSync(join(file, '..'), { recursive: true });
         writeFileSync(file, JSON.stringify({ label, result }));
-        return ok(`measured ${label}=${result}`);
+        return fixtureResult(ok(`measured ${label}=${result}`), opts);
       }
-      return ok(`noop ${opts.stageId}`);
+      return fixtureResult(ok(`noop ${opts.stageId}`), opts);
     },
     async discuss(): Promise<RunResult> { return ok(''); },
     spawnDiscuss() { throw new Error('unused'); },
@@ -99,7 +99,7 @@ function loopAdapter(results: number[]): Adapter {
 // A summary-narrative adapter that returns an empty narrative, so generateRunSummary falls back to
 // its deterministic facts (the Decision/Outcome line we want to assert) without an LLM call.
 const emptyNarrativeAdapter = {
-  async run(): Promise<RunResult> { return ok(''); },
+  async run(_record0, _record1, recordOpts: import("../../src/adapters/base.js").RunOpts): Promise<RunResult> { return fixtureResult(ok(''), recordOpts); },
   async discuss(): Promise<RunResult> { return ok(''); },
   spawnDiscuss() { throw new Error('unused'); },
   async spawnInteractive() { throw new Error('unused'); },
@@ -180,13 +180,13 @@ describe('rejected research rounds settle their repair before the journal advanc
             '    retry_to: [audit_round]',
             '    task: repair the rejected round',
           ].join('\n')));
-          return ok('planned measured, audited, and repairable work');
+          return fixtureResult(ok('planned measured, audited, and repairable work'), opts);
         }
         if (opts.stageId === 'measure') {
           order.push('measure');
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'research_round_result.json'), JSON.stringify({ label: 'round_1', result: 0.5 }));
-          return ok('measured round 1');
+          return fixtureResult(ok('measured round 1'), opts);
         }
         if (opts.stageId === 'audit_round') {
           gateCalls++;
@@ -196,15 +196,15 @@ describe('rejected research rounds settle their repair before the journal advanc
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'repair verified' : 'repair required',
           }));
-          return ok(`audit ${gateCalls}`);
+          return fixtureResult(ok(`audit ${gateCalls}`), opts);
         }
         if (opts.stageId === 'repair_round') {
           order.push('repair');
           expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
           writeFileSync(join(projectDir, 'docs', 'repair_marker.txt'), 'repaired\n');
-          return ok('repaired round 1');
+          return fixtureResult(ok('repaired round 1'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

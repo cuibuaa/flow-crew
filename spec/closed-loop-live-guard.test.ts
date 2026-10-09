@@ -1,4 +1,4 @@
-import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -167,7 +167,7 @@ describe('portable live constraint guard', () => {
     let correctionBytes: Buffer | undefined;
 
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       if (invocationCount === 1) {
         if (scope.length > 0) writeFileSync(join(projectDir, 'src', 'allowed.ts'), 'authorized change survives\n');
@@ -178,11 +178,11 @@ describe('portable live constraint guard', () => {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
         }
         if (readFileSync(testPath, 'utf-8') === preimage) restoreLatencyMs = performance.now() - writtenAt;
-        return {
+        return fixtureResult({
           output: 'first invocation wrote an unlisted existing test', exitCode: 0,
           duration_ms: performance.now() - writtenAt,
           writes: [...(scope.length > 0 ? ['src/allowed.ts'] : []), 'spec/existing.test.ts'], writeAttribution: 'structured',
-        };
+        }, opts);
       }
 
       if (invocationCount === 2) {
@@ -210,10 +210,10 @@ describe('portable live constraint guard', () => {
           accepted: true, requestId, authorizedPaths: requestedPaths,
           pathDigest: scopePathDigest(requestedPaths),
         });
-        return {
+        return fixtureResult({
           output: 'scope accepted; stop at the control boundary', exitCode: 0,
           duration_ms: 2, writes: [], writeAttribution: 'structured',
-        };
+        }, opts);
       }
 
       expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
@@ -224,10 +224,10 @@ describe('portable live constraint guard', () => {
       expect(prompt).toContain(`stages/${opts.stageId}/${decisionName}`);
       expect(prompt).not.toContain('This attempt stops at the control boundary');
       writeFileSync(testPath, 'export const invariant = "authorized-after-revision";\n');
-      return {
+      return fixtureResult({
         output: 'corrected after scope re-dispatch', exitCode: 0, duration_ms: 2,
         writes: ['spec/existing.test.ts'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
 
     const final = await runWorkflow(
@@ -314,9 +314,9 @@ describe('portable live constraint guard', () => {
     writeRunState(projectDir, created.runId, state);
     let invocationCount = 0;
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
-      return { output: 'read-only', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'read-only', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     const final = await runWorkflow(
@@ -344,13 +344,13 @@ describe('portable live constraint guard', () => {
     writeRunState(projectDir, created.runId, state);
     let invocationCount = 0;
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       writeFileSync(child, 'changed child content\n');
-      return {
+      return fixtureResult({
         output: 'changed nested content', exitCode: 0, duration_ms: 1,
         writes: ['submodule-dir/tracked.txt'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
 
     const final = await runWorkflow(
@@ -560,10 +560,10 @@ describe('portable live constraint guard', () => {
     state.autoApprove = true;
     writeRunState(projectDir, created.runId, state);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(externalFile, 'updated outside the project tree\n');
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      return { output: 'read-only project stage', exitCode: 0, duration_ms: 50, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'read-only project stage', exitCode: 0, duration_ms: 50, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     const final = await runWorkflow(

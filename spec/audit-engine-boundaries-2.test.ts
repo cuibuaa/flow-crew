@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -99,7 +100,7 @@ describe('engine boundary audit probes', () => {
           phase: 'started' | 'completed'; id: string; command: string; timestamp: string;
         }) => void;
       }) {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         calls.push(opts.attemptIndex);
         const reportPath = join(projectDir, 'docs', 'report.md');
         if (calls.length === 1) {
@@ -120,14 +121,14 @@ describe('engine boundary audit probes', () => {
           const event = { id: 'tool_1', command: 'read report', timestamp: new Date().toISOString() };
           opts.onCommandLifecycle?.({ ...event, phase: 'started' });
           opts.onCommandLifecycle?.({ ...event, phase: 'completed' });
-          return { output: 'boundary', exitCode: 137, duration_ms: 1,
-            writes: ['docs/report.md'], writeAttribution: 'structured' as const };
+          return fixtureResult({ output: 'boundary', exitCode: 137, duration_ms: 1,
+            writes: ['docs/report.md'], writeAttribution: 'structured' as const }, opts);
         }
         expect(readFileSync(reportPath, 'utf8')).toBe('completed before acceptance\n');
         mkdirSync(join(projectDir, 'src'), { recursive: true });
         writeFileSync(join(projectDir, 'src', 'extra.ts'), 'export const extra = true;\n');
-        return { output: 'reused report', exitCode: 0, duration_ms: 1,
-          writes: ['src/extra.ts'], writeAttribution: 'structured' as const };
+        return fixtureResult({ output: 'reused report', exitCode: 0, duration_ms: 1,
+          writes: ['src/extra.ts'], writeAttribution: 'structured' as const }, opts);
       } };
       const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined,
         join(projectDir, 'config', 'agents'), created.runId, 'reuse fixture', true);

@@ -16,7 +16,8 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { AVAILABLE_ADAPTER_NAMES } from '../src/adapters/loader.js';
 import { MockAdapter } from '../src/adapters/mock.js';
 import type { AgentConfig, RunOpts } from '../src/adapters/base.js';
-import { buildStagePrompt, MAX_PREDECESSOR_CONTEXT_BYTES } from '../src/handoff.js';
+import { buildStagePrompt, MAX_PREDECESSOR_CONTEXT_BYTES, HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
+import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 const SESSION_UUID = '123e4567-e89b-42d3-a456-426614174000';
@@ -51,6 +52,13 @@ afterEach(() => {
 });
 
 describe('size-independent adapter prompt delivery', () => {
+  it('refuses incomplete handoffs and verdicts using the same schema sent to generation', () => {
+    expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
+    expect(() => parseStageRecord('{"status":"delivered"}', HANDOFF_SCHEMA)).toThrow('required');
+    const verdict = stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
+    expect(() => parseStageRecord('{"pass":true,"reason":"accepted"}', verdict)).toThrow('anyOf');
+    expect(() => parseStageRecord(JSON.stringify({ pass: false, reason: 'rejected', criteria: { criterion: { status: 'fail', evidence: 'spec/proof.test.ts' } }, audit_findings: { version: 1, findings: [] } }), verdict)).toThrow('anyOf');
+  });
   it('preserves launch provenance when the stdin-backed Codex spawn fails', async () => {
     const root = temporaryRoot('flowcrew-prompt-missing-codex-');
     const emptyPath = join(root, 'empty-path');

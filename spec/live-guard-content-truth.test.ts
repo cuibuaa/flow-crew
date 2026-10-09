@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -164,7 +165,7 @@ describe('live guard content truth', () => {
     let invocationCount = 0;
 
     const result = await run([], 'cache-exemption', { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       if (invocationCount === 1) {
         mkdirSync(join(projectDir, 'pkg', '__pycache__'), { recursive: true });
@@ -178,7 +179,7 @@ describe('live guard content truth', () => {
         )) {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
         }
-        return {
+        return fixtureResult({
           output: 'cache plus tracked writes', exitCode: 0, duration_ms: 1,
           writes: [
             'pkg/__pycache__/module.cpython-312.pyc',
@@ -186,9 +187,9 @@ describe('live guard content truth', () => {
             'pkg/__pycache__/tracked.pyc',
           ],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
-      return { output: 'corrected', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'corrected', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } });
 
     expect(result.final.status).toBe('complete');
@@ -248,13 +249,13 @@ describe('live guard content truth', () => {
     const target = seedProject();
     let invocationCount = 0;
     const result = await run(scope, `metadata-${label}`, { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       chmodSync(target, 0o777);
       const future = new Date(Date.now() + 86_400_000);
       utimesSync(target, future, future);
       readFileSync(target);
-      return { output: 'read-only scout', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'read-only scout', exitCode: 0, duration_ms: 1 }, opts);
     } });
     expect(result.final.status).toBe('complete');
     expect(result.status.status).toBe('complete');
@@ -266,10 +267,10 @@ describe('live guard content truth', () => {
   it('does not attribute a timestamp-only scoped artifact as a write', async () => {
     const target = seedProject();
     const result = await run(['tracked.txt'], 'touch-artifact', { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       const future = new Date(Date.now() + 86_400_000);
       utimesSync(target, future, future);
-      return { output: 'touch only', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'touch only', exitCode: 0, duration_ms: 1 }, opts);
     } });
     expect(result.status.status).toBe('complete');
     expect(result.status.artifacts ?? []).not.toContain('tracked.txt');
@@ -280,13 +281,13 @@ describe('live guard content truth', () => {
   it('ignores structured timestamp-only attribution under an empty effective scope', async () => {
     const target = seedProject();
     const result = await run([], 'structured-touch', { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       const future = new Date(Date.now() + 86_400_000);
       utimesSync(target, future, future);
-      return {
+      return fixtureResult({
         output: 'structured timestamp-only attribution', exitCode: 0, duration_ms: 1,
         writes: ['tracked.txt'], writeAttribution: 'structured',
-      };
+      }, opts);
     } });
     expect(result.final.status).toBe('complete');
     expect(result.status.status).toBe('complete');
@@ -318,7 +319,7 @@ describe('live guard content truth', () => {
 
       let invocationCount = 0;
       const result = await run([], `raw-symlink-${preimageState}`, { async run(_prompt, _role, opts) {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         invocationCount++;
         if (invocationCount === 1) {
           rmSync(link);
@@ -327,15 +328,15 @@ describe('live guard content truth', () => {
           while (Date.now() < deadline && !readlinkSync(link, { encoding: 'buffer' }).equals(preimage)) {
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 2));
           }
-          return {
+          return fixtureResult({
             output: 'changed raw symbolic-link target', exitCode: 0, duration_ms: 1,
             writes: ['tracked-link'], writeAttribution: 'structured',
-          };
+          }, opts);
         }
-        return {
+        return fixtureResult({
           output: 'corrected symbolic-link target', exitCode: 0, duration_ms: 1,
           writes: [], writeAttribution: 'structured',
-        };
+        }, opts);
       } });
 
       expect(result.final.status).toBe('complete');
@@ -359,14 +360,14 @@ describe('live guard content truth', () => {
     let result: Awaited<ReturnType<typeof run>>;
     try {
       result = await run([], 'replacement-failure', { async run(_prompt, _role, opts) {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         invocationCount++;
         chmodSync(projectDir, 0o555);
         writeFileSync(target, 'changed bytes remain present\n');
-        return {
+        return fixtureResult({
           output: 'genuine write with blocked atomic replacement', exitCode: 0, duration_ms: 1,
           writes: ['tracked.txt'], writeAttribution: 'structured',
-        };
+        }, opts);
       } });
     } finally {
       chmodSync(projectDir, 0o755);

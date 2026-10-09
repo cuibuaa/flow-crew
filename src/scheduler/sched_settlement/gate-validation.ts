@@ -63,29 +63,18 @@ export function validationExecutionId(
     .digest('hex');
 }
 
-export function settledGateValidationExecution(
-  projectDir: string,
-  runId: string,
-  stageId: string,
-): GateValidationExecutionIdentity | undefined {
+function gateValidationExecution(projectDir: string, runId: string, stageId: string, status: 'running' | 'complete'): GateValidationExecutionIdentity | undefined {
   try {
     const attempt = readStageStatus(projectDir, runId, stageId).attempts?.at(-1);
-    if (!attempt || attempt.status !== STAGE_STATUS.COMPLETE || !attempt.completedAt) return undefined;
-    return {
-      attemptIndex: attempt.index,
-      attemptStartedAt: attempt.startedAt,
-      attemptCompletedAt: attempt.completedAt,
-      executionId: validationExecutionId(
-        runId,
-        stageId,
-        attempt.index,
-        attempt.startedAt,
-        attempt.completedAt,
-      ),
-    };
-  } catch {
-    return undefined;
-  }
+    if (attempt?.status !== status || (status === STAGE_STATUS.COMPLETE && !attempt.completedAt)) return undefined;
+    const completedAt = status === STAGE_STATUS.COMPLETE ? attempt.completedAt! : '';
+    return { attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, attemptCompletedAt: completedAt,
+      executionId: validationExecutionId(runId, stageId, attempt.index, attempt.startedAt, completedAt) };
+  } catch { return undefined; }
+}
+
+export function settledGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
+  return gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.COMPLETE);
 }
 
 export function validationDeltaMatchesCurrentExecution(
@@ -114,6 +103,29 @@ export function validationDeltaMatchesCurrentExecution(
     && current.attemptStartedAt === delta.attemptStartedAt
     && current.attemptCompletedAt === delta.attemptCompletedAt
     && current.executionId === delta.executionId;
+}
+
+/** Adopt pre-review results only after the entire wave is known to have avoided
+ * project writes. Include earlier peer attempts: a failed/suspended child may
+ * write before its last, read-only continuation. Unknown attribution reruns. */
+export function bindReviewedGateValidation(projectDir: string, runId: string, stageId: string, waveStageIds: string[] = [stageId]): boolean {
+  const base = runDir(projectDir, runId), prior = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
+  const execution = settledGateValidationExecution(projectDir, runId, stageId);
+  if (!prior || !execution || prior.stageId !== stageId || prior.attemptCompletedAt !== ''
+    || prior.attemptIndex !== execution.attemptIndex || prior.attemptStartedAt !== execution.attemptStartedAt
+    || prior.executionId !== validationExecutionId(runId, stageId, execution.attemptIndex, execution.attemptStartedAt, '')
+    || prior.baselineSha256 !== createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex')) return false;
+  for (const id of new Set([stageId, ...waveStageIds])) {
+    const attempts = readStageStatus(projectDir, runId, id).attempts;
+    if (!attempts?.length || attempts.some(attempt =>
+      attempt.status === STAGE_STATUS.RUNNING || !Array.isArray(attempt.writes) || attempt.writeAttribution === 'unknown'
+      || attempt.writes.some(path => !path.startsWith('run:')) || attempt.validationGeneratedWrites?.length)) return false;
+  }
+  const bound = { ...prior, ...execution };
+  bound.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(bound)).digest('hex').slice(0, 16)}.json`;
+  publishJsonCreateOnly(join(base, bound.immutablePath), bound);
+  writeFileSync(join(base, `validation_delta_${stageId}.json`), `${JSON.stringify(bound)}\n`);
+  return true;
 }
 
 export function readRunValidationBaseline(runDirPath: string): RunValidationBaselineArtifact | undefined {
@@ -201,8 +213,8 @@ export async function recordGateValidationDelta(
   const delta = evaluateValidationDelta(snapshot.baseline, current.results);
   const baselineBytes = readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE));
   const checkedAt = new Date().toISOString();
-  const settledExecution = settledGateValidationExecution(projectDir, runId, stageId);
-  const execution = settledExecution ?? {
+  const execution = settledGateValidationExecution(projectDir, runId, stageId)
+    ?? gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.RUNNING) ?? {
     attemptIndex: 0,
     attemptStartedAt: validationStartedAt,
     attemptCompletedAt: checkedAt,

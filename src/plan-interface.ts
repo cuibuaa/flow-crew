@@ -7,7 +7,7 @@ export const PLAN_STAGE_SCHEMA: Schema = {
   properties: {
     id: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,19}$' },
     role: { type: 'string', minLength: 1 }, scope: strings, depends_on: strings,
-    prompt_template: { type: 'string' }, condition: { type: 'string' },
+    prompt_template: { type: 'string' }, task: { type: 'string' }, condition: { type: 'string' },
     is_gate: { type: 'boolean' }, retry_to: strings, criterion_refs: strings,
     skills: strings, dynamic_dispatch: { type: 'boolean' },
     // Optional exact duties retain the existing artifact/replay validator and enforcement.
@@ -17,7 +17,7 @@ export const PLAN_STAGE_SCHEMA: Schema = {
     max_retries: { type: 'number' }, timeout_ms: {}, timeout_total_ms: {}, resources: {},
   },
 };
-export const PLAN_SCHEMA: Schema = { type: 'array', minItems: 1, items: PLAN_STAGE_SCHEMA };
+export const PLAN_SCHEMA: Schema = { type: 'object', required: ['stages'], additionalProperties: true, properties: { stages: { type: 'array', minItems: 1, items: PLAN_STAGE_SCHEMA } } };
 
 export function planStageErrors(value: unknown): string[] {
   return validate(value, PLAN_STAGE_SCHEMA, '$');
@@ -25,7 +25,7 @@ export function planStageErrors(value: unknown): string[] {
 
 export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
-    + 'Write a YAML stage list (or {stages: [...]}). This executable interface replaces older compulsory planning boilerplate.\n'
+    + 'Return a JSON object {stages: [...]}; the engine publishes it in dispatch.yaml for existing consumers. This executable interface replaces older compulsory planning boilerplate.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
     + 'Supply id, configured role, and the project-relative scope needed for writes. Missing scope is closed. '
     + 'Omitted depends_on means a root. Use edges only for real data dependencies; stage instructions supplement the injected full brief. '

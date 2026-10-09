@@ -1,4 +1,4 @@
-import { declaredDispatch } from '../test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * engine-a-plus regression contracts — the 3 confirmed gaps + 3 A+ deltas of the
  * framework-pure engine hardening on branch engine-a-plus.
@@ -225,13 +225,13 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
             '    is_gate: true', '    task: gate',
             '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_check.json}], reads: [], replays: []}',
           ].join('\n')));
-          return ok('planned a gate');
+          return fixtureResult(ok('planned a gate'), opts);
         }
         if (opts.stageId === 'check') {
           writeFileSync(join(opts.runDir, 'verdict_check.json'), JSON.stringify({ pass: false, reason: 'not yet' }));
-          return ok('gate failed');
+          return fixtureResult(ok('gate failed'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

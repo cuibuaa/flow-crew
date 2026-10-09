@@ -85,6 +85,8 @@ export interface CommandLifecycleEvent {
 }
 
 export interface RunOpts {
+  /** One JSON Schema shared by generation-capable adapters and return validation. */
+  outputSchema?: import('../reality-gate/checks/json-schema-match.js').Schema;
   /** Final credential-free transport boundary, called before every internal retry. */
   onInvocationInput?: (input: {
     systemPrompt: string;

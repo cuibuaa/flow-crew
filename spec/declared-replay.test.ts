@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -265,7 +266,7 @@ describe('new input boundaries and retained data readers', () => {
   it('refuses legacy launch/resume before invoking the adapter or creating a run', async () => {
     const f = fixture(); let invoked = false;
     const workflow = WorkflowConfigSchema.parse({ name: 'old', stages: [{ id: 'old', role: 'coder' }] });
-    await expect(runWorkflow(workflow, 'name: old\n', f.project, { run: async () => { invoked = true; return { output: '', exitCode: 0, duration_ms: 1 }; } }, new Map())).rejects.toThrow('DECLARED_INPUT_MIGRATION_REQUIRED');
+    await expect(runWorkflow(workflow, 'name: old\n', f.project, { run: async (_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) => { invoked = true; return fixtureResult({ output: '', exitCode: 0, duration_ms: 1 }, recordOpts); } }, new Map())).rejects.toThrow('DECLARED_INPUT_MIGRATION_REQUIRED');
     expect(invoked).toBe(false); expect(existsSync(join(f.project, '.fc'))).toBe(false);
   });
   it('preserves exact rooted output freshness and avoids sibling inference', () => {
@@ -303,9 +304,9 @@ describe('new input boundaries and retained data readers', () => {
     const run = createRun(f.project, 'fixture', 'name: fixture\nstages: []\n', ['work']); const directory = runDir(f.project, run.runId);
     const c = contract(['case.test.mjs'], 'node_test', [{ artifact: 'file_0', test: 'observed defect' }]);
     c.produces = [{ id: 'verdict', root: 'run', path: 'stages/work/audit.json', kind: 'file', nonempty: true }];
-    const result = await runStage({ run: async () => {
+    const result = await runStage({ run: async (_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) => {
       writeFileSync(join(directory, 'stages/work/audit.json'), '{"pass":false,"finding":"observed defect"}\n');
-      return { exitCode: 0, output: 'The audit found a defect.', duration_ms: 1, writes: ['run:stages/work/audit.json'], writeAttribution: 'structured' };
+      return fixtureResult({ exitCode: 0, output: 'The audit found a defect.', duration_ms: 1, writes: ['run:stages/work/audit.json'], writeAttribution: 'structured' }, recordOpts);
     } }, { stageId: 'work', role, dependsOn: [], projectDir: f.project, runId: run.runId, runDir: directory, promptTemplate: '', artifactContract: c, timeout_ms: 5000, retries: 0, projectWriteScope: [] });
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(readFileSync(join(directory, 'stages/work/audit.json'), 'utf8')).pass).toBe(false);

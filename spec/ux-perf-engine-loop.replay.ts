@@ -1,4 +1,4 @@
-import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -146,7 +146,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       const stageDirectory = join(opts.runDir, 'stages', opts.stageId);
       writeFileSync(join(stageDirectory, 'scope_revision_request.json'), currentRequestBytes);
       const decision = await waitForPathEvent(stageDirectory, () => {
@@ -162,7 +162,7 @@ describe('UX/performance engine-loop evidence replays', () => {
       expect(String(decision.rejectionReason)).toContain('does not match running attempt 1');
       expect(prompt).not.toContain('<current attempt>');
       expect(prompt).toContain('at most once per second');
-      return { output: 'stale request settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'stale request settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
     const decisions = readdirSync(join(created.runDirPath, 'stages', recordedRequest.stageId))
@@ -230,7 +230,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     let workCalls = 0;
     const added = 'src/inherited.ts';
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       workCalls++;
       const stageDirectory = join(opts.runDir, 'stages', opts.stageId);
       if (workCalls === 1) {
@@ -245,7 +245,7 @@ describe('UX/performance engine-loop evidence replays', () => {
           return name ? JSON.parse(readFileSync(join(stageDirectory, name), 'utf-8')) as Record<string, unknown> : undefined;
         });
         expect(decision).toMatchObject({ accepted: true, attemptIndex: 1 });
-        return { output: 'force technical retry', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'force technical retry', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       expect(prompt).toContain(JSON.stringify(['src/declared.ts', added]));
       expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
@@ -257,7 +257,7 @@ describe('UX/performance engine-loop evidence replays', () => {
       expect(prompt).not.toContain('This attempt stops at the control boundary');
       mkdirSync(join(projectDir, 'src'), { recursive: true });
       writeFileSync(join(projectDir, added), 'inherited capability\n');
-      return { output: 'retry used inherited scope', exitCode: 0, duration_ms: 1, writes: [added], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'retry used inherited scope', exitCode: 0, duration_ms: 1, writes: [added], writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -320,14 +320,14 @@ describe('UX/performance engine-loop evidence replays', () => {
     initial.research = config.research;
     writeRunState(projectDir, created.runId, initial);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       mkdirSync(join(projectDir, 'tests'), { recursive: true });
       writeFileSync(join(projectDir, testPath), [
         'from pathlib import Path',
         'RESULT = Path("docs/happymj/round_result.json")',
         'assert RESULT.exists()',
       ].join('\n'));
-      return { output: 'verifier written', exitCode: 0, duration_ms: 1, writes: [testPath], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'verifier written', exitCode: 0, duration_ms: 1, writes: [testPath], writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -376,7 +376,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     let markWritten!: () => void;
     const written = new Promise<void>((resolvePromise) => { markWritten = resolvePromise; });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       arrivals++;
       if (arrivals === stageIds.length) releaseArrivals();
       await allArrived;
@@ -388,16 +388,16 @@ describe('UX/performance engine-loop evidence replays', () => {
           'assert RESULT.exists()',
         ].join('\n'));
         markWritten();
-        return {
+        return fixtureResult({
           output: 'invalid temporal verifier written', exitCode: 0, duration_ms: 1,
           writes: [testPath], writeAttribution: 'structured',
-        };
+        }, opts);
       }
       await written;
-      return {
+      return fixtureResult({
         output: 'unrelated peer observed the batch snapshot', exitCode: 0, duration_ms: 1,
         writes: [testPath], writeAttribution: 'snapshot',
-      };
+      }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -475,9 +475,9 @@ describe('UX/performance engine-loop evidence replays', () => {
     writeRunState(projectDir, created.runId, initial);
     let firstPrompt = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       firstPrompt ||= prompt;
-      return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -675,12 +675,12 @@ describe('UX/performance engine-loop evidence replays', () => {
     writeRunState(projectDir, created.runId, initial);
     const paths = ['src/clean.txt', 'src/dirty.txt', 'src/untracked.txt', 'src/deleted.txt', 'src/mode.txt', 'src/new.txt'];
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       for (const path of paths.slice(0, 3)) writeFileSync(join(projectDir, path), 'unauthorized\n');
       rmSync(join(projectDir, 'src', 'deleted.txt'));
       chmodSync(join(projectDir, 'src', 'mode.txt'), 0o755);
       writeFileSync(join(projectDir, 'src', 'new.txt'), 'unauthorized new\n');
-      return { output: 'mutated', exitCode: 0, duration_ms: 1, writes: paths, writeAttribution: 'structured' };
+      return fixtureResult({ output: 'mutated', exitCode: 0, duration_ms: 1, writes: paths, writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -718,12 +718,12 @@ describe('UX/performance engine-loop evidence replays', () => {
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(join(projectDir, 'src', 'protected.txt'), 'unauthorized\n');
-      return {
+      return fixtureResult({
         output: 'mutated', exitCode: 0, duration_ms: 1,
         writes: ['src/protected.txt'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
     expect(readFileSync(join(projectDir, 'src', 'protected.txt'), 'utf-8')).toBe('operator preimage\n');
@@ -817,12 +817,12 @@ describe('UX/performance engine-loop evidence replays', () => {
     state.stages.work = status;
     writeRunState(projectDir, created.runId, state);
     const calls: Array<{ prompt: string; rolePrompt: string }> = [];
-    const adapter: Adapter = { async run(prompt, role) {
+    const adapter: Adapter = { async run(prompt, role, recordOpts: import("../src/adapters/base.js").RunOpts) {
       calls.push({ prompt, rolePrompt: role.prompt });
-      return {
+      return fixtureResult({
         output: '{"verdict":"WAIT","target_stage":null,"reason":"no new evidence","guidance":null}',
         exitCode: 0, duration_ms: 1,
-      };
+      }, recordOpts);
     } };
     const goal = 'Keep this exact static goal across supervisor calls.';
     const supervisor = new Supervisor(projectDir, created.runId, adapter, {

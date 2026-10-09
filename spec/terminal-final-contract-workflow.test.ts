@@ -1,4 +1,4 @@
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -128,17 +128,17 @@ describe('terminal final contract workflow behavior', () => {
             `    retry_to: [${gateId}]`,
             '    task: repair final gate evidence',
           ].join('\n')));
-          return result('planned');
+          return fixtureResult(result('planned'), opts);
         }
         if (opts.stageId === gateId) {
           gateAttempts++;
           writeJson(join(opts.runDir, `verdict_${gateId}.json`), gateAttempts === 1
             ? { pass: false, reason: 'missing_required_replay_artifact', model_success: false, study_complete: false }
             : { pass: true, reason: 'model_success', model_success: true, study_complete: true });
-          return result(`gate attempt ${gateAttempts}`);
+          return fixtureResult(result(`gate attempt ${gateAttempts}`), opts);
         }
-        if (opts.stageId === fixId) return result('fixed missing replay artifact');
-        return result(`unexpected ${opts.stageId}`, 1);
+        if (opts.stageId === fixId) return fixtureResult(result('fixed missing replay artifact'), opts);
+        return fixtureResult(result(`unexpected ${opts.stageId}`, 1), opts);
       },
       async discuss(): Promise<RunResult> { return result(''); },
       spawnDiscuss() { throw new Error('not used'); },
@@ -189,7 +189,7 @@ describe('terminal final contract workflow behavior', () => {
                 '    is_gate: true',
                 '    task: verify final transfer gate',
               ].join('\n')));
-          return result(`planned ${planCalls}`);
+          return fixtureResult(result(`planned ${planCalls}`), opts);
         }
         if (opts.stageId === phaseGate) {
           writeJson(join(opts.runDir, `verdict_${phaseGate}.json`), {
@@ -200,15 +200,15 @@ describe('terminal final contract workflow behavior', () => {
             nextPhase: 'final',
             outcome: 'phase3_complete_continue_next_phase',
           });
-          return result('phase complete');
+          return fixtureResult(result('phase complete'), opts);
         }
         if (opts.stageId === finalGate) {
           const verdict = terminalVerdict();
           writeJson(join(opts.runDir, `pre_gate_verdict_${finalGate}.json`), verdict);
           writeJson(join(opts.runDir, `verdict_${finalGate}.json`), verdict);
-          return result('terminal final completion');
+          return fixtureResult(result('terminal final completion'), opts);
         }
-        return result(`unexpected ${opts.stageId}`, 1);
+        return fixtureResult(result(`unexpected ${opts.stageId}`, 1), opts);
       },
       async discuss(): Promise<RunResult> { return result(''); },
       spawnDiscuss() { throw new Error('not used'); },

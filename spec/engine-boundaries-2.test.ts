@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -56,7 +57,7 @@ async function scopeBoundaryCase(deliverToolBoundary: boolean): Promise<{
       stageId: string; runDir: string; attemptIndex: number; abortSignal?: AbortSignal;
       onCommandLifecycle?: (event: { phase: 'started' | 'completed'; id: string; command: string; timestamp: string }) => void;
     }) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       calls.push(opts.attemptIndex);
       if (calls.length === 1) {
         const stageDir = join(opts.runDir, 'stages', opts.stageId);
@@ -75,17 +76,17 @@ async function scopeBoundaryCase(deliverToolBoundary: boolean): Promise<{
           const event = { id: 'tool_1', command: 'fixture command', timestamp: new Date().toISOString() };
           opts.onCommandLifecycle?.({ ...event, phase: 'started' });
           opts.onCommandLifecycle?.({ ...event, phase: 'completed' });
-          return { output: 'interrupted at tool boundary', exitCode: 137, duration_ms: 1, writes: [], writeAttribution: 'structured' as const };
+          return fixtureResult({ output: 'interrupted at tool boundary', exitCode: 137, duration_ms: 1, writes: [], writeAttribution: 'structured' as const }, opts);
         }
         put(join(project, 'src', 'shared.txt'), 'finished legitimate work\n');
-        return { output: 'completed current invocation', exitCode: 0, duration_ms: 1,
-          writes: ['src/shared.txt'], writeAttribution: 'structured' as const };
+        return fixtureResult({ output: 'completed current invocation', exitCode: 0, duration_ms: 1,
+          writes: ['src/shared.txt'], writeAttribution: 'structured' as const }, opts);
       }
       if (!existsSync(join(project, 'src', 'shared.txt'))) {
         put(join(project, 'src', 'shared.txt'), 'completed on re-dispatch\n');
       }
-      return { output: 're-dispatched', exitCode: 0, duration_ms: 1,
-        writes: deliverToolBoundary ? ['src/shared.txt'] : [], writeAttribution: 'structured' as const };
+      return fixtureResult({ output: 're-dispatched', exitCode: 0, duration_ms: 1,
+        writes: deliverToolBoundary ? ['src/shared.txt'] : [], writeAttribution: 'structured' as const }, opts);
     } };
     const final = await runWorkflow(config, yaml, project, adapter, new Map(), undefined,
       join(project, 'config', 'agents'), created.runId, 'scope boundary', true);
@@ -137,21 +138,21 @@ async function ignoredFileCase(writeKind: 'none' | 'known-tree' | 'ignored-tree'
     state.maxRetries = 0;
     writeRunState(project, created.runId, state);
     const adapter = { async run(_prompt: string, _role: unknown, opts: { stageId: string }) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'peer') {
         put(join(project, 'src', 'escaped.ts'), 'export const escape = true;\n');
         await new Promise((resolve) => setTimeout(resolve, 250));
-        return { output: 'peer wrote outside scope', exitCode: 0, duration_ms: 250,
-          writes: ['src/escaped.ts'], writeAttribution: 'structured' as const };
+        return fixtureResult({ output: 'peer wrote outside scope', exitCode: 0, duration_ms: 250,
+          writes: ['src/escaped.ts'], writeAttribution: 'structured' as const }, opts);
       }
       readFileSync(join(project, '.venv', 'pkg', 'preexisting.dat'), 'utf8');
       if (writeKind === 'known-tree') put(join(project, 'src', 'escaped.ts'), 'export const escape = true;\n');
       if (writeKind === 'ignored-tree') put(join(project, '.venv', 'pkg', 'preexisting.dat'), 'changed\n');
       await new Promise((resolve) => setTimeout(resolve, 250));
-      return { output: 'finished', exitCode: 0, duration_ms: 250,
+      return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 250,
         writes: writeKind === 'known-tree' ? ['src/escaped.ts']
           : writeKind === 'ignored-tree' ? ['.venv/pkg/preexisting.dat'] : [],
-        writeAttribution: 'structured' as const };
+        writeAttribution: 'structured' as const }, opts);
     } };
     const final = await runWorkflow(config, yaml, project, adapter, new Map(), undefined,
       join(project, 'config', 'agents'), created.runId, 'ignored file fixture', true, false);

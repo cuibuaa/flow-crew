@@ -2,6 +2,7 @@ import type { CheckContext, RealityCheck } from '../types.js';
 import { readJsonFile, result } from './_utils.js';
 
 export interface Schema {
+  anyOf?: Schema[];
   /** A single JSON Schema type name, or a union of them. JSON Schema allows both, and a
    *  union is the standard way to say "nullable" — `type: [string, "null"]`. Declaring this
    *  as `string` alone silently rejected every union: the array is truthy, so validation
@@ -56,6 +57,9 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
  *  brief-declared round_result schema). Returns a list of human-readable path errors. */
 export function validate(value: unknown, schema: Schema, path: string): string[] {
   const errors: string[] = [];
+  if (schema.anyOf && !schema.anyOf.some((variant) => validate(value, variant, path).length === 0)) {
+    errors.push(`${path} matches no anyOf variant`);
+  }
   if (hasTypeConstraint(schema.type) && !matchesType(value, schema.type)) {
     errors.push(`${path} expected ${describeType(schema.type)}`);
   }
@@ -110,4 +114,14 @@ function matchesOneType(value: unknown, type: string): boolean {
   if (type === 'integer') return Number.isInteger(value);
   if (type === 'null') return value === null;
   return typeof value === type;
+}
+
+/** Codex requires a closed root object; anyOf is supported only below it. */
+export function generationCompatibleSchema(schema: Schema): boolean {
+  const compatible = (part: Schema): boolean => {
+    if (part.type === 'object' && !part.anyOf && (part.additionalProperties !== false
+      || Object.keys(part.properties ?? {}).some(key => !part.required?.includes(key)))) return false;
+    return [...Object.values(part.properties ?? {}), ...(part.anyOf ?? []), ...(part.items ? [part.items] : [])].every(compatible);
+  };
+  return schema.type === 'object' && !schema.anyOf && compatible(schema);
 }

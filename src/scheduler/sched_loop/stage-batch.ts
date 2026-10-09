@@ -12,7 +12,7 @@ import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { stageWithInheritedScope } from '../sched_scope/scope-revisions.js';
 import { enforceTemporalResearchTestContract, readmitScopeContinuation, recordThrownStageAttempt, settleScopeRevisionBoundary, settleDeferredStageAttempt, scopeRevisionBeforeSettlement, uniqueStructuredWriteOwners } from '../sched_scope/stage-group.js';
-import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
+import { recordGateValidationDelta, bindReviewedGateValidation } from '../sched_settlement/gate-validation.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection } from '../../worker.js';
 import { executeOrdinaryStage } from './ordinary-stage.js';
@@ -251,7 +251,7 @@ export async function executeReadyBatch(
       state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
       if (stage.is_gate && state.stages[stage.id].status === STAGE_STATUS.COMPLETE) {
         try {
-          await recordGateValidationDelta(projectDir, runId, stage.id);
+          if (!bindReviewedGateValidation(projectDir, runId, stage.id, toRun.map(peer => peer.id))) await recordGateValidationDelta(projectDir, runId, stage.id);
         } catch (error) {
           // readGateVerdict fails closed when a run-local baseline exists but
           // its bound delta is missing.  Keep the stage settlement observable

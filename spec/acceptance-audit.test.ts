@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -67,7 +67,7 @@ describe('append-only gate history under a technical retry', () => {
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') {
-          return { output: '## What was done\n- verified retry history', exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: '## What was done\n- verified retry history', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'plan') {
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
@@ -88,24 +88,24 @@ describe('append-only gate history under a technical retry', () => {
             '    retry_to: [release_gate]',
             '    task: fix release',
           ].join('\n'), { release_gate: gateArtifactContract('release_gate'), fix_release: emptyArtifactContract() }));
-          return { output: 'planned', exitCode: 0, duration_ms: 10 };
+          return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 10 }, opts);
         }
         if (opts.stageId === 'fix_release') {
-          return { output: 'fixed', exitCode: 0, duration_ms: 200 };
+          return fixtureResult({ output: 'fixed', exitCode: 0, duration_ms: 200 }, opts);
         }
         if (opts.stageId === 'release_gate') {
           gateCalls++;
           if (gateCalls === 1) {
             writeFileSync(join(opts.runDir, 'verdict_release_gate.json'), JSON.stringify({ pass: false, reason: 'needs fix' }));
-            return { output: 'initial rejection', exitCode: 0, duration_ms: 100, tokens_out: 1 };
+            return fixtureResult({ output: 'initial rejection', exitCode: 0, duration_ms: 100, tokens_out: 1 }, opts);
           }
           if (gateCalls === 2) {
-            return { output: 'timed out while re-evaluating', exitCode: 124, duration_ms: 200, tokens_out: 2 };
+            return fixtureResult({ output: 'timed out while re-evaluating', exitCode: 124, duration_ms: 200, tokens_out: 2 }, opts);
           }
           writeFileSync(join(opts.runDir, 'verdict_release_gate.json'), JSON.stringify({ pass: true, reason: 'fixed' }));
-          return { output: 'final pass', exitCode: 0, duration_ms: 300, tokens_out: 3 };
+          return fixtureResult({ output: 'final pass', exitCode: 0, duration_ms: 300, tokens_out: 3 }, opts);
         }
-        return { output: 'unexpected stage', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected stage', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 

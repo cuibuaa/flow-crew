@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import {
   mkdirSync,
@@ -133,7 +134,7 @@ describe('scheduler-proven parallel writer leases', () => {
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') {
-          return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
         }
         const interval = { start: Date.now(), end: 0 };
         invocationIntervals[opts.stageId].push(interval);
@@ -160,14 +161,14 @@ describe('scheduler-proven parallel writer leases', () => {
               await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
             }
           }
-          return {
+          return fixtureResult({
             output: `${opts.stageId} invocation finished`,
             exitCode: 0,
             duration_ms: Date.now() - interval.start,
             ...(opts.stageId === 'readonly_left' && physicalWrites === 1
               ? { writes: ['protected.txt'], writeAttribution: 'structured' as const }
               : { writeAttribution: 'unknown' as const }),
-          };
+          }, opts);
         } finally {
           interval.end = Date.now();
           active--;
@@ -221,7 +222,7 @@ describe('scheduler-proven parallel writer leases', () => {
           ownerEntered();
           await held;
         }
-        return { output: opts.stageId, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1 }, opts);
       },
     };
     const common = {

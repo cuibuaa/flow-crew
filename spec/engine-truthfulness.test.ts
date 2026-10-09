@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { portCanBind } from './test-support/engine-fixtures.js';
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -363,7 +363,7 @@ describe('campaign cost honesty', () => {
     const planPrompts: string[] = [];
     const adapter: Adapter = {
       async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: '## What was done\n- completed after a re-plan', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- completed after a re-plan', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           planPrompts.push(prompt);
@@ -384,7 +384,7 @@ describe('campaign cost honesty', () => {
             '    is_gate: true',
             `    task: verify iteration ${planCalls}`,
           ].join('\n')));
-          return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 };
+          return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 }, opts);
         }
         if (opts.stageId === 'work_one') {
           const signalDir = join(opts.runDir, 'signals');
@@ -404,18 +404,18 @@ describe('campaign cost honesty', () => {
             },
             reason,
           }] }));
-          return { output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
+          return fixtureResult({ output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 }, opts);
         }
         if (opts.stageId === 'gate_one') {
           writeFileSync(join(opts.runDir, 'verdict_gate_one.json'), JSON.stringify({ pass: false, reason: 're-plan required' }));
-          return { output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 };
+          return fixtureResult({ output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 }, opts);
         }
-        if (opts.stageId === 'work_two') return { output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 };
+        if (opts.stageId === 'work_two') return fixtureResult({ output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 }, opts);
         if (opts.stageId === 'gate_two') {
           writeFileSync(join(opts.runDir, 'verdict_gate_two.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
-          return { output: 'second gate passed', exitCode: 0, duration_ms: 1, tokens_in: 30, tokens_out: 3 };
+          return fixtureResult({ output: 'second gate passed', exitCode: 0, duration_ms: 1, tokens_in: 30, tokens_out: 3 }, opts);
         }
-        return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 
@@ -445,7 +445,7 @@ describe('gate-aware DAG ordering', () => {
     let gateCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           calls.push('plan');
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
@@ -471,24 +471,24 @@ describe('gate-aware DAG ordering', () => {
             '    dependency_reasons: {design_gate: "build only from an accepted design"}',
             '    task: build product',
           ].join('\n')));
-          return { output: 'planned', exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'design_gate') {
           gateCalls++;
           const pass = gateCalls > 1;
           calls.push(`gate:${pass ? 'pass' : 'fail'}`);
           writeFileSync(join(opts.runDir, 'verdict_design_gate.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'design rejected' }));
-          return { output: pass ? 'accepted' : 'rejected', exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: pass ? 'accepted' : 'rejected', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'repair_design') {
           calls.push('repair');
-          return { output: 'repaired', exitCode: 0, duration_ms: 1, writes: ['src/design.ts'], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'repaired', exitCode: 0, duration_ms: 1, writes: ['src/design.ts'], writeAttribution: 'structured' }, opts);
         }
         if (opts.stageId === 'build_product') {
           calls.push('downstream');
-          return { output: 'built', exitCode: 0, duration_ms: 1, writes: ['src/product.ts'], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'built', exitCode: 0, duration_ms: 1, writes: ['src/product.ts'], writeAttribution: 'structured' }, opts);
         }
-        return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 
@@ -554,7 +554,7 @@ async function runScopeRevisionScenario(input: {
   const requestId = `scope-${input.expectAcceptance ? 'accept' : 'reject'}`;
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
@@ -582,18 +582,18 @@ async function runScopeRevisionScenario(input: {
             '    task: peer repair',
           ] : []),
         ].join('\n')));
-        return { output: 'planned', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'scope_gate') {
         gateCalls++;
         const pass = input.expectAcceptance && readFileSync(join(projectDir, 'src', 'store.ts'), 'utf-8').includes('audit fields');
         writeFileSync(join(opts.runDir, 'verdict_scope_gate.json'), JSON.stringify({ pass, reason: pass ? 'fixed' : 'still missing' }));
-        return { output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'peer_repair') {
         writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-active\n');
         await peerMayFinish;
-        return { output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'repair_scope') {
         const stagePath = join(opts.runDir, 'stages', opts.stageId);
@@ -615,15 +615,15 @@ async function runScopeRevisionScenario(input: {
         if (observedDecision?.accepted && input.requestedPath === 'src/store.ts') {
           writeFileSync(join(projectDir, 'src', 'store.ts'), 'audit fields\n');
         }
-        return {
+        return fixtureResult({
           output: observedDecision ? `scope ${observedDecision.accepted ? 'accepted' : 'rejected'}` : 'scope decision missing',
           exitCode: input.expectAcceptance && !observedDecision?.accepted ? 1 : 0,
           duration_ms: 800,
           writes: observedDecision?.accepted && input.requestedPath === 'src/store.ts' ? ['src/store.ts'] : [],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
-      return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
     },
   };
   const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'repair'), created.runId, 'scope revision fixture', true);

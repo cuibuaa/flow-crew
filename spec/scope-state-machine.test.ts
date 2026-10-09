@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -120,7 +120,7 @@ describe('eight-cell atomic scope state matrix', () => {
       const prewriteCase = stageKind === 'ordinary' && scopePresence === 'missing' && decision === 'rejected';
       const adapter: Adapter = { async run(prompt, _agent, opts) {
         const summary = summaryResult(opts);
-        if (summary) return summary;
+        if (summary) return fixtureResult(summary, opts);
         expect(prompt).toContain(`(declaration ${scopePresence})`);
         expect(prompt).toContain('A missing declaration is closed, never allow-all');
         if (gate) expect(prompt).toContain('Gate project writes remain subject to isolation policy');
@@ -152,10 +152,10 @@ describe('eight-cell atomic scope state matrix', () => {
         if (gate) {
           writeFileSync(join(opts.runDir, `verdict_${opts.stageId}.json`), JSON.stringify({ pass: true, reason: 'fixture verdict stays separate from scope policy' }));
         }
-        return {
+        return fixtureResult({
           output: 'matrix raw writes complete', exitCode: 0, duration_ms: 20,
           writes: [requestedPath, outsidePath], writeAttribution: 'structured',
-        };
+        }, opts);
       } };
 
       await runWorkflow(
@@ -215,7 +215,7 @@ async function runRejectedSnapshotMutation(mutation: 'delete' | 'deep-create') {
   const created = prepareRun(config, yaml);
   const adapter: Adapter = { async run(_prompt, _agent, opts) {
     const summary = summaryResult(opts);
-    if (summary) return summary;
+    if (summary) return fixtureResult(summary, opts);
     const directory = join(opts.runDir, 'stages', opts.stageId);
     writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
       version: 1, kind: 'scope_revision', requestId: `rejected-${mutation}`,
@@ -228,7 +228,7 @@ async function runRejectedSnapshotMutation(mutation: 'delete' | 'deep-create') {
       mkdirSync(join(absolutePath, '..'), { recursive: true });
       writeFileSync(absolutePath, 'unauthorized deep file\n');
     }
-    return { output: mutation, exitCode: 0, duration_ms: 2 };
+    return fixtureResult({ output: mutation, exitCode: 0, duration_ms: 2 }, opts);
   } };
 
   await runWorkflow(
@@ -267,7 +267,7 @@ describe('scheduler-authoritative full-tree enforcement', () => {
     let decision: Record<string, any> | undefined;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       mkdirSync(join(projectDir, 'src'), { recursive: true });
       writeFileSync(join(projectDir, prewrittenPath), 'written before requesting the tree\n');
       const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -278,10 +278,10 @@ describe('scheduler-authoritative full-tree enforcement', () => {
         reason: 'request the tree only after its descendant changed',
       }));
       decision = await waitForDecision(directory);
-      return {
+      return fixtureResult({
         output: 'directory prewrite', exitCode: 0, duration_ms: 2,
         writes: [prewrittenPath], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
 
     await runWorkflow(
@@ -330,9 +330,9 @@ describe('scheduler-authoritative full-tree enforcement', () => {
       let calls = 0;
       const adapter: Adapter = { async run(_prompt, _agent, opts) {
         const summary = summaryResult(opts);
-        if (summary) return summary;
+        if (summary) return fixtureResult(summary, opts);
         calls++;
-        if (calls > 1) return { output: 'continued after accepted no-op', exitCode: 0, duration_ms: 1 };
+        if (calls > 1) return fixtureResult({ output: 'continued after accepted no-op', exitCode: 0, duration_ms: 1 }, opts);
         mkdirSync(join(projectDir, input.mutation.path, '..'), { recursive: true });
         writeFileSync(join(projectDir, input.mutation.path), input.mutation.body);
         const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -343,10 +343,10 @@ describe('scheduler-authoritative full-tree enforcement', () => {
           reason: 'J8 requested-path precondition fixture',
         }));
         decision = await waitForDecision(directory);
-        return {
+        return fixtureResult({
           output: 'scope decision observed', exitCode: 0, duration_ms: 2,
           writes: [input.mutation.path], writeAttribution: 'structured',
-        };
+        }, opts);
       } };
 
       await runWorkflow(
@@ -432,7 +432,7 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
       let stageCalls = 0;
       const adapter: Adapter = { async run(prompt, _agent, opts) {
         const summary = summaryResult(opts);
-        if (summary) return summary;
+        if (summary) return fixtureResult(summary, opts);
         stageCalls++;
         expect(prompt).toContain(`"runId":"${created.runId}"`);
         if (stageCalls === 1) {
@@ -449,10 +449,10 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
           const decision = await waitForDecision(directory);
           expect(decision).toMatchObject({ accepted: true, requestedPaths: canonicalPaths });
           opts.onCommandLifecycle?.({ phase: 'completed', id: commandId, timestamp: new Date().toISOString() });
-          return {
+          return fixtureResult({
             output: 'scope accepted; stop at the control boundary', exitCode: 0,
             duration_ms: 20, writes: [], writeAttribution: 'structured',
-          };
+          }, opts);
         }
         expect(prompt).toContain('# Accepted scope revision');
         expect(prompt).toContain('Continue the stage work in execution 2');
@@ -466,7 +466,7 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
         if (shape.gate) {
           writeFileSync(join(opts.runDir, `verdict_${opts.stageId}.json`), JSON.stringify({ pass: true, reason: 'synthetic historical shape passed' }));
         }
-        return { output: 'autonomous scope negotiated', exitCode: 0, duration_ms: 20, writes: requestedPaths, writeAttribution: 'structured' };
+        return fixtureResult({ output: 'autonomous scope negotiated', exitCode: 0, duration_ms: 20, writes: requestedPaths, writeAttribution: 'structured' }, opts);
       } };
 
       const final = await runWorkflow(
@@ -514,7 +514,7 @@ describe('rejected digest handoff across planner iterations', () => {
       let observedDigest = '';
       const adapter: Adapter = { async run(prompt, _agent, opts) {
         const summary = summaryResult(opts);
-        if (summary) return summary;
+        if (summary) return fixtureResult(summary, opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           if (planCalls === 1) {
@@ -547,7 +547,7 @@ describe('rejected digest handoff across planner iterations', () => {
               '    is_gate: true', '    task: second iteration gate',
             ].join('\n')));
           }
-          return { output: `planner iteration ${planCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: `planner iteration ${planCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
         }
         if (opts.stageId === 'work_1') {
           const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -560,21 +560,21 @@ describe('rejected digest handoff across planner iterations', () => {
           expect(decision).toMatchObject({ accepted: false, decision: 'rejected' });
           mkdirSync(join(projectDir, 'src'), { recursive: true });
           writeFileSync(join(projectDir, requestedPath), 'must be rolled back\n');
-          return { output: 'one rejected raw write', exitCode: 0, duration_ms: 20, writes: [requestedPath], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'one rejected raw write', exitCode: 0, duration_ms: 20, writes: [requestedPath], writeAttribution: 'structured' }, opts);
         }
         if (opts.stageId === 'work_2') {
           if (disposition === 'resolve') {
             mkdirSync(join(projectDir, 'src'), { recursive: true });
             writeFileSync(join(projectDir, requestedPath), 'planner predeclared resolution\n');
-            return { output: 'resolved', exitCode: 0, duration_ms: 2, writes: [requestedPath], writeAttribution: 'structured' };
+            return fixtureResult({ output: 'resolved', exitCode: 0, duration_ms: 2, writes: [requestedPath], writeAttribution: 'structured' }, opts);
           }
-          return { output: 'deferred without a project write', exitCode: 0, duration_ms: 2, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'deferred without a project write', exitCode: 0, duration_ms: 2, writes: [], writeAttribution: 'structured' }, opts);
         }
         if (opts.stageId === 'review_gate_2') {
           writeFileSync(join(opts.runDir, 'verdict_review_gate_2.json'), JSON.stringify({ pass: true, reason: 'digest disposition recorded' }));
-          return { output: 'pass', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'pass', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
         }
-        return { output: 'blocked first-iteration gate should not run', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'blocked first-iteration gate should not run', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       } };
 
       const final = await runWorkflow(
@@ -624,12 +624,12 @@ describe('partial revision at concurrent control boundaries', () => {
     const waitingPeers = new Set<string>();
     let workCalls = 0;
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      const summary = summaryResult(opts); if (summary) return summary;
+      const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
       if (opts.stageId !== 'work') {
         waitingPeers.add(opts.stageId);
         await peerRelease;
         waitingPeers.delete(opts.stageId);
-        return { output: 'peer closed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'peer closed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (++workCalls === 1) {
         const directory = join(opts.runDir, 'stages', 'work');
@@ -642,7 +642,7 @@ describe('partial revision at concurrent control boundaries', () => {
         expect(decision).toMatchObject({ accepted: true, authorizedPaths: ['safe/one.txt', 'safe/two.txt'],
           rejectedPaths: ['shared/one.txt', 'shared/two.txt'], effectiveScope: ['safe/one.txt', 'safe/two.txt'] });
         opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
-        return { output: 'closed at revision boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'closed at revision boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       expect(opts.attemptIndex).toBe(2);
       expect(waitingPeers.size).toBe(2);
@@ -651,8 +651,8 @@ describe('partial revision at concurrent control boundaries', () => {
       mkdirSync(join(projectDir, 'safe'), { recursive: true });
       for (const path of ['safe/one.txt', 'safe/two.txt']) writeFileSync(join(projectDir, path), 'safe grant\n');
       releasePeers();
-      return { output: 'safe subset produced; withheld paths require planning', exitCode: 0, duration_ms: 1,
-        writes: ['safe/one.txt', 'safe/two.txt'], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'safe subset produced; withheld paths require planning', exitCode: 0, duration_ms: 1,
+        writes: ['safe/one.txt', 'safe/two.txt'], writeAttribution: 'structured' }, opts);
     } };
     // A failed expectation must also release these test-owned waiters.
     const cleanupTimer = setTimeout(releasePeers, 5000);

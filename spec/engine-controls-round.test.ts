@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import {
   copyFileSync,
@@ -488,7 +488,7 @@ describe('engine controls round replays', () => {
     let invocationCount = 0;
     const adapter: Adapter = {
       async run(_prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
         invocationCount += 1;
         const commandId = `configured-build-${invocationCount}`;
         options.onCommandLifecycle?.({
@@ -500,13 +500,13 @@ describe('engine controls round replays', () => {
         options.onCommandLifecycle?.({
           phase: 'completed', id: commandId, timestamp: new Date().toISOString(),
         });
-        return {
+        return fixtureResult({
           output: 'configured validation commands generated cache paths and refreshed a build manifest',
           exitCode: 0,
           duration_ms: 1,
           writes: [cachePath, knownExemptPath, generatedWithPreimagePath],
           writeAttribution: 'structured',
-        };
+        }, options);
       },
     };
     const final = await runWorkflow(
@@ -559,17 +559,17 @@ describe('engine controls round replays', () => {
     let oldInvocationCount = 0;
     const oldAdapter: Adapter = {
       async run(_prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
         oldInvocationCount += 1;
         write(join(oldProjectDir, ordinaryPath), `export const invocation = ${oldInvocationCount};\n`);
         await waitUntil(() => !existsSync(join(oldProjectDir, ordinaryPath)));
-        return {
+        return fixtureResult({
           output: 'ordinary source write was restored by the live guard',
           exitCode: 0,
           duration_ms: 1,
           writes: [ordinaryPath],
           writeAttribution: 'structured',
-        };
+        }, options);
       },
     };
     const oldFinal = await runWorkflow(
@@ -601,17 +601,17 @@ describe('engine controls round replays', () => {
     let authoredInvocationCount = 0;
     const authoredAdapter: Adapter = {
       async run(_prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
         authoredInvocationCount += 1;
         write(join(authoredProjectDir, authoredPath), `{"invocation":${authoredInvocationCount}}\n`);
         await waitUntil(() => !existsSync(join(authoredProjectDir, authoredPath)));
-        return {
+        return fixtureResult({
           output: 'authored generated-looking file was restored by the live guard',
           exitCode: 0,
           duration_ms: 1,
           writes: [authoredPath],
           writeAttribution: 'structured',
-        };
+        }, options);
       },
     };
     const authoredFinal = await runWorkflow(
@@ -695,7 +695,7 @@ describe('engine controls round replays', () => {
       let decision: Record<string, any> | undefined;
       const adapter: Adapter = {
         async run(prompt, _role, options) {
-          if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+          if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
           invocationCount += 1;
           if (invocationCount === 1) {
             const directory = join(options.runDir, 'stages', options.stageId);
@@ -711,10 +711,10 @@ describe('engine controls round replays', () => {
               reason: 'the generated command owns the complete content-addressed tree',
             });
             decision = await waitForScopeDecision(directory, requestId);
-            return {
+            return fixtureResult({
               output: 'stable generated parent requested before invoking the generator',
               exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured',
-            };
+            }, options);
           }
           expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
           expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
@@ -724,13 +724,13 @@ describe('engine controls round replays', () => {
           for (const path of [family.exactPath, family.siblingPath, family.futurePath]) {
             write(join(projectDir, path), `${path}\n`);
           }
-          return {
+          return fixtureResult({
             output: 'same generator wrote a sibling and a future content hash',
             exitCode: 0,
             duration_ms: 1,
             writes: [family.exactPath, family.siblingPath, family.futurePath],
             writeAttribution: 'structured',
-          };
+          }, options);
         },
       };
       const final = await runWorkflow(
@@ -800,15 +800,15 @@ describe('engine controls round replays', () => {
     let oldDecision: Record<string, any> | undefined;
     const oldAdapter: Adapter = {
       async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
         oldInvocationCount += 1;
         if (oldInvocationCount === 1) {
           write(join(oldProjectDir, ordinaryExact), 'first exact write\n');
           await waitUntil(() => !existsSync(join(oldProjectDir, ordinaryExact)));
-          return {
+          return fixtureResult({
             output: 'ordinary path restored', exitCode: 0, duration_ms: 1,
             writes: [ordinaryExact], writeAttribution: 'structured',
-          };
+          }, options);
         }
         if (oldInvocationCount === 2) {
           expect(prompt).toContain(`"requestedPaths":["${ordinaryExact}"]`);
@@ -820,18 +820,18 @@ describe('engine controls round replays', () => {
             reason: 'ordinary source generation requires only the named file',
           });
           oldDecision = await waitForScopeDecision(directory, oldRequestId);
-          return {
+          return fixtureResult({
             output: 'exact path accepted', exitCode: 0, duration_ms: 1,
             writes: [], writeAttribution: 'structured',
-          };
+          }, options);
         }
         write(join(oldProjectDir, ordinaryExact), 'authorized exact member\n');
         write(join(oldProjectDir, ordinarySibling), 'unauthorized sibling\n');
         await waitUntil(() => !existsSync(join(oldProjectDir, ordinarySibling)));
-        return {
+        return fixtureResult({
           output: 'ordinary sibling remains outside exact scope', exitCode: 0, duration_ms: 1,
           writes: [ordinaryExact, ordinarySibling], writeAttribution: 'structured',
-        };
+        }, options);
       },
     };
     const oldFinal = await runWorkflow(

@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -185,7 +186,7 @@ describe('worker state, invocation capture and engine resources', () => {
       received = prompt; suppliedSystem = role.prompt;
       opts.onInvocationInput?.({ userPrompt: prompt, systemPrompt: role.prompt, transport: { kind: 'stdin', payload: prompt } });
       opts.onInvocationInput?.({ userPrompt: `${prompt}\ninternal retry`, systemPrompt: role.prompt });
-      return { output: 'done', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1 }, opts);
     } };
     await runStage(adapter, { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: 'Do the declared work.', artifactContract: empty(), timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0 });
     const view = readRunStateView(project, runId, { includePromptText: true });
@@ -198,7 +199,7 @@ describe('worker state, invocation capture and engine resources', () => {
   });
   it('refuses a read before calling the adapter', async () => {
     let called = false;
-    const adapter: Adapter = { async run() { called = true; return { output: 'done', exitCode: 0, duration_ms: 1 }; } };
+    const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { called = true; return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1 }, recordOpts); } };
     const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [], reads: [{ id: 'missing', root: 'project', path: 'docs/missing.md', source: { kind: 'input' } }] });
     const result = await runStage(adapter, { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: '', artifactContract, timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0 });
     expect(called).toBe(false); expect(result.exitCode).toBe(1); expect(result.output).toContain('ARTIFACT_READ_ABSENT');
@@ -215,7 +216,7 @@ describe('proven restart recovery', () => {
     updateRunState(project, runId, (state) => { recordAdmittedPlan(state, workflow.stages, directory, 'Authentic one-stage checkpoint fixture', true, inspectDispatchAdmission({ dispatched: workflow.stages, baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory })); });
     beginStageAttempt(project, runId, 'writer', 0);
     updateRunState(project, runId, (state) => { state.currentIteration = 2; state.maxIterations = 4; state.engineCheckpoint = { version: 1, runId, projectDir: project, bootId: 'prior-owned-fixture-boot', generation: engineGeneration(), pid: 99999999, at: new Date().toISOString() }; state.stages.writer = readStageStatus(project, runId, 'writer'); });
-    const adapter: Adapter = { async run(_prompt, _role, opts) { if (opts.stageId === 'writer') calls++; return { output: 'resumed', exitCode: 0, duration_ms: 1, tokens_in: 7, tokens_out: 3 }; } };
+    const adapter: Adapter = { async run(_prompt, _role, opts) { if (opts.stageId === 'writer') calls++; return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1, tokens_in: 7, tokens_out: 3 }, opts); } };
     const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents, undefined, undefined, runId);
     expect(result.status).toBe('complete'); expect(calls).toBe(1); expect(result.currentIteration).toBe(2); expect(result.maxIterations).toBe(4);
     expect(result.stages.writer.attempts?.[0]).toMatchObject({ status: 'failed', exitCode: 143 });
@@ -229,7 +230,7 @@ describe('proven restart recovery', () => {
     beginStageAttempt(project, runId, 'writer', 0);
     updateRunState(project, runId, (state) => { state.engineCheckpoint = { version: 1, runId, projectDir: project, bootId: readHostBootId(), generation: engineGeneration(), pid: 99999999, at: new Date().toISOString() }; state.stages.writer = readStageStatus(project, runId, 'writer'); });
     const workflow = { name: 'resume', description: 'Unknown-consumer fixture', defaults: { max_iterations: 1 }, stages: [stage('writer')] };
-    const adapter: Adapter = { async run() { calls++; return { output: 'unsafe', exitCode: 0, duration_ms: 1 }; } };
+    const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'unsafe', exitCode: 0, duration_ms: 1 }, recordOpts); } };
     await expect(runWorkflow(workflow, yaml(workflow), project, adapter, agents, undefined, undefined, runId)).rejects.toThrow('RECOVERY_FATE_UNKNOWN');
     expect(calls).toBe(0); expect(readRunState(project, runId).recovery?.kind).toBe('blocked');
   });
@@ -265,7 +266,7 @@ describe('real scheduler boundaries', () => {
           write(join(opts.runDir, 'stages/first/plan_revision_request.json'), JSON.stringify({ version: 1, requestId: 'revise_execution', runId: id, stageId: 'first', attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, baseRevision: state.queryState!.planRevision!.revision, baseDigest: state.queryState!.planRevision!.digest, reason: 'Revise a pending tactic without removing its output duty.', stages: candidate }));
         }
         if (opts.stageId === 'owed') { owedCalls++; write(join(opts.runDir, 'owed.txt'), 'Fresh owed outcome.'); writes.push('run:owed.txt'); }
-        return { output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' };
+        return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
       } };
       const workflow = { name: 'execution-duty', description: 'Retain existing duties', defaults: { max_iterations: 1 }, stages: [first, owed] };
       const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);
@@ -285,7 +286,7 @@ describe('real scheduler boundaries', () => {
         firstCalls++; const state = readRunState(project, opts.runDir.split('/').at(-1)!); const attempt = readStageStatus(project, state.runId, 'first').attempts!.at(-1)!;
         write(join(opts.runDir, 'stages/first/plan_revision_request.json'), JSON.stringify({ version: 1, requestId: 'append_work', runId: state.runId, stageId: 'first', attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, baseRevision: state.queryState!.planRevision!.revision, baseDigest: state.queryState!.planRevision!.digest, reason: 'First outcome requires another stage', stages: [...state.planControl!.stages, stage('extra', { depends_on: ['first'], dependency_reasons: { first: 'Uses first outcome' } })] }));
       } else if (opts.stageId === 'extra') extraCalls++;
-      return { output: 'done', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1 }, opts);
     } };
     const workflow = { name: 'rolling', description: 'Rolling-plan fixture', defaults: { max_iterations: 1 }, stages: initial };
     const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);
@@ -306,7 +307,7 @@ describe('real scheduler boundaries', () => {
         write(join(opts.runDir, 'verdict_audit.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'report attribution missing', audit_findings: { version: 1, findings: pass ? [] : [{ id: 'attribution', paths: ['docs/report.md'], reason: 'Add the missing report attribution.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] } })); writes.push('run:verdict_audit.json');
       }
       if (opts.stageId.startsWith('repair_')) { repairCalls++; write(join(project, 'docs/report.md'), 'attribution repaired'); writes.push('docs/report.md'); }
-      return { output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
     } };
     const workflow = { name: 'repair', description: 'Scoped-repair fixture', defaults: { max_iterations: 1 }, stages: [plan] };
     const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);

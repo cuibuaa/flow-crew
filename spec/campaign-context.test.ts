@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -334,6 +334,6 @@ class PromptCaptureAdapter implements Adapter {
         '  prompt_template: Perform the fresh implementation.',
       ].join('\n') + '\n', { implement: emptyArtifactContract() }), 'utf-8');
     }
-    return { output: 'ok', exitCode: 0, duration_ms: 1 };
+    return fixtureResult({ output: 'ok', exitCode: 0, duration_ms: 1 }, opts);
   }
 }

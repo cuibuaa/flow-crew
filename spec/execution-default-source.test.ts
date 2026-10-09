@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -65,13 +66,13 @@ async function launchWithoutOverrides(): Promise<{ timeoutMs: number; maxIterati
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'work') observedTimeout = opts.timeout_ms;
-      return {
+      return fixtureResult({
         output: opts.stageId === '_summary' ? '## What was done\n- checked defaults' : 'done',
         exitCode: 0,
         duration_ms: 1,
         writes: [],
         writeAttribution: 'structured',
-      };
+      }, opts);
     },
   };
   const state = await runWorkflow(

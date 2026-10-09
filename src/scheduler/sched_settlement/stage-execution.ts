@@ -9,6 +9,7 @@ import { recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { appendTraceEvent } from '../../trace.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
+import { stageRecordSchema } from '../../handoff.js';
 import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
@@ -24,7 +25,7 @@ import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { gateArchiveArtifactPath, archivedGateVerdictWritePath, buildGateDispatchPreamble, buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
 import { isResearchOutcomeGate } from './gate-recovery.js';
-import { recordGateValidationDelta } from './gate-validation.js';
+import { recordGateValidationDelta, bindReviewedGateValidation } from './gate-validation.js';
 
 export function stageInitialTimeout(projectDir: string): number {
   return loadDefaults(projectDir).timeout_ms;
@@ -209,6 +210,8 @@ export async function executeSingleStage(
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
+      outputSchema: stageRecordSchema({ isGate: stage.is_gate, dynamicDispatch: stage.dynamic_dispatch,
+        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.research || state.campaignStorageKey || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       timeout_ms: prepared.budgetMs,
@@ -283,7 +286,7 @@ export async function executeSingleStage(
   try {
     const stageStatus = readStageStatus(projectDir, runId, stage.id);
     if (stage.is_gate && stageStatus.status === STAGE_STATUS.COMPLETE) {
-      await recordGateValidationDelta(projectDir, runId, stage.id);
+      if (!bindReviewedGateValidation(projectDir, runId, stage.id)) await recordGateValidationDelta(projectDir, runId, stage.id);
     }
     // Batch reconciliation owns stage_complete/stage_failed emission because a
     // just-accepted scope request or approval may convert this settlement into

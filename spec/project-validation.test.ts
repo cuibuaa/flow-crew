@@ -13,6 +13,8 @@ import {
 } from '../src/project-validation.js';
 import { validationEnvironment } from '../src/validation-environment.js';
 import { withEngineCommandBoundary } from '../src/write-boundary.js';
+import { createRun, writeStageStatus } from '../src/store.js';
+import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 function memoryFs(files: Record<string, string>): ValidationFileSystem {
   return {
@@ -28,6 +30,15 @@ function memoryFs(files: Record<string, string>): ValidationFileSystem {
 const root = resolve('portable-project');
 
 describe('project command environment and observer authority', () => {
+  it('ends configured validation inside the enclosing attempt budget', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'validation-deadline-'));
+    try {
+      const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], display: 'deadline probe', cwd: project, timeoutMs: 30 });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toMatch(/30ms|ENGINE_WRITE_BOUNDARY_UNVERIFIED: launcher closed without enforcement receipt/);
+      expect(result.durationMs).toBeLessThan(1000);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
   it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'validation-env-'));
     try {
@@ -445,7 +456,7 @@ describe('configuration-driven project validation baseline', () => {
     expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
   });
 
-  it('passes each validation role absent on both sides and keeps a configured command launch error unresolved', async () => {
+  it('passes absent roles, refuses receipt reuse after peer writes, and keeps command launch errors unresolved', async () => {
     const roles = ['build', 'test', 'lint'] as const;
     const absent = (role: typeof roles[number]): ValidationCommandResult => ({
       role, state: 'not_configured', durationMs: 0, output: '',
@@ -470,14 +481,23 @@ describe('configuration-driven project validation baseline', () => {
         );
         configure(`${JSON.stringify(process.execPath)} -e "process.exit(0)"`);
         const configuredBaseline = await runProjectValidationBaseline(projectDir);
+        const { runId, runDirPath } = createRun(projectDir, 'peer-validation', 'name: peer-validation\nstages: []\n', ['review', 'peer']);
+        writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: configuredBaseline }));
+        const attempt = { index: 1, startedAt: 'fixture', writes: [], writeAttribution: 'structured' as const };
+        writeStageStatus(projectDir, runId, 'review', { status: 'running', retries: 0, attempts: [{ ...attempt, status: 'running' }] });
+        await recordGateValidationDelta(projectDir, runId, 'review', { runCommand: () => ({ exitCode: 0 }) });
+        writeStageStatus(projectDir, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
+        for (const writes of [['input.txt'], []]) {
+          writeStageStatus(projectDir, runId, 'peer', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', writes }] });
+          expect(bindReviewedGateValidation(projectDir, runId, 'review', ['review', 'peer'])).toBe(writes.length === 0);
+        }
         configure(JSON.stringify(join(projectDir, `missing-${role}`)));
         const current = await runProjectValidationBaseline(projectDir);
-        expect(configuredBaseline.discovery.commands).toEqual([
-          expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
-        ]);
-        expect(current.discovery.commands).toEqual([
-          expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
-        ]);
+        for (const discovery of [configuredBaseline.discovery, current.discovery]) {
+          expect(discovery.commands).toEqual([
+            expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
+          ]);
+        }
         expect(configuredBaseline.results.find((result) => result.role === role))
           .toMatchObject({ state: 'passed', exitCode: 0 });
         expect(current.results.find((result) => result.role === role))

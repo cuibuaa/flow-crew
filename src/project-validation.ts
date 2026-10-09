@@ -50,6 +50,9 @@ export interface ValidationDiscovery {
 }
 
 export interface ValidationRunRequest extends ValidationCommand {
+  /** An enclosing stage may narrow the configured command deadline. */
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
   cwd: string;
   /** Parent-supplied run anchor; pre-admission validation uses a private one. */
   runDir?: string;
@@ -111,6 +114,8 @@ export interface ProjectValidationBaseline {
 }
 
 export interface ProjectValidationDependencies {
+  remainingMs?: () => number;
+  abortSignal?: AbortSignal;
   fs?: ValidationFileSystem;
   runCommand?: ValidationCommandRunner;
   declaredCommands?: readonly BriefValidationCommand[];
@@ -784,6 +789,7 @@ export function outwardProjectSymlinks(projectDir: string): OutwardProjectSymlin
 export const runValidationCommand: ValidationCommandRunner = (request) => withEngineCommandBoundary({
   projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
 }, async () => {
+  if (request.abortSignal?.aborted || (request.timeoutMs !== undefined && request.timeoutMs <= 0)) return { exitCode: null, error: 'Validation refused: enclosing stage deadline or control abort', durationMs: 0 };
   const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));
   try {
   const environment = validationEnvironment(environmentRoot, process.env, request.env);
@@ -808,6 +814,10 @@ export const runValidationCommand: ValidationCommandRunner = (request) => withEn
     const configured = loadProjectDefaults(request.cwd).validation_timeout_ms;
     if (Number.isFinite(configured) && configured > 0) timeoutMs = configured;
   } catch { /* fall back to the built-in when the project has no defaults file */ }
+  if (request.timeoutMs !== undefined) timeoutMs = Math.min(timeoutMs, Math.max(1, request.timeoutMs));
+  const onAbort = () => stop();
+  request.abortSignal?.addEventListener('abort', onAbort, { once: true });
+  if (request.abortSignal?.aborted) onAbort();
   const timeout = setTimeout(() => {
     timedOut = true;
     stop();
@@ -822,12 +832,13 @@ export const runValidationCommand: ValidationCommandRunner = (request) => withEn
     settled = true;
     clearTimeout(timeout);
     clearInterval(heartbeat);
+    request.abortSignal?.removeEventListener('abort', onAbort);
     resolveResult({
       exitCode,
       stdout,
       stderr,
       durationMs: Date.now() - started,
-      ...(error ? { error } : {}),
+      ...(error ? { error } : request.abortSignal?.aborted ? { error: 'Validation cancelled by enclosing stage' } : {}),
       ...(!error && timedOut ? { error: `Validation command timed out after ${timeoutMs}ms` } : {}),
       ...(!error && !timedOut && signal ? { error: `Validation process ended by signal ${signal}` } : {}),
     });
@@ -1037,7 +1048,9 @@ export async function runProjectValidationBaseline(
     let response: ValidationRunResponse;
     try { dependencies.observer?.onCommandStart?.(command); } catch { /* display callbacks cannot change validation */ }
     try {
-      response = await runner({ ...command, cwd: root, observer: dependencies.observer });
+      response = await runner({ ...command, cwd: root, observer: dependencies.observer,
+        ...(dependencies.remainingMs ? { timeoutMs: dependencies.remainingMs() } : {}),
+        ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
       response = { exitCode: null, error: errorMessage(error) };
     }

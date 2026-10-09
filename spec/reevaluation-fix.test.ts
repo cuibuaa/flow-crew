@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -82,7 +82,7 @@ describe('repair-stage retry ledger reevaluation', () => {
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') {
-          return { output: '## What was done\n- verified repair retry ledger', exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: '## What was done\n- verified repair retry ledger', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'plan') {
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
@@ -103,7 +103,7 @@ describe('repair-stage retry ledger reevaluation', () => {
             '    max_retries: 1',
             '    task: repair release',
           ].join('\n'), { release_gate: gateArtifactContract('release_gate'), fix_release: emptyArtifactContract() }));
-          return { output: 'planned', exitCode: 0, duration_ms: 10 };
+          return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 10 }, opts);
         }
         if (opts.stageId === 'release_gate') {
           gateCalls++;
@@ -111,15 +111,15 @@ describe('repair-stage retry ledger reevaluation', () => {
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'fixed' : 'repair required',
           }));
-          return { output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 100, tokens_out: 1 };
+          return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 100, tokens_out: 1 }, opts);
         }
         if (opts.stageId === 'fix_release') {
           fixCalls++;
-          return fixCalls === 1
+          return fixtureResult(fixCalls === 1
             ? { output: 'repair timed out', exitCode: 124, duration_ms: 200, tokens_in: 20, tokens_out: 2 }
-            : { output: 'repair complete', exitCode: 0, duration_ms: 300, tokens_in: 30, tokens_out: 3 };
+            : { output: 'repair complete', exitCode: 0, duration_ms: 300, tokens_in: 30, tokens_out: 3 }, opts);
         }
-        return { output: 'unexpected stage', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected stage', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 

@@ -22,6 +22,7 @@ import { isResearchOutcomeGate } from '../sched_settlement/gate-recovery.js';
 import { appendGateMetricInstruction, appendStageExecutionContracts, createSchedulerTechnicalRetryState, gateAttemptCoordinate, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult, stageInitialTimeout } from '../sched_settlement/stage-execution.js';
 import { StoreState, readStageStatus, runDir } from '../../store.js';
 import { runStage } from '../../worker.js';
+import { stageRecordSchema } from '../../handoff.js';
 import { createSchedulerLiveConstraintGuardFactory } from './services.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -177,6 +178,8 @@ export async function executeOrdinaryStage(
         promptTemplate: resolvedPrompt,
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
+        outputSchema: stageRecordSchema({ isGate: stage.is_gate, dynamicDispatch: stage.dynamic_dispatch,
+          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.research || state.campaignStorageKey || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
         timeout_ms: prepared.budgetMs,

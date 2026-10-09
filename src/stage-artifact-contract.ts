@@ -194,6 +194,6 @@ export async function verifyStageArtifactContract(input: StageArtifactContractIn
 
 export function writeStageArtifactContractAudit(runDir: string, audit: StageArtifactContractAudit): string {
   const path = join(runDir, 'stages', audit.stageId, 'artifact_contract.json');
-  writeFileSync(path, `${JSON.stringify(audit, null, 2)}\n`, 'utf-8');
+  writeFileSync(path, `${JSON.stringify(audit)}\n`, 'utf-8');
   return path;
 }

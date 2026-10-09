@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -60,7 +61,7 @@ describe('typed declarations are repaired by complete independently admitted rep
         }
       }
       if(opts.stageId==='work'){mkdirSync(join(project,'docs'),{recursive:true});writeFileSync(join(project,'docs/final.md'),'Fresh evidence from admitted work.');writes.push('docs/final.md');}
-      return {output:'done',exitCode:0,duration_ms:1,writes,writeAttribution:'structured'};
+      return fixtureResult({output:'done',exitCode:0,duration_ms:1,writes,writeAttribution:'structured'}, opts);
     }};
     const state=await runWorkflow(workflow,stringify(workflow),project,adapter,roles,undefined,agentsDir,undefined,'Write a fresh report with verified evidence.',true);
     expect(state.status,state.failureReason).toBe('complete');

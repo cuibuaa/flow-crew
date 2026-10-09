@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts, inputFile, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -97,8 +97,8 @@ class CaptureWriter {
 }
 
 const inertAdapter: Adapter = {
-  async run(): Promise<RunResult> {
-    return { output: 'unused', exitCode: 0, duration_ms: 1 };
+  async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts): Promise<RunResult> {
+    return fixtureResult({ output: 'unused', exitCode: 0, duration_ms: 1 }, recordOpts);
   },
 };
 
@@ -216,24 +216,24 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     };
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(opts)) return { output: 'fixture audit settled', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        if (settleCoverageFixture(opts)) return fixtureResult({ output: 'fixture audit settled', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'ceiling') {
           write(join(projectDir, ceilingPath), 'Honest ceiling after the recovered no-candidate round.\n');
-          return { output: 'ceiling settled', exitCode: 0, duration_ms: 1, writes: [ceilingPath], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'ceiling settled', exitCode: 0, duration_ms: 1, writes: [ceilingPath], writeAttribution: 'structured' }, opts);
         }
         write(join(projectDir, sidecar), JSON.stringify({
           label: 'completed-dose-floor-round',
           outcome: 'no_candidate',
           reason: 'every measured candidate violated a hard constraint',
         }));
-        return {
+        return fixtureResult({
           output: 'completed 18690 seconds of measurement',
           exitCode: 0,
           duration_ms: 18_690_000,
           writes: [sidecar],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     };
 
@@ -332,7 +332,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     let measurePrompt = '';
     const adapter: Adapter = {
       async run(prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           planCalls += 1;
           planPrompts.push(prompt);
@@ -364,7 +364,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
                 prompt_template: `invalid recovery proposal ${planCalls}`,
               }];
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
-          return { output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 };
+          return fixtureResult({ output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'measure') {
           measurePrompt = prompt;
@@ -373,15 +373,15 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
             status: 'no_candidate',
             reason: 'every measured candidate violated a hard constraint',
           }));
-          return {
+          return fixtureResult({
             output: 'completed 18690 seconds of measurement and wrote the sidecar',
             exitCode: 0,
             duration_ms: 18_690_000,
             writes: [sidecar],
             writeAttribution: 'structured',
-          };
+          }, opts);
         }
-        return { output: 'conditional finalizer did not write', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'conditional finalizer did not write', exitCode: 0, duration_ms: 1 }, opts);
       },
     };
 
@@ -640,8 +640,8 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     let planCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (opts.stageId !== 'plan') return { output: 'unexpected work stage', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        if (opts.stageId !== 'plan') return fixtureResult({ output: 'unexpected work stage', exitCode: 0, duration_ms: 1 }, opts);
         planCalls += 1;
         const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
           id,
@@ -673,7 +673,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
           '```',
           '',
         ].join('\n'), 'utf8');
-        return { output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       },
     };
 
@@ -1198,20 +1198,20 @@ describe('5 — violation path at durable and human event layers', () => {
     let invocations = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         invocations += 1;
         write(join(projectDir, violatingPath), `export const attempt = ${invocations};\n`);
         const deadline = Date.now() + 1_500;
         while (existsSync(join(projectDir, violatingPath)) && Date.now() < deadline) {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
         }
-        return {
+        return fixtureResult({
           output: 'wrote outside the admitted scope',
           exitCode: 0,
           duration_ms: 1,
           writes: [violatingPath],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     };
     const final = await runWorkflow(
@@ -1357,8 +1357,8 @@ describe('6 — exact declared outputs and replay evidence', () => {
     };
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        return { output: 'left the stale file untouched', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        return fixtureResult({ output: 'left the stale file untouched', exitCode: 0, duration_ms: 1 }, opts);
       },
     };
 
@@ -1428,8 +1428,8 @@ describe('6 — exact declared outputs and replay evidence', () => {
     let deliveredPrompt = '';
     const adapter: Adapter = {
       async run(prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (opts.stageId === 'plan') return { output: 'planned capture stage', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        if (opts.stageId === 'plan') return fixtureResult({ output: 'planned capture stage', exitCode: 0, duration_ms: 1 }, opts);
         deliveredPrompt = prompt;
         write(join(opts.runDir, 'stages', opts.stageId, 'before_evidence.md'), '# transposed\n');
         write(join(opts.runDir, 'stages', opts.stageId, 'before_evidence.json'), '{"transposed":true}\n');
@@ -1437,13 +1437,13 @@ describe('6 — exact declared outputs and replay evidence', () => {
           join(projectDir, 'reports', 'final.md'),
           '# Replay\n\n`npm exec vitest -- run spec/missing-replay.test.ts`\n',
         );
-        return {
+        return fixtureResult({
           output: 'published transposed evidence and report',
           exitCode: 0,
           duration_ms: 1,
           writes: ['reports/final.md'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     };
 
@@ -1525,18 +1525,18 @@ describe('6 — exact declared outputs and replay evidence', () => {
     };
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         write(join(opts.runDir, 'evidence_before.md'), '# exact\n');
         write(join(opts.runDir, 'evidence_before.json'), '{"exact":true}\n');
         write(join(projectDir, replayPath), 'const { test } = require("node:test"); test("exists", () => {});\n');
         write(join(projectDir, 'reports', 'final.md'), `# Replay\n\n\`npm exec vitest -- run ${replayPath}\`\n`);
-        return {
+        return fixtureResult({
           output: 'published exact evidence and command',
           exitCode: 0,
           duration_ms: 1,
           writes: ['reports/final.md', replayPath],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     };
 

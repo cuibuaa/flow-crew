@@ -1,6 +1,6 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { drainDueTimers } from './test-support/engine-fixtures.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -263,7 +263,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     let ordinaryCalls = 0;
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'ordinary') {
         ordinaryCalls++;
         expect(prompt).toContain('immutable');
@@ -277,17 +277,17 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
           }));
           const decision = await waitForDecision(directory, 'scope_revision_decision_');
           expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'scheduler-policy' });
-          return { output: 'scope accepted; stop at the control boundary', exitCode: 0, duration_ms: 20, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'scope accepted; stop at the control boundary', exitCode: 0, duration_ms: 20, writes: [], writeAttribution: 'structured' }, opts);
         }
         expect(prompt).toContain('# Accepted scope revision');
         expect(prompt).toContain('Continue the stage work in execution 2');
         expect(prompt).not.toContain('Scope revision ordinary-shared was accepted. This attempt stops');
         writeFileSync(join(projectDir, 'src', 'shared.ts'), 'shared\n');
-        return { output: 'done', exitCode: 0, duration_ms: 20, writes: ['src/shared.ts'], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 20, writes: ['src/shared.ts'], writeAttribution: 'structured' }, opts);
       }
       gateSawAudit = prompt.includes('constraint_audit_attempt_1.json') && prompt.includes('accepted=1');
       writeFileSync(join(opts.runDir, 'verdict_audit_gate.json'), JSON.stringify({ pass: gateSawAudit, reason: 'audit visible' }));
-      return { output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder', 'qa'), created.runId, 'scope gate', true);
     expect(final.status).toBe('complete');
@@ -305,7 +305,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     const created = prepareRun(config, yaml);
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       const directory = join(opts.runDir, 'stages', opts.stageId);
       writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
         version: 1, kind: 'scope_revision', requestId: 'empty-reason', stageId: opts.stageId,
@@ -314,7 +314,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       const decision = await waitForDecision(directory, 'scope_revision_decision_');
       expect(decision).toMatchObject({ accepted: false, decision: 'rejected' });
       writeFileSync(join(projectDir, 'src', 'escape.ts'), 'not authorized\n');
-      return { output: 'escaped', exitCode: 0, duration_ms: 20, writes: ['src/escape.ts'], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'escaped', exitCode: 0, duration_ms: 20, writes: ['src/escape.ts'], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope rejection', true);
     expect(final.status).toBe('failed');
@@ -331,11 +331,11 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     let invocationCount = 0;
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       invocationCount++;
       if (invocationCount === 1) writeFileSync(join(projectDir, 'src', 'observed.ts'), 'snapshot only\n');
       else expect(prompt).toContain('# Live constraint correction');
-      return { output: invocationCount === 1 ? 'snapshot' : 'corrected', exitCode: 0, duration_ms: 2 };
+      return fixtureResult({ output: invocationCount === 1 ? 'snapshot' : 'corrected', exitCode: 0, duration_ms: 2 }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope snapshot', true);
     expect(final.status).toBe('complete');
@@ -368,7 +368,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     let calls = 0;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       calls++;
       if (calls === 1) {
         const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -378,10 +378,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
         }));
         await waitForDecision(directory, 'scope_revision_decision_');
         writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt one\n');
-        return { output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
       }
       writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two\n');
-      return { output: 'no new request', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'no new request', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope attempts', true);
     expect(calls).toBe(2);
@@ -408,7 +408,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     let repairCalls = 0;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
@@ -418,14 +418,14 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
           '    dependency_reasons: {review_gate: "repair only after an explicit rejection"}', '    retry_to: [review_gate]',
           '    max_retries: 1', '    task: repair',
         ].join('\n')));
-        return { output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'review_gate') {
         gateCalls++;
         writeFileSync(join(opts.runDir, 'verdict_review_gate.json'), JSON.stringify({
           pass: gateCalls > 1, reason: gateCalls > 1 ? 'fixed' : 'rejected',
         }));
-        return { output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       repairCalls++;
       if (repairCalls === 1) {
@@ -436,10 +436,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
         }));
         await waitForDecision(directory, 'scope_revision_decision_');
         writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt one\n');
-        return { output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
       }
       writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two without request\n');
-      return { output: 'done', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
@@ -480,15 +480,15 @@ describe('approval attempt suspension', () => {
     let approvalAbortElapsedMs = Number.POSITIVE_INFINITY;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'downstream') {
         downstreamCalls++;
-        return { output: 'downstream complete', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'downstream complete', exitCode: 0, duration_ms: 1 }, opts);
       }
       actionCalls++;
       if (actionCalls > 1) {
         expect(existsSync(join(opts.runDir, 'approvals', 'launch-training.decision.json'))).toBe(true);
-        return { output: 'approved action complete', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'approved action complete', exitCode: 0, duration_ms: 1 }, opts);
       }
       const requestedAt = new Date().toISOString();
       const started = Date.now();
@@ -509,7 +509,7 @@ describe('approval attempt suspension', () => {
         if (opts.abortSignal?.aborted) finish();
         else opts.abortSignal?.addEventListener('abort', finish, { once: true });
       });
-      return { output: 'stopped at approval boundary', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: Date.now() - started };
+      return fixtureResult({ output: 'stopped at approval boundary', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: Date.now() - started }, opts);
     } };
 
     const parked = await runWorkflow(
@@ -621,7 +621,7 @@ describe('gate verdict facts and repair eligibility', () => {
     let releaseCalls = 0;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       calls.push(opts.stageId);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
@@ -648,7 +648,7 @@ describe('gate verdict facts and repair eligibility', () => {
         writeFileSync(join(opts.runDir, 'verdict_release_gate.json'), JSON.stringify({ pass: releaseCalls > 1, reason: releaseCalls > 1 ? 'released' : 'release rejected' }));
       }
       const writes = opts.stageId === 'implement' ? ['src/impl.ts'] : [];
-      return { output: opts.stageId, exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' };
+      return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'coder', 'repair'), created.runId, 'gate order', true);
     expect(final.status).toBe('complete');
@@ -681,10 +681,10 @@ describe('bounded timeout negotiation', () => {
           'switch to the isolated retry reproduction',
           'utf-8',
         );
-        return { output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
-          adapterError: true, adapterFailureKind: 'service_unavailable' };
+        return fixtureResult({ output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
+          adapterError: true, adapterFailureKind: 'service_unavailable' }, opts);
       }
-      return { output: 'recovered', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'recovered', exitCode: 0, duration_ms: 1 }, opts);
     } };
 
     const result = await runStage(adapter, {
@@ -787,9 +787,9 @@ describe('bounded timeout negotiation', () => {
       const budgets: number[] = [];
       const adapter: Adapter = { async run(_prompt, _agent, opts) {
         const summary = summaryResult(opts);
-        if (summary) return summary;
+        if (summary) return fixtureResult(summary, opts);
         budgets.push(opts.timeout_ms);
-        return { output: 'resumed', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1 }, opts);
       } };
       await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'resume timeout', true);
       return { budgets, status: readStageStatus(projectDir, created.runId, 'work') };
@@ -862,13 +862,13 @@ describe('bounded timeout negotiation', () => {
     const budgets: number[] = [];
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       budgets.push(opts.timeout_ms);
       if (budgets.length === 1) {
-        return { output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true };
+        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
       }
       expect(prompt).toContain(`strictly larger immutable budget of ${opts.timeout_ms}ms`);
-      return { output: 'finished', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 1 }, opts);
     } };
 
     const final = await runWorkflow(
@@ -907,7 +907,7 @@ describe('bounded timeout negotiation', () => {
     let workCalls = 0;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           '- id: work',
@@ -918,14 +918,14 @@ describe('bounded timeout negotiation', () => {
           '  max_retries: 0',
           '  prompt_template: finish the dispatched work',
         ].join('\n')));
-        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       workCalls++;
       budgets.push(opts.timeout_ms);
       if (workCalls === 1) {
-        return { output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true };
+        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
       }
-      return { output: 'finished', exitCode: 0, duration_ms: 1 };
+      return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 1 }, opts);
     } };
 
     const final = await runWorkflow(
@@ -953,14 +953,14 @@ describe('bounded timeout negotiation', () => {
     let adapterSettled = false;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       const started = Date.now();
-      return new Promise<RunResult>((resolve) => {
+      return fixtureResult(new Promise<RunResult>((resolve) => {
         const finishAfterClose = () => setTimeout(() => {
           adapterSettled = true;
           resolve({ output: 'closed after cancellation', exitCode: 137, duration_ms: Date.now() - started });
         }, 120);
         if (opts.abortSignal?.aborted) finishAfterClose();
         else opts.abortSignal?.addEventListener('abort', finishAfterClose, { once: true });
-      });
+      }), opts);
     } };
     const started = Date.now();
     await runStage(adapter, {
@@ -999,9 +999,9 @@ describe('bounded timeout negotiation', () => {
       emit();
       const interval = setInterval(emit, requestCadenceMs);
       try {
-        return await execWithStdin(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], '', {
+        return fixtureResult(await execWithStdin(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], '', {
           cwd: projectDir, timeout_ms: 10_000, abortSignal: opts.abortSignal,
-        });
+        }), opts);
       } finally {
         clearInterval(interval);
         resolveAdapterSettled();

@@ -1,4 +1,4 @@
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -133,11 +133,11 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
 
   const adapter: Adapter = {
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatchYaml()));
         writeSession(opts.runDir, 'plan', BUILDER_UUID, 'plan');
-        return { output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateCalls++;
@@ -161,7 +161,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
         } else {
           options.onSecondGatePrompt?.(prompt);
         }
-        return {
+        return fixtureResult({
           output: pass
             ? `All rejected items reproduced and fixed for iteration ${fixtureIteration}.\n\nCoverage Map\n- fixture marker: pass`
             : `iteration-${fixtureIteration}-round-1-output\n\nRejected broken marker.\n\nCoverage Map\n- fixture marker: fail via exact file read\n- session isolation: pass`,
@@ -170,7 +170,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
           tokens_in: gateCalls === 1 ? 100 : 30,
           tokens_out: gateCalls === 1 ? 40 : 15,
           sessionId: GATE_UUID,
-        };
+        }, opts);
       }
       if (opts.stageId === FIX_ID) {
         fixPrompts.push(prompt);
@@ -203,15 +203,15 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
             evidence: 'node probe.js -> current source was already FIXED',
           }, null, 2) + '\n');
         }
-        return {
+        return fixtureResult({
           output: 'fixed the rejected marker',
           exitCode: 0,
           duration_ms: 5,
           writes: options.writeOutsideScope ? ['src/checked.ts', 'src/outside.ts', 'src/outside.bin'] : ['src/checked.ts'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
-      return { output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 
@@ -357,9 +357,9 @@ describe('compressed acceptance loop', () => {
       const evaluatedInputPath = join(roundDir, `evaluated_input_${GATE_ID}.md`);
       const evaluatedInput = readFileSync(evaluatedInputPath, 'utf-8');
       expect(verdict).toContain(`iteration-${iteration}-round-1-verdict`);
-      expect(output).toContain(`iteration-${iteration}-round-1-output`);
+      expect(JSON.parse(output)).toMatchObject({ pass: false, marker: `iteration-${iteration}-round-1-verdict` });
       expect(verdict).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
-      expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-output`);
+      expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
       expect(evaluatedInput).toBe(result.gatePrompts[iteration === 1 ? 0 : 2]);
       expect(evaluatedInput).not.toBe(result.gatePrompts[iteration === 1 ? 1 : 3]);
       expect(JSON.parse(readFileSync(join(roundDir, 'repair_diff.json'), 'utf-8'))).toMatchObject({

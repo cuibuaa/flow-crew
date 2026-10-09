@@ -12,6 +12,8 @@ import { CommandActivityTracker } from '../command-activity.js';
 import { engineChildAdapterHome, execEngineChildSync } from '../write-boundary.js';
 import { prepareAdapterHome } from '../adapter-home.js';
 import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
+import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
+import { atomicWrite } from '../store.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -431,7 +433,7 @@ export function codexArgs(): string[] {
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
-export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[] {
+export function buildCodexExecArgs(_prompt: string, sessionId?: string, schemaPath?: string): string[] {
   if (sessionId !== undefined && !isCodexSessionUuid(sessionId)) {
     throw new Error('Codex session resume requires an explicit UUID');
   }
@@ -440,6 +442,7 @@ export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[
     : ['exec', '--json', ...codexArgs()];
   // Terminate option parsing, then tell Codex to read the prompt from stdin.
   // Keeping prompt bytes out of argv avoids the OS per-argument size ceiling.
+  if (schemaPath) args.push('--output-schema', schemaPath);
   args.push('--', '-');
   return args;
 }
@@ -466,13 +469,20 @@ export class CodexAdapter implements Adapter {
     // resume id, which would otherwise record the dead session as this stage's own.
     let resumeSessionId = opts.resumeSessionId;
     let invocationPrompt = prompt;
-    let args = buildCodexExecArgs(prompt, resumeSessionId);
+    // Materialize only the schema this CLI will consume, outside its write authority.
+    const schemaPath = opts.outputSchema && generationCompatibleSchema(opts.outputSchema)
+      ? join(opts.runDir, 'stages', opts.stageId, 'output_schema.json') : undefined;
+    let args = buildCodexExecArgs(prompt, resumeSessionId, schemaPath);
 
     let result: ExecResult | undefined;
     const invocations: NativeInvocationUsage[] = [];
     let durationMs = 0;
     const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
     try {
+      if (schemaPath) {
+        mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
+        atomicWrite(schemaPath, JSON.stringify(opts.outputSchema));
+      }
       // SURGICAL param-fix retry: when the failure output NAMES a fixable
       // parameter, fix exactly that and retry — instead of a blind same-config
       // retry that re-sends the request the server just rejected (and, with a
@@ -558,7 +568,7 @@ export class CodexAdapter implements Adapter {
           ownerStageId = opts.stageId;
           codexHome = stageCodexHome(opts.runDir, ownerStageId);
           invocationPrompt = opts.freshSessionPrompt ?? prompt;
-          args = buildCodexExecArgs(invocationPrompt, undefined);
+          args = buildCodexExecArgs(invocationPrompt, undefined, schemaPath);
         }
         try {
           appendFileSync(liveLogPath,

@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import { stringify as stringifyYaml } from 'yaml';
 import { spawn, spawnSync } from 'node:child_process';
@@ -209,9 +210,9 @@ describe('Dashboard admission handshake', () => {
     const prompts: string[] = [];
     const adapter: Adapter = {
       async run(prompt, _role, options) {
-        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         prompts.push(prompt);
-        return { output: 'completed', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: 'completed', exitCode: 0, duration_ms: 1 }, options);
       },
     };
     const worker: AgentConfig = {

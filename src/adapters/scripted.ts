@@ -14,7 +14,8 @@
  * round results) and/or the RUN dir (dispatch.yaml, reality_checks.md), with
  * the same containment check the mock adapter uses.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { readDispatchDocument } from '../dispatch-document.js';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 
@@ -31,6 +32,27 @@ export interface ScriptedTurn {
 }
 
 export type StageScript = ScriptedTurn | ScriptedTurn[];
+
+/** Legacy narrative fixture turns now model a typed final answer. Explicit
+ * JSON (including malformed JSON) is returned untouched for negative probes. */
+export function scriptedRecord(output: string, opts: RunOpts): string {
+  if (!opts.outputSchema || /^\s*[[{]/.test(output)) return output;
+  if (opts.outputSchema.properties?.stages) {
+    const document = readDispatchDocument(readFileSync(resolve(opts.runDir, 'dispatch.yaml'), 'utf8'));
+    return JSON.stringify(Array.isArray(document.document) ? { stages: document.stages } : document.document);
+  }
+  if (opts.outputSchema.anyOf) {
+    const path = resolve(opts.runDir, `verdict_${opts.stageId}.json`);
+    if (!existsSync(path)) return output; // absence must still be refused
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    record.reason ??= output.trim() || 'Fixture verdict.';
+    if (!opts.outputSchema.anyOf[0].properties?.criteria.required?.length) record.criteria ??= {};
+    record.audit_findings ??= { version: 1, findings: [] };
+    if (record.pass === false && !('repairability' in record)) record.repairability = { version: 1, disposition: 'repairable', evidence: record.reason };
+    return JSON.stringify(record);
+  }
+  return JSON.stringify({ status: 'delivered', summary: output.trim() || 'Fixture completed.', files_modified: [], checks: [], caveats: [] });
+}
 
 function writeContained(root: string, files: Record<string, string> | undefined): string[] {
   const writes: string[] = [];
@@ -70,7 +92,7 @@ export class ScriptedAdapter implements Adapter {
 
     const writes = [...writeContained(opts.workDir, turn.projectFiles), ...writeContained(opts.runDir, turn.runFiles).map((path) => `run:${path}`)];
     return {
-      output: turn.output ?? '',
+      output: turn.exitCode ? turn.output ?? '' : scriptedRecord(turn.output ?? '', opts),
       exitCode: turn.exitCode ?? 0,
       duration_ms: 1,
       writes,

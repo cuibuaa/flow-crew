@@ -1,19 +1,16 @@
 // Module: handoff
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStageOutput } from './store.js';
-import { readStageStatus } from './store.js';
+import { readStageOutput, readStageStatus } from './store.js';
 import { getDefaultTimeout } from './config.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { renderCriterionRulings, renderGateControlContract } from './verdict-controls.js';
+import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
+import { PLAN_SCHEMA } from './plan-interface.js';
 import { captureResearchGateCandidate } from './research-candidate.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
-
-function readDefaultTimeout(projectDir: string): string {
-  return getDefaultTimeout(projectDir);
-}
 
 export type HandoffVisibility = 'full' | 'minimal' | 'none';
 
@@ -38,177 +35,83 @@ interface HandoffOpts {
   criterionRefs?: string[];
 }
 
-/**
- * Handoff prompt suffix — appended to every stage so the agent writes
- * a natural handoff note for downstream stages.
- */
-const HANDOFF_SUFFIX = `
+const text: Schema = { type: 'string', minLength: 1, pattern: '\\S' };
+const strings: Schema = { type: 'array', items: text };
+const object = (properties: Record<string, Schema>): Schema => ({
+  type: 'object', properties, required: Object.keys(properties), additionalProperties: false,
+});
+export const HANDOFF_SCHEMA = object({
+  status: { type: 'string', enum: ['delivered', 'blocked'] }, summary: text,
+  files_modified: strings,
+  checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
+  caveats: strings,
+});
 
----
-Before finishing, write a brief handoff note for the next stage:
-- What did you do?
-- What key decisions did you make and why?
-- What should the next person know before starting?
-- Any risks or caveats?
-
-Knowledge graph continuity:
-- If this stage produced reusable goals, approaches, findings, results, dead ends, user hints, source references, or candidate metrics, update the task-local knowledge graph at {kg_path}.
-- If the file does not exist, create it with this shape: {"nodes":[],"edges":[],"metadata":{"createdAt":"<iso>","updatedAt":"<iso>"}}.
-- Keep entries concise and evidence-backed. Do not invent sources, scores, or results.
-- Use node types: goal, approach, finding, result, insight, dead_end, user_hint, source.
-- A "source" node is an external reference you cite (paper / doc / repo): {"type":"source","label":"<title>","source":"<URL>"}. Link the finding it backs with a "sourced_from" edge.
-- Use edge types: explored_by, found_that, measured_as, sourced_from, supports, contradicts, combines_with, depends_on.`;
-
-function resolveVisibility(opts: HandoffOpts): HandoffVisibility {
-  // Visibility is a role atom: each agent self-declares handoff_visibility in its config; the
-  // worker passes it through as opts.handoffVisibility. No engine-side role→visibility map.
-  return opts.handoffVisibility ?? 'full';
+/** Ordinary verdicts are closed generation-time variants. Optional legacy
+ * campaign/control metadata stays in the same JSON Schema dialect at return;
+ * its cross-field authority is still checked by the scheduler. */
+export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionRefs'> & { dynamicDispatch?: boolean; extendedVerdict?: boolean }): Schema {
+  if (opts.dynamicDispatch) return PLAN_SCHEMA;
+  if (!opts.isGate) return HANDOFF_SCHEMA;
+  const entry: Schema = object({ status: { type: 'string', enum: ['pass', 'fail', 'judgement'] }, evidence: text });
+  if (opts.extendedVerdict) entry.additionalProperties = true;
+  const criteria = object(Object.fromEntries((opts.criterionRefs ?? []).map(id => [id, entry])));
+  if (opts.extendedVerdict) criteria.additionalProperties = entry;
+  const audit_findings = object({ version: { type: 'integer', enum: [1] }, findings: { type: 'array', items: object({
+    id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' }, paths: strings, reason: text,
+    criterion_ids: strings, invalidates_plan: { type: 'boolean' }, repair_role: text,
+  }) } });
+  const base = { reason: text, criteria, audit_findings };
+  const pass = object({ ...base, pass: { type: 'boolean', enum: [true] } });
+  const fail = object({ ...base, pass: { type: 'boolean', enum: [false] }, repairability: object({
+    version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
+  }) });
+  if (opts.extendedVerdict) pass.additionalProperties = fail.additionalProperties = true;
+  return { type: 'object', anyOf: [pass, fail] };
 }
 
-interface PredecessorContextSource {
-  statusText: string;
-  artifactNames: string[];
-  output: string;
+export function parseStageRecord(output: string, schema: Schema): Record<string, unknown> {
+  const record: unknown = JSON.parse(output);
+  const errors = validate(record, schema, '$');
+  if (errors.length) throw new Error(`STAGE_RECORD_INVALID: ${errors.join('; ')}`);
+  return record as Record<string, unknown>;
 }
 
-function utf8Bytes(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
-}
-
-function takeUtf8Head(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) return '';
-  if (utf8Bytes(value) <= maxBytes) return value;
-  let bytes = 0;
-  let end = 0;
-  for (const codePoint of value) {
-    const codePointBytes = utf8Bytes(codePoint);
-    if (bytes + codePointBytes > maxBytes) break;
-    bytes += codePointBytes;
-    end += codePoint.length;
+/** A bounded excerpt keeps old prose and new JSON records readable. Iterating
+ * code points handles UTF-8 without the separate head/tail implementations. */
+function utf8Slice(value: string, budget: number, tail = false): string {
+  const points = [...value];
+  if (tail) points.reverse();
+  const kept: string[] = [];
+  for (const point of points) {
+    budget -= Buffer.byteLength(point);
+    if (budget < 0) break;
+    kept.push(point);
   }
-  return value.slice(0, end);
-}
-
-function takeUtf8Tail(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) return '';
-  if (utf8Bytes(value) <= maxBytes) return value;
-  let bytes = 0;
-  let start = value.length;
-  while (start > 0) {
-    let codePointStart = start - 1;
-    const trailing = value.charCodeAt(codePointStart);
-    if (trailing >= 0xdc00 && trailing <= 0xdfff && codePointStart > 0) {
-      const leading = value.charCodeAt(codePointStart - 1);
-      if (leading >= 0xd800 && leading <= 0xdbff) codePointStart--;
-    }
-    const codePoint = value.slice(codePointStart, start);
-    const codePointBytes = utf8Bytes(codePoint);
-    if (bytes + codePointBytes > maxBytes) break;
-    bytes += codePointBytes;
-    start = codePointStart;
-  }
-  return value.slice(start);
-}
-
-function renderOutputExcerpt(output: string, maxBytes: number): string {
-  if (maxBytes <= 0) return '';
-  const outputBytes = utf8Bytes(output);
-  if (outputBytes === 0) return takeUtf8Head('(output.md is empty)', maxBytes);
-  if (outputBytes <= maxBytes) return output;
-
-  // Reserve for the largest possible omission count first. The exact marker
-  // below can only be the same size or smaller, keeping the complete excerpt
-  // inside maxBytes without ever splitting a UTF-8 code point.
-  const reservedMarker = `\n...[${outputBytes} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
-  const contentBudget = Math.max(0, maxBytes - utf8Bytes(reservedMarker));
-  const tailBudget = Math.min(2_000, Math.floor(contentBudget / 4));
-  const head = takeUtf8Head(output, contentBudget - tailBudget);
-  const tail = takeUtf8Tail(output, tailBudget);
-  const omittedBytes = outputBytes - utf8Bytes(head) - utf8Bytes(tail);
-  const marker = `\n...[${omittedBytes} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
-  return takeUtf8Head(`${head}${marker}${tail}`, maxBytes);
-}
-
-function readPredecessorContext(depId: string, opts: HandoffOpts): PredecessorContextSource {
-  let statusText = 'unknown';
-  let artifactNames: string[] = [];
-  try {
-    const st = readStageStatus(opts.projectDir, opts.runId, depId);
-    statusText = st.status;
-    artifactNames = Array.isArray(st.artifacts)
-      ? st.artifacts.filter((artifact): artifact is string => typeof artifact === 'string')
-      : [];
-  } catch { /* missing stage data */ }
-  return {
-    statusText,
-    artifactNames,
-    output: readStageOutput(opts.projectDir, opts.runId, depId),
-  };
-}
-
-function boundPredecessorContext(
-  candidate: string,
-  depId: string,
-  opts: HandoffOpts,
-  visibility: Exclude<HandoffVisibility, 'none'>,
-  source: PredecessorContextSource,
-): string {
-  const candidateBytes = utf8Bytes(candidate);
-  if (candidateBytes <= MAX_PREDECESSOR_CONTEXT_BYTES) return candidate;
-
-  const stageDirectory = join(opts.runDir, 'stages', depId);
-  const heading = visibility === 'minimal'
-    ? `## Previous stage: ${depId}`
-    : `## Context from stage: ${depId}`;
-  const outputBytes = utf8Bytes(source.output);
-  const header = `${heading}
-Status: ${source.statusText}
-Inline predecessor block: ${candidateBytes} UTF-8 bytes; limit: ${MAX_PREDECESSOR_CONTEXT_BYTES} bytes.
-Complete predecessor stage directory: ${stageDirectory}
-Artifact names omitted from this prompt: ${source.artifactNames.length}. Read status.json for complete status and artifacts.
-Complete output: output.md (${outputBytes} UTF-8 bytes).
-Inline output excerpt (head and tail when truncated):`;
-  const headerBytes = utf8Bytes(header);
-  if (headerBytes >= MAX_PREDECESSOR_CONTEXT_BYTES) {
-    return takeUtf8Head(header, MAX_PREDECESSOR_CONTEXT_BYTES);
-  }
-
-  const remainingBytes = MAX_PREDECESSOR_CONTEXT_BYTES - headerBytes - 1;
-  const excerptBudget = visibility === 'minimal'
-    ? Math.min(512, remainingBytes)
-    : remainingBytes;
-  const excerpt = renderOutputExcerpt(source.output, excerptBudget);
-  const bounded = excerpt ? `${header}\n${excerpt}` : header;
-  return takeUtf8Head(bounded, MAX_PREDECESSOR_CONTEXT_BYTES);
-}
-
-function buildFullContext(depId: string, opts: HandoffOpts): string {
-  const source = readPredecessorContext(depId, opts);
-  const artifacts = source.artifactNames.join(', ') || 'none';
-  const candidate = `## Context from stage: ${depId}\nStatus: ${source.statusText}\nArtifacts: ${artifacts}\nSummary:\n${source.output}`;
-  return boundPredecessorContext(candidate, depId, opts, 'full', source);
-}
-
-function buildMinimalContext(depId: string, opts: HandoffOpts): string {
-  const source = readPredecessorContext(depId, opts);
-  const artifacts = source.artifactNames.join(', ') || 'none';
-  const candidate = `## Previous stage: ${depId}\nStatus: ${source.statusText}\nFiles changed: ${artifacts}\nVerify the changes are correct.`;
-  return boundPredecessorContext(candidate, depId, opts, 'minimal', source);
+  return (tail ? kept.reverse() : kept).join('');
 }
 
 function buildDependencyContext(opts: HandoffOpts): string {
-  const visibility = resolveVisibility(opts);
+  const visibility = opts.handoffVisibility ?? 'full';
   if (visibility === 'none') return '';
-
-  const blocks: string[] = [];
-  for (const depId of opts.dependsOn) {
-    if (visibility === 'minimal') {
-      blocks.push(buildMinimalContext(depId, opts));
-    } else {
-      blocks.push(buildFullContext(depId, opts));
-    }
-  }
-  return blocks.join('\n\n');
+  return opts.dependsOn.map(depId => {
+    let status = 'unknown';
+    let artifacts: string[] = [];
+    try { const source = readStageStatus(opts.projectDir, opts.runId, depId); status = source.status; artifacts = source.artifacts ?? []; } catch { /* absent history */ }
+    const output = readStageOutput(opts.projectDir, opts.runId, depId);
+    const heading = visibility === 'minimal' ? `## Previous stage: ${depId}` : `## Context from stage: ${depId}`;
+    const candidate = `${heading}\nStatus: ${status}\n${visibility === 'minimal' ? 'Files changed' : 'Artifacts'}: ${artifacts.join(', ') || 'none'}\n${visibility === 'minimal' ? 'Verify the changes are correct.' : `Summary:\n${output}`}`;
+    if (Buffer.byteLength(candidate) <= MAX_PREDECESSOR_CONTEXT_BYTES) return candidate;
+    const header = `${heading}\nStatus: ${status}\nInline predecessor block: ${Buffer.byteLength(candidate)} UTF-8 bytes; limit: ${MAX_PREDECESSOR_CONTEXT_BYTES} bytes.\nComplete predecessor stage directory: ${join(opts.runDir, 'stages', depId)}\nArtifact names omitted from this prompt: ${artifacts.length}. Read status.json for complete status and artifacts.\nComplete output: output.md (${Buffer.byteLength(output)} UTF-8 bytes).\nInline output excerpt (head and tail when truncated):`;
+    const budget = Math.min(visibility === 'minimal' ? 512 : MAX_PREDECESSOR_CONTEXT_BYTES, Math.max(0, MAX_PREDECESSOR_CONTEXT_BYTES - Buffer.byteLength(header) - 1));
+    const marker = `\n...[${Buffer.byteLength(output)} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
+    const content = Math.max(0, budget - Buffer.byteLength(marker));
+    const tail = Math.min(2000, Math.floor(content / 4));
+    const head = utf8Slice(output, content - tail), ending = utf8Slice(output, tail, true);
+    const omission = Buffer.byteLength(output) - Buffer.byteLength(head) - Buffer.byteLength(ending);
+    const excerpt = Buffer.byteLength(output) <= budget ? output : `${head}${marker.replace(String(Buffer.byteLength(output)), String(omission))}${ending}`;
+    return utf8Slice(`${header}\n${excerpt}`, MAX_PREDECESSOR_CONTEXT_BYTES);
+  }).join('\n\n');
 }
 
 function substituteTemplate(template: string, vars: Record<string, string>): string {
@@ -232,7 +135,7 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',
     task_description: opts.taskDescription ?? '',
-    default_timeout_ms: readDefaultTimeout(opts.projectDir),
+    default_timeout_ms: getDefaultTimeout(opts.projectDir),
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {
@@ -290,7 +193,7 @@ export function buildStagePrompt(opts: HandoffOpts): string {
           : [];
         return `- ${String(criterion.role)}: ${String(criterion.rule)}; baseline failures=${identifiers.length}${identifiers.length ? ` (${identifiers.join(', ')})` : ''}`;
       });
-      return `## Engine-enforced validation baseline\nExact run-local evidence: ${artifactPath}\n${rows.join('\n')}\nAfter this gate settles, the engine replays these commands and rejects a pass whose delta regresses or is unresolved.`;
+      return `## Engine-enforced validation baseline\nExact run-local evidence: ${artifactPath}\n${rows.join('\n')}\nThe engine supplies the current comparison before review. Read validation_delta_<stage_id>.json; a regressed or unresolved delta cannot authorize success.`;
     } catch {
       return `## Engine-enforced validation baseline\n${artifactPath} is unreadable; do not claim the validation delta passed.`;
     }
@@ -319,20 +222,7 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     anchor,
     skillsContent,
   ].filter(Boolean);
-  const prompt = parts.join('\n\n');
-  const handoffSuffix = substituteTemplate(HANDOFF_SUFFIX, vars);
-
-  // For gate stages: inject the verdict file path
-  if (opts.isGate && opts.stageId) {
-    const verdictPath = `${opts.runDir}/verdict_${opts.stageId}.json`;
-    const criterionEvidence = opts.criterionRefs?.length
-      ? `\nFor every assigned criterion ID, include a "criteria" map entry with {"status":"pass"|"fail"|"judgement","evidence":"non-empty checked evidence or why it is not mechanically decidable"}. Missing entries are an effective gate rejection.`
-      : '';
-    const verdictInstruction = `\n\nIMPORTANT: After your review, write your verdict to ${verdictPath}:\n{"pass": true} or {"pass": false, "reason": "specific reason"}\nThis file determines whether the workflow proceeds or retries.${criterionEvidence}`;
-    return prompt + verdictInstruction + handoffSuffix;
-  }
-
-  return prompt + handoffSuffix;
+  return parts.join('\n\n');
 }
 
 function loadSkills(skillNames: string[], projectDir: string): string {

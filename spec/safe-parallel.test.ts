@@ -1,4 +1,4 @@
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -90,19 +90,19 @@ async function runStatic(
   let maxActive = 0;
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
       active++;
       maxActive = Math.max(maxActive, active);
       mutate?.(opts.stageId);
       await new Promise((resolve) => setTimeout(resolve, 25));
       active--;
-      return {
+      return fixtureResult({
         output: opts.stageId,
         exitCode: 0,
         duration_ms: 25,
         writes: typeof reportedWrites === 'function' ? reportedWrites(opts.stageId) : reportedWrites,
         writeAttribution: 'structured',
-      };
+      }, opts);
     },
   };
   const final = await runWorkflow(workflow, yaml, projectDir, adapter, new Map(), undefined, writeAgent(), created.runId);
@@ -149,7 +149,7 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
       }
       active++;
       maxActive = Math.max(maxActive, active);
@@ -160,18 +160,18 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
             writeFileSync(join(projectDir, sharedPath), 'export const source = "left";\n');
             markWriterDone();
             await observerDone;
-            return {
+            return fixtureResult({
               output: 'left wrote', exitCode: 0, duration_ms: 1,
               writes: [sharedPath], writeAttribution: 'structured',
-            };
+            }, opts);
           }
           await writerDone;
           observerSawWrite = existsSync(join(projectDir, sharedPath));
           markObserverDone();
-          return {
+          return fixtureResult({
             output: 'right observed without writing', exitCode: 0, duration_ms: 1,
             writeAttribution: 'unknown',
-          };
+          }, opts);
         }
 
         physicalWriteCalls[opts.stageId as 'left' | 'right']++;
@@ -181,10 +181,10 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
           await writersArrived;
         }
         writeFileSync(join(projectDir, sharedPath), `export const source = "${opts.stageId}";\n`);
-        return {
+        return fixtureResult({
           output: `${opts.stageId} wrote`, exitCode: 0, duration_ms: 1,
           writes: [sharedPath], writeAttribution: 'structured',
-        };
+        }, opts);
       } finally {
         active--;
       }

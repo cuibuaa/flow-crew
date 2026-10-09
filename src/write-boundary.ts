@@ -19,6 +19,8 @@ export interface EngineWriteBoundaryInput {
   isGate?: boolean;
   /** Structured scheduler flag authorizes the planner transport channels. */
   dynamicDispatch?: boolean;
+  /** A typed final answer replaces the child's plan/verdict publication slot. */
+  structuredResult?: boolean;
   artifactContract: ArtifactContract;
   sessionOwnerStageId?: string;
   attemptIndex?: number;
@@ -142,7 +144,7 @@ function protectedCarriers(input: EngineWriteBoundaryInput): Array<{ path: strin
       const info = lstatSync(path);
       const ownStageParent = local === 'stages' || local === `stages/${input.stageId}` || local === `stages/${input.sessionOwnerStageId}`;
       if (input.sessionOwnerStageId && local === `stages/${input.sessionOwnerStageId}/codex_home`) continue;
-      if (isEngineOwnedRunPath(local, stage)) paths.push({ path, tree: info.isDirectory() && !ownStageParent });
+      if (isEngineOwnedRunPath(local, stage) || (input.structuredResult && (local === 'dispatch.yaml' || local === `verdict_${input.stageId}.json` || local === `handoff_${input.stageId}.md`))) paths.push({ path, tree: info.isDirectory() && !ownStageParent });
       // Ownership is rooted in the run namespace. Only these namespace
       // parents can contain mixed engine/stage entries; arbitrary authored
       // output trees cannot contain a reserved descendant. Python still
@@ -342,6 +344,7 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
     for (const name of ['tmp', 'cache', 'state', 'npm']) mkdirSync(join(scratch, name));
     for (const artifact of contract.produces) {
       if (artifact.root !== 'run') continue; // project scopes retain their live monitor
+      if (input.structuredResult && (artifact.path === `verdict_${input.stageId}.json` || artifact.path === `handoff_${input.stageId}.md` || (input.dynamicDispatch && artifact.path === 'dispatch.yaml'))) continue;
       if (producesEngineOwnedArtifact(artifact, { id: input.stageId, depends_on: [], is_gate: input.isGate }, run, project) || (artifact.kind === 'directory' ? containsEngineOwnedRunPath : isEngineOwnedRunPath)(artifact.path, stage)) {
         throw new Error(`ENGINE_WRITE_BOUNDARY_REFUSED: ${artifact.id} declares an engine-owned carrier; declare a separate stage output`);
       }
@@ -350,14 +353,14 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
       else fileSlot(path);
     }
     if (input.dynamicDispatch) {
-      for (const name of ['dispatch.yaml', 'reality_checks.md', 'tech_solution.md']) fileSlot(join(run, name));
+      for (const name of ['dispatch.yaml', 'reality_checks.md', 'tech_solution.md']) if (name !== 'dispatch.yaml' || !input.structuredResult) fileSlot(join(run, name));
     }
     // Engine-owned transport slots, deliberately without parent rename rights.
     if (publisher) {
       for (const name of ['approval_request.json', 'scope_revision_request.json', 'plan_revision_request.json', 'timeout_extension_request.json']) {
         fileSlot(join(run, 'stages', input.stageId, name));
       }
-      fileSlot(join(run, `handoff_${input.stageId}.md`));
+      if (!input.structuredResult) fileSlot(join(run, `handoff_${input.stageId}.md`));
       fileSlot(join(run, 'knowledge_graph.json'));
     }
     for (const owner of new Set([input.stageId, input.sessionOwnerStageId].filter((id): id is string => id !== undefined))) {

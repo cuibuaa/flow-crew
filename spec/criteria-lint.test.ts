@@ -47,22 +47,22 @@ describe('QA property-versus-means contract', () => {
     };
     expect(scenario.instruction).toContain('例如');
     expect(scenario.evidence).toContain('证明了性质');
-    expect(qa.prompt).toContain('split each operator instruction into (a) the observable property');
-    expect(qa.prompt).toContain('is illustrative, not a hard assertion');
-    expect(qa.prompt).toContain('MUST NOT fail solely because it differs from that example');
+    expect(qa.prompt).toContain('Mechanize observable properties and hard numbers.');
+    expect(qa.prompt).toContain('cannot override equivalent evidence.');
+    expect(qa.prompt).toContain('cannot override equivalent evidence.');
     expect(qa.prompt).toContain('property-vs-wording conflict');
-    expect(qa.prompt).toContain('Quote or precisely locate the operator sentence');
-    expect(qa.prompt).toContain('state the substantive evidence that passed');
+    expect(qa.prompt).toContain('originating sentence and property-vs-wording conflict');
+    expect(qa.prompt).toContain('passing property evidence');
   });
 
   it('keeps explicit exact means and measurable thresholds hard', () => {
     const qa = parseYaml(readFileSync(join(repositoryRoot, 'config', 'agents', 'qa.yaml'), 'utf-8')) as {
       prompt: string;
     };
-    expect(qa.prompt).toContain('the exact means itself is an acceptance criterion and alternatives do not count');
-    expect(qa.prompt).toContain('Hard numbers, thresholds, required outputs, compatibility constraints');
-    expect(qa.prompt).toContain('fail normally and say that equivalent means do not satisfy');
-    expect(qa.prompt).toContain('Keep mechanizing acceptance criteria into reproducible assertions');
+    expect(qa.prompt).toContain('Exact means are binding only when explicitly required as the criterion.');
+    expect(qa.prompt).toContain('explicit hard threshold or confirmed compatibility requirement.');
+    expect(qa.prompt).toContain('never waive an');
+    expect(qa.prompt).toContain('Make claims reproducible from durable evidence.');
   });
 });
 

@@ -493,7 +493,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
           mkdirSync(dirname(target), { recursive: true });
           writeFileSync(target, `# Rehearsal ${terminalStatus}\n\nSelected mechanically by the simulated research policy.\n`, 'utf-8');
           return {
-            output: `wrote ${terminalPath}`,
+            output: JSON.stringify({ status: 'delivered', summary: `wrote ${terminalPath}`, files_modified: [terminalPath], checks: [], caveats: [] }),
             exitCode: 0,
             duration_ms: 1,
             writes: [terminalPath],

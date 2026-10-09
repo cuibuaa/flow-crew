@@ -1,5 +1,6 @@
+import { parse as parseYaml } from 'yaml';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — regression contracts for two grounded engine failures
  * (fixed on branch autonomous-loop-refactor):
@@ -214,13 +215,13 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
           if (planCalls === 1) {
             // First plan: emit an EMPTY dispatch (a transient flake).
             writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch('stages: []'));
-            return ok('planned (empty — flake)');
+            return fixtureResult(ok('planned (empty — flake)'), opts);
           }
           // Retry: emit a valid single stage.
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n')));
-          return ok('planned (valid)');
+          return fixtureResult(ok('planned (valid)'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -240,9 +241,9 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n')));
-          return ok('planned (unknown role)');
+          return fixtureResult(ok('planned (unknown role)'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -270,20 +271,20 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? measuringOwnerDispatch
             : separatedResearchDispatch));
-          return ok(`planned attempt ${planCalls}`);
+          return fixtureResult(ok(`planned attempt ${planCalls}`), opts);
         }
         if (opts.stageId === 'measure') {
           measureCalls += 1;
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'round.json'), JSON.stringify({ label: 'repair_converged', result: 1 }));
-          return ok('measured');
+          return fixtureResult(ok('measured'), opts);
         }
         if (opts.stageId === 'finalize') {
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'final.md'), '# admitted terminal\n');
-          return ok('finalized');
+          return fixtureResult(ok('finalized'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -298,8 +299,8 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(planPrompts[1]).toContain('research result producer path docs/round.json cannot be owned by a terminal writer');
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
-    expect(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8'))
-      .toBe(declaredDispatch(measuringOwnerDispatch));
+    expect(parseYaml(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
+      .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
     const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: string[] };
     expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
@@ -314,9 +315,9 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
         if (opts.stageId === 'plan') {
           planCalls += 1;
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(measuringOwnerDispatch));
-          return ok('repeated unchanged proposal');
+          return fixtureResult(ok('repeated unchanged proposal'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -330,8 +331,8 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(final.failureReason).toContain('identical refused candidate');
     expect(final.failureReason).toContain('stage:measure:scope');
     for (const attempt of [1, 2]) {
-      expect(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8'))
-        .toBe(declaredDispatch(measuringOwnerDispatch));
+      expect(parseYaml(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8')))
+        .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
     }
     expect(existsSync(join(rd, 'dispatch_rejections', 'attempt_3'))).toBe(false);
   }, 60_000);
@@ -367,20 +368,20 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
             '    criterion_refs: []',
             '    prompt_template: validate and write the terminal report',
           ].join('\n')));
-          return ok('planned');
+          return fixtureResult(ok('planned'), opts);
         }
         if (opts.stageId === 'finalize') {
           finalizerCalls += 1;
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'final.md'), '# terminal candidate\n');
           writeFileSync(join(projectDir, 'src', 'generated.ts'), 'export const value = "after gate";\n');
-          return {
+          return fixtureResult({
             ...ok('finalized with a forbidden durable delta'),
             writes: ['docs/final.md', 'src/generated.ts'],
             writeAttribution: 'structured',
-          };
+          }, opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

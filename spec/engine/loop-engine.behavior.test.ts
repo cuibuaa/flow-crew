@@ -1,4 +1,4 @@
-import { declaredDispatch } from '../test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — loop-engine behavior (mock-adapter driven, no LLM).
  *
@@ -72,7 +72,7 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
           '    task: measure this round',
           '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/research_round_result.json}, {id: sidecar, root: project, path: docs/research_round_result.json.no_candidate.json}], reads: [], replays: [], groups: [{id: outcome, mode: exactly_one, members: [result, sidecar]}]}',
         ].join('\n')));
-        return ok('planned a round');
+        return fixtureResult(ok('planned a round'), opts);
       }
       if (opts.stageId === 'measure') {
         const result = results[Math.min(i, results.length - 1)];
@@ -81,9 +81,9 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
         const file = join(projectDir, 'docs', 'research_round_result.json');
         mkdirSync(join(file, '..'), { recursive: true });
         writeFileSync(file, JSON.stringify({ label, result, evidence: { independentMeasurement: i } }));
-        return ok(`measured ${label}=${result}`);
+        return fixtureResult(ok(`measured ${label}=${result}`), opts);
       }
-      return ok(`noop ${opts.stageId}`);
+      return fixtureResult(ok(`noop ${opts.stageId}`), opts);
     },
     async discuss(): Promise<RunResult> { return ok(''); },
     spawnDiscuss() { throw new Error('unused'); },
@@ -143,13 +143,13 @@ describe('loop engine — research behavior (mock-driven)', () => {
             '    is_gate: true', '    task: close out',
             '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_closeout.json}], reads: [], replays: []}',
           ].join('\n')));
-          return ok('planned (no round)');
+          return fixtureResult(ok('planned (no round)'), opts);
         }
         if (opts.stageId === 'closeout') {
           writeFileSync(join(opts.runDir, 'verdict_closeout.json'), JSON.stringify({ pass: true, reason: 'looks done' }));
-          return ok('gate passed');
+          return fixtureResult(ok('gate passed'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

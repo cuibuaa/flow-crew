@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
+import { scriptedRecord } from './scripted.js';
 
 type MockFixture = {
   output_text?: unknown;
@@ -40,6 +41,7 @@ export class MockAdapter implements Adapter {
       if (typeof fixture.tokens_in === 'number') result.tokens_in = fixture.tokens_in;
       if (typeof fixture.tokens_out === 'number') result.tokens_out = fixture.tokens_out;
       writeFixtureFiles(opts.runDir, fixture.write_files);
+      if (result.exitCode === 0) result.output = scriptedRecord(result.output, opts);
       return result;
     } catch {
       return { output: '', exitCode: 1, duration_ms: 0 };

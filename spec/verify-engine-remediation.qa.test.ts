@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import {
   existsSync,
@@ -156,11 +157,11 @@ describe('independent engine-remediation verification', () => {
       'name: validation-wire-qa',
       projectDir,
       { async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         gatePrompt = prompt;
-        write(join(options.runDir, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted' }));
-        return { output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        write(join(options.runDir, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'judgement', evidence: 'engine validation delta' }])) }));
+        return fixtureResult({ output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
@@ -243,10 +244,10 @@ describe('independent engine-remediation verification', () => {
       'name: plain-output-archive',
       projectDir,
       { async run(_prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         write(join(projectDir, outputPath), 'plain completion report\n');
-        return { output: 'report complete', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'report complete', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
@@ -464,8 +465,8 @@ describe('independent engine-remediation verification', () => {
       'name: ordinary-scope-control',
       projectDir,
       { async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         calls += 1;
         if (calls === 1) {
           const directory = join(options.runDir, 'stages', options.stageId);
@@ -481,7 +482,7 @@ describe('independent engine-remediation verification', () => {
             reason: 'write the ordinary report',
           }));
           decisionPath = await waitForDecision(directory);
-          return { output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         }
         expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
         expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
@@ -489,7 +490,7 @@ describe('independent engine-remediation verification', () => {
         expect(prompt).toContain(`stages/${options.stageId}/${basename(decisionPath)}`);
         expect(prompt).not.toContain('This attempt stops at the control boundary');
         write(join(projectDir, requestedPath), 'ordinary report\n');
-        return { output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined,
       brief, true,

@@ -13,7 +13,11 @@ import { artifactDeclarationErrors, type ArtifactContract } from './artifact-dec
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
-import { buildStagePrompt } from './handoff.js';
+import { buildStagePrompt, parseStageRecord } from './handoff.js';
+import type { Schema } from './reality-gate/checks/json-schema-match.js';
+import { recordGateValidationDelta } from './scheduler/sched_settlement/gate-validation.js';
+import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
+import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { loadProjectDefaults } from './config.js';
 import { renderPlannerPolicies } from './planner-policies.js';
 import { extractBriefCriteria } from './brief-criteria.js';
@@ -26,6 +30,7 @@ import {
   writeStageStatus,
   writeStageInput,
   writeStageOutput,
+  atomicWrite,
   TERMINAL_STATUSES,
   VERDICT_CONTRACT_DOC,
   PHASE_METADATA_FIELDS,
@@ -87,6 +92,8 @@ export function plannerCriterionAssignmentContext(brief: string): string {
 }
 
 export interface StageOpts {
+  /** Scheduled stages return JSON; standalone legacy workers remain readable. */
+  outputSchema?: Schema;
   artifactContract?: ArtifactContract;
   planRevision?: { revision: number; digest: string };
   artifactStatuses?: Record<string, StageStatus>;
@@ -562,6 +569,9 @@ async function runStageWithWriterLease(
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
+  if (opts.outputSchema) {
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.dynamicDispatch ? ' and dispatch.yaml' : opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff or verdict-file instructions. Put human-readable documents only at paths the task asks people to read. Evidence references name reproducible files or commands. Update the task-local knowledge_graph.json with concise evidence-backed continuity findings when useful.`;
+  }
   prompt += `\n\n${runStateContext(opts.projectDir, opts.runId, opts.planRevision)}`;
   if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract)}`;
 
@@ -1058,7 +1068,7 @@ async function runStageWithWriterLease(
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
-        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!, attemptIndex,
+        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex,
         sessionOwnerStageId: continuation?.ownerStageId },
       () => selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
@@ -1075,6 +1085,7 @@ async function runStageWithWriterLease(
         abortSignal: invocationAbortSignal,
         onCommandLifecycle,
         onInvocationInput: (input) => captureInput(input, 'model'),
+        outputSchema: opts.outputSchema,
       })).then(
         (value) => {
           liveMonitor?.observePaths(value.writes ?? []);
@@ -1126,7 +1137,7 @@ async function runStageWithWriterLease(
     const structured = prior.writeAttribution === 'structured' && next.writeAttribution === 'structured';
     return {
       ...next,
-      output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
+      output: opts.outputSchema ? next.output : [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
       duration_ms: prior.duration_ms + next.duration_ms,
       ...sumInvocationUsage([prior, next]),
       invocations: [...(prior.invocations ?? []), ...(next.invocations ?? [])],
@@ -1270,6 +1281,12 @@ async function runStageWithWriterLease(
   try {
     const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
     if (!preflightErrors.length) preflightErrors.push(...inspectDeclaredStageReads({ artifactContract: opts.artifactContract!, projectDir: opts.projectDir, runDir: opts.runDir, statuses: opts.artifactStatuses }));
+    if (!preflightErrors.length && opts.isGate && !aggregateAbortSignal.aborted) {
+      const validation = await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId, {
+        remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
+      });
+      if (validation) prompt += `\n\n# Engine validation for this review\nRead ${join(opts.runDir, `validation_delta_${opts.stageId}.json`)}. Direct configured command outcomes and baseline comparison are engine-owned. Current comparison pass=${validation.pass}. Review these results together with the change and criteria; do not rerun the configured set unless a concrete gap needs it. A regression or unresolved comparison cannot authorize success. Project writes by this gate require post-write revalidation.`;
+    }
     result = aggregateAbortSignal.aborted ? { ...cancelledResult(), output: preflightErrors.join('\n') }
       : preflightErrors.length ? { output: preflightErrors.join('\n'), exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), friendlyError: preflightErrors.join('; ') }
       : await invokeAdapterWithLiveCorrection(adapter, resolvedRole);
@@ -1304,6 +1321,30 @@ async function runStageWithWriterLease(
   if (opts.beforeSettlement && !aggregateAbortSignal.aborted) {
     scopeRevisionBoundaryReached ||= await opts.beforeSettlement();
   }
+  const enginePublishedCarriers: string[] = [];
+  if (result.exitCode === 0 && opts.outputSchema && !scopeRevisionBoundaryReached) {
+    try {
+      const record = parseStageRecord(result.output, opts.outputSchema);
+      if (!opts.dynamicDispatch && !opts.isGate && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
+      if (opts.isGate) {
+        const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
+          ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');
+        if (violation) throw new Error(violation);
+        const findings = AuditFindingsSchema.parse(record.audit_findings);
+        if (record.pass === true && findings.findings.length) throw new Error('AUDIT_FINDINGS_OPEN: passing verdict has unresolved findings');
+      }
+      const carriers = [opts.dynamicDispatch ? 'dispatch.yaml' : opts.isGate ? `verdict_${opts.stageId}.json` : undefined].filter((path): path is string => Boolean(path));
+      const handoff = `handoff_${opts.stageId}.md`;
+      if (opts.dynamicDispatch || opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
+      for (const carrier of carriers) {
+        atomicWrite(join(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
+        enginePublishedCarriers.push(`run:${carrier}`);
+      }
+    } catch (error) {
+      result.exitCode = 1;
+      result.friendlyError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
   if (result.exitCode === 0 || (production && invocationIndex > 0 && !childCloseUnverified)) {
     try {
       const artifactInput = {
@@ -1313,7 +1354,7 @@ async function runStageWithWriterLease(
         template: opts.artifactObligationTemplate ?? '',
         projectDir: opts.projectDir,
         runDir: opts.runDir,
-        writes: result.writes,
+        writes: [...(result.writes ?? []), ...enginePublishedCarriers],
         preimages: artifactContractPreimages,
         priorProducedArtifacts,
         artifactContract: opts.artifactContract,

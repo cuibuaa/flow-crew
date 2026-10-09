@@ -167,10 +167,10 @@ describe('outer re-plan evidence retention', () => {
     expect(work).toBeDefined();
     expect(work?.status).toMatchObject({ status: 'complete', exitCode: 0, attempts: [{ index: 1, status: 'complete' }] });
     expect(work?.outputPath).toBeTruthy();
-    expect(readFileSync(join(runDir(projectDir, final.runId), work!.outputPath!), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), work!.outputPath!), 'utf-8')).summary)
       .toBe('iteration 1 implementation evidence');
     expect(work?.attemptOutputPaths).toHaveLength(1);
-    expect(readFileSync(join(runDir(projectDir, final.runId), work!.attemptOutputPaths[0].path), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), work!.attemptOutputPaths[0].path), 'utf-8')).summary)
       .toBe('iteration 1 implementation evidence');
 
     const gate = stageEvidence(final).find((entry) => entry.iteration === 1 && entry.stageId === 'first_gate');
@@ -243,11 +243,11 @@ describe('outer re-plan evidence retention', () => {
     });
     const archived = stageEvidence(final).find((entry) => entry.iteration === 1 && entry.stageId === 'shared_work');
     expect(archived?.status.attempts).toEqual([expect.objectContaining({ index: 1, status: 'complete' })]);
-    expect(readFileSync(join(runDir(projectDir, final.runId), archived!.outputPath!), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), archived!.outputPath!), 'utf-8')).summary)
       .toBe('shared work from iteration 1');
-    expect(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output.md'), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output.md'), 'utf-8')).summary)
       .toBe('shared work from iteration 2');
-    expect(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output_attempt_1.md'), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output_attempt_1.md'), 'utf-8')).summary)
       .toBe('shared work from iteration 2');
   }, 15_000);
 
@@ -318,7 +318,7 @@ describe('outer re-plan evidence retention', () => {
     expect(adapter.calls.filter((call) => call.stageId === 'plan')[2].prompt).toContain('hard_check_cannot_fail');
     const archived = stageEvidence(final).filter((entry) => entry.iteration === 1 && entry.stageId === 'first_work');
     expect(archived).toHaveLength(1);
-    expect(readFileSync(join(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8'))
+    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8')).summary)
       .toBe('evidence captured before the blocking preflight retry');
     expect(readFileSync(join(runDir(projectDir, final.runId), archived[0].statusPath), 'utf-8'))
       .toContain('"status": "complete"');

@@ -1,3 +1,4 @@
+import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { runStage } from '../src/worker.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { createSchedulerLiveConstraintGuardFactory } from '../src/scheduler/sched_loop/services.js';
@@ -12,7 +13,6 @@ import { readRunEvents } from '../src/run-events.js';
 import { publishConstraintDecision, scopePathDigest } from '../src/runtime-negotiation.js';
 import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
 import { appendGuidanceEnvelope, parseGuidanceLedger } from '../src/guidance.js';
-import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
@@ -30,7 +30,7 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         let retained = false;
         let resume: string | undefined;
         const adapter: Adapter = { async run(prompt, _agent, opts) { if (opts.stageId === '_summary')
-                return { output: 'summary', exitCode: 0, duration_ms: 1 }; calls++; if (calls === 1) {
+                return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts); calls++; if (calls === 1) {
                 ownSession(opts.runDir, opts.stageId);
                 if (shape === 'operator-before-command') appendGuidanceEnvelope({ runDir: opts.runDir, target: 'work', source: 'operator', attemptIndex: 1, body: 'Retain the operator requirement.' });
                 if (shape !== 'synchronous')
@@ -41,8 +41,8 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
                     await waitForPathEvent(dir, () => { const names = requireNames(dir); return names.some(x => x.startsWith('scope_revision_decision_')) || undefined; });
                     opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
                 }
-                return { output: 'verified progress ready for continuation', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-            } expect(opts.attemptIndex).toBe(2); expect(prompt).not.toContain('This attempt stops at the control boundary'); if (shape === 'operator-before-command') expect(prompt).toContain('Retain the operator requirement.'); retained = existsSync(join(opts.runDir, 'stages', 'work', 'codex_home', 'progress')); resume = opts.resumeSessionId; writeFileSync(join(project, 'product.txt'), 'current product'); return { output: 'product delivered', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: ['product.txt'], writeAttribution: 'structured' }; } };
+                return fixtureResult({ output: 'verified progress ready for continuation', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+            } expect(opts.attemptIndex).toBe(2); expect(prompt).not.toContain('This attempt stops at the control boundary'); if (shape === 'operator-before-command') expect(prompt).toContain('Retain the operator requirement.'); retained = existsSync(join(opts.runDir, 'stages', 'work', 'codex_home', 'progress')); resume = opts.resumeSessionId; writeFileSync(join(project, 'product.txt'), 'current product'); return fixtureResult({ output: 'product delivered', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: ['product.txt'], writeAttribution: 'structured' }, opts); } };
         const final = await runWorkflow(config, yaml, project, adapter, new Map(), undefined, join(project, 'config', 'agents'), created.runId, 'settle product', true);
         const status = readStageStatus(project, created.runId, 'work'), events = readRunEvents(project, created.runId);
         console.log('RUNTIME_PAIR ' + JSON.stringify({ shape, status: final.status, attempts: status.attempts?.map(x => x.status), retained, resume, firstEvents: events.filter(x => x.stageId === 'work' && x.attemptIndex === 1).map(x => ({ type: x.type, status: x.status, detail: x.detail })) }));
@@ -72,8 +72,8 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
                     ownSession(o.runDir, 'work');
                     writeFileSync(join(o.runDir, 'stages', 'work', 'live.log'), 'author finished verification; delivery remains\n');
                 }
-                return { output: 'refused after progress', sessionId: uuid, exitCode: 1, duration_ms: 1, adapterFailureKind: 'provider_internal_error' };
-            } resume = o.resumeSessionId; prompt = p; return { output: 'continued', sessionId: uuid, exitCode: 0, duration_ms: 1 }; } } as Adapter;
+                return fixtureResult({ output: 'refused after progress', sessionId: uuid, exitCode: 1, duration_ms: 1, adapterFailureKind: 'provider_internal_error' }, o);
+            } resume = o.resumeSessionId; prompt = p; return fixtureResult({ output: 'continued', sessionId: uuid, exitCode: 0, duration_ms: 1 }, o); } } as Adapter;
         await executeSingleStage(config.stages[0], project, created.runId, created.runDirPath, config, transport, new Map([['coder', role]]), join(project, 'config', 'agents'), state, config.stages);
         console.log('RUNTIME_RETRY ' + JSON.stringify({ resume, promptHasProgress: prompt.includes('live.log'), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
         expect(resume).toBe(uuid);
@@ -90,16 +90,16 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         const failure = { kind: 'refusal', provider: 'codex', source: 'native_stdout', eventType: 'turn.failed', reason: 'fixture refusal after work' } as const;
         const adapter: Adapter = { async run(p, _agent, opts) {
                 if (opts.stageId === '_summary')
-                    return { output: 'summary', exitCode: 0, duration_ms: 1 };
+                    return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
                 if (++calls === 1) {
                     if (hasSession)
                         ownSession(opts.runDir, 'work');
                     writeFileSync(join(opts.runDir, 'stages', 'work', 'live.log'), 'verification completed; deliver the result\n');
-                    return { output: 'partial verified work; delivery interrupted', exitCode: 1, processExitCode: 1, duration_ms: 1, providerFailure: failure, ...(hasSession ? { sessionId: uuid } : {}) };
+                    return fixtureResult({ output: 'partial verified work; delivery interrupted', exitCode: 1, processExitCode: 1, duration_ms: 1, providerFailure: failure, ...(hasSession ? { sessionId: uuid } : {}) }, opts);
                 }
                 resume = opts.resumeSessionId;
                 prompt = p;
-                return { output: 'delivered verified result', exitCode: 0, duration_ms: 1 };
+                return fixtureResult({ output: 'delivered verified result', exitCode: 0, duration_ms: 1 }, opts);
             } };
         const final = await runWorkflow(config, 'name: refusal', project, adapter, new Map(), undefined, join(project, 'config', 'agents'), created.runId, 'current full task duties', true);
         console.log('RUNTIME_REFUSAL ' + JSON.stringify({ hasSession, status: final.status, resume, promptHasProgress: prompt.includes('live.log'), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
@@ -126,10 +126,10 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
             publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/work'), request,
                 decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
             opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
-            if (shape === 'unobserved-child-close') return new Promise<import('../src/adapters/base.js').RunResult>(() => {});
-            if (shape === 'missing-boundary-receipt') return { output: 'launcher closed without receipt', exitCode: 125, duration_ms: 1 };
-            return { output: 'boundary refused', exitCode: 125, duration_ms: 1,
-                writeBoundary: { kind: 'refused' as const, message: 'fixture boundary refuses launch' } };
+            if (shape === 'unobserved-child-close') return fixtureResult(new Promise<import('../src/adapters/base.js').RunResult>(() => {}), opts);
+            if (shape === 'missing-boundary-receipt') return fixtureResult({ output: 'launcher closed without receipt', exitCode: 125, duration_ms: 1 }, opts);
+            return fixtureResult({ output: 'boundary refused', exitCode: 125, duration_ms: 1,
+                writeBoundary: { kind: 'refused' as const, message: 'fixture boundary refuses launch' } }, opts);
         } }, { stageId: 'work', role, dependsOn: [], promptTemplate: 'current duties',
             artifactContract: config.stages[0].artifact_contract, projectDir: project, runId: created.runId,
             runDir: created.runDirPath, timeout_ms: 60000, retries: 0 });
@@ -151,7 +151,7 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/work'), request,
             decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
         let calls = 0;
-        const result = await runStage({ async run() { calls++; return { output: 'closed child', exitCode: 0, duration_ms: 1 }; } }, {
+        const result = await runStage({ async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'closed child', exitCode: 0, duration_ms: 1 }, recordOpts); } }, {
             stageId: 'work', role, dependsOn: [], promptTemplate: 'current duties', artifactContract: config.stages[0].artifact_contract,
             projectDir: project, runId: created.runId, runDir: created.runDirPath, timeout_ms: 60000, retries: 0,
             beforeSettlement: async () => {
@@ -168,7 +168,7 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
     it('records a reconciliation exception against the single closed child', async () => {
         const config = workflow(), created = createRun(project, config.name, 'name: settlement', ['work']);
         let calls = 0;
-        const adapter: Adapter = { async run() { calls++; return { output: 'closed child output', exitCode: 0, duration_ms: 1 }; } };
+        const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'closed child output', exitCode: 0, duration_ms: 1 }, recordOpts); } };
         const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => { }, createSchedulerLiveConstraintGuardFactory, reconcileCompletedStageAttempts: () => {
             const closed = readStageStatus(project, created.runId, 'work');
             expect(closed.status).toBe('pending');

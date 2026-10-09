@@ -54,53 +54,21 @@ export function createGateAttemptServices(services: Pick<GateArchiveServices, 'g
     const durableVerdictPath = archivedGateVerdictWritePath(runDirPath, coordinate, stageId);
     return `${prompt}
 
-## Gate Verdict Evidence Lifetime
-
-Write the live verdict to ${join(runDirPath, `verdict_${stageId}.json`)}. If the verdict rejects,
-the scheduler archives that exact attempt after evaluation. Reports must cite the durable archive,
-not the live root path that a retry or later iteration clears.
-
+## Gate evidence
+Return your verdict as the final JSON answer. The engine publishes
+${join(runDirPath, `verdict_${stageId}.json`)} and archives a rejecting attempt.
 Durable rejected-verdict citation: ${durableVerdictPath}
 
-## Optional Campaign Metric Artifact
-
-If this gate evaluates evidence that contains a numeric campaign metric, write a metric artifact to:
-
-${metricPath}
-
-Use exactly this JSON shape when a trustworthy numeric metric exists:
-
-{
-  "hasMetric": true,
-  "metric": "metric name",
-  "value": 0,
-  "higherIsBetter": true,
-  "threshold": null,
-  "pass": false,
-  "source": {
-    "path": "path to the evidence file used",
-    "evidence": "short exact evidence text"
-  },
-  "notes": "short explanation"
-}
-
-Rules:
-- Write this file only from gate stages.
-- Do not invent a metric.
-- Use only evidence you verified in this gate stage.
-- If multiple numeric metrics exist, choose the primary campaign metric stated in the task, workflow, or evidence.
-- If no trustworthy numeric campaign metric exists, write:
-
-{
-  "hasMetric": false,
-  "reason": "No trustworthy numeric campaign metric was found for this gate."
-}
-
-- Keep the normal workflow verdict file separate. The workflow verdict remains pass/reason only unless explicitly instructed otherwise.
-- If this gate controls a campaign phase, also include phase metadata in the verdict or metric artifact:
-  phase, phaseComplete, nextPhase, outcome, artifactSummary, reason.
-  This lets future planner iterations use the existing campaign file to continue from the next phase instead of redispatching all phases.
-- If you write a metric value, ensure it is a JSON number, not a string.`;
+An optional trustworthy numeric campaign observation belongs at ${metricPath},
+which the scheduler and campaign readers consume. Use:
+${JSON.stringify({ hasMetric: true, metric: 'metric name', value: 0, higherIsBetter: true, threshold: null, pass: false, source: { path: 'checked evidence path', evidence: 'exact evidence' }, notes: 'explanation' })}
+Write it only from a gate and only from checked evidence. Choose the primary
+metric declared by the task or acceptance contract; never invent a score.
+If no numeric observation exists, keep the engine's hasMetric:false default.
+For a campaign phase also include phase, phaseComplete, nextPhase, outcome,
+artifactSummary and reason in the verdict or metric. Values must be JSON numbers.
+The verdict remains the one independent review; metric agreement and contracted
+thresholds are enforced by the engine.`;
   }
 
   return { gateAttemptCoordinate, appendGateMetricInstruction };

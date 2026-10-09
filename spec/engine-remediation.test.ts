@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import {
   appendFileSync,
@@ -450,10 +451,10 @@ describe('engine remediation after-state, controls, and reach counts', () => {
       'name: plain-output-after',
       plainProject,
       { run: async (_prompt, _role, options) => {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(options)) return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         write(join(plainProject, outputPath), 'plain completion report\n');
-        return { output: 'done', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, plainBrief, true,
     );
@@ -614,9 +615,9 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     };
     const config: WorkflowConfig = { name: 'rollback-after', defaults: { max_iterations: 1, max_retries: 0 }, stages: [escapedStage] };
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       write(join(projectDir, dependencyPath), 'stage replacement\n');
-      return { output: 'wrote escaped path', exitCode: 0, duration_ms: 1, writes: [dependencyPath], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'wrote escaped path', exitCode: 0, duration_ms: 1, writes: [dependencyPath], writeAttribution: 'structured' }, opts);
     } };
     const escaped = await runWorkflow(
       config, 'name: rollback-after', projectDir, adapter, new Map(), undefined,
@@ -835,7 +836,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
     let calls = 0;
     const final = await runWorkflow(
       { name: 'budget-after', defaults: { max_iterations: 5, max_retries: 0 }, stages: [stage] },
-      'name: budget-after', projectDir, { async run() { calls += 1; return { output: 'unexpected', exitCode: 0, duration_ms: 1 }; } },
+      'name: budget-after', projectDir, { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls += 1; return fixtureResult({ output: 'unexpected', exitCode: 0, duration_ms: 1 }, recordOpts); } },
       new Map(), undefined, agentsDir, undefined, brief, true, false, undefined, true, admission,
     );
     const fits = assessResearchIterationBudget({ ...parsed.research!, stop: { ...parsed.research!.stop, maxRounds: 5 } }, 5);
@@ -1015,8 +1016,8 @@ describe('engine remediation after-state, controls, and reach counts', () => {
         },
       ] },
       'name: terminal-owner-after', projectDir, { async run(_prompt, _role, opts) {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (settleCoverageFixture(opts) || opts.stageId === 'finalizer') return { output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        if (settleCoverageFixture(opts) || opts.stageId === 'finalizer') return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
         calls += 1;
         write(join(opts.runDir, 'dispatch_admission.json'), JSON.stringify({
           version: 1, pass: true, errors: [], terminalOwners: { [terminalPath]: 'finalizer' },
@@ -1029,7 +1030,7 @@ describe('engine remediation after-state, controls, and reach counts', () => {
           requestedPaths, pathDigest: scopePathDigest(requestedPaths), reason: 'claim finalizer path',
         }));
         decisionPath = await waitForFile(stagePath, (name) => name.startsWith('scope_revision_decision_'));
-        return { output: 'request handled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'request handled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       } }, new Map(), undefined, agentsDir, undefined,
       '---\nterminal_states:\n  escalated:\n    paths: [docs/escalation.md]\n---\n# Goal\n## What the report must show\n1. Exercise terminal ownership refusal.\n', true, false,
     );

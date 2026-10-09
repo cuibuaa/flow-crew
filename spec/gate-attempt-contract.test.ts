@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -181,7 +181,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
   const adapter: Adapter = {
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## Gate attempt contract fixture', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## Gate attempt contract fixture', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'plan') {
         planCalls += 1;
@@ -189,7 +189,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
         if (options.contract) {
           writeFileSync(join(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
         }
-        return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateCalls += 1;
@@ -205,13 +205,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
             JSON.stringify(attempt.metric, null, 2) + '\n',
           );
         }
-        return { output: attempt.output ?? `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: attempt.output ?? `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === REPAIR_ID) {
         repairCalls += 1;
-        return { output: `repair ${repairCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `repair ${repairCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
-      return { output: `unexpected ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: `unexpected ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 
@@ -330,7 +330,7 @@ describe('per-attempt gate metric contract', () => {
       gateAttempt: ({ prompt }) => {
         citedPath = /Durable rejected-verdict citation: (.+\.json)/.exec(prompt)?.[1] ?? '';
         return {
-          verdict: { pass: false, reason: 'substantive rejection' },
+          verdict: { pass: false, reason: `substantive rejection; evidence: ${citedPath}` },
           output: `Rejected. Verdict evidence: ${citedPath || 'missing durable citation'}`,
         };
       },

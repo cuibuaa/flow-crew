@@ -1,4 +1,4 @@
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -162,23 +162,23 @@ describe('engine-owned unresolved stage obligations', () => {
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         calls.push(opts.stageId);
-        if (opts.stageId === '_summary') return result('summary');
+        if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
             ? firstPlan()
             : passingReplacementPlan()));
-          return result(`plan ${planCalls}`);
+          return fixtureResult(result(`plan ${planCalls}`), opts);
         }
         if (opts.stageId === 'gate_phase4') {
           writeVerdict(opts.runDir, opts.stageId, false);
-          return result('phase 4 rejected');
+          return fixtureResult(result('phase 4 rejected'), opts);
         }
         if (opts.stageId === 'replacement_gate') {
           writeVerdict(opts.runDir, opts.stageId, true);
-          return result('replacement accepted');
+          return fixtureResult(result('replacement accepted'), opts);
         }
-        return result(opts.stageId);
+        return fixtureResult(result(opts.stageId), opts);
       },
     } as Adapter;
 
@@ -210,7 +210,7 @@ describe('engine-owned unresolved stage obligations', () => {
     const adapter: Adapter = {
       async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         calls.push(opts.stageId);
-        if (opts.stageId === '_summary') return result('summary');
+        if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           planPrompts.push(prompt);
@@ -235,17 +235,17 @@ describe('engine-owned unresolved stage obligations', () => {
                   '    task: accept the fully discharged plan',
                 ].join('\n');
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatch));
-          return result(`plan ${planCalls}`);
+          return fixtureResult(result(`plan ${planCalls}`), opts);
         }
         if (opts.stageId === 'gate_phase4') {
           writeVerdict(opts.runDir, opts.stageId, false);
-          return result('phase 4 rejected');
+          return fixtureResult(result('phase 4 rejected'), opts);
         }
         if (opts.stageId === 'iteration_2_gate' || opts.stageId === 'final_gate') {
           writeVerdict(opts.runDir, opts.stageId, true);
-          return result(`${opts.stageId} accepted`);
+          return fixtureResult(result(`${opts.stageId} accepted`), opts);
         }
-        return result(opts.stageId);
+        return fixtureResult(result(opts.stageId), opts);
       },
     } as Adapter;
 
@@ -275,7 +275,7 @@ describe('engine-owned unresolved stage obligations', () => {
     let planCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return result('summary');
+        if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(planCalls === 1
@@ -296,19 +296,19 @@ describe('engine-owned unresolved stage obligations', () => {
                 '    is_gate: true',
                 '    task: accept after discharge',
               ].join('\n')));
-          return result(`plan ${planCalls}`);
+          return fixtureResult(result(`plan ${planCalls}`), opts);
         }
         if (opts.stageId === 'gate_phase4') {
           writeVerdict(opts.runDir, opts.stageId, false);
           mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
           writeFileSync(join(opts.runDir, 'signals', 'goal_met.json'), JSON.stringify({ reason: 'premature DONE' }));
-          return result('phase 4 rejected while supervisor says done');
+          return fixtureResult(result('phase 4 rejected while supervisor says done'), opts);
         }
         if (opts.stageId === 'final_gate') {
           writeVerdict(opts.runDir, opts.stageId, true);
-          return result('final accepted');
+          return fixtureResult(result('final accepted'), opts);
         }
-        return result(opts.stageId);
+        return fixtureResult(result(opts.stageId), opts);
       },
     } as Adapter;
 
@@ -344,7 +344,7 @@ describe('engine-owned unresolved stage obligations', () => {
     writeRunState(projectDir, run.runId, seeded);
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        return result(opts.stageId === '_summary' ? 'summary' : 'static plan complete');
+        return fixtureResult(result(opts.stageId === '_summary' ? 'summary' : 'static plan complete'), opts);
       },
     } as Adapter;
 
@@ -384,7 +384,7 @@ describe('engine-owned unresolved stage obligations', () => {
     let adapterCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return result('summary');
+        if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         adapterCalls++;
         if (opts.stageId === 'plan') {
           writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
@@ -396,16 +396,16 @@ describe('engine-owned unresolved stage obligations', () => {
             '    scope: [docs/explicit-terminal.md]',
             '    task: write the explicit terminal artifact',
           ].join('\n')));
-          return result('planned terminal writer');
+          return fixtureResult(result('planned terminal writer'), opts);
         }
         expect(opts.stageId).toBe('terminal_writer');
         mkdirSync(join(projectDir, 'docs'), { recursive: true });
         writeFileSync(join(projectDir, 'docs', 'explicit-terminal.md'), '# Explicitly complete\n');
-        return {
+        return fixtureResult({
           ...result('wrote the explicit terminal artifact'),
           writes: ['docs/explicit-terminal.md'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     } as Adapter;
 

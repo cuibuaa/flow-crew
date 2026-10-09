@@ -1,3 +1,4 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -180,7 +181,7 @@ describe('engine boundaries from recorded runs', () => {
         state.maxRetries = 0;
         writeRunState(projectDir, created.runId, state);
         const adapter = { async run(_prompt: string, _role: unknown, options: any) {
-          if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+          if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
           if (options.stageId === stageIds[0]) {
             options.onCommandLifecycle?.({ phase: 'started', id: 'vitest-fixture', command: 'vitest run spec/fixture.test.ts', timestamp: new Date().toISOString() });
             writeFileSync(join(projectDir, writePath), 'fixture');
@@ -188,7 +189,7 @@ describe('engine boundaries from recorded runs', () => {
             if (writePath.endsWith('timestamp-fixture.mjs')) unlinkSync(join(projectDir, writePath));
             options.onCommandLifecycle?.({ phase: 'completed', id: 'vitest-fixture', timestamp: new Date().toISOString() });
           } else await delay(1300);
-          return { output: 'stage settled', exitCode: 0, duration_ms: 1200 };
+          return fixtureResult({ output: 'stage settled', exitCode: 0, duration_ms: 1200 }, options);
         } } as Adapter;
         const final = await runWorkflow(config as any, yaml, projectDir, adapter, new Map(), undefined, agentsDir, created.runId, '# fixture', true, false);
         return { final: final.status, stages: stageIds.map((id) => readStageStatus(projectDir, created.runId, id)?.status) };

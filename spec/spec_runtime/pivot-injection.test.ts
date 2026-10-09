@@ -1,3 +1,4 @@
+import { fixtureResult, fixtureArtifactContract } from '../test-support/declared-dispatch.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,7 +6,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter } from '../../src/adapters/base.js';
 import { runWorkflow, WorkflowConfigSchema } from '../../src/scheduler.js';
 import { readRunState, writeRunState } from '../../src/store.js';
-import { fixtureArtifactContract } from '../test-support/declared-dispatch.js';
 import { prepareFixtureRun } from './run-fixture.js';
 
 const roots: string[] = [];
@@ -37,7 +37,7 @@ describe('native planner pivot injection', () => {
     let observed = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
       if (opts.stageId === 'plan') observed = prompt;
-      return { output: 'fixture settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'fixture settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, 'synthetic pivot control', projectDir, adapter,
       new Map(), undefined, agentsDir, created.runId, undefined, true);

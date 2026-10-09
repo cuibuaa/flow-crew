@@ -1,4 +1,4 @@
-import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -185,7 +185,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## E18 fixture summary', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## E18 fixture summary', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'plan') {
         writeFileSync(
@@ -196,7 +196,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
             options.escalationTerminal,
           )),
         );
-        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateInputs.push(readFileSync(join(opts.runDir, 'stages', GATE_ID, 'input.md'), 'utf-8'));
@@ -219,7 +219,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
             passing: JSON.stringify(metricArtifact(true)),
           });
         }
-        return { output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'terminal_finalize') {
         mkdirSync(join(projectDir, 'docs'), { recursive: true });
@@ -227,13 +227,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
           join(projectDir, 'docs', 'final_verification.md'),
           '# Synthetic final verification\n\nThe declared outcome is complete.\n',
         );
-        return {
+        return fixtureResult({
           output: 'terminal report written by its admitted owner',
           exitCode: 0,
           duration_ms: 1,
           writes: ['docs/final_verification.md'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
       if (opts.stageId === 'escalation_finalize') {
         escalationCalls++;
@@ -242,20 +242,20 @@ async function runScenario(options: ScenarioOptions): Promise<{
           join(projectDir, 'docs', 'research_escalation.md'),
           '# Research gate escalation\n\nThe rejected criteria remain unsatisfied.\n',
         );
-        return {
+        return fixtureResult({
           output: 'escalation terminal written by its admitted owner',
           exitCode: 0,
           duration_ms: 1,
           writes: ['docs/research_escalation.md'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
       if (opts.stageId === UNRELATED_GATE_ID) {
         writeFileSync(
           join(opts.runDir, `verdict_${UNRELATED_GATE_ID}.json`),
           JSON.stringify(scoredVerdict(false, 'unrelated rejection'), null, 2) + '\n',
         );
-        return { output: 'unrelated gate: false', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'unrelated gate: false', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === REPAIR_ID) {
         repairCalls++;
@@ -269,9 +269,9 @@ async function runScenario(options: ScenarioOptions): Promise<{
         if (existsSync(archived)) {
           repairSawArchivedNegative ||= JSON.parse(readFileSync(archived, 'utf-8')).pass === false;
         }
-        return { output: 'repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
-      return { output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 

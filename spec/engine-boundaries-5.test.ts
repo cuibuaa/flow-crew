@@ -1,4 +1,4 @@
-import { declaredDispatch } from './test-support/declared-dispatch.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -72,11 +72,11 @@ describe('planning and reality declaration admission', () => {
             '    type: file-exists-nonempty', '    params: { paths: [docs/work.md] }', '```',
             'The check observes the produced work artifact.',
           ].join('\n'));
-          return ok('first proposal complete');
+          return fixtureResult(ok('first proposal complete'), opts);
         }
         if (opts.stageId === 'work') {
           write(join(project, 'docs/work.md'), '# Work\n');
-          return ok('work complete');
+          return fixtureResult(ok('work complete'), opts);
         }
         if (opts.stageId === 'gate') {
           const criteria = extractBriefCriteria(brief).criteria;
@@ -84,9 +84,9 @@ describe('planning and reality declaration admission', () => {
             criteria: Object.fromEntries(criteria.map((criterion) => [criterion.id,
               { status: 'pass', evidence: 'the work artifact exists' }])),
           }));
-          return ok('gate complete');
+          return fixtureResult(ok('gate complete'), opts);
         }
-        return ok('summary complete');
+        return fixtureResult(ok('summary complete'), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

@@ -101,7 +101,7 @@ export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?
   if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|campaign_revision_request\.jsonl|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;
   if (/^stages(?:\/|$)/.test(path)) {
     if (!path.startsWith(`stages/${stage.id}/`)) return true;
-    if (/^stages\/[^/]+\/(?:status\.json|input\.md|invocations(?:\/|$)|attempt_generation\.json|plan_revision_decision_|scope_revision_decision_|approval_resolution|attempt_deadline_|constraint_audit|write_boundary_|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live\.log|trace\.jsonl)/.test(path)) return true;
+    if (/^stages\/[^/]+\/(?:status\.json|input\.md|output_schema\.json|invocations(?:\/|$)|attempt_generation\.json|plan_revision_decision_|scope_revision_decision_|approval_resolution|attempt_deadline_|constraint_audit|write_boundary_|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live\.log|trace\.jsonl)/.test(path)) return true;
   }
   return /^verdict_/.test(path) && !(stage.is_gate && path === `verdict_${stage.id}.json`);
 }

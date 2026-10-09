@@ -1,5 +1,5 @@
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
-import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -23,6 +23,7 @@ import {
   appendResearchTemporalPathContract,
   ensureTerminalArtifactValidation,
   findGateRecoveryStages,
+  inspectDispatchAdmission,
   normalizedResearchEvidenceDigest,
   parseDispatchedStageConfig,
   recordGateValidationDelta,
@@ -199,11 +200,12 @@ afterEach(() => {
 });
 
 describe('engine generalization runtime bindings', () => {
-  it.each(['regression', 'authored-rejection'])('refuses static completion after %s despite completed execution', async (failure) => {
-    const { projectDir, agentsDir } = seedProject('static-gate-acceptance', 'qa');
+  it.each(['regression', 'authored-rejection', 'peer-regression', 'peer-green'])('settles static completion after %s against current validation', async (failure) => {
+    const { projectDir, agentsDir } = seedProject('static-gate-acceptance', 'qa', 'coder');
     const gate = stage({ id: 'qa', role: 'qa', is_gate: true });
-    const workflow: WorkflowConfig = { name: 'static-gate-acceptance', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate] };
-    const created = createRun(projectDir, workflow.name, `name: ${workflow.name}`, ['qa']);
+    const workflow: WorkflowConfig = { name: 'static-gate-acceptance', defaults: { max_iterations: 1, max_retries: 0 }, stages: failure.startsWith('peer-') ? [gate, stage({ id: 'peer', role: 'coder', scope: ['validation.cjs'] }), stage({ id: 'peer_review', role: 'qa', is_gate: true, depends_on: ['peer'] })] : [gate] };
+    expect(inspectDispatchAdmission({ dispatched: workflow.stages, baseStages: [], dispatchStageId: 'plan' }).pass).toBe(true);
+    const created = createRun(projectDir, workflow.name, `name: ${workflow.name}`, workflow.stages.map(item => item.id));
     const command = join(projectDir, 'validation.cjs');
     writeFileSync(command, failure === 'regression'
       ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1'
@@ -214,15 +216,28 @@ describe('engine generalization runtime bindings', () => {
     });
     writeValidationSnapshot(created.runDirPath, baseline);
     let reviews = 0;
+    let reviewStarted!: () => void, peerFinished!: () => void;
+    const reviewing = new Promise<void>(resolve => { reviewStarted = resolve; });
+    const peerDone = new Promise<void>(resolve => { peerFinished = resolve; });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      const summary = summaryResult(opts); if (summary) return summary;
-      reviews++;
+      const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
+      if (opts.stageId === 'peer_review') return { output: JSON.stringify({ pass: true, reason: 'Peer reviewed', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      if (opts.stageId === 'peer') {
+        await reviewing;
+        writeFileSync(command, failure === 'peer-regression' ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1' : 'console.log("ok")');
+        peerFinished();
+        return fixtureResult({ output: 'peer', exitCode: 0, duration_ms: 1, writes: ['validation.cjs'], writeAttribution: 'structured' }, opts);
+      }
+      reviews++; reviewStarted();
+      if (failure.startsWith('peer-')) await peerDone;
       writeFileSync(join(opts.runDir, 'verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
-      return { output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
       created.runId, '# Require accepted gates.', true, false);
-    expect(final.status).toBe('incomplete');
+    expect(final.status).toBe(failure === 'peer-green' ? 'complete' : 'incomplete');
+    const receipt = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    expect(receipt.pass).toBe(failure === 'authored-rejection' || failure === 'peer-green');
     expect(final.stages.qa.status).toBe('complete');
     expect(reviews).toBe(1);
     expect(final.stages.qa.attempts).toHaveLength(1);
@@ -353,7 +368,7 @@ describe('engine generalization runtime bindings', () => {
     let repairCalls = 0;
     const adapter: Adapter = { async run(prompt, _role, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
@@ -372,7 +387,7 @@ describe('engine generalization runtime bindings', () => {
           '    retry_to: [qa]',
           '    prompt_template: Repair only a product defect.',
         ].join('\n')));
-        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'qa') {
         gateCalls++;
@@ -380,10 +395,10 @@ describe('engine generalization runtime bindings', () => {
           ? { pass: true, reason: 'work itself passes', metric: 'quality' }
           : { pass: true, reason: 'contract evidence supplied', metric: 'quality', value: 8 }));
         if (gateCalls === 2) expect(prompt).toContain('engine_rejection_reason');
-        return { output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'repair') repairCalls++;
-      return { output: 'unexpected repair', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'unexpected repair', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(
       workflow,
@@ -692,7 +707,7 @@ describe('engine generalization runtime bindings', () => {
     let redispatchPrompt = '';
     const adapter: Adapter = { async run(prompt, _role: AgentConfig, opts: RunOpts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       calls++;
       if (calls === 1) {
         const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -713,10 +728,10 @@ describe('engine generalization runtime bindings', () => {
           const name = readdirSync(directory).find((file) => file.startsWith('scope_revision_decision_'));
           return name ? JSON.parse(readFileSync(join(directory, name), 'utf-8')) as Record<string, unknown> : undefined;
         });
-        return { output: 'scope accepted', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'scope accepted', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       redispatchPrompt = prompt;
-      return { output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(
       workflow,
@@ -771,7 +786,7 @@ describe('engine generalization runtime bindings', () => {
     let repairPrompt = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
           'stages:',
@@ -798,7 +813,7 @@ describe('engine generalization runtime bindings', () => {
       } else {
         repairPrompt = prompt;
       }
-      return { output: opts.stageId, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(
       workflow,

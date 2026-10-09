@@ -1,3 +1,5 @@
+import { scriptedRecord } from '../../src/adapters/scripted.js';
+import type { RunOpts, RunResult } from '../../src/adapters/base.js';
 import { parse, stringify } from 'yaml';
 import { ArtifactContractSchema, type ArtifactContractInput } from '../../src/artifact-declarations.js';
 
@@ -28,4 +30,11 @@ export function declaredDispatch(text: string, contracts: Record<string, Artifac
     stage.artifact_contract = contracts[stage.id] ?? fixtureArtifactContract(stage.id, stage.is_gate === true);
   }
   return stringify(parsed);
+}
+
+/** Fixture final answers follow the new carrier; negative explicit JSON stays
+ * untouched. No runtime/admission assertion is relaxed by this conversion. */
+export function fixtureResult(result: RunResult | Promise<RunResult>, opts: RunOpts): RunResult | Promise<RunResult> {
+  if (result instanceof Promise) return result.then(value => fixtureResult(value, opts) as RunResult);
+  return result.exitCode === 0 ? { ...result, output: scriptedRecord(result.output, opts) } : result;
 }
