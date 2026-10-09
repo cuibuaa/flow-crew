@@ -138,7 +138,9 @@ async function launchOwnedProcessTree(
   });
 
   const recordPath = fallbackRecordPath(baseDir, unit);
-  const initialized = await waitUntil(() => existsSync(pidPath) && existsSync(recordPath));
+  // The fixture creates the pid file before it writes it; wait for both pids, not only for the file.
+  const initialized = await waitUntil(() => existsSync(recordPath) && existsSync(pidPath)
+    && /^\d+,\d+/.test(readFileSync(pidPath, 'utf-8')));
   expect(initialized, `fallback unit ${unit} never initialized`).toBe(true);
   const [agentPid, childPid] = readFileSync(pidPath, 'utf-8').split(',').map(Number);
   const recorded = JSON.parse(readFileSync(recordPath, 'utf-8')) as { pid?: number };
