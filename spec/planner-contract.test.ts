@@ -5,7 +5,11 @@ import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { formatDispatchStageSchemaFailure, StageConfigSchema, parseDispatchedStageConfig, inspectDispatchAdmission, parseBriefFrontmatter, readGateVerdict } from '../src/scheduler.js';
-import { fcGlobalDir, setFcGlobalDir, createRun, runDir } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, createRun, runDir, updateRunState } from '../src/store.js';
+import { recordAdmittedPlan } from '../src/plan-revisions.js';
+import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
+import { scopePathDigest } from '../src/runtime-negotiation.js';
+import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import { parsePlannerPolicySelection, renderPlannerPolicies } from '../src/planner-policies.js';
 
@@ -18,121 +22,6 @@ interface PlannerConfig {
   prompt?: unknown;
 }
 
-const REQUIRED_CLAUSES = [
-  {
-    id: 'project-relative-scope',
-    pattern: /scope: \[<project-relative paths or globs>\]/,
-  },
-  {
-    id: 'gate-metric-optional-unless-contracted',
-    pattern: /A numeric gate metric is OPTIONAL unless an authoritative project acceptance contract supplies a headline metric for that gate\./,
-  },
-  {
-    id: 'durable-gate-report-citation',
-    pattern: /Gate reports MUST cite the scheduler-injected durable rejected-verdict path under `gate_reevaluation\/iteration_<n>\/round_<n>\/`/,
-  },
-  {
-    id: 'headline-distribution',
-    pattern: /A requested headline or quoted statistic MUST require its mean, median, and where the reported value sits in its own distribution\./,
-  },
-  {
-    id: 'preregistration-feasibility',
-    pattern: /A rule frozen or pre-registered before outcome measurement MUST require an expected qualifying-member count computed from structural quantities, a numeric feasibility floor, and revision below that floor before any outcome is seen\./,
-  },
-  {
-    id: 'operator-figure-anti-anchoring',
-    pattern: /An operator-supplied numeric expectation MUST require both exact result fields `within_expected_range` and `method_was_not_adjusted_to_match_expectation`\./,
-  },
-  {
-    id: 'default-parallelism',
-    pattern: /Default to parallel execution\./,
-  },
-  {
-    id: 'genuine-data-dependencies-only',
-    pattern: /add an edge ONLY when the downstream stage has a genuine data dependency/,
-  },
-  {
-    id: 'temporary-work-under-os-root',
-    pattern: /temporary or one-off work product[\s\S]*`os\.tmpdir\(\)` \/ `\$TMPDIR`/,
-  },
-  {
-    id: 'drvfs-rationale',
-    pattern: /WSL2 drvfs mount[\s\S]*more than 6× slower/,
-  },
-  {
-    id: 'project-output-exceptions',
-    pattern: /Normal project outputs `dist\/`, `ui\/dist\/`, and the project's own `node_modules` are explicit exceptions/,
-  },
-] as const;
-
-
-
-const LINEAR_BY_DEFAULT = [
-  /(?:stages|workflow) (?:must|should) (?:form|follow|use) (?:a )?(?:strictly )?linear chain by default/i,
-  /each stage (?:must|should) depend on (?:the )?previous stage/i,
-];
-
-const REALITY_CHECK_CLAUSES = [
-  {
-    id: 'ban-whole-document-single-literal',
-    pattern: /Documentation-completeness checks MUST NOT use a single literal match across an\s+entire document\./,
-  },
-  {
-    id: 'prefer-structure-or-omit',
-    pattern: /Prefer a heading anchor, a structure or non-empty\/length assertion,\s+or omit the deterministic check/,
-  },
-  {
-    id: 'leave-content-quality-to-human-review',
-    pattern: /content quality belongs to human review, not `grep`/,
-  },
-  {
-    id: 'accept-equivalent-terminology',
-    pattern: /MUST accept common\s+equivalent spellings and phrasings[\s\S]*both `risk=external` and\s+`` `risk` is exactly `external` ``/,
-  },
-  {
-    id: 'terminology-is-advisory',
-    pattern: /It MUST set `advisory: true`/,
-  },
-  {
-    id: 'warn-about-wording-false-negatives',
-    pattern: /failure\s+message MUST explicitly say `wording check; possible false negative`/,
-  },
-  {
-    id: 'objective-evidence-remains-hard',
-    pattern: /Evidence checks \(file existence, command exit code,\s+numeric thresholds, schema\/integrity constraints\) MUST stay hard/,
-  },
-  {
-    id: 'planner-reads-preflight-feedback',
-    pattern: /if \{run_dir\}\/reality_check_preflight\.json exists,\s+read it before writing new checks/,
-  },
-  {
-    id: 'advisories-have-explicit-delivery',
-    pattern: /marks intent-dependent findings advisory in `reality_checks\.md` before\s+dispatch[\s\S]*emits an operator-visible\s+`reality_gate_advisory` run event/,
-  },
-] as const;
-
-const REALITY_CHECK_ADMISSIBILITY_CLAUSES = [
-  {
-    id: 'check-can-fail',
-    pattern: /A hard Reality-Gate\s+check is admissible only if it is capable of failing/,
-  },
-  {
-    id: 'failure-set-matches-claimed-property',
-    pattern: /every state in which it fails must be\s+one where the contract property named by the check is false/,
-  },
-  {
-    id: 'derive-property-with-exceptions',
-    pattern: /Derive that property from the brief,\s+including every explicit exception/,
-  },
-] as const;
-
-const MOTIVATING_FALSE_BLOCK = /observed: a clean gated-0 round was wrongly\s+`reality_gate_failed` because a self-authored archived-copy path was absent/;
-const FORMER_INSTANCE_ONLY_RULE = [
-  'ROBUST checks only — verify INTEGRITY INVARIANTS, not your own bookkeeping.',
-  'A reality check may reference ONLY required files.',
-  'Do NOT require EXTRA self-created archive/copy files or assert byte-equality between copies.',
-].join(' ');
-
 function readPlannerPrompt(): string {
   const parsed = parse(readFileSync(PLANNER_PATH, 'utf-8')) as PlannerConfig;
   if (typeof parsed.prompt !== 'string') throw new Error('planner.yaml must contain a string prompt');
@@ -144,36 +33,9 @@ function readShipSkill(): string {
   return readFileSync(SHIP_SKILL_PATH, 'utf-8');
 }
 
-function contractViolations(prompt: string): string[] {
-  const missing = REQUIRED_CLAUSES
-    .filter(({ pattern }) => !pattern.test(prompt))
-    .map(({ id }) => `missing:${id}`);
-  const unsafe = LINEAR_BY_DEFAULT
-    .filter((pattern) => pattern.test(prompt))
-    .map(() => 'forbidden:linear-by-default');
-  return [...missing, ...unsafe];
-}
-
-function realityCheckContractViolations(prompt: string): string[] {
-  const missing = [...REALITY_CHECK_CLAUSES, ...REALITY_CHECK_ADMISSIBILITY_CLAUSES]
-    .filter(({ pattern }) => !pattern.test(prompt))
-    .map(({ id }) => `missing:${id}`);
-  const instanceOnly = /self-created archive\/copy files/i.test(prompt)
-    && /byte-equality between copies/i.test(prompt)
-    && REALITY_CHECK_ADMISSIBILITY_CLAUSES.some(({ pattern }) => !pattern.test(prompt));
-  return [...missing, ...(instanceOnly ? ['forbidden:instance-only-enumeration'] : [])];
-}
-
-function referenceExamples(prompt: string): string {
-  const examples = prompt.split('# Reference Examples', 2)[1];
-  if (!examples) throw new Error('planner prompt must contain reference examples');
-  return examples.split('# Runtime Context Handlers', 1)[0];
-}
-
-
 const CORE_GUARDS = [
   {
-    "id": "scope-required-for-every-stage"
+    "id": "missing-scope-is-closed"
   },
   {
     "id": "writable-gate-scope"
@@ -191,7 +53,7 @@ const CORE_GUARDS = [
     "id": "metric-verdict-consistency-remains-strict"
   },
   {
-    "id": "one-reason-per-dependency"
+    "id": "exact-dependency-graph"
   }
 ] as const;
 function verifyCoreGuard(id: string): void {
@@ -200,8 +62,11 @@ function verifyCoreGuard(id: string): void {
   const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   try {
     const stage = (id: string, extra = {}) => StageConfigSchema.parse({criterion_refs: [], dynamic_dispatch: false, id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',artifact_contract:artifacts([], [], [], []),...extra});
-    if (id === 'scope-required-for-every-stage') {
-      expect(() => parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),criterion_refs: [], dynamic_dispatch: false, id:'work',role:'coder',depends_on:[],dependency_reasons:{},prompt_template:'Work.'})).toThrow('scope');
+    if (id === 'missing-scope-is-closed') {
+      const work = parseDispatchedStageConfig({id:'work',role:'coder'});
+      expect(work.scope).toEqual([]);
+      work.artifact_contract!.produces.push({id:'output',root:'project',path:'docs/out.md',kind:'file',nonempty:true});
+      expect(inspectDispatchAdmission({dispatched:[work],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
     } else if (id === 'writable-gate-scope') {
       const gate = stage('gate', {role:'qa',is_gate:true,scope:[],artifact_contract:artifacts([{id:'probe',root:'project',path:'spec/qa.test.ts'}], [], [], [])});
       expect(inspectDispatchAdmission({dispatched:[gate],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('ARTIFACT_OUTPUT_OUTSIDE_SCOPE');
@@ -209,8 +74,9 @@ function verifyCoreGuard(id: string): void {
       const terminalStates = parseBriefFrontmatter('---\nterminal_states:\n  complete:\n    paths: [docs/final.md]\n---\n').terminalStates;
       const report = inspectDispatchAdmission({dispatched:[stage('first'),stage('second')],baseStages:[],dispatchStageId:'plan',terminalStates});
       expect(report.pass).toBe(false); expect(report.errors.join(';')).toMatch(/terminal.*owner|owner.*terminal/);
-    } else if (id === 'one-reason-per-dependency') {
-      expect(() => parseDispatchedStageConfig({...stage('reader'),depends_on:['producer'],dependency_reasons:{}})).toThrow('dependency_reasons');
+    } else if (id === 'exact-dependency-graph') {
+      const reader = parseDispatchedStageConfig({...stage('reader'),depends_on:['producer']});
+      expect(inspectDispatchAdmission({dispatched:[reader],baseStages:[],dispatchStageId:'plan'}).errors.join(';')).toContain('unknown stage');
     } else if (id === 'raw-validation-exit-forbidden') {
       const report = inspectRealityChecks('Validation may not add a failing test identity.', '## Reality checks\n\x60\x60\x60yaml\nchecks:\n - name: raw status\n   type: exec-script-exit-zero\n   reads: []\n   params: {script: "node validation.mjs"}\n\x60\x60\x60\n', {validationBaseline:{version:1,projectDir:project,discovery:{state:'partial',configPath:join(project,'package.json'),commands:[{role:'test',command:'node',args:['validation.mjs'],display:'node validation.mjs'}],missingRoles:['build','lint']},results:[{role:'test',display:'node validation.mjs',state:'failed',exitCode:1,durationMs:1,output:'',failureCount:1,failureIdentifiers:['known_failure'],failureIdentity:'known'}],gateCriteria:[{role:'test',rule:'no_regression_from_baseline',baselineFailureCount:1,baselineFailureIdentifiers:['known_failure'],description:'No new failures'}]}});
       expect(report.blockingTierFindings.some((finding)=>finding.code==='hard_check_cannot_pass')).toBe(true);
@@ -242,60 +108,73 @@ describe('planner dispatch contract', () => {
     expect(readPlannerPrompt()).not.toMatch(/^\s+timeout_(?:total_)?ms:/m);
   });
 
-  it('requires safe parallel scope, real dependency reasons, and TMPDIR placement', () => {
-    expect(contractViolations(readPlannerPrompt())).toEqual([]);
-    expect(readPlannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
-  });
-
-  it.each(REQUIRED_CLAUSES)('rejects omission of $id', ({ id, pattern }) => {
-    const prompt = readPlannerPrompt();
-    const match = prompt.match(pattern);
-    expect(match, `fixture setup must find ${id}`).not.toBeNull();
-    const withoutClause = prompt.replace(match![0], '');
-    expect(contractViolations(withoutClause)).toContain(`missing:${id}`);
-  });
-
   it.each(CORE_GUARDS)('enforces $id in the core without a planner sentence', ({ id }) => { verifyCoreGuard(id); });
 
-  it.each([
-    'Stages should form a linear chain by default.',
-    'Each stage must depend on the previous stage.',
-  ])('rejects linear-by-default guidance: %s', (unsafeGuidance) => {
-    expect(contractViolations(`${readPlannerPrompt()}\n${unsafeGuidance}`))
-      .toContain('forbidden:linear-by-default');
+  it('normalizes small plans and retains independent criterion verification', () => {
+    const criteria = {version:1 as const,briefDigest:'fixture',criteria:[{id:'required',text:'Do the task.',line:1,section:'Criteria'}]};
+    const work = parseDispatchedStageConfig({id:'work',role:'coder',scope:['src/**']});
+    const gate = parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true,depends_on:['work'],scope:[]});
+    const admit = (dispatched: typeof work[]) => inspectDispatchAdmission({dispatched,baseStages:[],dispatchStageId:'plan',criteria});
+    expect(admit([work]).errors.join(';')).toContain('not assigned to a gate');
+    expect(admit([work,gate]).pass).toBe(true);
+    expect(gate.criterion_refs).toEqual(['required']);
+    expect(gate.artifact_contract!.produces[0].path).toBe('verdict_audit.json');
+    expect(admit([parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true})]).pass).toBe(true);
   });
 
-  it('keeps reference examples free of task-brief reinjection', () => {
-    const examples = referenceExamples(readPlannerPrompt());
-    expect(examples).not.toContain('{task_description}');
-    expect(examples).not.toMatch(/^\s*Task:/m);
+  it('refuses a sole product-authoring gate, including a later scope amendment, while retaining independent audits and repairs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'planner-independent-audit-'));
+    const project = join(root, 'project'); mkdirSync(project);
+    const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
+    try {
+      const brief = '# Criteria\n1. Independently check existing work.\n';
+      const criteria = extractBriefCriteria(brief);
+      const audit = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true });
+      const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['audit'], retry_to: ['audit'] });
+      const planner = parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true });
+      const admit = (dispatched: typeof audit[]) => inspectDispatchAdmission({ dispatched, baseStages: [], dispatchStageId: 'plan', criteria });
+      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.join(';')).toContain('not assigned to a capable work/finalizer stage');
+      expect(admit([audit]).pass).toBe(true);
+      expect(admit([audit, repair]).pass).toBe(true);
+      expect(admit([{ ...audit, scope: ['docs/report.md'] }, repair]).pass).toBe(false);
+      const runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['audit', 'repair']).runId;
+      const directory = runDir(project, runId);
+      writeFileSync(join(directory, 'task_brief.md'), brief);
+      writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify(criteria));
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, audit, repair], directory, 'existing-work audit', true); state.dispatchedStages = [audit, repair]; });
+      const revise = (stage: typeof audit, paths: string[]) => decideScopeRevision({
+        request: { version: 1, kind: 'scope_revision', requestId: stage.id, runId, stageId: stage.id, attemptIndex: 1, requestedPaths: paths, pathDigest: scopePathDigest(paths), reason: 'Need product capability' },
+        stage, priorScope: stage.scope ?? [], activePeers: [], projectDir: project, runId, attemptIndex: 1,
+      });
+      const denied = revise(audit, ['src/**']);
+      expect(denied.accepted).toBe(false);
+      expect(denied.rejectionReason).toContain('not assigned to a capable work/finalizer stage');
+      expect(revise(repair, ['src/other.js']).accepted).toBe(true);
+      const work = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['src/**'] });
+      const downstream = { ...audit, depends_on: ['work'] };
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, work, downstream], directory, 'ordinary independent work', true); state.dispatchedStages = [work, downstream]; });
+      expect(revise(downstream, ['docs/report.md']).accepted).toBe(true);
+      // Base workflow stages are not newly dispatched criterion owners.
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, work, downstream, repair], directory, 'audit after base work', true); state.dispatchedStages = [downstream, repair]; });
+      expect(revise(downstream, ['docs/report.md']).accepted).toBe(false);
+      // Static workflows and pre-launch library fixtures never acquired the
+      // dynamic criterion contract; scope negotiation retains that boundary.
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [audit, repair], directory, 'static workflow', true); });
+      expect(revise(audit, ['docs/report.md']).accepted).toBe(true);
+      writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify({ ...criteria, criteria: [] }));
+      const legacyAudit = { ...audit, criterion_refs: [] };
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, legacyAudit, repair], directory, 'legacy library fixture', true); state.dispatchedStages = [legacyAudit, repair]; });
+      expect(revise(repair, ['src/other.js']).accepted).toBe(true);
+    } finally { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); }
   });
-});
 
-describe('planner reality-check contract', () => {
-  it('uses a general failure-set criterion alongside structural and advisory guidance', () => {
-    expect(realityCheckContractViolations(readPlannerPrompt())).toEqual([]);
+  it.each([{id:'work',role:'coder',scope:'src/**'}, {id:'work',role:'coder',scpoe:[]}, {id:'../escape',role:'coder'}, {id:'work',role:'coder',depends_on:null}])('refuses malformed fields rather than defaulting them', raw => {
+    expect(() => parseDispatchedStageConfig(raw)).toThrow();
   });
 
-  it.each([...REALITY_CHECK_CLAUSES, ...REALITY_CHECK_ADMISSIBILITY_CLAUSES])('rejects omission of $id', ({ id, pattern }) => {
-    const prompt = readPlannerPrompt();
-    const match = prompt.match(pattern);
-    expect(match, `fixture setup must find ${id}`).not.toBeNull();
-    const withoutClause = prompt.replace(match![0], '');
-    expect(realityCheckContractViolations(withoutClause)).toContain(`missing:${id}`);
-  });
-
-  it('rejects the former two-instance enumeration as a substitute for the criterion', () => {
-    expect(realityCheckContractViolations(FORMER_INSTANCE_ONLY_RULE)).toEqual(expect.arrayContaining([
-      'missing:check-can-fail',
-      'missing:failure-set-matches-claimed-property',
-      'missing:derive-property-with-exceptions',
-      'forbidden:instance-only-enumeration',
-    ]));
-  });
-
-  it('preserves the incident that explains why the criterion exists', () => {
-    expect(readPlannerPrompt()).toMatch(MOTIVATING_FALSE_BLOCK);
+  it('loads a planner that asks for consumed documents and a public draft check', () => {
+    expect(readPlannerPrompt()).toContain('plan-check');
+    expect(readPlannerPrompt()).toContain('only when a downstream stage consumes analysis');
   });
 });
 

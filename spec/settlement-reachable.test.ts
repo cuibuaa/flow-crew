@@ -248,7 +248,7 @@ describe('criterion discharge boundary', () => {
   };
 
   it('admits settlement-only coverage only with a matching engine discharge', () => {
-    const stages = settlementStages().map((entry) => ({ ...entry, criterion_refs: [] }));
+    const stages = settlementStages().map((entry) => ({ ...entry, criterion_refs: ['other'] }));
     const input = {
       dispatched: stages,
       baseStages: [],
@@ -258,7 +258,7 @@ describe('criterion discharge boundary', () => {
       criteria: {
         version: 1 as const,
         briefDigest: recorded.briefDigest,
-        criteria: [{ id: recorded.criterionId, text: 'Choose the terminal path by outcome.', line: 1, section: 'Report' }],
+        criteria: [{ id: recorded.criterionId, text: 'Choose the terminal path by outcome.', line: 1, section: 'Report' }, {id:'other',text:'Write the terminal report.',line:2,section:'Report'}],
       },
     };
     const before = inspectDispatchAdmission(input);

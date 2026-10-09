@@ -1,7 +1,7 @@
 import type { CheckContext, RealityCheck } from '../types.js';
 import { readJsonFile, result } from './_utils.js';
 
-interface Schema {
+export interface Schema {
   /** A single JSON Schema type name, or a union of them. JSON Schema allows both, and a
    *  union is the standard way to say "nullable" — `type: [string, "null"]`. Declaring this
    *  as `string` alone silently rejected every union: the array is truthy, so validation
@@ -11,6 +11,10 @@ interface Schema {
    *  through validate(), so both were affected. */
   type?: string | string[];
   required?: string[];
+  additionalProperties?: boolean | Schema;
+  pattern?: string;
+  minLength?: number;
+  minItems?: number;
   properties?: Record<string, Schema>;
   items?: Schema;
   enum?: unknown[];
@@ -55,6 +59,11 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
   if (hasTypeConstraint(schema.type) && !matchesType(value, schema.type)) {
     errors.push(`${path} expected ${describeType(schema.type)}`);
   }
+  if (typeof value === 'string') {
+    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(`${path} does not match ${schema.pattern}`);
+    if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${path} below minLength`);
+  }
+  if (Array.isArray(value) && schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${path} below minItems`);
   if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) errors.push(`${path} not in enum`);
   if (typeof value === 'number') {
     if (typeof schema.minimum === 'number' && value < schema.minimum) errors.push(`${path} below minimum`);
@@ -62,6 +71,11 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
   }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
+    for (const key of Object.keys(obj)) {
+      if (Object.hasOwn(schema.properties ?? {}, key)) continue;
+      if (schema.additionalProperties === false) errors.push(`${path}.${key} unknown field`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') errors.push(...validate(obj[key], schema.additionalProperties, `${path}.${key}`));
+    }
     for (const key of schema.required ?? []) {
       if (!(key in obj)) errors.push(`${path}.${key} required`);
     }

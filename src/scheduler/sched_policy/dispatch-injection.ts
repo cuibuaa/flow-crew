@@ -245,25 +245,13 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
       const wfRaw = readFileSync(wfPath, 'utf-8');
       const wfParsed = parseYaml(wfRaw) ?? {};
       if (!Array.isArray(wfParsed.stages)) wfParsed.stages = [];
-      for (const s of dispatched) wfParsed.stages.push({
-        id: s.id,
-        role: s.role,
-        scope: s.scope,
-        depends_on: s.depends_on,
-        dependency_reasons: s.dependency_reasons,
-        condition: s.condition,
-        prompt_template: s.prompt_template,
-        skills: s.skills.length ? s.skills : undefined,
-        dynamic_dispatch: s.dynamic_dispatch || undefined,
-        is_gate: s.is_gate || undefined,
-        retry_to: s.retry_to?.length ? s.retry_to : undefined,
-        criterion_refs: s.criterion_refs.length ? s.criterion_refs : undefined,
-        artifact_contract: s.artifact_contract,
-        resources: s.resources,
-      });
+      wfParsed.stages.push(...dispatched);
       writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
     } catch { /* best effort */ }
 
+    // Readers of the admitted dispatch (including verdict controls) need the
+    // same derived criterion and artifact facts as workflow/state readers.
+    writeFileSync(dispatchPath, stringifyYaml(Array.isArray(items) ? dispatched : { ...items as object, stages: dispatched }), 'utf-8');
     state.dispatchedStages = dispatched;
     refreshRunQueryState(state, sorted);
     recordAdmittedPlan(state, sorted, runDirPath, 'Initial dispatch admitted', true, admission);

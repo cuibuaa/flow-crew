@@ -9,7 +9,7 @@ describe('declared fixture migration boundary', () => {
       { id: 'worker', role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], prompt_template: 'Write unnamed.md; node --test omitted.test.mjs' },
       { id: 'judge', role: 'qa', depends_on: [], dependency_reasons: {}, scope: [], is_gate: true, prompt_template: 'Judge worker' },
     ];
-    expect(() => parseDispatchedStageConfig(raw[0])).toThrow(/ARTIFACT_DECLARATION_REQUIRED/);
+    expect(parseDispatchedStageConfig(raw[0]).artifact_contract).toMatchObject({produces:[],reads:[],replays:[]});
     const working = (parse(declaredDispatch(stringify(raw))) as unknown[]).map((stage) => parseDispatchedStageConfig(stage));
     expect(working[0].artifact_contract).toMatchObject({ version: 1, produces: [], reads: [], replays: [] });
     expect(working[1].artifact_contract?.produces).toEqual([

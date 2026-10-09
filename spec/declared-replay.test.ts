@@ -252,12 +252,12 @@ describe('new input boundaries and retained data readers', () => {
     writeFileSync(path, JSON.stringify({ ...record, replayExecutions: 'malformed' }));
     expect(readRecordedArtifactContract(path).status).toBe('unreadable');
   });
-  it('refuses old dispatch without waiving an unrelated dependency refusal', () => {
+  it('normalizes omitted duties without waiving an unrelated dependency refusal', () => {
     const raw = { id: 'work', role: 'coder', depends_on: ['missing'], dependency_reasons: { missing: 'Consumes evidence' }, scope: [], prompt_template: 'Write prose.md' };
-    expect(() => parseDispatchedStageConfig(raw)).toThrow(/ARTIFACT_DECLARATION_REQUIRED.*replays/s);
-    const stage = StageConfigSchema.parse(raw); // Archived schema is readable.
+    const stage = parseDispatchedStageConfig(raw);
+    expect(stage.artifact_contract).toMatchObject({produces:[],reads:[],replays:[]});
     const report = inspectDispatchAdmission({ dispatched: [stage], baseStages: [], dispatchStageId: 'plan' });
-    expect(report.errors.some((error) => error.includes('ARTIFACT_DECLARATION_REQUIRED'))).toBe(true);
+    expect(report.errors.some((error) => error.includes('ARTIFACT_DECLARATION_REQUIRED'))).toBe(false);
     expect(report.errors.some((error) => error.includes('unknown'))).toBe(true);
     expect(RecordedArtifactContractSchema.parse({ version: 1, produces: [], reads: [] }).replays).toBeUndefined();
     expect(() => ArtifactContractSchema.parse({ version: 1, produces: [], reads: [] })).toThrow('REPLAY_DECLARATION_REQUIRED');

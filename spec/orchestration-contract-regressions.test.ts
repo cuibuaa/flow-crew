@@ -224,7 +224,7 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(reusedPath.errors.join('\n')).toContain('one path cannot encode multiple outcomes');
   });
 
-  it('still rejects missing acting-stage transport and ordinary work without a downstream gate', () => {
+  it('assigns conservative coverage and refuses ordinary work without a downstream gate', () => {
     const criterionId = 'criterion_report_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'abc', criteria: [{
       id: criterionId, text: 'Show independently checked work.', line: 1, section: 'Report',
@@ -242,11 +242,10 @@ describe('canonical criteria and atomic dispatch admission', () => {
       dispatched: [{ ...work, criterion_refs: [] }, gate],
       baseStages: [], dispatchStageId: 'plan', criteria,
     });
-    expect(gateOnly.pass).toBe(false);
-    expect(gateOnly.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(gateOnly.pass).toBe(true);
 
     const ordinaryWithoutGate = inspectDispatchAdmission({
-      dispatched: [work, { ...gate, criterion_refs: [] }],
+      dispatched: [work],
       baseStages: [], dispatchStageId: 'plan', criteria,
     });
     expect(ordinaryWithoutGate.pass).toBe(false);
@@ -254,7 +253,7 @@ describe('canonical criteria and atomic dispatch admission', () => {
   });
 
   it('rejects an unconditional research finalizer and malformed dynamic schema', () => {
-    expect(() => parseDispatchedStageConfig({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder' })).toThrow(/depends_on|scope/);
+    expect(() => parseDispatchedStageConfig({id:'work',role:'coder',scope:'src/**'})).toThrow(/scope/);
     const plan = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
     const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'researcher', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'] });
     const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'finalize', role: 'writer', depends_on: ['measure'], dependency_reasons: { measure: 'Consumes the accepted measurement.' }, scope: ['docs/final.md'] });

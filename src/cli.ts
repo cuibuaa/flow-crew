@@ -38,6 +38,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     watch: 'Usage: flowcrew watch [--once]',
     events: 'Usage: flowcrew events [--run <run-id>] [--follow]',
     doctor: 'Usage: flowcrew doctor [--repair-registry|--compact-registry] [--apply]',
+    'plan-check': 'Usage: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>',
     version: 'Usage: flowcrew version',
   };
   return usage[command];
@@ -61,6 +62,9 @@ if (bootstrapHelp !== undefined) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
+} else if (bootstrapArgs[0] === 'plan-check') {
+  const { cmdPlanCheck } = await import('./plan-interface.js');
+  process.exitCode = await cmdPlanCheck(bootstrapArgs);
 } else if (bootstrapArgs[0] === 'state') {
   const { cmdState } = await import('./run-state-access.js');
   process.exitCode = cmdState(bootstrapArgs);
@@ -2134,6 +2138,7 @@ Commands:
   task      List and manage background tasks
   fc_tasks  Render and safely update a conversational task ledger
   audit-reality  Run declared checks against task history
+  plan-check  Check a draft stage list against a brief without launching
   inbox     Review and resolve approval requests that parked a run
   ship-preflight  Gather prior-run, campaign, build, and brief-input facts before shipping
   ship-setup  Create a launch worktree, link declared inputs, and baseline validation

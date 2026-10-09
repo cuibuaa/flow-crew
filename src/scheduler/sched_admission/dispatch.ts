@@ -531,6 +531,14 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         .map((record) => [record.criterionId, record]),
     );
     const criterionIds = new Set(criteria.map((criterion) => criterion.id));
+    // Empty refs mean conservative whole-brief responsibility. Explicit subsets
+    // keep large plans precise without making small plans repeat generated IDs.
+    for (const stage of input.dispatched) {
+      if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
+    }
+    // Existing-work audits cannot author the product they certify. Repairs
+    // remain separate authors whose retry gates independently check the change.
+    const auditOnly = input.dispatched.every(stage => stage.is_gate ? !stage.scope?.length : stage.retry_to?.length);
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {
         if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);
@@ -542,7 +550,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       const terminalWorkers = workers.filter((stage) => ownerIds.has(stage.id));
       const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
       const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
-      if (workers.length === 0 && !discharged.has(criterion.id)) {
+      if (workers.length === 0 && !discharged.has(criterion.id) && !(auditOnly && gates.length > 0)) {
         errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
       }
       for (const owner of terminalWorkers) {

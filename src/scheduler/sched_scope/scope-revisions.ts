@@ -13,6 +13,8 @@ import { declaredInputScopeConflict, listProjectFilesAt, resolveDeclaredInputWri
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshot } from './snapshots.js';
 import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
 import { compareRepairFileContents } from './file-images.js';
+import { createDispatchAdmission, readBriefCriteriaForAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
+import { firstDeclaredInputScopeConflict } from './path-capabilities.js';
 
 type ScopeRevisionDecision = RuntimeConstraintDecisionV1;
 
@@ -200,6 +202,41 @@ export function decideScopeRevision(input: {
     return { ...scopeRevisionRejection({ ...request, requestedPaths }, priorScope,
       conflicts.map((conflict) => `${conflict.path}: ${conflict.reason}`).join('; '),
       conflicts.find((conflict) => conflict.conflictingStageId)?.conflictingStageId), ...diagnostics };
+  }
+  // A scope grant changes the plan's authority, so use initial-plan admission
+  // again before publishing it. In particular a read-only audit cannot become
+  // its own product author. Static workflows never passed dispatch admission.
+  try {
+    const state = readRunState(projectDir, runId);
+    if (state.planControl?.stages.some((candidate) => candidate.dynamic_dispatch)) {
+      const directory = runDir(projectDir, runId);
+      if (!state.dispatchedStages?.length) throw new Error('admitted dispatch population is unavailable');
+      const dispatchedIds = new Set(state.dispatchedStages.map((candidate) => {
+        if (candidate && typeof candidate === 'object' && 'id' in candidate && typeof candidate.id === 'string') return candidate.id;
+        throw new Error('admitted dispatch stage identity is invalid');
+      }));
+      const stages = state.planControl.stages.map((candidate) => ({
+        ...stageWithInheritedScope(directory, candidate),
+        ...(candidate.id === stage.id ? { scope: [...new Set([...(priorScope ?? []), ...authorizedPaths])] } : {}),
+      }));
+      const recordedCriteria = readBriefCriteriaForAdmission(directory);
+      const criteria = recordedCriteria?.criteria.length === 0 && !state.briefAdmission ? undefined : recordedCriteria;
+      const admission = createDispatchAdmission(firstDeclaredInputScopeConflict)({
+        dispatched: stages.filter((candidate) => dispatchedIds.has(candidate.id)),
+        baseStages: stages.filter((candidate) => !dispatchedIds.has(candidate.id)),
+        dispatchStageId: stages.find((candidate) => candidate.dynamic_dispatch)?.id ?? 'plan',
+        criteria, criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest),
+        terminalStates: state.terminalStates, research: state.research,
+        declaredInputs, projectDir, runDir: directory,
+      });
+      if (!admission.pass) return scopeRevisionRejection(request, priorScope, admission.errors.join('; '));
+    }
+  } catch (error) {
+    // Standalone static fixtures have no run; a real run must prove admission.
+    if (existsSync(join(runDir(projectDir, runId), 'run.json'))) {
+      return scopeRevisionRejection(request, priorScope,
+        `could not revalidate plan admission: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   // Capture only the admitted subset before publication. Withheld capabilities
   // never become inherited scope or retrospective write authorization.

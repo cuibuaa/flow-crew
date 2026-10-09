@@ -106,8 +106,8 @@ describe('planning and reality declaration admission', () => {
 
   it('carries a many-criterion first proposal with explicit coverage through admission', () => {
     const prompt = (parseYaml(readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf8')) as { prompt: string }).prompt;
-    expect(prompt).toContain('Before the FIRST dispatch proposal, read {run_dir}/brief_criteria.json');
-    expect(prompt).toContain('make a coverage table in tech_solution.md');
+    expect(prompt).toContain('executable JSON Schema');
+    expect(prompt).toContain('plan-check');
     const brief = ['# Task', '## Requirements', ...Array.from({ length: 12 }, (_, index) =>
       `${index + 1}. Requirement ${index + 1} must be implemented and checked.`)].join('\n');
     const criteria = extractBriefCriteria(brief);
@@ -131,7 +131,7 @@ describe('planning and reality declaration admission', () => {
     expect(() => parseDispatchedStageConfig({ ...work, timeout_ms: 1000 })).toThrow();
     expect(inspectDispatchAdmission({
       dispatched: [{ ...work, criterion_refs: [] }, gate], baseStages: [], dispatchStageId: 'plan', criteria,
-    }).errors).toEqual(expect.arrayContaining([expect.stringContaining('not assigned to a capable work/finalizer stage')]));
+    }).pass).toBe(true);
   });
 
   it('compares first-proposal admission before and after the planner context on one brief', () => {
@@ -181,7 +181,7 @@ describe('planning and reality declaration admission', () => {
       return parseDispatchedStageConfig(stage);
     });
     expect(inspectDispatchAdmission({ dispatched: missingCoverage, baseStages: [],
-      dispatchStageId: 'plan', criteria }).errors).toHaveLength(18);
+      dispatchStageId: 'plan', criteria }).errors).toHaveLength(0);
     expect(admit(prechangePrompt)).toEqual({ attempts: 2, admitted: true, operatorGuidanceNeeded: false });
     expect(admit(currentPrompt)).toEqual({ attempts: 1, admitted: true, operatorGuidanceNeeded: false });
   });

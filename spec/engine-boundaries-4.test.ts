@@ -220,7 +220,7 @@ describe('engine boundaries from recorded runs', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('names an empty downstream gate field while still refusing a plan with no downstream gate', () => {
+  it('assigns omitted downstream coverage while refusing a plan with no gate', () => {
     const criterionId = 'criterion_report_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'fixture', criteria: [{ id: criterionId, text: 'Audit the work', line: 1, section: 'Report' }] };
     const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({ prompt_template: 'fixture', skills: [], criterion_refs: [], scope: [], is_gate: false, depends_on: [], dependency_reasons: {}, ...raw,
@@ -228,12 +228,12 @@ describe('engine boundaries from recorded runs', () => {
     const work = stage({ id: 'work', role: 'coder', criterion_refs: [criterionId], scope: ['src/**'] });
     const gate = stage({ id: 'verify', role: 'qa', is_gate: true, depends_on: ['work'], dependency_reasons: { work: 'audits work' } });
     const missingRefs = inspectDispatchAdmission({ dispatched: [work, gate], baseStages: [], dispatchStageId: 'plan', criteria });
-    expect(missingRefs.pass).toBe(false);
-    expect(missingRefs.errors.join('\n')).toContain('verify.criterion_refs is empty');
+    expect(missingRefs.pass).toBe(true);
+    expect(gate.criterion_refs).toEqual([criterionId]);
     expect(inspectDispatchAdmission({ dispatched: [work, { ...gate, criterion_refs: [criterionId] }], baseStages: [], dispatchStageId: 'plan', criteria }).pass).toBe(true);
     const absentGate = inspectDispatchAdmission({ dispatched: [{ ...work, criterion_refs: [] }], baseStages: [], dispatchStageId: 'plan', criteria });
     expect(absentGate.pass).toBe(false);
-    expect(absentGate.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(absentGate.errors.join('\n')).toContain('not assigned to a gate');
   });
 
   it('catches a rounded numeric grep at admission while preserving an exact contractual literal check', async () => {

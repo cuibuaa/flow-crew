@@ -153,13 +153,13 @@ describe('whole-plan admission at each revision', () => {
     expect(revise({ ...request, requestId: 'stale' }).decision.errors.join(';')).toContain('PLAN_REVISION_STALE');
     expect(existsSync(join(directory, after.state.queryState!.planRevision!.path!))).toBe(true);
   });
-  it.each(['executed', 'scope', 'cycle', 'removed', 'missing_contract', 'binding'])('refuses %s change without changing the admitted plan', (kind) => {
+  it.each(['executed', 'scope', 'cycle', 'removed', 'malformed_contract', 'binding'])('refuses %s change without changing the admitted plan', (kind) => {
     const { request, stages } = initializeRevision();
     const extra = stage('extra');
     if (kind === 'executed') stages[0] = { ...stages[0], prompt_template: 'different executed work' };
     if (kind === 'scope') extra.scope = ['elsewhere/**'];
     if (kind === 'cycle') { extra.depends_on = ['extra']; extra.dependency_reasons = { extra: 'cycle' }; }
-    if (kind === 'missing_contract') delete extra.artifact_contract;
+    if (kind === 'malformed_contract') extra.artifact_contract = {version:1,produces:[],reads:[]} as typeof extra.artifact_contract;
     const after = revise({ ...request, ...(kind === 'binding' ? { attemptIndex: 2 } : {}), stages: [...(kind === 'removed' ? stages.slice(0, 1) : stages), extra] });
     expect(after.decision.accepted).toBe(false); expect(after.decision.errors.length).toBeGreaterThan(0);
     expect(after.state.queryState!.planHistory).toHaveLength(1); expect(after.state.stages.extra).toBeUndefined();

@@ -193,7 +193,7 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
     expect(p).toMatch(/failed to emit a valid dispatch\.yaml/i);
     expect(p).toContain('wizard');
-    expect(p).toMatch(/Required dispatch\.yaml schema/);
+    expect(p).toMatch(/dispatch\.yaml interface/);
     expect(p).toMatch(/Replace the structurally invalid dispatch\.yaml/);
     expect(p).not.toMatch(/continue from where you left off/);
   });

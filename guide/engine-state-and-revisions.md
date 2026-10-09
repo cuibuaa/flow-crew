@@ -4,8 +4,25 @@ The view includes admitted plan revisions, stage and attempt statuses, declared 
 
 Retired stage history is optional read evidence, separate from the active stage graph. Malformed history rows are omitted with `RUN_STAGE_HISTORY_INVALID` diagnostics: the run-detail API exposes `stageHistoryDiagnostics`, and status and summary output name the gap. Valid retired rows and readable core run data remain visible; no record is repaired or retired stage reactivated.
 
-Newly submitted dispatched stages declare outputs, reads and replay commands in
-`artifact_contract` version 1. Each of `produces`, `reads` and `replays` is present;
+New dispatched plans use a YAML stage list. `id` and configured `role` are required;
+`scope` names project writes and omission is closed. Omitted `depends_on` is a root.
+Empty/omitted `criterion_refs` conservatively cover the whole brief; nonempty subsets
+use canonical IDs. Ordinary work requires a downstream independent gate. Existing-work
+audits can use read-only gates and separate `retry_to` repairs; gates in that plan have
+empty project scope. Scope amendments re-run whole-plan admission before granting writes.
+Dependency prose is optional historical metadata.
+
+`flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>`
+checks a draft with the live parser and whole-plan admission without launching work.
+It uses a synthetic empty run root, so run inputs from earlier work require the actual
+admission boundary. Historical readers remain tolerant; new unknown fields are refused.
+The same JSON Schema is appended to built-in and local planner-role prompts.
+Only dispatch.yaml is compulsory planning output. Analysis and reality-check documents
+are useful when consumed, rather than required empty packages.
+
+Optional `artifact_contract` version 1 declares exact outputs, reads and replay commands.
+An omitted live stage contract becomes empty duties plus the known gate verdict when applicable.
+Explicit duties retain the enforcement below; revisions cannot erase them. Each of `produces`, `reads` and `replays` is present;
 an explicit empty list is valid:
 
 ```yaml
@@ -136,7 +153,7 @@ A settled stage can write a complete proposal to its own stage directory's `plan
 }
 ```
 
-Replace `stages` with the complete proposed list, including existing stages. New stages require the complete declared contract, including `replays`. Revisions occur only when all stages are idle. Existing stages, artifact duties and execution conditions remain present and unchanged; `PLAN_REVISION_EXECUTION_CHANGED` refuses a predicate change that could skip an existing producer. Executed work stages are immutable, and new scopes must fit the initial capability union. The scheduler reruns the same whole-plan admission for roles, dependencies, scope, criteria, terminal ownership and gates, declared inputs, research bindings and reality-check reachability. It retains a digest-bound history carrier and a durable accepted or refused decision committed in the same run-state transaction. Decision files are immutable projections; a retry reconstructs a lost projection without committing the revision again. An unjournaled decision file is refused with `PLAN_REVISION_DECISION_UNJOURNALED`; it cannot grant acceptance by naming an unrelated history entry. Preserve that evidence and submit a new request ID against the current admitted view. Stages cannot declare engine decision projections as their products. Stale requests and reused IDs with different bytes are refused. Removing an existing obligation or migrating an undeclared historical plan requires a new initial plan, rather than an amendment that silently erases authority.
+Replace `stages` with the complete proposed list, including existing normalized stages. New stages use the same compact parser; an optional explicit contract includes `replays`. Revisions occur only when all stages are idle. Existing stages, artifact duties and execution conditions remain present and unchanged; `PLAN_REVISION_EXECUTION_CHANGED` refuses a predicate change that could skip an existing producer. Executed work stages are immutable, and new scopes must fit the initial capability union. The scheduler reruns the same whole-plan admission for roles, dependencies, scope, criteria, terminal ownership and gates, declared inputs, research bindings and reality-check reachability. It retains a digest-bound history carrier and a durable accepted or refused decision committed in the same run-state transaction. Decision files are immutable projections; a retry reconstructs a lost projection without committing the revision again. An unjournaled decision file is refused with `PLAN_REVISION_DECISION_UNJOURNALED`; it cannot grant acceptance by naming an unrelated history entry. Preserve that evidence and submit a new request ID against the current admitted view. Stages cannot declare engine decision projections as their products. Stale requests and reused IDs with different bytes are refused. Removing an existing obligation or migrating an undeclared historical plan requires a new initial plan, rather than an amendment that silently erases authority.
 
 A gate can publish `audit_findings: {version: 1, findings: [...]}` in its declared verdict. Each finding names `id`, exact project `paths`, `reason`, `criterion_ids`, `invalidates_plan` and a configured `repair_role`. A finding that leaves the plan valid produces a repair stage limited to those paths, admitted as a full revision, followed by the authoring gate's re-evaluation. Passing re-evaluation resolves the finding. The initial rejected verdict is retained by content hash. The engine can add a repair prerequisite and reopen the authoring gate for re-evaluation; the prior gate definition and attempts remain in history. A finding that invalidates the plan follows the existing replan path. Undeclared verdicts, foreign criteria, unconfigured roles and scopes beyond the initial capabilities cannot create repair authority.
 

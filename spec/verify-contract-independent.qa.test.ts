@@ -204,7 +204,7 @@ describe('independent dispatch-admission QA probes', () => {
     expect(report.criterionTerminalRefs).toEqual({ finalize: [criterion] });
   });
 
-  it('keeps gate-only and ungated ordinary criterion transport rejected', () => {
+  it('accepts audit-only coverage while refusing ungated ordinary work', () => {
     const criterion = 'criterion_work_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'qa', criteria: [
       { id: criterion, text: 'Audit the produced work.', line: 1, section: 'Report' },
@@ -223,10 +223,10 @@ describe('independent dispatch-admission QA probes', () => {
       dispatched: [{ ...work, criterion_refs: [] }, gate], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
-    expect(gateOnly.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(gateOnly.pass, gateOnly.errors.join('\n')).toBe(true);
 
     const ungated = inspectDispatchAdmission({
-      dispatched: [work, { ...gate, criterion_refs: [] }], baseStages: [],
+      dispatched: [work], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
     expect(ungated.errors.join('\n')).toContain('not assigned to a gate');

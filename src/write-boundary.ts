@@ -350,8 +350,7 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
       else fileSlot(path);
     }
     if (input.dynamicDispatch) {
-      fileSlot(join(run, 'dispatch.yaml'));
-      fileSlot(join(run, 'reality_checks.md'));
+      for (const name of ['dispatch.yaml', 'reality_checks.md', 'tech_solution.md']) fileSlot(join(run, name));
     }
     // Engine-owned transport slots, deliberately without parent rename rights.
     if (publisher) {

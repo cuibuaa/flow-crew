@@ -1,4 +1,5 @@
 /** Planner artifact retry decisions; run/campaign/guidance effects enter through typed callbacks. */
+import { renderPlanInterface } from '../../plan-interface.js';
 import { type StoreState, runDir, RUN_STATUS, writeRunState } from '../../store.js';
 import { join, posix } from 'node:path';
 import { writeFileSync, existsSync, unlinkSync, readFileSync, mkdirSync, copyFileSync } from 'node:fs';
@@ -41,19 +42,7 @@ export function promoteAdmittedRealityChecks(runDirPath: string, state: StoreSta
 
 // Canonical dispatch.yaml schema reminder, single-sourced for the re-prompt so
 // the planner re-emits a well-formed file. Generic mechanism (no task content).
-const DISPATCH_SCHEMA_REMINDER = [
-  'Required dispatch.yaml schema — a YAML list at top level (or {stages: [...]}), each item:',
-  '  - id: <snake_case, unique>',
-  '    role: <one of the available roles named above>',
-  '    prompt_template: |',
-  '      <short, stage-specific instructions>',
-  '    scope: [<project-relative file paths or globs>]',
-  '    depends_on: [<stage_ids>]   # required; [] is an explicit root',
-  '    dependency_reasons: {<stage_id>: <one-sentence reason>}   # required for each dependency',
-  '    criterion_refs: [<canonical criterion IDs from brief_criteria.json>]',
-  '    is_gate: true               # optional — quality gate (writes a verdict file)',
-  '    retry_to: [<gate_ids>]      # optional',
-].join('\n');
+const DISPATCH_SCHEMA_REMINDER = renderPlanInterface();
 
 export function buildRetryPreamble(
   retries: number,

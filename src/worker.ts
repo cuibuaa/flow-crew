@@ -8,6 +8,7 @@ import { runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { sumInvocationUsage } from './invocation-usage.js';
 import { inspectDeclaredStageReads } from './declared-artifact-audit.js';
+import { renderPlanInterface } from './plan-interface.js';
 import { artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
@@ -80,7 +81,7 @@ export function plannerCriterionAssignmentContext(brief: string): string {
   if (criteria.length === 0) return '';
   return [
     '# First-proposal criterion assignments',
-    'Use these exact IDs in criterion_refs. Assign every ID to a capable work or finalizer stage and to a downstream gate when ordinary work owns it. Do not set per-stage timeout fields.',
+    'Empty/omitted criterion_refs assign all criteria conservatively. Use these exact IDs only when assigning explicit subsets. Ordinary work needs a downstream independent gate. Do not set per-stage timeout fields.',
     ...criteria.map((criterion) => `- ${criterion.id}: ${criterion.text}`),
   ].join('\n');
 }
@@ -555,7 +556,7 @@ async function runStageWithWriterLease(
     } catch { /* non-critical */ }
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
-    resolvedSystemPrompt += '\n\nEvery dispatched stage must declare artifact_contract {version:1, produces:[], reads:[], groups:[], replays:[]}. Replay entries declare id, runner (node_test, vitest or pytest), target artifact IDs, argv, and expected {exit_code, failures:[{artifact,test}]}. Declare an empty replay list when no command is claimed. Exact test files must be unconditional produces/reads declarations. Report prose is never executed. A nonzero reproduction must declare the exact failing test identities. Optional replay timeout_ms cannot exceed the project validation budget or extend the immutable attempt deadline.';
+    resolvedSystemPrompt += `\n\n${renderPlanInterface()}`;
     const policies = renderPlannerPolicies(loadProjectDefaults(opts.projectDir).planner_policies ?? []);
     if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }

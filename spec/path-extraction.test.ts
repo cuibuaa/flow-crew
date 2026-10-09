@@ -140,11 +140,11 @@ describe('declared reality-check reads replace lexical path inference', () => {
     writer.artifact_contract = artifacts([{ id: 'evidence', root: 'project', path }]);
     expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [writer] })).toEqual([]);
   });
-  it.each(['research', 'diagram'] as const)('reads the byte-identical %s quarantine and refuses its old execution format', (name) => {
+  it.each(['research', 'diagram'] as const)('reads the byte-identical %s quarantine while preserving invalid reality-read refusal', (name) => {
     const subject = fixture(name);
     expect(subject.recorded.pass).toBe(false);
     expect(subject.dispatched.length).toBeGreaterThan(0);
-    expect(() => parseDispatchedStageConfig(subject.rawStages[0])).toThrow('ARTIFACT_DECLARATION_REQUIRED');
+    expect(parseDispatchedStageConfig(subject.rawStages[0]).artifact_contract).toBeDefined();
     const report = inspectDispatchAdmission(subject.admission);
     expect(report.errors.some((error) => error.includes('ARTIFACT_DECLARATION_REQUIRED'))).toBe(true);
     const errors = inspectRealityCheckReachability({ markdown: subject.checks, projectDir: subject.projectDir, stages: subject.dispatched,

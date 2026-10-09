@@ -198,7 +198,7 @@ describe('engine generalization binding contracts', () => {
     })}\n`);
 
     expect(admitted.pass, admitted.errors.join('\n')).toBe(true);
-    expect(noWorker.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(noWorker.pass, noWorker.errors.join('\n')).toBe(true);
     expect(noGate.errors.join('\n')).toContain('not assigned to a gate');
     expect(checkGates([work, gate], state, projectDir, state.runId)).toEqual({
       allPass: false,

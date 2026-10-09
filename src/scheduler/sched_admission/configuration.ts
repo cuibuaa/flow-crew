@@ -1,6 +1,7 @@
 /** Agent/workflow/live-dispatch schemas and admitted query facts. Recorded contracts remain readable; live parser stays strict. */
 import { loadProjectDefaults as loadDefaults } from '../../config.js';
 import { z } from 'zod';
+import { PLAN_STAGE_SCHEMA, planStageErrors } from '../../plan-interface.js';
 import { type AgentConfig } from '../../adapters/base.js';
 import { RecordedArtifactContractSchema, artifactActivation, artifactDeclarationErrors } from '../../artifact-declarations.js';
 import { type StoreState, RUN_STATUS } from '../../store.js';
@@ -39,7 +40,7 @@ export const StageConfigSchema = z.object({
   depends_on: z.array(z.string()).optional().default([]),
   /** Project-relative write capability. Missing is closed for writes and conflicting for parallel dispatch. */
   scope: z.array(z.string()).optional(),
-  /** One concrete planner explanation per real dependency edge. */
+  /** Optional historical dependency prose; graph edges carry execution order. */
   dependency_reasons: z.record(z.string(), z.string()).optional(),
   condition: z.string().optional(),
   prompt_template: z.string().optional().default(''),
@@ -57,41 +58,6 @@ export const StageConfigSchema = z.object({
   /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
   artifact_contract: RecordedArtifactContractSchema.optional(),
   resources: z.never({ error: 'RESOURCES_RETIRED: stage.resources scheduling was retired; remove resources and provision GPU/disk capacity outside the engine.' }).optional(),
-});
-
-const StrictDispatchedStageConfigSchema = StageConfigSchema.extend({
-  id: z.string().regex(/^[a-z][a-z0-9_]{0,19}$/, 'must be snake_case and at most 20 characters'),
-  depends_on: z.array(z.string()),
-  scope: z.array(z.string()),
-  dependency_reasons: z.record(z.string(), z.string()),
-}).superRefine((stage, context) => {
-  const dependencies = new Set(stage.depends_on);
-  const reasons = new Set(Object.keys(stage.dependency_reasons));
-  for (const dependency of dependencies) {
-    if (!stage.dependency_reasons[dependency]?.trim()) {
-      context.addIssue({
-        code: 'custom',
-        path: ['dependency_reasons', dependency],
-        message: 'must contain one non-empty reason for this depends_on edge',
-      });
-    }
-  }
-  for (const reason of reasons) {
-    if (!dependencies.has(reason)) {
-      context.addIssue({
-        code: 'custom',
-        path: ['dependency_reasons', reason],
-        message: 'has no matching depends_on edge',
-      });
-    }
-  }
-  if (stage.is_gate && stage.retry_to?.length) {
-    context.addIssue({
-      code: 'custom',
-      path: ['retry_to'],
-      message: 'gate stages cannot declare retry_to; repairs own retry_to edges',
-    });
-  }
 });
 
 export const WorkflowConfigSchema = z.object({
@@ -161,14 +127,31 @@ function normalizeResearchTerminalCondition(condition: string | undefined): stri
  * it before the stage reaches state, workflow persistence, or execution.
  */
 export function parseDispatchedStageConfig(raw: unknown): StageConfig {
-  const contractErrors = artifactDeclarationErrors(raw && typeof raw === 'object' ? (raw as { artifact_contract?: unknown }).artifact_contract : undefined, raw && typeof raw === 'object' ? String((raw as { id?: unknown }).id ?? 'stage') : 'stage');
-  const parsed = StrictDispatchedStageConfigSchema.safeParse(raw);
-  if (!parsed.success) {
-    if (contractErrors.length) throw new Error(`${parsed.error.message}; ${contractErrors.join('; ')}`);
-    throw parsed.error;
+  // Keep the historical task alias at the one live parser boundary.
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'task' in raw) {
+    const { task, ...fields } = raw as Record<string, unknown>;
+    raw = { ...fields, prompt_template: fields.prompt_template ?? task };
   }
+  // Undefined optional properties in typed callers are equivalent to omission;
+  // null and malformed values in YAML remain errors.
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    raw = Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== undefined
+      || !Object.hasOwn(PLAN_STAGE_SCHEMA.properties!, key) || ['id', 'role'].includes(key)));
+  }
+  const errors = planStageErrors(raw);
+  if (errors.length) throw new Error(errors.join('; '));
+  const stage = StageConfigSchema.parse(raw);
+  // Live omission is a closed capability, never the legacy ungoverned scope state.
+  stage.scope ??= [];
+  if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
+  if (stage.artifact_contract === undefined) {
+    stage.artifact_contract = RecordedArtifactContractSchema.parse({
+      version: 1, produces: stage.is_gate ? [{ id: 'verdict', root: 'run', path: `verdict_${stage.id}.json` }] : [],
+      reads: [], groups: [], replays: [],
+    });
+  }
+  const contractErrors = artifactDeclarationErrors(stage.artifact_contract, stage.id);
   if (contractErrors.length) throw new Error(contractErrors.join('; '));
-  const stage = parsed.data;
   delete stage.max_retries;
   stage.condition = normalizeResearchTerminalCondition(stage.condition);
   return stage;
