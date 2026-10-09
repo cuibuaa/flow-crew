@@ -2,10 +2,9 @@ import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
-import type { ArtifactLocation } from './artifact-location.js';
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
-import { DeclaredReplaySchema, DECLARED_REPLAY_LIMIT, inspectReplayBindings } from './declared-replay.js';
+import { DeclaredReplaySchema } from './declared-replay.js';
 import type { StageStatus } from './store.js';
 import { fcGlobalDir, STAGE_STATUS } from './store.js';
 import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isEngineOwnedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
@@ -37,7 +36,7 @@ export const RecordedArtifactContractSchema = z.object({
   version: z.literal(1),
   produces: z.array(produced),
   reads: z.array(ArtifactReadSchema),
-  replays: z.array(DeclaredReplaySchema).max(DECLARED_REPLAY_LIMIT).optional(),
+  replays: z.array(DeclaredReplaySchema).optional(),
   groups: z.array(z.object({ id, mode: z.literal('exactly_one'), members: z.array(id).min(2) }).strict()).default([]),
 }).strict().superRefine((contract, context) => {
   const ids = new Set<string>();
@@ -63,21 +62,12 @@ export const RecordedArtifactContractSchema = z.object({
     }
   }
 });
-// Only archived data may omit replay declarations. No production admission uses
-// this reader schema to authorize an execution.
-export const ArtifactContractSchema = RecordedArtifactContractSchema.safeExtend({
-  replays: z.array(DeclaredReplaySchema, { error: 'REPLAY_DECLARATION_REQUIRED: declare artifact_contract.replays: [] explicitly, or structured replay commands' }).max(DECLARED_REPLAY_LIMIT),
-}).superRefine((contract, context) => {
-  for (const message of inspectReplayBindings(contract)) context.addIssue({ code: 'custom', path: ['replays'], message });
-});
+// Declarations carry capability/ownership metadata, not an extra verification
+// protocol. Historical replay data remains readable and is never executed.
+export const ArtifactContractSchema = RecordedArtifactContractSchema;
 export type ArtifactContract = z.infer<typeof RecordedArtifactContractSchema>;
 export function artifactDeclarationErrors(value: unknown, stageId: string): string[] {
-  if (!value) return [`ARTIFACT_DECLARATION_REQUIRED: ${stageId}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[], replays:[]} explicitly; prose cannot supply this contract`];
-  if (typeof value === 'object' && !('replays' in value)) {
-    const legacy = RecordedArtifactContractSchema.safeParse(value);
-    const missing = `REPLAY_DECLARATION_REQUIRED: ${stageId}.artifact_contract.replays: declare [] explicitly, or structured {id, runner, targets, argv, expected} replay commands`;
-    return legacy.success ? [missing] : [missing, `ARTIFACT_DECLARATION_INVALID: ${stageId}.artifact_contract: ${legacy.error.message}`];
-  }
+  if (!value) return [`ARTIFACT_DECLARATION_REQUIRED: ${stageId}.artifact_contract: declare output/input locations explicitly`];
   const parsed = ArtifactContractSchema.safeParse(value);
   return parsed.success ? [] : [`ARTIFACT_DECLARATION_INVALID: ${stageId}.artifact_contract: ${parsed.error.message}`];
 }

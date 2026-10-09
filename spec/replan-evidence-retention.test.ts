@@ -123,7 +123,7 @@ afterEach(() => {
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-describe('outer re-plan evidence retention', () => {
+describe('next-phase evidence retention', () => {
   it('keeps iteration-1 status, attempts, output, and verdict reachable after iteration 2 replaces the DAG', async () => {
     const adapter = new ScriptedAdapter({
       plan: [
@@ -133,7 +133,7 @@ describe('outer re-plan evidence retention', () => {
       first_work: { output: 'iteration 1 implementation evidence' },
       first_gate: {
         output: 'iteration 1 audit evidence',
-        runFiles: { 'verdict_first_gate.json': JSON.stringify({ pass: false, reason: 'outer re-plan required' }) },
+        runFiles: { 'verdict_first_gate.json': JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }) },
       },
       replacement_work: { output: 'iteration 2 implementation evidence' },
       replacement_gate: {
@@ -152,7 +152,7 @@ describe('outer re-plan evidence retention', () => {
       undefined,
       writeRoles(),
       undefined,
-      'Complete work, reject it at a gate, then preserve its evidence through the re-plan.',
+      'Complete work, accept its first phase at a gate, then preserve its evidence through the re-plan.',
       true,
       false,
     );
@@ -178,7 +178,7 @@ describe('outer re-plan evidence retention', () => {
     expect(gate?.status.attempts).toHaveLength(1);
     expect(gate?.verdictPath).toBeTruthy();
     expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), gate!.verdictPath!), 'utf-8')))
-      .toMatchObject({ pass: false, reason: 'outer re-plan required' });
+      .toMatchObject({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' });
     expect(existsSync(join(runDir(projectDir, final.runId), gate!.statusPath))).toBe(true);
 
     const app = await startDashboard(projectDir, 0, { distDir: join(projectDir, 'missing-dist') });
@@ -210,7 +210,7 @@ describe('outer re-plan evidence retention', () => {
       shared_gate: [
         {
           output: 'shared gate rejected iteration 1',
-          runFiles: { 'verdict_shared_gate.json': JSON.stringify({ pass: false, reason: 'replace this plan' }) },
+          runFiles: { 'verdict_shared_gate.json': JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }) },
         },
         {
           output: 'shared gate accepted iteration 2',
@@ -229,7 +229,7 @@ describe('outer re-plan evidence retention', () => {
       undefined,
       writeRoles(),
       undefined,
-      'Re-dispatch the same stage IDs after an outer gate rejection.',
+      'Re-dispatch the same stage IDs after deliberate next-phase acceptance.',
       true,
       false,
     );
@@ -284,7 +284,7 @@ describe('outer re-plan evidence retention', () => {
       },
       first_gate: {
         output: 'iteration 1 rejected',
-        runFiles: { 'verdict_first_gate.json': JSON.stringify({ pass: false, reason: 'outer re-plan required' }) },
+        runFiles: { 'verdict_first_gate.json': JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }) },
       },
       replacement_work: {
         output: 'corrected replacement executed',

@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
 import { inspectDeclaredStageReads } from '../src/declared-artifact-audit.js';
-import { captureStageArtifactContractPreimages, inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, StageConfigSchema, WorkflowConfigSchema, type StageConfig } from '../src/scheduler.js';
 import { applyPlanRevision, planDigest, recordAdmittedPlan } from '../src/plan-revisions.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
@@ -32,21 +32,6 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 describe('independent declaration and decision controls', () => {
-  it('rejects a wrong-kind exactly-one member even when the alternative is absent', () => {
-    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'yes', root: 'run', path: 'yes.json' }, { id: 'no', root: 'run', path: 'no.md' }], reads: [], groups: [{ id: 'choice', mode: 'exactly_one', members: ['yes', 'no'] }] });
-    const input = { stageId: 'writer', template: '', projectDir: project, runDir: directory, artifactContract };
-    const preimages = captureStageArtifactContractPreimages(input);
-    mkdirSync(join(directory, 'no.md'));
-    expect(inspectStageArtifactContract({ ...input, preimages, writes: ['run:no.md'] }).violations[0].reason).toContain('ARTIFACT_EXACTLY_ONE');
-  });
-
-  it('accepts an explicitly empty fresh output when its declaration allows empty content', () => {
-    const artifactContract = ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'empty', root: 'run', path: 'empty.json', nonempty: false }], reads: [] });
-    const input = { stageId: 'writer', template: '', projectDir: project, runDir: directory, artifactContract };
-    const preimages = captureStageArtifactContractPreimages(input);
-    writeFileSync(join(directory, 'empty.json'), '');
-    expect(inspectStageArtifactContract({ ...input, preimages }).violations).toEqual([]);
-  });
 
   it('keeps an incomplete producer from satisfying a declared read through a stale file', () => {
     writeFileSync(join(project, 'old.md'), 'stale output');

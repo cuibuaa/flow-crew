@@ -212,7 +212,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     return created.runId;
   }
 
-  it('a gate that never passes unchanged reaches repeated-blockage escalation (terminal, not a success, not a crash)', async () => {
+  it('a rejected gate with no admitted repair stops incomplete without an outer restart', async () => {
     const runId = setupPlainRun();
     const agentsDir = join(projectDir, 'config', 'agents');
     // Every iteration: plan a gate stage that writes a FAILING verdict, so gates never pass.
@@ -239,7 +239,8 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     } as unknown as Adapter;
 
     const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('escalated');           // unchanged rejection crossed repeated-failure threshold
+    expect(final.status).toBe('incomplete');
+    expect(final.currentIteration).toBe(1);
     expect(final.status).not.toBe('failed');          // no longer the unconditional 'failed' clobber
     expect(isTerminalRunStatus(final.status)).toBe(true);
     expect(isSuccessfulRunStatus(final.status)).toBe(false);

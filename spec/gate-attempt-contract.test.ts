@@ -292,9 +292,10 @@ describe('per-attempt gate metric contract', () => {
     ))).toMatchObject({ hasMetric: false, source: { kind: 'engine_attempt_default' } });
   });
 
-  it('replaces a prior iteration failing metric before a new passing gate writes no metric', async () => {
+  it('replaces a prior rejected attempt metric after an admitted repair', async () => {
     const result = await runScenario({
       maxIterations: 2,
+      includeRepair: true,
       gateAttempt: ({ call }) => call === 1
         ? { verdict: { pass: false, reason: 'iteration one rejected' }, metric: failingMetric() }
         : { verdict: { pass: true, reason: 'iteration two qualitative audit passed' } },
@@ -364,7 +365,7 @@ describe('per-attempt gate metric contract', () => {
     expect(result.final.failureReason).toContain('metric="quality"');
     expect(result.final.failureReason).toContain('threshold=10');
     expect(result.planCalls).toBe(1);
-    expect(result.gateCalls).toBe(4);
+    expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
   });
 });

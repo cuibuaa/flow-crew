@@ -1,9 +1,8 @@
-// Boundary: Admit audit finding repairs and idle-boundary plan amendments through the existing revision transaction; receives the shared full-dispatch admission predicate.
+// Boundary: Admit idle-boundary plan amendments through the existing revision transaction; receives the shared full-dispatch admission predicate.
 import { inspectArtifactDeclarations } from '../../artifact-declarations.js';
 import { BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { RevisionAdmission, applyPlanRevision, recordAdmittedPlan } from '../../plan-revisions.js';
 import { recordRunEvent } from '../../run-events.js';
-import { AuditFindingsSchema, buildScopedRepair } from '../../scoped-audit-repair.js';
 import { STAGE_STATUS, StoreState, atomicWrite, writeRunState } from '../../store.js';
 import { StageConfig, WorkflowConfig, parseDispatchedStageConfig, refreshRunQueryState } from '../sched_admission/configuration.js';
 import { readBriefCriteriaForAdmission, stageScopeOwnsPath, type createDispatchAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
@@ -11,11 +10,9 @@ import { parseDeclaredScope, topoSort } from '../sched_admission/frontier.js';
 import { inspectRealityCheckReachability } from '../sched_admission/reality-reads.js';
 import { resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from '../sched_scope/path-capabilities.js';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
-import { GateRuntimeFacts } from './gate-recovery.js';
-import { validateSettledGateVerdict } from './gate-evidence.js';
 
 export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof createDispatchAdmission>) {
 
@@ -27,75 +24,6 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     refreshRunQueryState(state, sorted);
     writeRunState(projectDir, runId, state);
     atomicWrite(join(directory, 'workflow.yaml'), stringifyYaml({ ...workflow, stages: sorted }));
-  }
-
-  /** Turn settled declared audit findings into bounded revision transactions. */
-  function admitScopedAuditRepairs(sorted: StageConfig[], state: StoreState, facts: GateRuntimeFacts, projectDir: string, runId: string, directory: string, workflow: WorkflowConfig, roles: Map<string, { name: string; description: string }>): StoreState {
-    for (const evaluation of facts.evaluations) {
-      if (evaluation.effectiveVerdict?.pass === true) {
-        const findings = state.queryState?.findings ?? [];
-        let changed = false;
-        for (const finding of findings) if (finding.gateId === evaluation.id && finding.status === 'open') { finding.status = 'resolved'; changed = true; }
-        if (changed) writeRunState(projectDir, runId, state);
-        continue;
-      }
-      const gate = sorted.find((stage) => stage.id === evaluation.id);
-      if (!gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE || evaluation.authoredVerdict?.pass !== false
-          || evaluation.rejectionKind === 'irreparable_rejection' || evaluation.effectiveVerdict?.contractViolation) continue;
-      const verdictPath = join(directory, `verdict_${gate.id}.json`);
-      let raw: Record<string, unknown>;
-      let verdictBytes: Buffer;
-      try { verdictBytes = readFileSync(verdictPath); raw = JSON.parse(verdictBytes.toString('utf8')) as Record<string, unknown>; } catch { continue; }
-      if (raw.audit_findings === undefined) continue;
-      const parsed = AuditFindingsSchema.safeParse(raw.audit_findings);
-      if (!parsed.success) continue; // readGateVerdict records the precise malformed declaration refusal.
-      state.queryState ??= { version: 1 };
-      state.queryState.findings ??= [];
-      const evidenceDirectory = join(directory, 'audit_findings');
-      mkdirSync(evidenceDirectory, { recursive: true });
-      const evidenceName = `${gate.id}_${createHash('sha256').update(JSON.stringify(raw)).digest('hex')}.json`;
-      const evidencePath = join(evidenceDirectory, evidenceName);
-      if (!existsSync(evidencePath)) atomicWrite(evidencePath, `${JSON.stringify(raw, null, 2)}\n`);
-      for (const finding of parsed.data.findings) {
-        const id = `${gate.id}:${finding.id}`;
-        if (!state.queryState.findings.some((entry) => entry.id === id)) state.queryState.findings.push({ id, status: 'open', paths: finding.paths, gateId: gate.id, reason: finding.reason, criterionIds: finding.criterion_ids, invalidatesPlan: finding.invalidates_plan, evidencePath: `audit_findings/${evidenceName}` });
-      }
-      writeRunState(projectDir, runId, state);
-      if (parsed.data.findings.some((finding) => finding.invalidates_plan)) continue;
-      for (const finding of parsed.data.findings) {
-        const refusal = join(directory, `scoped_repair_refusal_${gate.id}_${finding.id}_${evidenceName.slice(gate.id.length + 1, -5)}.json`);
-        if (existsSync(refusal)) continue;
-        try {
-          if (!gate.artifact_contract?.produces.some((artifact) => artifact.root === 'run' && artifact.path === `verdict_${gate.id}.json`)) throw new Error('SCOPED_REPAIR_VERDICT_UNBOUND: authoring gate must declare its exact run verdict output');
-          const revision = state.queryState?.planRevision;
-          const attempt = state.stages[gate.id]?.attempts?.at(-1);
-          if (!revision || !attempt) throw new Error('SCOPED_REPAIR_PLAN_UNBOUND: admitted plan and settled gate execution are required');
-          const bindingError = validateSettledGateVerdict(directory, runId, gate.id, attempt, createHash('sha256').update(verdictBytes).digest('hex'));
-          if (bindingError) throw new Error(bindingError);
-          const producers = sorted.filter((stage) => !stage.retry_to?.length && stage.artifact_contract?.produces.some((artifact) => artifact.root === 'project'
-            && finding.paths.some((path) => artifact.path === path || (artifact.kind === 'directory' && path.startsWith(`${artifact.path}/`)))));
-          const repair = buildScopedRepair(gate, finding, producers, {
-            evidencePath: `audit_findings/${evidenceName}`, verdictDigest: createHash('sha256').update(readFileSync(evidencePath)).digest('hex'),
-            attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
-          });
-          if (sorted.some((stage) => stage.id === repair.id)) continue;
-          const result = applyPlanRevision({ projectDir, runId,
-            request: { version: 1, requestId: repair.id, runId, stageId: gate.id, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, baseRevision: revision.revision, baseDigest: revision.digest, reason: `Scoped repair of ${gate.id} finding ${finding.id}: ${finding.reason}`, stages: [...sorted, repair] },
-            parseStage: parseDispatchedStageConfig,
-            admit: (candidate, current) => admitRevisionCandidate(candidate, current, projectDir, directory, roles),
-            scopeContained: revisionScopeContained,
-          });
-          state = result.state;
-          if (result.decision.pending) continue;
-          if (!result.decision.accepted || !result.stages) throw new Error(result.decision.errors.join('; '));
-          publishRevisedWorkflow(result.stages, sorted, state, projectDir, runId, directory, workflow);
-          recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: gate.id, requestId: repair.id, detail: `admitted scoped repair ${repair.id} revision ${result.decision.revision}`, source: 'scheduler' });
-        } catch (error) {
-          atomicWrite(refusal, `${JSON.stringify({ version: 1, findingId: finding.id, reason: error instanceof Error ? error.message : String(error) }, null, 2)}\n`);
-        }
-      }
-    }
-    return state;
   }
 
   function admitRevisionCandidate(stages: StageConfig[], state: StoreState, projectDir: string, directory: string, roles: Map<string, { name: string; description: string }>): RevisionAdmission {
@@ -180,5 +108,5 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     writeRunState(projectDir, runId, state);
     return state;
   }
-  return { admitScopedAuditRepairs, consumePlanRevisions };
+  return { consumePlanRevisions };
 }

@@ -1,5 +1,5 @@
 name: qa
-description: 'Verifies implementations through tests and independent review; writes declared evidence and current-behaviour regressions.'
+description: 'Reviews implementations independently; returns criterion status and reproducible evidence.'
 reasoning_effort: high
 tools:
 - read
@@ -45,6 +45,6 @@ prompt: |
   - Make claims reproducible from durable evidence. Give each criterion a one-line
     reference (a command and its result, a file:line, or an evidence path) and say
     briefly what you did not examine and why. Write a report, coverage document or
-    replay only when the task asks for one or a criterion cannot be established
+    evidence file only when the task asks for one or a criterion cannot be established
     without it.
 handoff_visibility: minimal

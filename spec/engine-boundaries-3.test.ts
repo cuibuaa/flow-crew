@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { buildRetryPreamble, captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively, closeRepairRoundSnapshot, parseDispatchedStageConfig, restoreProjectPath } from '../src/scheduler.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
-import { verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
+
 import { inspectTemporalResearchTests } from '../src/temporal-test-guard.js';
 import { fcGlobalDir, runDir, setFcGlobalDir, writeRunState, type StoreState } from '../src/store.js';
 
@@ -144,66 +144,3 @@ describe('C — temporal retry context', () => {
   });
 });
 
-describe('D — bounded configured pytest replay', () => {
-  const previousPythonUserBase = process.env.PYTHONUSERBASE;
-  beforeAll(() => { process.env.PYTHONUSERBASE ??= join(userInfo().homedir, '.local'); });
-  afterAll(() => {
-    if (previousPythonUserBase === undefined) delete process.env.PYTHONUSERBASE;
-    else process.env.PYTHONUSERBASE = previousPythonUserBase;
-  });
-  async function audit(project: string, report: string, target: string) {
-    const run = root();
-    const artifactContract = artifacts([{ id: 'report', root: 'project', path: report }], [inputFile('test', target)],
-      [{ id: 'pytest_evidence', runner: 'pytest', targets: ['test'], argv: ['-q'], expected: { exit_code: 0, failures: [] } }]);
-    write(join(project, report), '# Evidence is declared, independently of this prose.\n');
-    return verifyStageArtifactContract({ stageId: 'audit', template: `Write ${report}.`, artifactContract, projectDir: project, runDir: run, writes: [report] }, { remainingMs: () => 30_000 });
-  }
-
-  it('executes configured Python and Makefile pytest evidence and refuses a failing test', async () => {
-    const project = root();
-    if (!pytestAvailable(project)) throw new Error('pytest is required for the configured replay; missing dependencies cannot pass');
-    write(join(project, 'pyproject.toml'), '[project]\nname="probe"\nversion="0.1.0"\ndependencies=["pytest"]\n');
-    write(join(project, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    expect((await audit(project, 'reports/pass.md', 'tests/test_ok.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, executedTests: 1 });
-    write(join(project, 'tests/test_fail.py'), 'def test_fail():\n    assert False\n');
-    expect((await audit(project, 'reports/fail.md', 'tests/test_fail.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'failed', exitCode: 1, failedTests: 1 });
-    write(join(project, 'tests/test_skip.py'), 'import pytest\ndef test_skip():\n    pytest.skip("no execution")\n');
-    expect((await audit(project, 'reports/skipped.md', 'tests/test_skip.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'failed', exitCode: 0, executedTests: 0 });
-    const make = root();
-    write(join(make, 'Makefile'), 'PYTHON ?= python3\ntest:\n\t$(PYTHON) -m pytest tests/test_ok.py -q\n');
-    write(join(make, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    expect((await audit(make, 'reports/make.md', 'tests/test_ok.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'passed', executedTests: 1 });
-  });
-
-  it('refuses skipped-only pytest evidence despite a spoofed terminal summary', async () => {
-    const project = root();
-    if (!pytestAvailable(project)) throw new Error('pytest is required for this replay');
-    write(join(project, 'pyproject.toml'), '[project]\nname="probe"\nversion="0.1.0"\ndependencies=["pytest"]\n');
-    write(join(project, 'conftest.py'), 'def pytest_terminal_summary(terminalreporter):\n    terminalreporter.write_line("1 passed")\n');
-    write(join(project, 'tests/test_skip.py'), 'import pytest\ndef test_skip():\n    pytest.skip("no execution")\n');
-    expect((await audit(project, 'reports/spoof.md', 'tests/test_skip.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'failed', exitCode: 0, executedTests: 0, skippedTests: 1 });
-  });
-
-  it('refuses unconfigured runners, unsafe argv, absent targets and outward aliases before execution', async () => {
-    const unconfigured = root(); write(join(unconfigured, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    expect((await audit(unconfigured, 'reports/unconfigured.md', 'tests/test_ok.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'not_run', reason: expect.stringContaining('configured') });
-    const configured = root();
-    write(join(configured, 'pyproject.toml'), '[project]\nname="probe"\nversion="0.1.0"\ndependencies=["pytest"]\n');
-    write(join(configured, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    for (const argv of [['-q', '&&', 'touch escaped.marker'], ['-q', '-c', 'outside.ini']]) {
-      expect(() => ArtifactContractSchema.parse({ version: 1, produces: [], reads: [inputFile('test', 'tests/test_ok.py')], replays: [{ id: 'unsafe', runner: 'pytest', targets: ['test'], argv, expected: { exit_code: 0, failures: [] } }] })).toThrow(/argv/);
-    }
-    expect(existsSync(join(configured, 'escaped.marker'))).toBe(false);
-    expect((await audit(configured, 'reports/missing.md', 'tests/test_missing.py')).replayExecutions[0])
-      .toMatchObject({ runner: 'pytest', status: 'not_run' });
-    const outside = root(); write(join(outside, 'test_escape.py'), 'def test_escape():\n    assert True\n');
-    symlinkSync(join(outside, 'test_escape.py'), join(configured, 'tests/test_escape.py'));
-    await expect(audit(configured, 'reports/escape.md', 'tests/test_escape.py')).rejects.toThrow('ARTIFACT_PATH_ESCAPE');
-  });
-});

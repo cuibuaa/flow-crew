@@ -14,7 +14,7 @@ import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
 import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
 import { recordRunEvent } from '../../run-events.js';
 import { executeIteration } from './iteration.js';
-import { admitScopedAuditRepairs, runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
+import { runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -75,7 +75,6 @@ export async function settleGateRetries(
       if (outerCheck.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
           && terminateForGateContractRefusal(state, outerCheck, projectDir, runId, iteration)) return { kind: 'settled', state };
       const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
-      state = admitScopedAuditRepairs(sorted, state, outerCheck, projectDir, runId, runDirPath, workflow, roleRegistry);
       log.info({
         event: 'gate_retry_outer_check',
         runId,
@@ -131,7 +130,6 @@ export async function settleGateRetries(
               );
             }
             const currentRejectedGateIds = currentCheck.rejectedGateIds;
-            state = admitScopedAuditRepairs(sorted, state, currentCheck, projectDir, runId, runDirPath, workflow, roleRegistry);
             const breakConditions = { allPass: currentCheck.allPass };
             const shouldBreakForPassingGates = breakConditions.allPass;
             log.info({
@@ -320,7 +318,6 @@ export async function settleGateRetries(
 
             // Check gates again
             const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
-            state = admitScopedAuditRepairs(sorted, state, recheck, projectDir, runId, runDirPath, workflow, roleRegistry);
             if (recheck.contractRefusals.length > 0) {
               archiveRejectedGateRuntimeFacts(
                 runDirPath,
@@ -330,7 +327,7 @@ export async function settleGateRetries(
             }
             if (recheck.allPass) break;
             if (inner === maxInnerRetries - 1) {
-              log.info({ runId, iteration }, 'Inner loop exhausted, falling back to outer re-plan');
+              log.info({ runId, iteration }, 'Bounded repair loop exhausted');
             }
           }
         }

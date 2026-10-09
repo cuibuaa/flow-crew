@@ -176,7 +176,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     if (snapshot.resources.status === 'available') expect(snapshot.resources.snapshot.leases[0].owner.runId).toBe(runId);
   });
 
-  it('exposes settled file bytes and directory members without confusing them with later metadata', () => {
+  it('exposes archived settlement bytes and directory members without confusing them with later metadata', () => {
     mkdirSync(join(project, 'large'));
     writeFileSync(join(project, 'small.md'), 'abc');
     writeFileSync(join(project, 'large/payload'), Buffer.alloc(32768, 65));
@@ -184,6 +184,13 @@ describe('versioned run state and immutable invocation inputs', () => {
       writes: ['small.md', 'large/payload'], artifactContract: ArtifactContractSchema.parse({ version: 1,
         produces: [{ id: 'small', root: 'project', path: 'small.md' }, { id: 'large', root: 'project', path: 'large', kind: 'directory' }], reads: [], replays: [] }) });
     expect(audit.violations).toEqual([]);
+    // A historical receipt remains readable; new intermediate observations
+    // no longer establish freshness obligations or recursively hash directories.
+    audit.obligations = ['small.md', 'large'].map((path) => ({ kind: 'declared_artifact', mention: `project:${path}`, path: join(project, path), source: 'declaration' }));
+    audit.observations = [
+      { id: 'small', path: join(project, 'small.md'), kind: 'file', bytes: 3, sha256: 'a'.repeat(64), fresh: true },
+      { id: 'large', path: join(project, 'large'), kind: 'directory', bytes: 32768, members: 1, sha256: 'b'.repeat(64), fresh: true },
+    ];
     writeStageArtifactContractAudit(directory, audit);
     writeFileSync(join(project, 'small.md'), 'edited');
     const summary = summarizeRunStateView(view()) as { artifacts: ReturnType<typeof view>['artifacts'] };

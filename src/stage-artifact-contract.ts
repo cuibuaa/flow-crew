@@ -2,11 +2,10 @@ import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import type { LiveConstraintContentIdentity } from './live-constraint-guard.js';
-import { ArtifactContractSchema, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
+import { ArtifactContractSchema, artifactDeclarationErrors, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import type { StageStatus } from './store.js';
-import { declaredArtifactPreimages, inspectDeclaredStageArtifactContract } from './declared-artifact-audit.js';
-import { executeDeclaredReplays, type ReplayBudget } from './declared-replay-execution.js';
-import type { ReplayTests } from './declared-replay-results.js';
+import { readLiveConstraintContentIdentity } from './live-constraint-guard.js';
+import { existsSync } from 'node:fs';
 
 export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target' | 'declared_artifact' | 'declared_replay';
 
@@ -34,7 +33,7 @@ export interface StageArtifactContractAudit {
   replayVerification?: 'pending' | 'verified' | 'refused' | 'not_requested';
   obligations: StageArtifactObligation[];
   producedPromptArtifacts: string[];
-  /** Quantities from the existing settled content inspection, never a second scan. */
+  /** Current verdict receipt, or quantities retained in historical records. */
   observations?: Array<{ id: string; path: string; kind: 'file' | 'directory'; bytes: number; members?: number; sha256: string; fresh: boolean }>;
   replayExecutions: StageArtifactReplayExecution[];
   violations: StageArtifactContractViolation[];
@@ -49,9 +48,7 @@ export interface StageArtifactProduction {
   attemptStartedAt: string;
 }
 
-/** Content may survive an execution; its admitted duties must survive as well.
- * Deleting freshness would accept unrelated preexisting files. One binding on
- * the protected audit replaces the suspension-only path exception. */
+/** Bind the protected gate result observation to the current execution. */
 export function stageArtifactProduction(input: StageArtifactContractInput & {
   runId: string; attemptIndex: number; attemptStartedAt: string;
   planRevision?: { revision: number; digest: string };
@@ -87,7 +84,7 @@ export interface StageArtifactReplayExecution {
   declarationId?: string;
   effectiveTimeoutMs?: number;
   elapsedMs?: number;
-  targets?: Array<ReplayTests & { artifact: string; path: string; executed: number }>;
+  targets?: Array<{ artifact: string; path: string; executed: number; [key: string]: unknown }>;
   /** Every direct process outcome, including earlier targets and abnormal exits.
    * These observations explain a refusal; they cannot overrule it. */
   processes?: StageArtifactReplayProcess[];
@@ -142,7 +139,7 @@ export interface StageArtifactContractInput {
   runDir: string;
   writes?: readonly string[];
   preimages?: readonly StageArtifactContractPreimage[];
-  /** Verified by the worker from its protected prior audit and attempt ledger. */
+  /** Legacy caller surface; intermediate preimages are ignored. */
   priorProducedArtifacts?: readonly StageArtifactContractPreimage[];
   /** Legacy caller surface, retained but never an authorization. */
   priorProducedPromptArtifacts?: readonly string[];
@@ -151,45 +148,43 @@ export interface StageArtifactContractInput {
 }
 
 
-/** Capture exact declarations only. Legacy records are data, never fresh duties. */
-export function captureStageArtifactContractPreimages(input: Pick<StageArtifactContractInput, 'template' | 'projectDir' | 'runDir' | 'artifactContract'>): StageArtifactContractPreimage[] {
-  return ArtifactContractSchema.safeParse(input.artifactContract).success
-    ? declaredArtifactPreimages({ ...input, artifactContract: input.artifactContract! }) : [];
-}
-
-function refusedDeclaration(input: StageArtifactContractInput): StageArtifactContractAudit | undefined {
+/** Record optional outputs for consumers. Presence, age and proof collection do
+ * not adjudicate intermediate work; the independent gate reviews the result.
+ * Directory capabilities are not recursively hashed at every attempt boundary.
+ */
+export function inspectStageArtifactContract(input: StageArtifactContractInput, deferred = false): StageArtifactContractAudit {
   const errors = artifactDeclarationErrors(input.artifactContract, input.stageId);
-  if (!errors.length) return undefined;
-  const obligation: StageArtifactObligation = { kind: 'declared_artifact', source: 'declaration', mention: `${input.stageId}.artifact_contract`, path: join(input.runDir, 'stages', input.stageId, 'artifact_contract.json') };
-  return { version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(), obligations: [], producedPromptArtifacts: [], replayExecutions: [], replayVerification: 'refused', violations: errors.map((reason) => ({ ...obligation, reason })) };
-}
-
-/** Scope suspension records output identity; successful settlement verifies replay. */
-export function captureDeferredStageArtifactContract(input: StageArtifactContractInput): StageArtifactContractAudit {
-  return refusedDeclaration(input) ?? inspectDeclaredStageArtifactContract({ ...input, artifactContract: input.artifactContract! }, true);
-}
-
-/** Recognition-only inspection. A pending replay cannot authorize completion. */
-export function inspectStageArtifactContract(input: StageArtifactContractInput): StageArtifactContractAudit {
-  const refusal = refusedDeclaration(input);
-  if (refusal) return refusal;
-  const audit = inspectDeclaredStageArtifactContract({ ...input, artifactContract: input.artifactContract! });
-  audit.replayVerification = input.artifactContract!.replays!.length ? 'pending' : 'not_requested';
-  return audit;
-}
-
-/** Worker settlement always runs every declared replay, independent of report prose. */
-export async function verifyStageArtifactContract(input: StageArtifactContractInput, budget: ReplayBudget): Promise<StageArtifactContractAudit> {
-  const audit = inspectStageArtifactContract(input);
-  if (audit.replayVerification === 'refused') return audit;
-  audit.replayExecutions = await executeDeclaredReplays(input, budget);
-  for (const execution of audit.replayExecutions) {
-    if (execution.status === 'passed') continue;
-    audit.violations.push({ kind: 'declared_replay', source: 'declaration', mention: `artifact_contract.replays.${execution.declarationId}`, path: execution.targetPaths[0] ?? '', reason: `DECLARED_REPLAY_REFUSED: ${execution.declarationId}: ${execution.reason}` });
+  if (errors.length) return {
+    version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(),
+    obligations: [], producedPromptArtifacts: [], replayExecutions: [], violations: errors.map(reason => ({
+      kind: 'declared_artifact', source: 'declaration', mention: `${input.stageId}.artifact_contract`,
+      path: join(input.runDir, 'stages', input.stageId, 'artifact_contract.json'), reason,
+    })),
+  };
+  const contract = ArtifactContractSchema.parse(input.artifactContract);
+  const observations: NonNullable<StageArtifactContractAudit['observations']> = [];
+  const produced: string[] = [];
+  for (const artifact of contract.produces) {
+    const path = resolveArtifactLocation(artifact, input.projectDir, input.runDir);
+    if (existsSync(path)) produced.push(path);
+    if (artifact.kind !== 'file' || input.isGate !== true || artifact.root !== 'run'
+        || artifact.path !== `verdict_${input.stageId}.json`) continue;
+    const identity = readLiveConstraintContentIdentity(path);
+    if (identity.state === 'present' && identity.type === 'file') observations.push({
+      id: artifact.id, path, kind: artifact.kind, bytes: identity.byteLength, sha256: identity.sha256,
+      // Retained record field: only a published current gate verdict is an
+      // adjudication, rather than a reusable intermediate output.
+      fresh: input.isGate === true && artifact.root === 'run'
+        && artifact.path === `verdict_${input.stageId}.json`
+        && ((input.writes ?? []).includes(path) || (input.writes ?? []).includes(`run:${artifact.path}`)),
+    });
   }
-  audit.replayVerification = audit.replayExecutions.some((entry) => entry.status !== 'passed') ? 'refused' : audit.replayExecutions.length ? 'verified' : 'not_requested';
-  audit.checkedAt = new Date().toISOString();
-  return audit;
+  return {
+    version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(),
+    ...(deferred ? { completionDeferred: true } : {}),
+    obligations: [], producedPromptArtifacts: produced.sort(), observations,
+    replayExecutions: [], replayVerification: 'not_requested', violations: [],
+  };
 }
 
 export function writeStageArtifactContractAudit(runDir: string, audit: StageArtifactContractAudit): string {

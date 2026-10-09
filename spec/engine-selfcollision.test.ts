@@ -33,7 +33,7 @@ import {
   writeCampaignEntry,
   type StageConfig,
 } from '../src/scheduler.js';
-import { inspectStageArtifactContract, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import {
   campaignsRoot,
   createRun,
@@ -392,54 +392,6 @@ describe('engine self-collision after-state replays and controls', () => {
       literalGeneratedControl: literal,
       projectionPositive: stableGeneratedScope(generatedMember),
       projectionNegative: stableGeneratedScope('src/generated/ordinary.ts') ?? null,
-    });
-  });
-
-  it('4 — verifies exact declared replay targets and keeps report citations inert', async () => {
-    const root = temporaryRoot('item-4');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(root, 'run-fixture');
-    const reportRelative = 'reports/published.md';
-    write(join(runDirectory, 'stages', 'gate', 'evidence.json'), '{"evidence":true}\n');
-    write(join(projectDir, reportRelative), '# Replay\n\n`node --test evidence.json`\n');
-    const contract = (path: string) => artifacts(
-      [{ id: 'report', root: 'project', path: reportRelative }],
-      [inputFile('test', path)],
-      [{ id: 'evidence', runner: 'node_test', targets: ['test'], argv: [], expected: { exit_code: 0, failures: [] } }],
-    );
-    const inspect = (path: string) => verifyStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir,
-      runDir: runDirectory, writes: [reportRelative], artifactContract: contract(path),
-    }, { remainingMs: () => 30_000 });
-    const bare = await inspect('evidence.json');
-    expect(bare.violations.some(({ reason }) => /ARTIFACT_READ_ABSENT|REPLAY_INPUT_ABSENT/.test(reason))).toBe(true);
-    expect(bare.replayExecutions[0]).toMatchObject({ status: 'not_run' });
-
-    const validTarget = 'run-fixture/stages/gate/replay.test.cjs';
-    write(join(projectDir, validTarget), [
-      "const { test } = require('node:test');",
-      "const assert = require('node:assert');",
-      "test('full citation', () => assert.equal(2 + 2, 4));", '',
-    ].join('\n'));
-    const full = await inspect(validTarget);
-    expect(full.violations).toEqual([]);
-    expect(full.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode: 0, executedTests: 1 });
-    const missingTarget = 'run-fixture/stages/gate/missing.test.cjs';
-    const missing = await inspect(missingTarget);
-    expect(missing.violations.some(({ reason }) => reason.includes('REPLAY_INPUT_ABSENT'))).toBe(true);
-    expect(missing.replayExecutions[0]).toMatchObject({ status: 'not_run' });
-
-    const prose = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir,
-      runDir: runDirectory, writes: [reportRelative],
-      artifactContract: artifacts([{ id: 'report', root: 'project', path: reportRelative }]),
-    });
-    expect(prose.violations).toEqual([]);
-    expect(prose.replayExecutions).toEqual([]);
-    recordAfter(4, 'declare missing bare, existing exact nested and missing full targets; keep report citation unchanged', {
-      bareRefused: bare.violations, bareExecution: bare.replayExecutions[0],
-      fullExecution: full.replayExecutions[0], fullViolations: full.violations,
-      missingFullRefused: missing.violations, inertProseExecutions: prose.replayExecutions,
     });
   });
 

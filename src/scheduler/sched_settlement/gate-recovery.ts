@@ -410,14 +410,9 @@ export function findGateRecoveryStages(
 
     if (rejectionKind === 'irreparable_rejection') continue;
 
-    if (rejectionKind === 'engine_contract_or_evidence_rejection') {
-      // The authored verdict says the work passed; the engine rejected the
-      // verdict/evidence contract. Re-run that evidence producer, never a
-      // product repair whose inputs already passed its own judgment.
-      const gate = byId.get(gateId);
-      if (gate?.is_gate) selected.set(gate.id, gate);
-      continue;
-    }
+    // Evidence refusal cannot certify the product or justify an unchanged
+    // model review. Mechanical validation settlement owns its own bounded work.
+    if (rejectionKind === 'engine_contract_or_evidence_rejection') continue;
 
     if (rejectionKind === 'omitted_research_outcome' && research) {
       for (const candidate of allStages) {

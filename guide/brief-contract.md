@@ -588,15 +588,12 @@ and the conditional stage is recorded `skipped`. Dynamically dispatched
 conditions are also persisted in `workflow.yaml`, so the recorded DAG matches
 the one the scheduler evaluated.
 
-`artifact_contract` is the machine-checkable output, read and replay interface.
-Its version 1 `produces`, `reads` and `replays` lists are explicit, even when
-empty. An ordinary stage cannot settle successfully with a missing or stale
-declared output or an unverified declared replay. Prose and report commands
-create no additional duties. Exact paths and producer bindings remove filename
-guessing: "write X/a.json and b.md" does not declare either path. Declare
-`X/a.json` and `X/b.md` separately when those are the intended locations.
-See [declared artifacts and replay commands](engine-state-and-revisions.md) for
-rooted sources, output groups, expected failing reproductions and budget limits.
+`artifact_contract` carries optional output/input locations for write capability,
+ownership and reachability. It does not impose intermediate freshness, proof
+collection or engine replays. Authors run useful targeted checks; the independent
+gate judges correctness using the engine-owned configured validation comparison.
+See [artifact locations and plan revisions](engine-state-and-revisions.md).
+
 
 ### `scope`: the paths a stage may write
 

@@ -468,7 +468,7 @@ describe('gate retry loop entry', () => {
     }));
   });
 
-  it('uses a fresh round-zero entrance read instead of reaching the dispatch guard', async () => {
+  it('settles transient evidence without re-running a passing review', async () => {
     const logPath = join(root, 'mechanism.log');
     const result = await runScenario({ gatePasses: [true], staleMetricReads: 2, logPath });
     const logs = readFileSync(logPath, 'utf-8');
@@ -477,14 +477,11 @@ describe('gate retry loop entry', () => {
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
-    expect(logs).toContain('"event":"gate_retry_entry_check"');
-    expect(logs).toContain('"source":"fresh-runtime-collection","allPass":true');
-    expect(logs).toContain('"decision":"break"');
     expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
-  it('re-reads related verdicts at the dispatch point and blocks a stale entrance', async () => {
+  it('does not dispatch product repair for a passing authored review with transient metric evidence', async () => {
     const logPath = join(root, 'guard.log');
     const result = await runScenario({ gatePasses: [true], staleMetricReads: 4, logPath });
     const logs = readFileSync(logPath, 'utf-8');
@@ -492,26 +489,20 @@ describe('gate retry loop entry', () => {
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
-    expect(logs).toContain('"event":"gate_retry_dispatch_guard"');
-    expect(logs).toContain('"decision":"skip-repair-dispatch"');
+    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
     expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
-  it('keeps policy-aware metric rejection authoritative at the dispatch guard', async () => {
-    const result = await runScenario({ gatePasses: [true, true], staleMetricReads: 6 });
-
-    expect(result.final.status).toBe('complete');
-    expect(result.gateCalls).toBe(2);
+  it('refuses a persistent metric mismatch without re-running a passing review', async () => {
+    const result = await runScenario({ gatePasses: [true, true], staleMetricReads: Number.MAX_SAFE_INTEGER });
+    expect(result.final.status).toBe('incomplete');
+    expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
-    expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
     expect(JSON.parse(readFileSync(join(
-      result.runDirPath,
-      'gate_reevaluation',
-      'iteration_1',
-      'round_1',
-      `rejected_verdict_${GATE_ID}.json`,
-    ), 'utf-8'))).toMatchObject({ pass: true });
+      result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1',
+      `engine_verdict_${GATE_ID}.json`,
+    ), 'utf-8'))).toMatchObject({ written_verdict_pass: true, engine_effective_pass: false });
   });
 
   it('guards a related pass even while an unrelated gate remains rejected', async () => {
@@ -525,11 +516,10 @@ describe('gate retry loop entry', () => {
     const logs = readFileSync(logPath, 'utf-8');
 
     expect(result.repairCalls).toBe(0);
-    expect(logs).toContain(`"activeGateIds":["${GATE_ID}"]`);
-    expect(logs).toContain('"decision":"skip-repair-dispatch"');
+    expect(result.gateCalls).toBe(1);
+    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
     const archiveDir = join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
-    expect(existsSync(join(archiveDir, `rejected_verdict_${GATE_ID}.json`))).toBe(false);
     expect(JSON.parse(readFileSync(
       join(archiveDir, `rejected_verdict_${UNRELATED_GATE_ID}.json`),
       'utf-8',

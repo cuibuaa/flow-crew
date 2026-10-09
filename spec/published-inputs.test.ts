@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { ArtifactContractSchema, type ArtifactContract } from '../src/artifact-declarations.js';
-import { captureStageArtifactContractPreimages, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
+
 import { applyBasePrompt, inspectDispatchAdmission, loadBasePrompt, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
 
@@ -82,30 +82,6 @@ describe('published declaration inputs', () => {
         }
       }
     }
-  });
-
-  it.each([0, 1])('executes the published Node replay example with expected direct exit %i', async (exitCode) => {
-    const contract = guideContracts().find((entry) => entry.replays?.some((replay) => replay.runner === 'node_test' && replay.expected.exit_code === exitCode));
-    expect(contract, 'guide must retain a runnable declaration for this outcome').toBeDefined();
-    const owned = fixture();
-    try {
-      const input = { stageId: 'audit', template: 'Report commands have no executable authority.', projectDir: owned.project, runDir: owned.run, artifactContract: contract! };
-      const preimages = captureStageArtifactContractPreimages(input);
-      for (const output of contract!.produces) {
-        const path = join(output.root === 'project' ? owned.project : owned.run, output.path);
-        mkdirSync(dirname(path), { recursive: true });
-        const title = exitCode ? contract!.replays![0].expected.failures[0].test : 'declared regression';
-        writeFileSync(path, `import test from 'node:test'; import assert from 'node:assert/strict';\ntest(${JSON.stringify(title)}, () => assert.equal(1, ${exitCode ? 2 : 1}));\n`);
-      }
-      const started = performance.now();
-      const audit = await verifyStageArtifactContract({ ...input, preimages }, { remainingMs: () => Math.max(0, 15_000 - (performance.now() - started)) });
-      expect(audit.violations).toEqual([]);
-      expect(audit.replayExecutions).toHaveLength(1);
-      expect(audit.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode, timedOut: false, collectedTests: 1, executedTests: 1, failedTests: exitCode, passedTests: 1 - exitCode });
-      const { replays: omitted, ...oldContract } = contract!;
-      expect(omitted).toHaveLength(1);
-      expect(() => ArtifactContractSchema.parse(oldContract)).toThrow('REPLAY_DECLARATION_REQUIRED');
-    } finally { owned.cleanup(); }
   });
 
   it('runs the published reality checks on their declared inputs and refuses a mismatched result', async () => {

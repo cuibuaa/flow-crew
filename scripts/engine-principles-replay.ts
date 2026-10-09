@@ -49,7 +49,7 @@ function referencedTemplate(row:any):string{
   if(!stage)throw new Error(`Template reference hash mismatch: ${row.raw_sha256}`);return stage.prompt_template;
 } 
 const expected:Record<string,number>={stage_schema:rawStages.length,artifact_contracts:templates.length,check_declarations:checks.length,general_admission:documents.length,native_admission:nativeDocs.length,reality_admission:checks.length,recorded_audits:audits.length,gate_verdicts:verdicts.length,retry_requirements:admissions.length};
-writeFileSync(join(output,'replay_selection_before.json'),JSON.stringify({version:3,at:new Date().toISOString(),expected,sources,rules:['New live inputs add exact contract/replays errors while retaining graph, ownership, warnings and terminal decisions.','Prompt/report prose supplies no obligations; a legacy input is refused for missing declarations.','Reality declarations require reads including advisory checks; malformed declarations fail admission. Only undeclared script references are superseded.','Typed handler reads bind their declared physical root; invalid/outward declarations remain refused.','Recorded obligation/replay/verdict bytes remain readable; no stored command or check runs.','Every other difference is ambiguous_unpredicted and blocks an achieved replay claim.'],context:'Frozen full selected recognition projections; absent original complete-plan role/criteria/input/terminal provenance is censored'},null,2));
+writeFileSync(join(output,'replay_selection_before.json'),JSON.stringify({version:3,at:new Date().toISOString(),expected,sources,rules:['New live inputs use the native location declaration errors while retaining graph, ownership, warnings and terminal decisions.','Prompt/report prose supplies no obligations; a legacy input is refused for missing declarations.','Reality declarations require reads including advisory checks; malformed declarations fail admission. Only undeclared script references are superseded.','Typed handler reads bind their declared physical root; invalid/outward declarations remain refused.','Recorded obligation/replay/verdict bytes remain readable; no stored command or check runs.','Every other difference is ambiguous_unpredicted and blocks an achieved replay claim.'],context:'Frozen full selected recognition projections; absent original complete-plan role/criteria/input/terminal provenance is censored'},null,2));
 async function runtime(dist:string){const load=(file:string)=>import(pathToFileURL(join(dist,file)).href);return{scheduler:await load('scheduler.js'),contract:await load('stage-artifact-contract.js'),checks:await load('reality-gate/index.js'),retry:await load('plan-retry-monotone.js'),declarations:await load('artifact-declarations.js')};}
 const before=await runtime(baseline),after=await runtime(candidate),reader=await import(pathToFileURL(join(candidate,'recorded-artifact-contract.js')).href);
 const project=join(scratch,'empty-project'),directory=join(scratch,'empty-run');mkdirSync(project);mkdirSync(directory);
@@ -57,14 +57,9 @@ const replayClock = Date.parse('2000-01-01T00:00:00.000Z');
 function decision(fn:()=>unknown):ReplayDecision{try{return{status:'returned',value:recordedReplayValue(withRecordedReplayClock(replayClock,fn),scratch)};}catch(e){return{status:'refused',error:String((e as Error).message??e).replaceAll(scratch,'<owned-root>')};}}
 const key=(value:unknown)=>JSON.stringify(value),same=(a:ReplayDecision,b:ReplayDecision)=>key(a)===key(b);
 function formatErrors(raw:any):string[]{
-  if(!raw.artifact_contract)return[`ARTIFACT_DECLARATION_REQUIRED: ${raw.id??'stage'}.artifact_contract: declare {version:1, produces:[], reads:[], groups:[], replays:[]} explicitly; prose cannot supply this contract`];
-  if(typeof raw.artifact_contract==='object'&&!('replays'in raw.artifact_contract)){
-    const errors=[`REPLAY_DECLARATION_REQUIRED: ${raw.id??'stage'}.artifact_contract.replays: declare [] explicitly, or structured {id, runner, targets, argv, expected} replay commands`];
-    const recorded=after.declarations.RecordedArtifactContractSchema.safeParse(raw.artifact_contract);
-    if(!recorded.success)errors.push(`ARTIFACT_DECLARATION_INVALID: ${raw.id??'stage'}.artifact_contract: ${recorded.error.message}`);
-    return errors;
-  }return[];
+  return after.declarations.artifactDeclarationErrors(raw.artifact_contract, raw.id ?? 'stage');
 }
+
 const schemaCache=new Map<string,{decisions:ReplayDecision[];classification:string}>();
 const schemaRows=rawStages.map((row:any)=>{
   const digest=hash(JSON.stringify(row.stage));let result=schemaCache.get(digest);
@@ -73,7 +68,7 @@ const schemaRows=rawStages.map((row:any)=>{
 });
 const artifactRows=templates.map((row:any,index:number)=>{
   let template=referencedTemplate(row);if(row.project_dir)template=template.replaceAll(row.project_dir,project);if(row.run_dir)template=template.replaceAll(row.run_dir,directory);
-  const inspect=(engine:typeof after)=>decision(()=>{const i={stageId:'recorded',template,projectDir:project,runDir:directory,writes:[]};const audit=engine.contract.inspectStageArtifactContract({...i,preimages:engine.contract.captureStageArtifactContractPreimages(i)});if(audit.replayExecutions.length)throw new Error('Stored command execution forbidden');return{obligations:audit.obligations,violations:audit.violations};});
+  const inspect=(engine:typeof after)=>decision(()=>{const i={stageId:'recorded',template,projectDir:project,runDir:directory,writes:[]};const audit=engine.contract.inspectStageArtifactContract(i);if(audit.replayExecutions.length)throw new Error('Stored command execution forbidden');return{obligations:audit.obligations,violations:audit.violations};});
   const a=inspect(before),b=inspect(after);const intended=b.status==='returned'&&key((b.value as any).obligations)==='[]'&&(b.value as any).violations.length===1&&(b.value as any).violations[0].reason===formatErrors({id:'recorded'})[0];
   return{index,templateHash:row.raw_sha256,contextState:row.context_state,occurrenceCount:row.occurrences.length,decisions:[a,b],classification:same(a,b)?'unchanged':intended?'intended':'ambiguous_unpredicted',rule:'prose_inference_removed_and_legacy_input_refused'};
 });

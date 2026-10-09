@@ -43,16 +43,12 @@ prompt: |
   Gate reports cite durable rejected-verdict paths under gate_reevaluation/iteration_<n>/round_<n>/.
   Keep handoffs brief: changed paths, direct check exits, evidence locators and material caveats.
 
-  Optional exact artifacts use artifact_contract version 1: produces, reads, groups, replays.
-  Locations have id, root (project or run), path, optional kind (file or directory).
-  Stage reads name source {kind: stage, stage: producer_id, artifact: producer_artifact_id};
-  existing inputs use {kind: input}; framework brief/state reads use {kind: framework, artifact: task_brief|run_state}.
-  Optional when {stage: ancestor_id, field: exitCode|status, equals: value} binds settled facts.
-  Alternatives use groups [{id: outcome, mode: exactly_one, members: [artifact_ids]}].
-  Replays name id, runner (node_test|vitest|pytest), target artifact IDs, argv, expected
-  {exit_code, failures: [{artifact, test}]}. A claimed failure must name exact failing tests.
-  Import errors, empty/skipped targets, mismatches, signals and timeouts never verify evidence.
-  Preserve explicit admitted duties. See guide/engine-state-and-revisions.md when using revisions.
+  Optional artifact_contract locations supply capabilities and ownership: version 1,
+  produces and reads, with id, root (project or run), path and kind (file or directory).
+  No separate audit proof, post-attempt replay or intermediate freshness protocol is required.
+  Combine independent review in the gate's existing result. A successful repair returns
+  to the same gate; an exhausted or failed repair stops without repeating the whole plan.
+  Preserve isolation metadata when revising a plan. See guide/engine-state-and-revisions.md.
 
   Reality checks are optional; avoid repeating engine validation, result schema and loop floors.
   If needed, write reality_checks.md with a fenced YAML checks list: name, type, reads, params.

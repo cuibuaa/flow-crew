@@ -18,7 +18,7 @@ describe('declared fixture migration boundary', () => {
   });
 
   it.each([
-    { version: 1, produces: [], reads: [] },
+    { version: 2, produces: [], reads: [] },
     { version: 1, produces: [{ id: 'escape', root: 'run', path: '../outside.md' }], reads: [], replays: [] },
     { version: 1, produces: [], reads: [], replays: [{ id: 'shell', runner: 'shell', targets: ['missing'], argv: [] }] },
   ])('preserves a malformed existing declaration for native refusal: %j', (artifact_contract) => {

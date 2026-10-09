@@ -343,7 +343,7 @@ describe('engine generalization runtime bindings', () => {
     const research = { baseline: 0, policy: 'best_of_n' as const, resultFile: 'artifacts/round.json' };
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: contractFact.effectiveVerdict?.reason }, research, { qa: contractFact },
-    ).map((entry) => entry.id)).toEqual(['qa']);
+    ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: substantiveFact.effectiveVerdict?.reason }, research, { qa: substantiveFact },
     ).map((entry) => entry.id)).toEqual(['repair']);
@@ -413,9 +413,9 @@ describe('engine generalization runtime bindings', () => {
       true,
     );
     expect({ status: final.status, gateCalls, repairCalls }).toEqual({
-      // The contract rejection must re-run only the gate/evidence producer; the
-      // product-repair stage remains blocked because the authored verdict passed.
-      status: 'complete', gateCalls: 2, repairCalls: 0,
+      // Invalid gate evidence does not authorize product repair or another
+      // unchanged gate review. The contract refusal remains a terminal failure.
+      status: 'failed', gateCalls: 1, repairCalls: 0,
     });
   });
 

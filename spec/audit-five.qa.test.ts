@@ -287,7 +287,8 @@ describe.sequential('five-instrument independent QA', () => {
     const declared = markdown('test -s docs/report.json').replace('reads: []', 'reads: [{id: report, root: project, path: docs/report.json, source: {kind: stage, stage: absent, artifact: report}}]');
     expect(inspectRealityCheckReachability({ markdown: declared, projectDir, stages: [] }).join(';')).toContain('ARTIFACT_READ_UNREACHABLE');
     expect(patternAudit.obligations).toEqual([]);
-    expect(literalAudit.obligations.map((row) => row.mention)).toEqual(['project:docs/report.md']);
+    expect(literalAudit.obligations).toEqual([]);
+    expect(literalAudit.violations).toEqual([]);
   });
 
   it('derives the campaign default boundary from the full recent window', () => {

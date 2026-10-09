@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { runWorkflow, StageConfigSchema, type WorkflowConfig } from '../src/scheduler.js';
-import { buildScopedRepair } from '../src/scoped-audit-repair.js';
 import {
   createRun,
   fcGlobalDir,
@@ -19,33 +18,6 @@ import {
 let fixtureRoot: string;
 let projectDir: string;
 let previousFcGlobalDir: string;
-
-describe('finding-derived repair duties', () => {
-  const finding = { id: 'late', paths: ['product.txt'], reason: 'Correct the admitted product', criterion_ids: [], invalidates_plan: false, repair_role: 'builder' };
-  const producer = () => StageConfigSchema.parse({ id: 'author', role: 'builder', scope: ['product.txt'],
-    artifact_contract: { version: 1, produces: [{ id: 'product', root: 'project', path: 'product.txt' }],
-      reads: [{ id: 'proof', root: 'project', path: 'proof.test.mjs', source: { kind: 'input' } }],
-      replays: [{ id: 'product_check', runner: 'node_test', targets: ['proof'], argv: [], expected: { exit_code: 0, failures: [] } }],
-    },
-  });
-  const gate = () => StageConfigSchema.parse({ id: 'gate', role: 'qa', scope: [], is_gate: true,
-    artifact_contract: fixtureArtifactContract('gate', true),
-  });
-  it('preserves producer reads and replay identities without broadening the named write scope', () => {
-    const repair = buildScopedRepair(gate(), finding, [producer()]);
-    expect(repair.scope).toEqual(['product.txt']);
-    expect(repair.artifact_contract?.produces.map((entry) => entry.path)).toEqual(['product.txt']);
-    expect(repair.artifact_contract?.reads).toContainEqual(expect.objectContaining({ path: 'proof.test.mjs', source: { kind: 'input' } }));
-    const replay = repair.artifact_contract!.replays![0];
-    expect(replay).toMatchObject({ runner: 'node_test', expected: { exit_code: 0, failures: [] } });
-    expect(replay.targets).toEqual([repair.artifact_contract!.reads.find((entry) => entry.path === 'proof.test.mjs')!.id]);
-    expect(repair.artifact_contract?.reads).toContainEqual(expect.objectContaining({ path: 'verdict_gate.json', source: { kind: 'stage', stage: 'gate', artifact: 'verdict' } }));
-  });
-  it('refuses to narrow conditional producer duties and refuses plan-invalidating findings', () => {
-    expect(() => buildScopedRepair(gate(), finding, [{ ...producer(), condition: 'facts.choice == true' }])).toThrow('SCOPED_REPAIR_CONDITIONAL_DUTY');
-    expect(() => buildScopedRepair(gate(), { ...finding, invalidates_plan: true }, [producer()])).toThrow('SCOPED_REPAIR_PLAN_LEVEL');
-  });
-});
 
 function workflow(maxIterations: number, dynamicDispatch = true): { config: WorkflowConfig; yaml: string } {
   const yaml = [
@@ -155,7 +127,7 @@ afterEach(() => {
 });
 
 describe('engine-owned unresolved stage obligations', () => {
-  it('does not complete when iteration 2 omits an unexecuted downstream stage and passes', async () => {
+  it('stops after rejection and retains the unexecuted downstream obligation', async () => {
     const { config, yaml } = workflow(2);
     const calls: string[] = [];
     let planCalls = 0;
@@ -196,78 +168,10 @@ describe('engine-owned unresolved stage obligations', () => {
     );
 
     expect(final.status).toBe('incomplete');
-    expect(planCalls).toBe(2);
+    expect(planCalls).toBe(1);
     expect(calls).not.toContain('phase5_ci_docs');
     expect(final.unresolvedStageObligations?.map((entry) => entry.stageId)).toEqual(['phase5_ci_docs']);
     expect(final.failureReason).toContain('phase5_ci_docs');
-  });
-
-  it('keeps re-planning until the same downstream stage ID is satisfied', async () => {
-    const { config, yaml } = workflow(3);
-    const calls: string[] = [];
-    const planPrompts: string[] = [];
-    let planCalls = 0;
-    const adapter: Adapter = {
-      async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        calls.push(opts.stageId);
-        if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
-        if (opts.stageId === 'plan') {
-          planCalls++;
-          planPrompts.push(prompt);
-          const dispatch = planCalls === 1
-            ? firstPlan()
-            : planCalls === 2
-              ? passingReplacementPlan('iteration_2_gate')
-              : [
-                  'stages:',
-                  '  - id: phase5_ci_docs',
-                  '    role: builder',
-                  '    depends_on: [plan]',
-                  '    dependency_reasons: {plan: "discharge the carried phase 5 obligation"}',
-                  '    scope: []',
-                  '    task: finally run phase 5 CI and documentation',
-                  '  - id: final_gate',
-                  '    role: qa',
-                  '    depends_on: [phase5_ci_docs]',
-                  '    dependency_reasons: {phase5_ci_docs: "verify the discharged obligation"}',
-                  '    scope: []',
-                  '    is_gate: true',
-                  '    task: accept the fully discharged plan',
-                ].join('\n');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch(dispatch));
-          return fixtureResult(result(`plan ${planCalls}`), opts);
-        }
-        if (opts.stageId === 'gate_phase4') {
-          writeVerdict(opts.runDir, opts.stageId, false);
-          return fixtureResult(result('phase 4 rejected'), opts);
-        }
-        if (opts.stageId === 'iteration_2_gate' || opts.stageId === 'final_gate') {
-          writeVerdict(opts.runDir, opts.stageId, true);
-          return fixtureResult(result(`${opts.stageId} accepted`), opts);
-        }
-        return fixtureResult(result(opts.stageId), opts);
-      },
-    } as Adapter;
-
-    const final = await runWorkflow(
-      config,
-      yaml,
-      projectDir,
-      adapter,
-      new Map(),
-      undefined,
-      writeRoles(),
-      undefined,
-      'A later plan must discharge phase5_ci_docs by exact stage ID.',
-      true,
-    );
-
-    expect(final.status).toBe('complete');
-    expect(planCalls).toBe(3);
-    expect(calls.filter((stageId) => stageId === 'phase5_ci_docs')).toHaveLength(1);
-    expect(planPrompts[1]).toContain('phase5_ci_docs');
-    expect(planPrompts[2]).toContain('phase5_ci_docs');
-    expect(final.unresolvedStageObligations).toBeUndefined();
   });
 
   it('does not let a supervisor DONE signal bypass a pending obligation', async () => {
@@ -325,9 +229,10 @@ describe('engine-owned unresolved stage obligations', () => {
       true,
     );
 
-    expect(final.status).toBe('complete');
-    expect(planCalls).toBe(2);
-    expect(final.stages.phase5_ci_docs.status).toBe('complete');
+    expect(final.status).toBe('incomplete');
+    expect(planCalls).toBe(1);
+    expect(final.stages.phase5_ci_docs.status).toBe('pending');
+    expect(final.unresolvedStageObligations?.map(entry => entry.stageId)).toContain('phase5_ci_docs');
   });
 
   it('guards the no-dispatch allDone completion path', async () => {

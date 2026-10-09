@@ -334,7 +334,7 @@ describe('campaign cost honesty', () => {
     });
   });
 
-  it('keeps usage from stages replaced by a later successful outer re-plan', { timeout: 15_000 }, async () => {
+  it('keeps usage from stages replaced by a deliberate next phase', { timeout: 15_000 }, async () => {
     const yaml = [
       'name: p6-replan-cost',
       'defaults:',
@@ -407,7 +407,7 @@ describe('campaign cost honesty', () => {
           return fixtureResult({ output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 }, opts);
         }
         if (opts.stageId === 'gate_one') {
-          writeFileSync(join(opts.runDir, 'verdict_gate_one.json'), JSON.stringify({ pass: false, reason: 're-plan required' }));
+          writeFileSync(join(opts.runDir, 'verdict_gate_one.json'), JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }));
           return fixtureResult({ output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 }, opts);
         }
         if (opts.stageId === 'work_two') return fixtureResult({ output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 }, opts);

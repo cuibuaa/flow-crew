@@ -1,8 +1,6 @@
 import { z } from 'zod';
-import type { ArtifactContract } from './artifact-declarations.js';
 
-/** Replay declarations contain data, never shell text or a report to parse. */
-export const DECLARED_REPLAY_LIMIT = 32;
+/** Historical replay declarations are data only; the engine never runs them. */
 export const DeclaredReplaySchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   runner: z.enum(['node_test', 'vitest', 'pytest']),
@@ -42,19 +40,3 @@ export const DeclaredReplaySchema = z.object({
 });
 export type DeclaredReplay = z.infer<typeof DeclaredReplaySchema>;
 
-/** Resolve artifact IDs against the same output/read contract as settlement. */
-export function inspectReplayBindings(contract: ArtifactContract): string[] {
-  const errors: string[] = [];
-  const ids = new Set<string>();
-  for (const replay of contract.replays ?? []) {
-    if (ids.has(replay.id)) errors.push(`REPLAY_ID_DUPLICATE: replays.${replay.id} must have a unique declaration ID`);
-    ids.add(replay.id);
-    for (const target of replay.targets) {
-      const artifact = [...contract.produces, ...contract.reads].find((entry) => entry.id === target);
-      if (!artifact || artifact.kind !== 'file' || artifact.when || contract.groups.some((group) => group.members.includes(target))) {
-        errors.push(`REPLAY_TARGET_UNBOUND: replays.${replay.id}.targets ${target} must name an unconditional exact file in artifact_contract.produces or reads`);
-      }
-    }
-  }
-  return errors;
-}

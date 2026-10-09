@@ -16,7 +16,7 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal,
 import { createResearchBudgetFinalizer } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type IterationDisposition = {kind: 'settled' | 'next-iteration' | 'continue'; state: StoreState};
@@ -76,12 +76,7 @@ export async function concludeWorkflowIteration(
       // Terminal-state already handled by the top gate + eager post-batch gate
       // (with an isTerminalStatus early-return after executeIteration), so
       // reaching here means a plain gate-passed completion.
-      if (unresolvedStageIds.length > 0) {
-        if (iteration < maxIterations) {
-          log.info({ runId, iteration, unresolvedStageIds }, 'Gate passed, but required stages remain unresolved — re-planning');
-          return { kind: 'next-iteration', state };
-        }
-      } else {
+      if (unresolvedStageIds.length === 0) {
         return {kind: 'settled', state: await completePlainWorkflow(state, sorted, projectDir, runId, runDirPath, iteration, adapter, 'gate_pass')};
       }
     }
@@ -115,12 +110,7 @@ export async function concludeWorkflowIteration(
         iteration,
         'base_all_done',
       );
-      if (unresolvedStageIds.length > 0) {
-        if (iteration < maxIterations) {
-          log.info({ runId, iteration, unresolvedStageIds }, 'Base stages passed, but required stages remain unresolved — re-planning');
-          return { kind: 'next-iteration', state };
-        }
-      } else {
+      if (unresolvedStageIds.length === 0) {
         return {kind: 'settled', state: await completePlainWorkflow(state, sorted, projectDir, runId, runDirPath, iteration, adapter, 'base_all_done')};
       }
     }
@@ -196,8 +186,8 @@ export async function concludeWorkflowIteration(
       }
     }
 
-    // Max iterations reached
-    if (iteration === maxIterations) {
+    // Exhausted admitted work stops; only successful work advances above.
+    {
       // Preserve an already settled terminal or parked state.
       if (isTerminalStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
       const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
@@ -221,26 +211,13 @@ export async function concludeWorkflowIteration(
       ).stageIds;
       state.status = 'incomplete';
       state.failureReason = unresolvedStageIds.length > 0
-        ? `Max iterations reached (${maxIterations}) with unresolved required stage obligation(s): ${unresolvedStageIds.join(', ')}. A replacement plan cannot satisfy declared work by omission.`
-        : `Max iterations reached (${maxIterations}). Gates did not pass after ${maxIterations} attempt(s) — search budget exhausted mid-progress (incomplete, not a crash).`;
+        ? `Required stage obligation(s) remain unresolved: ${unresolvedStageIds.join(', ')}.`
+        : `Workflow stopped after bounded stage/repair attempts: gates did not pass or required work did not complete (iteration ${iteration}).`;
       state.completedAt = new Date().toISOString();
       publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: state.status}));
-      log.info({ runId, iteration }, 'Max iterations reached, run incomplete (budget exhausted mid-search)');
+      log.info({ runId, iteration }, 'Admitted stage and repair attempts exhausted, run incomplete');
       return { kind: 'settled', state };
     }
-
-    // Clear dispatch.yaml and verdict.json for re-plan
-    const dispatchPath = join(runDirPath, 'dispatch.yaml');
-    if (existsSync(dispatchPath)) {
-      unlinkSync(dispatchPath);
-    }
-    const verdictPath = join(runDirPath, 'verdict.json');
-    if (existsSync(verdictPath)) {
-      unlinkSync(verdictPath);
-    }
-
-    log.info({ runId, iteration: iteration + 1 }, 'Re-planning...');
-  return {kind: 'next-iteration', state};
 }
 
 

@@ -43,4 +43,4 @@ export const { runScopeSafeStageGroup } = createScopeSafeStageRunner({ monitorAp
 // Settlement effects receive only their consumed service.
 export const terminateForGateContractRefusal = createGateContractRefusalHandler(writeCampaignEntry);
 export const archiveDeclaredOutputsBeforePlainCompletion = createPlainCompletionArchiver(writeCampaignEntry);
-export const { admitScopedAuditRepairs, consumePlanRevisions } = createPlanSettlement(inspectDispatchAdmission);
+export const { consumePlanRevisions } = createPlanSettlement(inspectDispatchAdmission);

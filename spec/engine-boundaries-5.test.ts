@@ -11,7 +11,7 @@ import { appendGuidanceEnvelope, readGuidanceForStage } from '../src/guidance.js
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, validateVerdictAgainstMetricFile, type WorkflowConfig } from '../src/scheduler.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
-import { verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
+
 import { runDir } from '../src/store.js';
 import { plannerCriterionAssignmentContext } from '../src/worker.js';
 
@@ -236,34 +236,3 @@ describe('gate metric authority', () => {
   });
 });
 
-describe('bounded Makefile pytest replay', () => {
-  const previousPythonUserBase = process.env.PYTHONUSERBASE;
-  beforeAll(() => { process.env.PYTHONUSERBASE ??= join(userInfo().homedir, '.local'); });
-  afterAll(() => {
-    if (previousPythonUserBase === undefined) delete process.env.PYTHONUSERBASE;
-    else process.env.PYTHONUSERBASE = previousPythonUserBase;
-  });
-  function audit(projectDir: string, argv: string[]) {
-    const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [],
-      reads: [{ id: 'target', root: 'project', path: 'tests/test_ok.py', source: { kind: 'input' } }],
-      replays: [{ id: 'evidence', runner: 'pytest', targets: ['target'], argv,
-        expected: { exit_code: 0, failures: [] } }],
-    });
-    return verifyStageArtifactContract({ stageId: 'work', template: 'Verify the declared test.', projectDir,
-      runDir: temporaryRoot(), artifactContract }, { remainingMs: () => 30_000 });
-  }
-
-  it('verifies the exact declared target through a statically configured Makefile runner', async () => {
-    const project = temporaryRoot();
-    write(join(project, 'Makefile'), 'PY ?= python3\n\n.PHONY: test\ntest:\n\tPYTHONPATH=. PYTEST_ADDOPTS=-p\\ no:cacheprovider $(PY) -m pytest tests/ -q\n');
-    write(join(project, 'tests/test_ok.py'), 'def test_ok():\n    assert True\n');
-    const bare = await audit(project, ['-q']);
-    expect(bare.replayExecutions[0], JSON.stringify(bare.violations)).toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, collectedTests: 1, executedTests: 1 });
-    const module = await audit(project, ['-q', '-p', 'no:cacheprovider']);
-    expect(module.replayExecutions[0]).toMatchObject({ runner: 'pytest', status: 'passed', exitCode: 0, executedTests: 1 });
-    write(join(project, 'Makefile'), 'test:\n\tPYTHONPATH=.. python3 -m pytest tests/ -q\n\tpython3 -m pytest tests/ -q\n');
-    const untrusted = await audit(project, ['-q']);
-    expect(untrusted.replayExecutions[0]).toMatchObject({ runner: 'pytest', status: 'not_run' });
-    expect(untrusted.violations[0].reason).toContain('DECLARED_REPLAY_REFUSED');
-  });
-});

@@ -7,7 +7,6 @@ import { finalizeCodexHome, isCodexSessionUuid, readCodexSession, stageCodexHome
 import { runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { sumInvocationUsage } from './invocation-usage.js';
-import { inspectDeclaredStageReads } from './declared-artifact-audit.js';
 import { renderPlanInterface } from './plan-interface.js';
 import { artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
@@ -67,13 +66,10 @@ import {
   type LiveConstraintInvocationResult,
 } from './live-constraint-guard.js';
 import {
-  captureDeferredStageArtifactContract,
-  captureStageArtifactContractPreimages,
-  verifyStageArtifactContract,
+  inspectStageArtifactContract,
   writeStageArtifactContractAudit,
   stageArtifactProduction,
 } from './stage-artifact-contract.js';
-import { readRecordedArtifactContract, reusableStageArtifactProduction } from './recorded-artifact-contract.js';
 import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
 
 function getDefaultTimeout(projectDir: string): string {
@@ -563,29 +559,15 @@ async function runStageWithWriterLease(
     prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.dynamicDispatch ? ' and dispatch.yaml' : opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff or verdict-file instructions. Put human-readable documents only at paths the task asks people to read. Evidence references name reproducible files or commands.`;
   }
   prompt += `\n\n${runStateContext(opts.projectDir, opts.runId, opts.planRevision)}`;
-  if (opts.artifactContract) prompt += `\n\n# Declared artifact and replay duties\n${JSON.stringify(opts.artifactContract)}`;
+  if (opts.artifactContract) prompt += `\n\n# Output and input locations (capability metadata)\n${JSON.stringify(opts.artifactContract)}`;
 
   const projectWriteScope = opts.projectWriteScope ?? [];
   const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope);
-  const artifactContractPath = join(opts.runDir, 'stages', opts.stageId, 'artifact_contract.json');
-  const artifactContractPreimages = opts.artifactContract || opts.artifactObligationTemplate?.trim()
-    ? captureStageArtifactContractPreimages({
-        template: opts.artifactObligationTemplate ?? '',
-        projectDir: opts.projectDir,
-        runDir: opts.runDir,
-        artifactContract: opts.artifactContract,
-      })
-    : [];
   const production = artifactDeclarationErrors(opts.artifactContract, opts.stageId).length === 0 ? stageArtifactProduction({
     runId: opts.runId, stageId: opts.stageId, projectDir: opts.projectDir, runDir: opts.runDir,
     template: opts.artifactObligationTemplate ?? '', artifactContract: opts.artifactContract,
     isGate: opts.isGate, planRevision: opts.planRevision, attemptIndex, attemptStartedAt,
   }) : undefined;
-  const priorAudit = readRecordedArtifactContract(artifactContractPath);
-  const priorProducedArtifacts = production && priorAudit.status === 'readable'
-    ? reusableStageArtifactProduction(production, opts.stageId, priorAudit.record, runningStatus.attempts ?? [], artifactContractPreimages)
-    : [];
-
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
     ledgerDir: join(opts.runDir, 'stages', opts.stageId),
@@ -1265,11 +1247,10 @@ async function runStageWithWriterLease(
   };
 
   let result: RunResult;
-  // Adapter work and declared replay share one immutable attempt boundary.
+  // All adapter work shares one immutable attempt boundary.
   try {
   try {
     const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
-    if (!preflightErrors.length) preflightErrors.push(...inspectDeclaredStageReads({ artifactContract: opts.artifactContract!, projectDir: opts.projectDir, runDir: opts.runDir, statuses: opts.artifactStatuses }));
     if (!preflightErrors.length && opts.isGate && !aggregateAbortSignal.aborted) {
       const validation = await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId, {
         remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
@@ -1344,65 +1325,12 @@ async function runStageWithWriterLease(
         projectDir: opts.projectDir,
         runDir: opts.runDir,
         writes: [...(result.writes ?? []), ...enginePublishedCarriers],
-        preimages: artifactContractPreimages,
-        priorProducedArtifacts,
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const replayAbort = new AbortController();
-      const replayMonitor = result.exitCode === 0 && !scopeRevisionBoundaryReached && opts.artifactContract?.replays?.length
-        ? liveConstraintGuard?.beginInvocation(++invocationIndex, (reason) => replayAbort.abort(reason)) : undefined;
-      let audit: Awaited<ReturnType<typeof verifyStageArtifactContract>>;
-      try {
-        audit = scopeRevisionBoundaryReached || result.exitCode !== 0
-          ? captureDeferredStageArtifactContract(artifactInput)
-          : await verifyStageArtifactContract(artifactInput, {
-            remainingMs: () => attemptDeadline.remainingMs(),
-            abortSignal: AbortSignal.any([aggregateAbortSignal, replayAbort.signal]),
-            onCommandLifecycle: (event) => {
-              if (event.phase === 'started') replayMonitor?.commandStarted(event.id, event.command);
-              else {
-                lastChildClosedAt = event.timestamp;
-                replayMonitor?.commandCompleted(event.id);
-              }
-            },
-          });
-      } finally {
-        if (replayMonitor) latestLiveConstraintResult = await replayMonitor.finish();
-      }
-      if (replayMonitor && latestLiveConstraintResult) {
-        const live = latestLiveConstraintResult;
-        if (live.validationGeneratedPaths.length) result.validationGeneratedWrites = [...new Set([...(result.validationGeneratedWrites ?? []), ...live.validationGeneratedPaths])];
-        const reasons = [...live.incidents.map((incident) => `REPLAY_SCOPE_VIOLATION: ${incident.path}: ${incident.scopeRevisionInstruction}`), ...(live.monitorFailure ? [live.monitorFailure.reason] : [])];
-        if (reasons.length) {
-          audit.replayVerification = 'refused';
-          audit.violations.push(...reasons.map((reason) => ({ kind: 'declared_replay' as const, source: 'declaration' as const, mention: 'artifact_contract.replays', path: opts.projectDir, reason })));
-        }
-      }
+      const audit = inspectStageArtifactContract(artifactInput, scopeRevisionBoundaryReached || result.exitCode !== 0);
       if (production && !childCloseUnverified) audit.production = production;
       if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
-      if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
-        const detail = audit.violations.map((violation) => violation.reason).join('; ');
-        result.exitCode = 1;
-        result.timedOut = false;
-        result.adapterError = false;
-        result.adapterFailureKind = undefined;
-        result.providerFailure = undefined;
-        result.friendlyError = `artifact contract violation: ${detail}`;
-        result.output = `${result.output}${result.output ? '\n\n' : ''}Artifact contract refused completion: ${detail}`;
-        recordRunEvent(opts.projectDir, opts.runId, {
-          type: 'stage_artifact_contract_violation',
-          runId: opts.runId,
-          timestamp: audit.checkedAt,
-          stageId: opts.stageId,
-          attemptIndex,
-          attemptStartedAt,
-          files: audit.violations.map((violation) => violation.mention),
-          detail,
-          level: 'warning',
-          source: 'worker',
-        });
-      }
     } catch (error) {
       result.exitCode = 1;
       result.timedOut = false;
@@ -1419,7 +1347,7 @@ async function runStageWithWriterLease(
     for (const watcher of requestWatchers) watcher.close();
     cleanupAbortSignalAtExit();
     cleanupCommandInterruptSignalAtExit();
-    // The execution attempt ends after adapter and declared replay settlement.
+    // The execution attempt ends after adapter settlement.
     // A blocked event loop can settle after the immutable boundary before its
     // timer callback runs, so observe monotonic expiry before disposal.
     if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();

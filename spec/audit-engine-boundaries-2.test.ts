@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { captureStageArtifactContractPreimages, inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { findAllReady, inspectRealityCheckReachability, runWorkflow, selectRunnableBatch, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
@@ -266,45 +266,5 @@ describe('engine boundary audit probes', () => {
       setFcGlobalDir(previousHome);
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it('accepts a changed run-local file without adapter write attribution', () => {
-    const root = mkdtempSync(join(tmpdir(), 'fc-audit-c-'));
-    try {
-      const projectDir = join(root, 'project');
-      const runDirectory = join(root, 'run');
-      mkdirSync(runDirectory, { recursive: true });
-      mkdirSync(projectDir, { recursive: true });
-      const template = "Write this run's validation_final.json.";
-      const artifactContract = artifacts([{ id: 'validation', root: 'run', path: 'validation_final.json' }]);
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory, artifactContract });
-      writeFileSync(join(runDirectory, 'validation_final.json'), '{"passed":true}\n');
-      const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory, artifactContract,
-        preimages, writes: [],
-      });
-      expect(result.violations).toEqual([]);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-
-  it('does not credit an unchanged preexisting run file to a new attempt', () => {
-    const root = mkdtempSync(join(tmpdir(), 'fc-audit-c-control-'));
-    try {
-      const projectDir = join(root, 'project');
-      const runDirectory = join(root, 'run');
-      mkdirSync(runDirectory, { recursive: true });
-      mkdirSync(projectDir, { recursive: true });
-      writeFileSync(join(runDirectory, 'validation_final.json'), '{"old":true}\n');
-      const template = "Write this run's validation_final.json.";
-      const artifactContract = artifacts([{ id: 'validation', root: 'run', path: 'validation_final.json' }]);
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory, artifactContract });
-      const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory, artifactContract,
-        preimages, writes: [],
-      });
-      expect(result.violations).toEqual([expect.objectContaining({
-        reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE'),
-      })]);
-    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

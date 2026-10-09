@@ -236,14 +236,14 @@ describe('engine boundary promises', () => {
         writes: ['run:validation_final.json'],
         artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'validation', root: 'run', path: 'validation_final.json' }], reads: [], replays: [] }) });
       expect(contextual.violations).toEqual([]);
-      expect(contextual.obligations[0].path).toBe(join(runDir, 'validation_final.json'));
+      expect(contextual.producedPromptArtifacts).toEqual([join(runDir, 'validation_final.json')]);
+      expect(contextual.obligations).toEqual([]);
       const ordinary = inspectStageArtifactContract({ stageId: 'write_report',
         template: 'Write validation_final.json.', projectDir: project, runDir,
         writes: ['run:validation_final.json'],
         artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'validation', root: 'project', path: 'validation_final.json' }], reads: [], replays: [] }) });
-      expect(ordinary.violations).toContainEqual(expect.objectContaining({
-        path: join(project, 'validation_final.json'), reason: expect.stringContaining('ARTIFACT_OUTPUT_ABSENT_OR_STALE'),
-      }));
+      expect(ordinary.violations).toEqual([]);
+      expect(ordinary.producedPromptArtifacts).toEqual([]);
       const missing = inspectStageArtifactContract({ stageId: 'write_report', template: "Write this run's validation_final.json.", projectDir: project, runDir, writes: ['run:validation_final.json'] });
       expect(missing.violations[0].reason).toContain('ARTIFACT_DECLARATION_REQUIRED');
     } finally { rmSync(root, { recursive: true, force: true }); }

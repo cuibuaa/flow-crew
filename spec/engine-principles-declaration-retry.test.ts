@@ -54,7 +54,7 @@ describe('typed declarations are repaired by complete independently admitted rep
       if(opts.stageId==='plan'){
         plans++;prompts.push(prompt);
         const declared=failure==='check_reads'||plans>1;
-        writeFileSync(join(opts.runDir,'dispatch.yaml'),stringify([{...rawStage,...(declared?{artifact_contract:contract}:{artifact_contract:{version:1,produces:[],reads:[]}})}]));writes.push('run:dispatch.yaml');
+        writeFileSync(join(opts.runDir,'dispatch.yaml'),stringify([{...rawStage,...(declared?{artifact_contract:contract}:{artifact_contract:{version:2,produces:[],reads:[]}})}]));writes.push('run:dispatch.yaml');
         if(failure==='check_reads'){
           const check={name:'report',type:'file-exists-nonempty',params:{paths:['docs/final.md']},...(plans>1?{reads:[{id:'report',root:'project',path:'docs/final.md',source:{kind:'stage',stage:'work',artifact:'report'}}]}:{})};
           writeFileSync(join(opts.runDir,'reality_checks.md'),'## Reality checks\n```yaml\n'+stringify({checks:[check]})+'```\n');writes.push('run:reality_checks.md');
@@ -68,7 +68,7 @@ describe('typed declarations are repaired by complete independently admitted rep
     const preflightPath=join(runDir(project,state.runId),'reality_check_preflight.json');
     const diagnostic=failure==='check_reads'?readFileSync(preflightPath,'utf8'):'';
     expect(plans,diagnostic).toBe(2);expect(calls.slice(0,3)).toEqual(['plan','plan','work']);
-    expect(prompts[1]).toContain(failure==='stage_contract'?'REPLAY_DECLARATION_REQUIRED':'REALITY_READ_DECLARATION_REQUIRED');
+    expect(prompts[1]).toContain(failure==='stage_contract'?'artifact_contract.version':'REALITY_READ_DECLARATION_REQUIRED');
     expect(readFileSync(join(project,'docs/final.md'),'utf8')).toContain('Fresh evidence');
     expect(StageConfigSchema.parse(rawStage).role).toBe('coder');
   });

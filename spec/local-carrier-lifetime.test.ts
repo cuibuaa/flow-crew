@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execWithStdin } from '../src/adapters/base.js';
 import { ArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
-import { captureStageArtifactContractPreimages, inspectStageArtifactContract, verifyStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { createRun, captureStageEvidence, readRunState, RUN_HISTORY_FILE, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { engineChildAdapterHome, execEngineChildSync, spawnEngineChild, withEngineCommandBoundary, withEngineWriteBoundary } from '../src/write-boundary.js';
 import { resolveCodexCapabilityIdentity, writeCodexConfig } from '../src/adapters/codex.js';
@@ -103,15 +103,6 @@ describe('engine-owned local carrier lifetime', () => {
     expect(result.exitCode).toBe(0); expect(result.output).toContain('exact stdin'); expect(result.writeBoundary?.kind).toBe('installed');
   });
 
-  native('keeps untouched slot scaffolding from satisfying empty outputs or exactly-one groups', async () => {
-    const f = fixture();
-    f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'a', root: 'run', path: 'a', nonempty: false }, { id: 'b', root: 'run', path: 'b', nonempty: false }], groups: [{ id: 'one', mode: 'exactly_one', members: ['a', 'b'] }], reads: [], replays: [] });
-    const input = { ...f, template: '', preimages: captureStageArtifactContractPreimages({ ...f, template: '' }) };
-    const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
-    expect(result.exitCode).toBe(0); expect(existsSync(join(f.runDir, 'a'))).toBe(false); expect(existsSync(join(f.runDir, 'b'))).toBe(false);
-    expect(inspectStageArtifactContract(input).violations.map((x) => x.reason).join('\n')).toContain('ARTIFACT_EXACTLY_ONE');
-  });
-
   native('permits a declared shared-parent file write and precisely closes its atomic replacement', async () => {
     const f = fixture();
     f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'report.md' }], reads: [], replays: [] });
@@ -120,23 +111,6 @@ describe('engine-owned local carrier lifetime', () => {
       try{fs.writeFileSync(target+'.tmp','new');fs.renameSync(target+'.tmp',target);process.exitCode=9}catch(e){console.log(e.code)}
     `)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
     expect(result.exitCode).toBe(0); expect(result.output.trim()).toBe('EACCES'); expect(readFileSync(join(f.runDir, 'report.md'), 'utf8')).toBe('legitimate report');
-  });
-
-  native('executes declared replay under the same kernel boundary while retaining expected-failure semantics', async () => {
-    const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), before = readFileSync(history, 'utf8');
-    writeFileSync(join(f.projectDir, 'proof.cjs'), `const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');test('protected proof',()=>assert.throws(()=>fs.writeFileSync(${JSON.stringify(history)},'bad'),{code:'EACCES'}));test('expected failure',()=>assert.fail('reproduction'));`);
-    f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [], reads: [{ id: 'proof', root: 'project', path: 'proof.cjs', source: { kind: 'input' } }], replays: [{ id: 'proof', runner: 'node_test', targets: ['proof'], argv: [], expected: { exit_code: 1, failures: [{ artifact: 'proof', test: 'expected failure' }] } }] });
-    const audit = await verifyStageArtifactContract({ ...f, template: '' }, { remainingMs: () => 8_000 });
-    expect(audit.violations).toEqual([]); expect(audit.replayExecutions[0].status).toBe('passed'); expect(readFileSync(history, 'utf8')).toBe(before);
-  });
-
-  native('retains gate verdict authority through replay without modifying its authored failing verdict', async () => {
-    const f = fixture(), verdict = join(f.runDir, 'verdict_writer.json');
-    writeFileSync(verdict, '{"pass":false,"reason":"reproduced"}\n');
-    writeFileSync(join(f.projectDir, 'proof.cjs'), `const test=require('node:test');const assert=require('node:assert/strict');test('expected failure',()=>assert.fail('reproduction'));`);
-    f.artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_writer.json' }], reads: [{ id: 'proof', root: 'project', path: 'proof.cjs', source: { kind: 'input' } }], replays: [{ id: 'proof', runner: 'node_test', targets: ['proof'], argv: [], expected: { exit_code: 1, failures: [{ artifact: 'proof', test: 'expected failure' }] } }] });
-    const audit = await verifyStageArtifactContract({ ...f, isGate: true, template: '', writes: ['run:verdict_writer.json'] }, { remainingMs: () => 8_000 });
-    expect(audit.violations).toEqual([]); expect(audit.replayExecutions[0].status).toBe('passed'); expect(JSON.parse(readFileSync(verdict, 'utf8')).pass).toBe(false);
   });
 
   native('cannot weaken carrier protection through a directory view in the writable project', async () => {

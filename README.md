@@ -261,7 +261,7 @@ or scheduled runs — is in the [CLI reference](guide/cli.md).
 
 FlowCrew is a **self-evolving multi-agent architecture** built on a small set of **execution primitives ("atoms")**
 and a **harness loop**: the planner composes your goal from those atoms, and the crew iterates — plan, execute, gate,
-re-plan — self-correcting until the result survives its own checks. The engine stays **task-agnostic** — every
+repair — changed work returns to the same independent gate. Exhausted failures stop honestly. The engine stays **task-agnostic** — every
 task-specific rule lives in the brief and its declared checks, never in the core — so the same loop carries research
 and engineering alike. Three design choices carry the weight.
 
@@ -287,12 +287,12 @@ the scope machinery in full.
 
 ### Every hand-off is a checkable artifact, not a message
 
-The planner declares each stage's outputs, reads and evidence commands. The engine checks
-the exact artifact paths and producer bindings, and re-runs every declared replay. Reports
+The planner declares output and input locations for scope and ownership. The engine checks
+the exact artifact paths and producer bindings. Intermediate proof/freshness protocols and post-attempt replays are retired. Reports
 explain the result; their prose does not create obligations or executable commands.
 Verdicts, scope requests and approvals also use typed artifacts at known paths.
 The [brief contract](guide/brief-contract.md) lists the interfaces; the
-[declaration reference](guide/engine-state-and-revisions.md) includes replay examples and
+[declaration reference](guide/engine-state-and-revisions.md) describes output/input locations and
 the boundary for earlier runs.
 
 ### Knowing when to stop is a rule, not a judgement call

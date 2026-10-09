@@ -10,7 +10,7 @@ export const PLAN_STAGE_SCHEMA: Schema = {
     prompt_template: { type: 'string' }, task: { type: 'string' }, condition: { type: 'string' },
     is_gate: { type: 'boolean' }, retry_to: strings, criterion_refs: strings,
     skills: strings, dynamic_dispatch: { type: 'boolean' },
-    // Optional exact duties retain the existing artifact/replay validator and enforcement.
+    // Optional output/input locations supply write capabilities and ownership metadata.
     artifact_contract: { type: 'object' },
     // Recorded field names remain accepted; dependency prose and retry policy are not required.
     dependency_reasons: { type: 'object', additionalProperties: { type: 'string' } },
@@ -32,7 +32,7 @@ export function renderPlanInterface(): string {
     + 'Empty/omitted criterion_refs conservatively assign all brief criteria; nonempty subsets use exact brief_criteria.json IDs. '
     + 'Ordinary authored work needs a downstream independent gate. Existing-work audits may consist of gates with empty project scope, plus separate retry_to repairs. Scope amendments must preserve admission. '
     + 'The engine supplies empty artifact duties and each gate verdict when artifact_contract is omitted. '
-    + 'Optional explicit artifact contracts retain exact output/read/group/replay and freshness enforcement; never omit an existing admitted duty. '
+    + 'Optional artifact contracts describe output/input locations for capabilities and ownership; they do not impose proof, replay or intermediate freshness duties. '
     + 'Write tech_solution.md only when a stage reads it. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
     + 'Check a draft without launching: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>. '
     + 'A sibling reality_checks.md is checked when present. Timeout/resource overrides remain retired.';

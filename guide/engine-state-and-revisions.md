@@ -20,10 +20,9 @@ The same JSON Schema is appended to built-in and local planner-role prompts.
 Only dispatch.yaml is compulsory planning output. Analysis and reality-check documents
 are useful when consumed, rather than required empty packages.
 
-Optional `artifact_contract` version 1 declares exact outputs, reads and replay commands.
-An omitted live stage contract becomes empty duties plus the known gate verdict when applicable.
-Explicit duties retain the enforcement below; revisions cannot erase them. Each of `produces`, `reads` and `replays` is present;
-an explicit empty list is valid:
+Optional `artifact_contract` version 1 describes output and input locations for
+write capabilities, ownership and reachability. Omission supplies empty locations
+and the gate's known verdict. `produces` and `reads` are explicit lists:
 
 ```yaml
 artifact_contract:
@@ -31,110 +30,30 @@ artifact_contract:
   produces:
     - {id: report, root: project, path: docs/report.md}
   reads:
-    - id: task
-      root: run
-      path: task_brief.md
-      source: {kind: framework, artifact: task_brief}
-  replays: []
+    - {id: task, root: run, path: task_brief.md, source: {kind: framework, artifact: task_brief}}
 ```
 
-Outputs must be fresh and nonempty unless `nonempty: false` is explicit. `kind` can be `file` or `directory`. Project outputs must belong to the stage's declared scope. Run outputs cannot overwrite engine control records or another stage's evidence. A read from another stage identifies its exact artifact and an ancestor dependency. Existing inputs must exist; framework reads name `task_brief` or `run_state`. Prose mentions and script literals create no obligations. Gates declare their unconditional `run:verdict_<id>.json` output.
+Project outputs must belong to the declared scope. Run outputs cannot overwrite
+engine control records or another stage's evidence. A stage input names a matching
+producer and an ancestor dependency. Existing inputs must exist at admission.
+Gates declare their unconditional `run:verdict_<id>.json` publication.
 
-An old-format stage is refused with `ARTIFACT_DECLARATION_REQUIRED` naming
-`<stage>.artifact_contract`. A contract without the replay list is refused with
-`REPLAY_DECLARATION_REQUIRED` naming `<stage>.artifact_contract.replays`.
-The remedy is to declare the exact duties or explicit empty lists, never to
-transcribe old prose into another prompt.
+These locations do not create a second content-verification protocol. Intermediate
+outputs are not refused for unchanged content, age, missing attribution, emptiness
+or alternatives. The engine does not execute declared replay commands. Authors run
+targeted checks and the independent gate judges the work and its evidence, using
+the engine's configured validation comparison. No separate audit proof package is
+required. Historic groups/replay fields and observations remain readable metadata.
+`stages/<id>/artifact_contract.json` records available file identities and binds the
+current gate publication; it makes no freshness claim about intermediate products.
+Directory capabilities are not recursively hashed at attempt boundaries.
 
-An output can carry `when: {stage: ancestor_id, field: exitCode, equals: 0}`. An unknown fact refuses settlement. Alternative outputs use `groups: [{id: outcome, mode: exactly_one, members: [success, escalation]}]`. Both IDs must be declared; exactly one fresh output must exist. A stage can read a conditional producer output only with the exact same `when` predicate; unknown facts never waive a read. Group alternatives and conditional stage execution need unconditional outcome evidence. Reality checks, including advisory checks, require structured `reads` alongside `type` and `params`. Preflight receives unconditional typed outputs from the exact candidate, so it does not demote their existence checks merely because prose omitted them. Admission checks rooted inputs and producer bindings. The executor rechecks declared reads immediately before running the handler, including settled producer facts. Typed handler parameters must also have declared reads. The executor cannot prove that an arbitrary script declared every dynamic read. Advisory check failures remain nonblocking and visible.
-
-Replay declarations name file artifact IDs, never shell text or report passages.
-For example, successful Node test evidence can declare a produced test:
-
-```yaml
-artifact_contract:
-  version: 1
-  produces:
-    - {id: regression, root: project, path: checks/regression.test.mjs}
-  reads: []
-  replays:
-    - id: regression
-      runner: node_test
-      targets: [regression]
-      argv: []
-      expected: {exit_code: 0, failures: []}
-```
-
-An audit can verify a reproduction that correctly fails on current code:
-
-```yaml
-artifact_contract:
-  version: 1
-  produces:
-    - {id: reproduction, root: run, path: stages/audit/reproduction.test.mjs}
-  reads: []
-  replays:
-    - id: reproduce_defect
-      runner: node_test
-      targets: [reproduction]
-      argv: []
-      expected:
-        exit_code: 1
-        failures:
-          - {artifact: reproduction, test: reproduces current defect}
-```
-
-The engine executes every declared replay and verifies each target's actual
-collection and execution, direct exit and exact failing test identities. An
-unrelated failure, import error, empty or all-skipped target, signal, spawn
-failure or timeout refuses verification. A verified failing reproduction does
-not make a failing audit verdict pass; it establishes the evidence the audit
-claimed. A line such as `npm test -- spec/change.test.ts: exit 0` in a report
-has no executable authority.
-
-Supported runners are `node_test`, a locally configured `vitest run`, and a
-locally configured `pytest` recipe. `argv` accepts only the runner's test-name
-filter (`--test-name-pattern` for Node; `--testNamePattern` or `-t` for Vitest),
-or pytest verbosity and `-p no:cacheprovider`. Targets are unconditional exact
-file IDs in this stage's `produces` or `reads`; directories, conditional outputs
-and exactly-one alternatives cannot be targets. Admission refuses unsupported
-arguments, unbound targets, duplicate IDs and more than 32 replay declarations.
-
-The replay budget defaults to `config/defaults.yaml::default_validation_timeout_ms`.
-Optional replay `timeout_ms` may lower that bound; it cannot raise it or exceed
-the immutable attempt's remaining time. The audit records effective budget,
-elapsed time, direct exit, signal and timeout. A timeout is reported before
-secondary missing-runner-output diagnostics.
-
-`stages/<id>/artifact_contract.json` retains one observation per declared replay,
-with `processes` for each direct invocation and `targets[].tests` for every
-reported name and outcome, including observations from refused collection.
-Node errors retain nested `cause` and assertion fields; Vitest retains emitted
-failure messages/details; pytest retains JUnit failure bodies. Node's forwarded
-test stdout/stderr and diagnostic events live in `targets[].runnerOutput`,
-separately from the direct process pipes. Stream records include byte counts,
-hashes and explicit truncation flags; text prefixes are limited to 16,384
-characters. Nested diagnostics limit strings to 8,192 characters, depth to eight,
-and object/array entries to 128, with omissions labelled. Forwarded Node output
-keeps at most 128 events and 262,144 serialized characters, with omitted-event
-counts. Named results are retained before process-log truncation.
-
-`observation` records timing/load and declared-target identities before and after
-execution, plus the module and manifest observed on disk at replay start. These
-snapshots do not attest transitive inputs, external state or already loaded code.
-The policy is `single_execution_no_confirmation`: no automatic confirmation or
-retry changes acceptance. An unexpected failing check remains refused; a later
-pass does not identify the earlier failure as a flake. Legacy audits retain their
-original fields; absent diagnostics are not reconstructed or written back.
-
-Earlier run artifacts remain readable: their recorded obligations, replay
-executions, advisories and verdicts stay data. Reading them does not derive new
-commands or duties. A resident process on the old admitted generation may finish
-under that generation. A new generation refuses an undeclared in-flight plan at
-`DECLARED_INPUT_MIGRATION_REQUIRED` before work or publication; it does not
-silently resume it with inferred obligations. Preserve the original generation
-for that work, or start a new declared run. Generation-bound recovery can also
-refuse a mismatched checkpoint.
+Explicit reality checks still use rooted `reads` and recheck their inputs before
+executing the handler. Their configured hard properties, final-output archival,
+terminal settlement and research measured-round rules remain separate guarantees.
+Historical records never authorize execution of recorded commands. A resident old
+generation may finish under its admitted generation; generation-bound recovery
+still refuses mismatched checkpoints.
 
 A settled stage can write a complete proposal to its own stage directory's `plan_revision_request.json`:
 
@@ -153,13 +72,19 @@ A settled stage can write a complete proposal to its own stage directory's `plan
 }
 ```
 
-Replace `stages` with the complete proposed list, including existing normalized stages. New stages use the same compact parser; an optional explicit contract includes `replays`. Revisions occur only when all stages are idle. Existing stages, artifact duties and execution conditions remain present and unchanged; `PLAN_REVISION_EXECUTION_CHANGED` refuses a predicate change that could skip an existing producer. Executed work stages are immutable, and new scopes must fit the initial capability union. The scheduler reruns the same whole-plan admission for roles, dependencies, scope, criteria, terminal ownership and gates, declared inputs, research bindings and reality-check reachability. It retains a digest-bound history carrier and a durable accepted or refused decision committed in the same run-state transaction. Decision files are immutable projections; a retry reconstructs a lost projection without committing the revision again. An unjournaled decision file is refused with `PLAN_REVISION_DECISION_UNJOURNALED`; it cannot grant acceptance by naming an unrelated history entry. Preserve that evidence and submit a new request ID against the current admitted view. Stages cannot declare engine decision projections as their products. Stale requests and reused IDs with different bytes are refused. Removing an existing obligation or migrating an undeclared historical plan requires a new initial plan, rather than an amendment that silently erases authority.
+Replace `stages` with the complete proposed list, including existing normalized stages. New stages use the same compact parser; optional explicit contracts describe output/input locations. Revisions occur only when all stages are idle. Existing stages, capability metadata and execution conditions remain present and unchanged; `PLAN_REVISION_EXECUTION_CHANGED` refuses a predicate change that could skip an existing producer. Executed work stages are immutable, and new scopes must fit the initial capability union. The scheduler reruns the same whole-plan admission for roles, dependencies, scope, criteria, terminal ownership and gates, declared inputs, research bindings and reality-check reachability. It retains a digest-bound history carrier and a durable accepted or refused decision committed in the same run-state transaction. Decision files are immutable projections; a retry reconstructs a lost projection without committing the revision again. An unjournaled decision file is refused with `PLAN_REVISION_DECISION_UNJOURNALED`; it cannot grant acceptance by naming an unrelated history entry. Preserve that evidence and submit a new request ID against the current admitted view. Stages cannot declare engine decision projections as their products. Stale requests and reused IDs with different bytes are refused. Removing an existing obligation or migrating an undeclared historical plan requires a new initial plan, rather than an amendment that silently erases authority.
 
-A gate can publish `audit_findings: {version: 1, findings: [...]}` in its declared verdict. Each finding names `id`, exact project `paths`, `reason`, `criterion_ids`, `invalidates_plan` and a configured `repair_role`. A finding that leaves the plan valid produces a repair stage limited to those paths, admitted as a full revision, followed by the authoring gate's re-evaluation. Passing re-evaluation resolves the finding. The initial rejected verdict is retained by content hash. The engine can add a repair prerequisite and reopen the authoring gate for re-evaluation; the prior gate definition and attempts remain in history. A finding that invalidates the plan follows the existing replan path. Undeclared verdicts, foreign criteria, unconfigured roles and scopes beyond the initial capabilities cannot create repair authority.
+A gate can publish `audit_findings: {version: 1, findings: [...]}` in its verdict.
+Each finding names `id`, exact project `paths`, `reason`, `criterion_ids`,
+`invalidates_plan` and a configured `repair_role`. Findings explain the rejection;
+they do not generate another repair stage. The admitted `retry_to` repair reads the
+archived rejection and returns successful changes to the same independent gate.
+Review covers rejected findings and the changed diff. Failed or exhausted repairs
+stop honestly without repeating the whole plan. Gate evidence-format refusals do
+not dispatch an unchanged model review. Passing next phases and research search
+can still advance deliberately; ordinary failure does not trigger outer re-planning.
 
-Generated repairs retain the rejected producers' and gate's declared reads and replay checks. Named outputs keep their declared shape; other outputs remain reads bound to their existing owners. The existing stages and their duties stay unchanged in the revision. The repair reads the durable rejected verdict, with its content digest and gate execution recorded in the prompt. The engine refuses a changed or stale verdict whose protected artifact receipt does not match the current completed execution. Conditional stages, conditional outputs and exactly-one groups require a complete outcome repair and are refused by the narrowed file repair builder with `SCOPED_REPAIR_CONDITIONAL_DUTY`; declare that repair in a new complete plan. Checks exceeding the combined replay limit are also refused rather than dropped. Fixed `retry_to` repairs remain available alongside generated repairs.
-
-A rejected gate may declare `repairability: {version: 1, disposition: "repairable" | "irreparable", evidence: "<reproducible evidence>"}`. `irreparable` means that no repair or re-plan can undo the observed failure. A completed gate's unchanged exact declared verdict and protected execution receipt authorize that disposition: the scheduler retains the rejected criteria and evidence, records `run_completed`, and settles `escalated` before dispatching repair or a new plan. An incomplete gate or an unbound/shared carrier cannot authorize it. The disposition never turns a rejection into a pass. Legacy verdicts without this field keep their bounded repair route; reason words do not determine terminality. All neighbouring projects retain that legacy behaviour. Unknown versions/dispositions, extra fields, empty evidence, any repairability field with `pass: true`, or repairability combined with the terminal study completion success contract are refused with a message naming the conflicting declaration; the evidence producer is re-evaluated within the existing budget. Historical records are neither migrated nor rewritten.
+A rejected gate may declare `repairability: {version: 1, disposition: "repairable" | "irreparable", evidence: "<reproducible evidence>"}`. `irreparable` means that no repair or re-plan can undo the observed failure. A completed gate's unchanged exact declared verdict and protected execution receipt authorize that disposition: the scheduler retains the rejected criteria and evidence, records `run_completed`, and settles `escalated` before dispatching repair or a new plan. An incomplete gate or an unbound/shared carrier cannot authorize it. The disposition never turns a rejection into a pass. Legacy verdicts without this field keep their bounded repair route; reason words do not determine terminality. All neighbouring projects retain that legacy behaviour. Unknown versions/dispositions, extra fields, empty evidence, any repairability field with `pass: true`, or repairability combined with the terminal study completion success contract are refused with a message naming the conflicting declaration. Such a refusal stops without gate-only evidence re-evaluation. Historical records are neither migrated nor rewritten.
 
 New stage declarations containing `resources` are refused with `RESOURCES_RETIRED`;
 remove that key. Archived resource observations remain displayable in recorded runs.

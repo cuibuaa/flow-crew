@@ -491,13 +491,13 @@ describe('synthetic regressions for the four measured historical QA shapes', () 
   );
 });
 
-describe('rejected digest handoff across planner iterations', () => {
-  it.each(['resolve', 'defer'] as const)(
-    'publishes one digest and records planner %s on iteration two',
+describe('rejected digest retention without failure-driven restart', () => {
+  it(
+    'retains the rejected digest and rollback without starting another plan',
     { timeout: 25_000 },
-    async (disposition) => {
+    async () => {
       const config: WorkflowConfig = {description: '', 
-        name: `m3-two-iteration-${disposition}`,
+        name: 'm3-stopped-digest',
         defaults: { max_iterations: 2, max_retries: 0 },
         stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
           id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [],
@@ -505,7 +505,7 @@ describe('rejected digest handoff across planner iterations', () => {
         }],
       };
       const yaml = [
-        `name: m3-two-iteration-${disposition}`, 'defaults:', '  max_iterations: 2', '  max_retries: 0',
+        'name: m3-stopped-digest', 'defaults:', '  max_iterations: 2', '  max_retries: 0',
         'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
       ].join('\n');
       const created = prepareRun(config, yaml);
@@ -526,26 +526,6 @@ describe('rejected digest handoff across planner iterations', () => {
               '    dependency_reasons: {work_1: "review the first iteration work"}',
               '    is_gate: true', '    task: first iteration gate',
             ].join('\n')));
-          } else {
-            const inputName = readdirSync(opts.runDir).find((file) => file.startsWith('scope_negotiation_input_'));
-            if (!inputName) throw new Error('iteration two did not receive a scope planning input artifact');
-            observedDigest = String(readJson(join(opts.runDir, inputName)).digest);
-            expect(prompt).toContain('# Pending scope-negotiation planning input');
-            expect(prompt).toContain(observedDigest);
-            expect(prompt).toContain('# Engine-owned unresolved stage obligations');
-            expect(prompt).toContain('review_gate_1');
-            const scopeLine = disposition === 'resolve' ? `    scope: [${requestedPath}]` : '    scope: []';
-            writeFileSync(join(opts.runDir, 'dispatch.yaml'), declaredDispatch([
-              'scope_negotiation:',
-              '  defer:',
-              ...(disposition === 'defer' ? [`    - ${observedDigest}`] : []),
-              'stages:',
-              '  - id: work_2', '    role: coder', scopeLine, '    depends_on: [plan]',
-              '    dependency_reasons: {plan: "consume the second planner iteration"}', '    task: disposition consumer',
-              '  - id: review_gate_2', '    role: qa', '    scope: []', '    depends_on: [work_2]',
-              '    dependency_reasons: {work_2: "review the disposition consumer"}',
-              '    is_gate: true', '    task: second iteration gate',
-            ].join('\n')));
           }
           return fixtureResult({ output: `planner iteration ${planCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
         }
@@ -562,18 +542,6 @@ describe('rejected digest handoff across planner iterations', () => {
           writeFileSync(join(projectDir, requestedPath), 'must be rolled back\n');
           return fixtureResult({ output: 'one rejected raw write', exitCode: 0, duration_ms: 20, writes: [requestedPath], writeAttribution: 'structured' }, opts);
         }
-        if (opts.stageId === 'work_2') {
-          if (disposition === 'resolve') {
-            mkdirSync(join(projectDir, 'src'), { recursive: true });
-            writeFileSync(join(projectDir, requestedPath), 'planner predeclared resolution\n');
-            return fixtureResult({ output: 'resolved', exitCode: 0, duration_ms: 2, writes: [requestedPath], writeAttribution: 'structured' }, opts);
-          }
-          return fixtureResult({ output: 'deferred without a project write', exitCode: 0, duration_ms: 2, writes: [], writeAttribution: 'structured' }, opts);
-        }
-        if (opts.stageId === 'review_gate_2') {
-          writeFileSync(join(opts.runDir, 'verdict_review_gate_2.json'), JSON.stringify({ pass: true, reason: 'digest disposition recorded' }));
-          return fixtureResult({ output: 'pass', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-        }
         return fixtureResult({ output: 'blocked first-iteration gate should not run', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       } };
 
@@ -581,29 +549,18 @@ describe('rejected digest handoff across planner iterations', () => {
         config, yaml, projectDir, adapter, new Map(), undefined,
         writeRoles('planner', 'coder', 'qa'), created.runId, 'two iteration M3 fixture', true,
       );
-      expect(final.status).toBe('complete');
-      expect(final.unresolvedStageObligations).toBeUndefined();
-      expect(planCalls).toBe(2);
-      expect(observedDigest).not.toBe('');
-      const inputFiles = readdirSync(created.runDirPath).filter((file) => file.startsWith('scope_negotiation_input_'));
+      expect(final.status).toBe('incomplete');
+      expect(final.currentIteration).toBe(1);
+      expect(planCalls).toBe(1);
+      expect(observedDigest).toBe('');
+      expect(final.unresolvedStageObligations).toBeDefined();
       const dispositionFiles = readdirSync(created.runDirPath).filter((file) => file.startsWith('scope_negotiation_disposition_'));
-      expect(inputFiles).toHaveLength(1);
-      expect(dispositionFiles).toHaveLength(1);
-      expect(readJson(join(created.runDirPath, dispositionFiles[0]))).toMatchObject({
-        digest: observedDigest,
-        iteration: 2,
-        disposition,
-      });
+      expect(dispositionFiles).toEqual([]);
       const firstAuditStatus = readStageStatus(projectDir, created.runId, 'work_1');
       const firstAudit = readJson(join(created.runDirPath, firstAuditStatus.constraintAudit!.path));
-      expect(firstAudit.planningDigests).toEqual([observedDigest]);
+      expect(firstAudit.planningDigests).toHaveLength(1);
       expect(firstAudit.violations).toHaveLength(1);
-      const secondAuditStatus = readStageStatus(projectDir, created.runId, 'work_2');
-      const secondAudit = readJson(join(created.runDirPath, secondAuditStatus.constraintAudit!.path));
-      expect(secondAudit.planningDigests).toEqual([]);
-      expect(secondAudit.violations).toEqual([]);
-      expect(readFileSync(join(created.runDirPath, 'iteration_log.md'), 'utf-8')).toContain(observedDigest);
-      expect(existsSync(join(projectDir, requestedPath))).toBe(disposition === 'resolve');
+      expect(existsSync(join(projectDir, requestedPath))).toBe(false);
     },
   );
 });
