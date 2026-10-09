@@ -256,8 +256,9 @@ export function createCampaignWriters(services: CampaignWriterServices) {
     if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
       lines.push(`Gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}`);
     }
-    // Include base stages (e.g. plan) so re-plan iterations have context on failures
-    const allIds = [...(baseStageIds ?? []), ...dispatchedStageIds];
+    // Include base stages (e.g. plan) so re-plan iterations have context on failures, and every stage the iteration
+    // added after dispatch (scoped repairs): a new iteration retires all non-base stages, so state.stages holds only this one's.
+    const allIds = [...(baseStageIds ?? []), ...dispatchedStageIds, ...Object.keys(state.stages)];
     const seen = new Set<string>();
     for (const sid of allIds) {
       if (seen.has(sid)) continue;
@@ -266,11 +267,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       if (!ss) continue;
       lines.push(`## ${sid} (${ss.status})`);
       lines.push(`Output: ${runDirPath}/stages/${sid}/output.md`);
-      lines.push(`Artifacts: ${ss.artifacts?.join(', ') || 'none'}`);
-      if (ss.error) {
-        const isAdapter = ss.error === 'adapter connection failed';
-        lines.push(`Error: ${ss.error}${isAdapter ? ' (transient — not a code issue, retry may succeed)' : ''}`);
-      }
+      if (ss.error) lines.push(`Error: ${ss.error}`);
       if (ss.duration_ms !== undefined) lines.push(`Duration: ${Math.round(ss.duration_ms / 1000)}s`);
       // Include actual gate verdict if available
       const verdict = readGateVerdict(projectDir, sid, runId);

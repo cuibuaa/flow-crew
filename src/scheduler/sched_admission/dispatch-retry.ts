@@ -99,8 +99,6 @@ export function buildRetryPreamble(
   let cause: string;
   if (prevError && prevError.startsWith('aborted by supervisor')) {
     cause = `Previous execution was ${prevError}. The supervisor judged that execution stuck or off-direction. Use this signal: re-read the goal, identify what concrete progress you should produce in this execution, and START making file edits within a few minutes; do NOT spend the whole execution only inspecting code.`;
-  } else if (prevError && prevError.startsWith('adapter connection failed')) {
-    cause = `Previous attempt failed with an adapter connection error (transient). Retry the same plan.`;
   } else if (timeoutContext) {
     cause = `Previous attempt timed out with an effective budget of ${timeoutContext.previousBudgetMs}ms. `
       + `This new attempt has a strictly larger immutable budget of ${timeoutContext.nextBudgetMs}ms.`;

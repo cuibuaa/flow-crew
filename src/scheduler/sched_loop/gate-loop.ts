@@ -274,14 +274,6 @@ export async function settleGateRetries(
             // Skip gate re-runs if any fix stage itself failed (saves wasted agent calls)
             const anyFixFailed = activeWorkRecoveryStages.some(s => state.stages[s.id]?.status === STAGE_STATUS.FAILED);
             if (anyFixFailed) {
-              // If the failure is a transient adapter error, continue to next retry instead of aborting
-              const allAdapterErrors = activeWorkRecoveryStages
-                .filter(s => state.stages[s.id]?.status === STAGE_STATUS.FAILED)
-                .every(s => state.stages[s.id]?.error === 'adapter connection failed');
-              if (allAdapterErrors && inner < maxInnerRetries - 1) {
-                log.info({ runId, iteration, inner }, 'Fix stage failed due to adapter error — retrying');
-                continue;
-              }
               log.info({ runId, iteration, inner }, 'Fix stage failed — skipping gate re-evaluation');
               break;
             }
