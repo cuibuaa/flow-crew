@@ -272,12 +272,12 @@ export function buildGateDispatchPreamble(input: {
           ? [`- Partial prior gate output: ${input.interruptedOutputPath}`]
           : []),
         'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
-        'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a new validator-owned Coverage Map.',
+        'Review as a first evaluation: check every assigned criterion against the change in proportion to its size and risk. The engine runs the configured validation for this gate.',
       ].join('\n');
     }
     return [
       `FIRST EVALUATION (round ${input.evaluationRound}): No prior execution or durable rejected verdict exists for gate ${input.gateId}.`,
-      'Perform the complete first-pass audit, including exhaustive discovery, every task/project mechanical suite, and a validator-owned Coverage Map.',
+      'Check every assigned criterion against the change in proportion to its size and risk. The engine runs the configured validation for this gate.',
     ].join('\n');
   }
 
@@ -296,7 +296,7 @@ export function buildGateDispatchPreamble(input: {
     '  verdict file is not the defect — engine_rejection_reason names what the engine',
     '  objected to, and that is what must change.',
     `- Metric artifact actually evaluated: ${latest.metricPath}`,
-    `- Original first-pass validator-owned Coverage Map: ${firstCoverageOutput}`,
+    `- Original first-pass gate output: ${firstCoverageOutput}`,
     ...(existsSync(latest.outputPath) && latest.outputPath !== firstCoverageOutput
       ? [`- Immediately previous gate output: ${latest.outputPath}`]
       : []),
@@ -305,7 +305,7 @@ export function buildGateDispatchPreamble(input: {
       : ['- Complete repair-round diff: unavailable on this dispatch route; inspect the archived input/output and current repository diff.']),
     ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
     '',
-    'Reproduce every rejected finding, run the full mechanical regression suites, read the complete repair diff, and re-run every check from the prior Coverage Map touched by it.',
+    'Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. The engine re-runs the configured validation for this gate.',
     'Do not treat a repair summary or the existence of changed code as proof.',
   ].join('\n');
 }

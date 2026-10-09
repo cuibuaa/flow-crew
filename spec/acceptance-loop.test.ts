@@ -329,8 +329,8 @@ describe('compressed acceptance loop', () => {
     });
     expect(result.finalStatus).toBe('complete');
     expect(touchedCheckProbe).toHaveBeenCalledExactlyOnceWith('fixture-marker-check');
-    expect(result.gatePrompts[1]).toContain('re-run every check from the prior Coverage Map');
-    expect(result.gatePrompts[1]).toContain('full mechanical regression suites');
+    expect(result.gatePrompts[1]).toContain('re-check earlier conclusions only where the diff touches them');
+    expect(result.gatePrompts[1]).toContain('The engine re-runs the configured validation for this gate');
   });
 
   it('keeps round evidence distinct while carrying same-gate rejection history across outer iterations', { timeout: 20_000 }, async () => {
@@ -411,7 +411,7 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(legacyPreamble).toContain(`Rejected verdict: ${legacyVerdict}`);
-    expect(legacyPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${legacyOutput}`);
+    expect(legacyPreamble).toContain(`Original first-pass gate output: ${legacyOutput}`);
     expect(legacyPreamble).toContain('Exact input evaluated by the rejected gate: unavailable');
     expect(legacyPreamble).not.toContain(`evaluated_input_${GATE_ID}.md`);
     expect(readFileSync(legacyVerdict, 'utf-8')).toBe(verdictContents);
@@ -445,7 +445,7 @@ describe('compressed acceptance loop', () => {
 
     expect(mixedPreamble).toContain('RE-EVALUATION (round 2)');
     expect(mixedPreamble).toContain(`Rejected verdict: ${staleLegacyVerdict}`);
-    expect(mixedPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${staleLegacyOutput}`);
+    expect(mixedPreamble).toContain(`Original first-pass gate output: ${staleLegacyOutput}`);
     expect(mixedPreamble).not.toContain(canonicalVerdict);
     expect(mixedPreamble).not.toContain(canonicalOutput);
     expect(mixedPreamble).not.toContain(otherIterationRound);
@@ -478,7 +478,7 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(preamble).toContain(`Rejected verdict: ${canonicalVerdict}`);
-    expect(preamble).toContain(`Original first-pass validator-owned Coverage Map: ${canonicalOutput}`);
+    expect(preamble).toContain(`Original first-pass gate output: ${canonicalOutput}`);
     expect(preamble).not.toContain(legacyVerdict);
     expect(preamble).not.toContain(legacyOutput);
   });
@@ -500,7 +500,7 @@ describe('compressed acceptance loop', () => {
     })).toThrow(`Gate archive ${component} must be a positive integer`);
   });
 
-  it('locks the first-pass coverage map and bounded re-evaluation contracts in every prompt source', () => {
+  it('locks the proportional first-pass review and bounded re-evaluation contracts in every prompt source', () => {
     const base = readFileSync(join(process.cwd(), 'config', 'agents', '_base.md'), 'utf-8');
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
     const qa = readFileSync(join(process.cwd(), 'config', 'agents', 'qa.yaml'), 'utf-8');
@@ -519,15 +519,19 @@ describe('compressed acceptance loop', () => {
       roundDiffPath: join(roundDir, 'repair_diff.json'),
     });
 
-    expect(base).toContain('validator-owned Coverage Map');
-    expect(planner).toContain("validator's output");
+    expect(base).toContain('check every assigned criterion');
+    expect(base).toContain('say briefly what you did not examine and why');
+    expect(base).not.toContain('explore risks exhaustively');
+    expect(base).toContain('Check each rejected finding against the repair diff');
+    expect(base).toContain('do not open unrelated audit dimensions');
+    expect(planner).toContain('returns concrete repairable findings');
     expect(planner).toContain('Do NOT turn the brief into a finite planner-owned checklist');
-    expect(qa).toContain('do not invent unrelated probes');
-    expect(qa).toContain('complete repair diff');
+    expect(qa).toContain('Size the review to the change');
+    expect(qa).not.toContain('Make each claim reproducible');
     expect(qa).not.toContain('write NEW tests');
-    expect(preamble).toContain('Reproduce every rejected finding');
-    expect(preamble).toContain('full mechanical regression suites');
-    expect(preamble).toContain('complete repair diff');
+    expect(preamble).toContain('Check each rejected finding against the repair diff');
+    expect(preamble).toContain('The engine re-runs the configured validation for this gate');
+    expect(preamble).toContain('untruncated repair-round diff');
     expect(preamble).not.toContain('Write NEW and DIFFERENT tests');
     expect(source).not.toContain('Write NEW and DIFFERENT tests');
   });

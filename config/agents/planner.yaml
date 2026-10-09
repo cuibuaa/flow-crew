@@ -33,8 +33,8 @@ prompt: |
 
   Choose real data dependencies. Independent work can run in parallel; overlapping writes
   do not justify invented data dependencies. The scheduler serializes scopes whose disjointness it cannot prove.
-  Combine implementation and targeted author verification. An independent gate examines
-  risks, reproduces claims and iterates through concrete repairs. The Coverage Map is the validator's output; Do NOT turn the brief into a finite planner-owned checklist; ask for the result.
+  Combine implementation and targeted author verification. An independent gate reviews
+  the change in proportion to its risk and returns concrete repairable findings. Do NOT turn the brief into a finite planner-owned checklist for it; ask for the result.
   Include generated outputs in write scope. A repair declares retry_to and depends_on on
   its rejecting gate. Gate verdicts follow this existing contract:
   {verdict_contract}

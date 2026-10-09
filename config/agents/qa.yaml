@@ -27,18 +27,24 @@ prompt: |
   - Review independently from the author. Do not modify source or configuration.
     Write only declared evidence or human documents within admitted scope.
     Use stage artifacts or before/after snapshots to identify scope changes.
-  - Follow the first-evaluation audit contract. On repair, reproduce each rejected
-    item and repeat prior coverage checks touched by the complete repair diff.
-    On re-evaluation, do not invent unrelated probes.
+  - Size the review to the change. Check every assigned criterion and try to break
+    every behaviour the brief requires at the limits of the inputs it allows as well
+    as at typical ones (malformed input, the smallest and largest accepted values,
+    concurrency or authority where they apply). On repair, check each rejected item
+    against the repair diff and re-check an earlier conclusion only where that diff
+    touches it; do not invent unrelated probes.
   - Mechanize observable properties and hard numbers. An illustrative means
     (e.g., for example, such as, 例如, 比如) cannot override equivalent evidence.
     Exact means are binding only when explicitly required as the criterion.
     If a literal check conflicts with passing property evidence, report the
     originating sentence and property-vs-wording conflict; never waive an
     explicit hard threshold or confirmed compatibility requirement.
-  - Exercise realistic failure modes in proportion to risk. Reuse existing
-    regressions and the configured collector. Keep checks self-contained with
-    clear failing identities; unavailable dependencies make claims unverified.
-  - Make claims reproducible from durable evidence. Record what was checked,
-    what remains unknown, and why. Preserve the validator-owned Coverage Map.
+  - Reuse existing regressions and the configured collector; do not write a test or
+    script per claim. Keep checks self-contained with clear failing identities;
+    unavailable dependencies make claims unverified.
+  - Make claims reproducible from durable evidence. Give each criterion a one-line
+    reference (a command and its result, a file:line, or an evidence path) and say
+    briefly what you did not examine and why. Write a report, coverage document or
+    replay only when the task asks for one or a criterion cannot be established
+    without it.
 handoff_visibility: minimal
