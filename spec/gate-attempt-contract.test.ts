@@ -94,6 +94,77 @@ interface ScenarioOptions {
   }) => { verdict: Record<string, unknown>; metric?: Record<string, unknown>; output?: string };
 }
 
+describe('explicit gate repairability', () => {
+  it.each([
+    null,
+    'irreparable',
+    { version: 2, disposition: 'irreparable', evidence: 'fact' },
+    { version: 1, disposition: 'unknown', evidence: 'fact' },
+    { version: 1, disposition: 'irreparable', evidence: ' ' },
+    { version: 1, disposition: 'irreparable', evidence: 'fact', extra: true },
+  ])('refuses malformed repairability case %# without inferring a terminal fact', (repairability) => {
+    writeGateVerdict({ pass: false, repairability });
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({
+      pass: false, contractViolation: 'repairability', reason: expect.stringContaining('exactly {version:1'),
+    });
+  });
+
+  it('refuses repairability alongside pass=true', () => {
+    writeGateVerdict({ pass: true, repairability: { version: 1, disposition: 'irreparable', evidence: 'fact' } });
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability' });
+  });
+
+  it('refuses rejected repairability alongside terminal study completion success', () => {
+    const conflicting = { pass: false, reason: 'study_complete_without_model_success', study_complete: true, model_success: false,
+      repairability: { version: 1, disposition: 'irreparable', evidence: 'Unrepairable failed constraint' } };
+    writeGateVerdict(conflicting);
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability', reason: expect.stringContaining('incompatible outcome declarations') });
+    const directory = runDir(projectDir, UNIT_RUN_ID);
+    rmSync(join(directory, `verdict_${GATE_ID}.json`));
+    writeFileSync(join(directory, `pre_gate_verdict_${GATE_ID}.json`), JSON.stringify(conflicting));
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
+  });
+
+  it('escalates an irreparable rejection once without dispatching repair or re-planning', async () => {
+    const result = await runScenario({ maxIterations: 3, includeRepair: true,
+      gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
+        repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' },
+        criteria: { fact: { status: 'fail', evidence: 'Retained immutable fact' } },
+      } }),
+    });
+    expect(result.final.status).toBe('escalated');
+    expect(result.planCalls).toBe(1);
+    expect(result.gateCalls).toBe(1);
+    expect(result.repairCalls).toBe(0);
+    expect(result.final.failureReason).toContain('Irreparable gate rejection');
+    const retained = JSON.parse(readFileSync(join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
+    expect(retained.criteria.fact.status).toBe('fail');
+    expect(retained.repairability.disposition).toBe('irreparable');
+  });
+
+  it('keeps explicit repairable rejections on the bounded repair route', async () => {
+    const result = await runScenario({ includeRepair: true,
+      gateAttempt: ({ call }) => ({ verdict: call === 1
+        ? { pass: false, repairability: { version: 1, disposition: 'repairable', evidence: 'Correctable output' } }
+        : { pass: true } }),
+    });
+    expect(result.final.status).toBe('complete');
+    expect(result.repairCalls).toBe(1);
+    expect(result.gateCalls).toBe(2);
+  });
+
+  it('keeps irreversible failure terminal when numeric evidence also refuses', async () => {
+    const result = await runScenario({ includeRepair: true, contract: { metric: 'quality', threshold: 1, higherIsBetter: true },
+      gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
+        repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' } } }),
+    });
+    expect(result.final.status).toBe('escalated');
+    expect(result.repairCalls).toBe(0);
+    expect(result.gateCalls).toBe(1);
+    expect(result.final.failureReason).toContain('missing required numeric gate value');
+  });
+});
+
 async function runScenario(options: ScenarioOptions): Promise<{
   final: Awaited<ReturnType<typeof runWorkflow>>;
   runDirPath: string;

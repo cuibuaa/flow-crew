@@ -3,6 +3,7 @@ import {
   NON_TERMINAL_RUN_STATUSES,
   TERMINAL_RUN_STATUSES,
   humanizeRunEvents,
+  historicalRunStages,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   parseRunSummary,
@@ -27,6 +28,20 @@ function run(overrides: Partial<RunDetailData> = {}): RunDetailData {
 }
 
 describe("run-page presentation model", () => {
+  it('uses the shared budget for retired work and keeps historical failure out of the final plan', () => {
+    const old = { index: 1, status: 'failed', startedAt: '2026-01-01T00:00:00.000Z' };
+    const data = run({
+      stages: [{ id: 'work', role: 'coder', depends_on: [], status: 'complete' }],
+      stageHistory: [{ stageId: 'work', iteration: 1, status: { status: 'failed', attempts: [old] } }],
+      budget: { tokens: { knownInputTokens: 2100, knownOutputTokens: 900, complete: true } },
+    });
+    expect(runUsageTotal(data)).toMatchObject({ tokens: 3000, complete: true });
+    const history = historicalRunStages(data);
+    expect(history[0]).toMatchObject({ id: 'work', historyIteration: 1, status: 'failed' });
+    expect(runFailureHistory(data.stages, history)).toMatchObject({ failedAttempts: 1, failedStageIds: [] });
+    expect(runFailureHistory([{ ...data.stages[0], attempts: [old] }], history).failedAttempts).toBe(1);
+    expect(runUsageTotal({ ...data, budget: { tokens: { ...data.budget!.tokens, complete: false } } }).complete).toBe(false);
+  });
   it("uses the complete canonical status vocabulary for the only scene split", () => {
     expect(NON_TERMINAL_RUN_STATUSES).toEqual(["pending", "running", "parked", "awaiting_approval"]);
     expect(TERMINAL_RUN_STATUSES).toEqual([

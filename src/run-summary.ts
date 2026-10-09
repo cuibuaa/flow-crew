@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from './adapters/base.js';
-import { recordInvocationInput } from './run-state-view.js';
+import { projectRunStageHistory, recordInvocationInput } from './run-state-view.js';
 import { withEngineCommandBoundary } from './write-boundary.js';
 import {
   resolveRunStatus,
@@ -206,8 +206,11 @@ function renderTestsSection(stageOutputs: string[]): string {
 
 function renderStagesSection(state: StoreState): string {
   const ids = Object.keys(state.stages);
-  const historical = state.stageEvidence ?? [];
-  if (ids.length === 0 && historical.length === 0 && !state.supervisor) return '';
+  const diagnostics: string[] = [];
+  const historical = projectRunStageHistory(state, diagnostic => diagnostics.push(
+    `- ${diagnostic.code}: ${diagnostic.path}: ${diagnostic.detail}`,
+  ));
+  if (ids.length === 0 && historical.length === 0 && !state.supervisor && diagnostics.length === 0) return '';
   const lines = ids.map((id) => {
     const st = state.stages[id];
     const attempts = st?.attempts?.length ?? 0;
@@ -229,7 +232,7 @@ function renderStagesSection(state: StoreState): string {
     const tokensTotal = state.supervisor.tokens_in + state.supervisor.tokens_out;
     lines.push(`- _supervisor: ${state.supervisor.calls} calls, ${Math.round(state.supervisor.duration_ms / 1000)}s cumulative, ${tokensTotal} tokens total (${state.supervisor.tokens_in} in + ${state.supervisor.tokens_out} out)`);
   }
-  return `## Stages\n${lines.join('\n')}`;
+  return `## Stages\n${[...lines, ...diagnostics].join('\n')}`;
 }
 
 function renderOrchestrationEvents(projectDir: string, runId: string): string {

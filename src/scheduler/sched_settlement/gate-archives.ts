@@ -3,7 +3,8 @@ import { GATE_VERDICT_CORRECTION_VERSION, gateVerdictCorrectionPath } from '../s
 import { GateArchiveCoordinate } from '../sched_scope/gate-attempt.js';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GateRuntimeFacts } from './gate-recovery.js';
+import type { GateRuntimeFacts } from './gate-recovery.js';
+import type { GateVerdict } from '../../store.js';
 
 export function gateArchiveCoordinate(iteration: number, round: number): GateArchiveCoordinate {
   if (!Number.isSafeInteger(iteration) || iteration < 1) {
@@ -98,7 +99,7 @@ export function archiveGateRoundEvidence(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
   gateIds: string[],
-  effectiveVerdicts?: Map<string, { pass: boolean; reason?: string }>,
+  effectiveVerdicts?: Map<string, GateVerdict>,
 ): void {
   const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
   mkdirSync(artifactDir, { recursive: true });
@@ -127,6 +128,7 @@ export function archiveGateRoundEvidence(
             written_verdict_pass: readWrittenVerdictPass(verdict),
             engine_effective_pass: effective.pass,
             engine_rejection_reason: effective.reason ?? null,
+            ...(effective.repairability ? { repairability: effective.repairability } : {}),
             note: 'The engine\'s conclusion. If engine_effective_pass is false while '
               + 'written_verdict_pass is true, the gate file is not the thing to fix — '
               + 'engine_rejection_reason is.',

@@ -1,16 +1,19 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { confineEngineChild, observeEngineChildBoundary, withEngineWriteBoundary, withEngineWriteBoundaryDirectory } from './write-boundary.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ArtifactContractSchema, resolveArtifactLocation } from './artifact-declarations.js';
 import { loadProjectDefaults } from './config.js';
 import { configuredPytest, configuredVitest } from './declared-replay-config.js';
 import { NODE_REPLAY_REPORTER, nodeReplayTests, pytestReplayTests, vitestReplayTests, type ReplayTests } from './declared-replay-results.js';
 import type { DeclaredReplay } from './declared-replay.js';
-import type { StageArtifactContractInput, StageArtifactReplayExecution } from './stage-artifact-contract.js';
+import type { StageArtifactContractInput, StageArtifactReplayExecution, StageArtifactReplayProcess } from './stage-artifact-contract.js';
 import type { CommandLifecycleEvent } from './adapters/base.js';
+import { readLiveConstraintContentIdentity } from './live-constraint-guard.js';
 
 export interface ReplayBudget {
   /** Worker-owned monotonic time remaining; the declaration cannot extend it. */
@@ -19,20 +22,13 @@ export interface ReplayBudget {
   /** Engine-owned invocation monitor; actual argv is data, never shell execution. */
   onCommandLifecycle?: (event: CommandLifecycleEvent) => void;
 }
-interface ProcessOutcome {
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  timedOut: boolean;
-  aborted: boolean;
-  stdout: string;
-  stderr: string;
-  processError?: string;
-}
+type ProcessOutcome = StageArtifactReplayProcess;
 const OUTPUT_BYTES = 8 * 1024 * 1024;
 const bounded = (text: string) => text.length <= 16_384 ? text : `${text.slice(0, 16_384)}\n[replay output truncated]`;
 
 /** Preserve direct process facts and terminate the owned group on every exit. */
 function run(command: string, args: string[], cwd: string, timeoutMs: number, budget: ReplayBudget, id: string, environment: NodeJS.ProcessEnv = {}): Promise<ProcessOutcome> {
+  const startedAt = new Date().toISOString(), started = performance.now(), loadStart = loadavg();
   return new Promise((done) => {
     const abortSignal = budget.abortSignal;
     const description = [command, ...args].map((word) => `'${word.replace(/'/g, `'\\''`)}'`).join(' ');
@@ -43,6 +39,8 @@ function run(command: string, args: string[], cwd: string, timeoutMs: number, bu
       env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1', ...environment },
     });
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    const stdoutHash = createHash('sha256'), stderrHash = createHash('sha256');
+    let stdoutBytes = 0, stderrBytes = 0;
     let boundaryObserved = !launch.receiptPath;
     let bytes = 0, timedOut = false, aborted = false, processError: string | undefined;
     observeEngineChildBoundary(child, launch.receiptPath, (receipt) => {
@@ -63,14 +61,20 @@ function run(command: string, args: string[], cwd: string, timeoutMs: number, bu
       if (bytes > OUTPUT_BYTES) { processError = `replay output exceeded ${OUTPUT_BYTES} bytes`; stop(); }
       else stream.push(chunk);
     };
-    child.stdout!.on('data', (chunk: Buffer) => append(stdout, chunk));
-    child.stderr!.on('data', (chunk: Buffer) => append(stderr, chunk));
+    child.stdout!.on('data', (chunk: Buffer) => { stdoutBytes += chunk.length; stdoutHash.update(chunk); append(stdout, chunk); });
+    child.stderr!.on('data', (chunk: Buffer) => { stderrBytes += chunk.length; stderrHash.update(chunk); append(stderr, chunk); });
     child.on('error', (error) => { processError = `replay spawn failed: ${error.message}`; });
     child.on('close', (exitCode, signal) => {
       if (!boundaryObserved) processError = 'ENGINE_WRITE_BOUNDARY_UNVERIFIED: replay launcher closed without enforcement receipt; child fate is unknown';
       clearTimeout(timer); abortSignal?.removeEventListener('abort', onAbort); stop();
       budget.onCommandLifecycle?.({ phase: 'completed', id, command: description, timestamp: new Date().toISOString() });
-      done({ exitCode, signal, timedOut, aborted, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), ...(processError ? { processError } : {}) });
+      const out = Buffer.concat(stdout).toString('utf8'), err = Buffer.concat(stderr).toString('utf8');
+      done({ command, argv: args, cwd, startedAt, completedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), loadStart, loadEnd: loadavg(),
+        exitCode, signal, timedOut, aborted, stdout: out, stderr: err,
+        stdoutBytes, stderrBytes, stdoutSha256: stdoutHash.digest('hex'), stderrSha256: stderrHash.digest('hex'),
+        stdoutTruncated: out.length > 16_384 || Buffer.byteLength(out) < stdoutBytes,
+        stderrTruncated: err.length > 16_384 || Buffer.byteLength(err) < stderrBytes,
+        ...(processError ? { processError } : {}) });
     });
   });
 }
@@ -102,11 +106,15 @@ async function executeConfinedDeclaredReplays(input: StageArtifactContractInput,
     const effectiveTimeoutMs = Math.max(0, Math.floor(Math.min(declaration.timeout_ms ?? validationBudget, validationBudget, budget.remainingMs())));
     const started = performance.now();
     const command = JSON.stringify({ runner: declaration.runner, argv: declaration.argv, targets: declaration.targets });
+    const inputs = () => targets.map((target) => ({ path: target.path, identity: readLiveConstraintContentIdentity(target.path) }));
+    const modulePath = fileURLToPath(import.meta.url);
     const execution: StageArtifactReplayExecution = {
       declarationId: declaration.id, command, sourcePath: '', runner: declaration.runner,
       targetPaths: targets.map((target) => target.path), status: 'not_run', exitCode: null, signal: null, timedOut: false,
       collectedTests: 0, executedTests: 0, passedTests: 0, failedTests: 0, skippedTests: 0,
-      stdout: '', stderr: '', reason: '', effectiveTimeoutMs, elapsedMs: 0, targets: [],
+      stdout: '', stderr: '', reason: '', effectiveTimeoutMs, elapsedMs: 0, targets: [], processes: [],
+      observation: { policy: 'single_execution_no_confirmation', startedAt: new Date().toISOString(), loadStart: loadavg(), inputsBefore: inputs(),
+        runtime: { modulePath, moduleIdentity: readLiveConstraintContentIdentity(modulePath), manifestIdentity: readLiveConstraintContentIdentity(join(dirname(modulePath), '.flowcrew-build-manifest.json')) } },
     };
     const remaining = () => Math.max(0, Math.floor(Math.min(effectiveTimeoutMs - (performance.now() - started), budget.remainingMs())));
     const missing = targets.filter((target) => { try { return !statSync(target.path).isFile(); } catch { return true; } });
@@ -163,6 +171,9 @@ async function executeConfinedDeclaredReplays(input: StageArtifactContractInput,
         execution.timedOut = outcomes.some((outcome) => outcome.timedOut);
         execution.stdout = bounded(outcomes.map((outcome) => outcome.stdout).join('\n'));
         execution.stderr = bounded(outcomes.map((outcome) => outcome.stderr).join('\n'));
+        // The aggregate exit/log fields remain compatible. One durable ledger
+        // keeps individual targets' direct facts instead of collapsing them.
+        execution.processes = outcomes.map((outcome) => ({ ...outcome, stdout: bounded(outcome.stdout), stderr: bounded(outcome.stderr) }));
         const processError = outcomes.find((outcome) => outcome.processError)?.processError;
         if (execution.timedOut) execution.reason = `REPLAY_TIMEOUT: replay exceeded its effective ${effectiveTimeoutMs}ms budget`;
         else if (outcomes.some((outcome) => outcome.aborted)) execution.reason = 'REPLAY_ABORTED: authoritative attempt/control abort stopped the replay';
@@ -174,6 +185,9 @@ async function executeConfinedDeclaredReplays(input: StageArtifactContractInput,
       } finally { rmSync(directory, { recursive: true, force: true }); }
     }
     execution.elapsedMs = Math.round(performance.now() - started);
+    execution.observation!.completedAt = new Date().toISOString();
+    execution.observation!.loadEnd = loadavg();
+    execution.observation!.inputsAfter = inputs();
     executions.push(execution);
   }
   return executions;

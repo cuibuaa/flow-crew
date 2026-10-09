@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { extractFinalMessage, generateRunSummary } from '../src/run-summary.js';
@@ -52,6 +52,30 @@ describe('extractFinalMessage', () => {
 });
 
 describe('Reality-Gate advisory summary', () => {
+  it('keeps terminal and active stage data in the summary while naming omitted optional history', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'flowcrew-summary-optional-history-'));
+    const previousFcGlobalDir = fcGlobalDir();
+    try {
+      setFcGlobalDir(join(root, 'fc-home'));
+      const projectDir = join(root, 'project'); mkdirSync(projectDir);
+      const created = createRun(projectDir, 'test', 'name: test', ['active_work']);
+      const path = join(runDir(projectDir, created.runId), 'run.json');
+      const state = JSON.parse(readFileSync(path, 'utf8'));
+      state.status = 'complete'; state.supervise = false;
+      state.stages.active_work = { status: 'complete', retries: 0 };
+      state.retiredStageUsage = [{ stageId: 'work', iteration: 'damaged-optional-iteration', status: { status: 'failed', retries: 0 } }];
+      writeFileSync(path, JSON.stringify(state));
+      const summary = await generateRunSummary(projectDir, created.runId, {
+        run: async () => ({ output: '## What was done\n- deterministic narrative', exitCode: 0, duration_ms: 1 }),
+      });
+      expect(summary).toContain('active_work: complete');
+      expect(summary).toContain('RUN_STAGE_HISTORY_INVALID: retiredStageUsage[0]: optional history omitted');
+      expect(summary).not.toContain('work [iteration');
+    } finally {
+      setFcGlobalDir(previousFcGlobalDir);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('renders failed advisory checks into the deterministic run summary', async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-summary-advisory-'));
     const previousFcGlobalDir = fcGlobalDir();
@@ -129,6 +153,10 @@ describe('Reality-Gate advisory summary', () => {
         outputPath: `${evidenceRoot}/output.md`,
         attemptOutputPaths: [{ attemptIndex: 1, path: `${evidenceRoot}/output_attempt_1.md` }],
       }];
+      state.retiredStageUsage = [
+        { stageId: 'retired_work', iteration: 1, status: state.stageEvidence[0].status },
+        { stageId: 'legacy_work', iteration: 0, status: { status: 'failed', retries: 0 } },
+      ];
       writeRunState(projectDir, created.runId, state);
       const evidenceDir = join(runDir(projectDir, created.runId), evidenceRoot);
       mkdirSync(evidenceDir, { recursive: true });
@@ -149,6 +177,8 @@ describe('Reality-Gate advisory summary', () => {
       const summary = await generateRunSummary(projectDir, created.runId, adapter);
 
       expect(summary).toContain('retired_work [iteration 1, archived]: complete');
+      expect(summary.match(/retired_work \[iteration 1, archived\]:/g)).toHaveLength(1);
+      expect(summary).toContain('legacy_work [iteration 0, archived]: failed');
       expect(narrativePrompt).toContain('## Stage: retired_work [iteration 1, archived] (complete, 1s)');
       expect(narrativePrompt).toContain('historical output remains reachable');
     } finally {

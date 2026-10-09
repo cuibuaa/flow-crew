@@ -751,7 +751,17 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 }
 
 /** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
-export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>)';
+export interface GateVerdict {
+  pass: boolean;
+  reason?: string;
+  repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };
+  /** Engine-only refusal classification; authored fields never populate it. */
+  contractViolation?: 'repairability';
+}
+export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
+  + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
+  + 'Use irreparable only when no repair or re-plan can undo the observed failure; it ends the run escalated and preserves the rejection. '
+  + 'Omitting repairability preserves the legacy repair route. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';

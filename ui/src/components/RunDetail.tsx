@@ -5,6 +5,7 @@ import type { RealityGateCheckDiagnostic, RealityGateOutputTail, RunDetailData, 
 import ActivityFeed from "./ActivityFeed";
 import {
   formatDuration,
+  historicalRunStages,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   parseRunSummary,
@@ -161,16 +162,16 @@ function RealityGateDiagnostics({ run }: { run: RunDetailData }) {
   );
 }
 
-function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: number }) {
+function StageAttemptHistory({ stages, nowMs }: { stages: Array<RunStage & { historyIteration?: number }>; nowMs: number }) {
   if (stages.length === 0) return <div className="empty-state">No workflow stages were recorded.</div>;
   return (
     <div className="attempt-history-list">
       {stages.map((stage) => {
         const ledger = stageAttemptLedger(stage, nowMs);
         return (
-          <article className="attempt-history-stage" key={stage.id} data-testid={`attempt-ledger-${stage.id}`}>
+          <article className="attempt-history-stage" key={JSON.stringify([stage.historyIteration, stage.id])} data-testid={`attempt-ledger-${stage.id}${stage.historyIteration === undefined ? '' : `-iteration-${stage.historyIteration}`}`}>
             <header>
-              <strong>{stage.id}</strong>
+              <strong>{stage.id}{stage.historyIteration === undefined ? '' : ` [iteration ${stage.historyIteration}, archived]`}</strong>
               <span className={`outcome-badge ${stageStatusTone(stage.status)}`}>{stage.status}</span>
               <span>{ledger.executions} {ledger.executions === 1 ? "execution" : "executions"} · {ledger.failedAttemptsExact ? ledger.failedAttempts : `at least ${ledger.failedAttempts}`} failed</span>
             </header>
@@ -178,9 +179,9 @@ function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: num
               <ol className="attempt-ledger">
                 {ledger.rows.map((attempt) => (
                   <li key={attempt.key} className={attempt.status === "failed" ? "failed" : ""}>
-                    <span>Execution {attempt.index}{attempt.current ? " · current" : ""}</span>
+                    <span>Execution {attempt.index}{attempt.current ? stage.historyIteration === undefined ? " · current" : " · running at retirement" : ""}</span>
                     <code>{attempt.status}</code>
-                    <span>{formatDuration(attempt.durationMs)}</span>
+                    <span>{formatDuration(attempt.current && stage.historyIteration !== undefined ? null : attempt.durationMs)}</span>
                     {attempt.current && !attempt.recorded ? <span className="run-muted">start time unavailable in this view</span> : null}
                     {attempt.error ? <span className="attempt-error">{attempt.error}</span> : null}
                   </li>
@@ -389,7 +390,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
 
   const campaignId = run.campaignId ?? "";
   const runningStages = stages.filter((stage) => stage.status === "running");
-  const failures = runFailureHistory(stages);
+  const failures = runFailureHistory(stages, historicalRunStages(run));
   const usage = runUsageTotal(run);
   const elapsed = runElapsedMs(run, nowMs);
   const failedChecks = run.realityGate?.results?.filter((check) => !check.pass) ?? [];
@@ -658,6 +659,10 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <section aria-labelledby="attempt-history-title">
             <h2 id="attempt-history-title">Stage execution history</h2>
             <StageAttemptHistory stages={stages} nowMs={nowMs} />
+            {run.stageHistory?.length ? <>
+              <h3>Archived iterations</h3>
+              <StageAttemptHistory stages={historicalRunStages(run)} nowMs={nowMs} />
+            </> : null}
           </section>
           <section aria-labelledby="execution-structure-title">
             <h2 id="execution-structure-title">Execution structure</h2>

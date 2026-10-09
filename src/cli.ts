@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import type { RunStatus } from './store.js';
+import type { RetiredStageUsage, RunStatus } from './store.js';
 import type { AdapterName, AdapterResolution } from './adapters/availability.js';
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
@@ -86,6 +86,7 @@ const [
   guidanceModule,
   commandInterruptModule,
   supervisionModule,
+  runStateViewModule,
 ] = await Promise.all([
   import('node:fs'),
   import('node:path'),
@@ -107,6 +108,7 @@ const [
   import('./guidance.js'),
   import('./command-interrupt.js'),
   import('./supervision.js'),
+  import('./run-state-view.js'),
 ]);
 
 const {
@@ -126,6 +128,7 @@ const { join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
 const { createInterface } = readlineModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
+const { projectRunStageHistory } = runStateViewModule;
 const {
   campaignDir,
   extractTaskTitle,
@@ -135,6 +138,7 @@ const {
   isTerminalRunStatus,
   resolveRunStatus,
   readRunState,
+  readArchivedRunState,
   RUN_STATUS,
   RUN_RESERVATION_FILE,
   RUN_RESERVATION_TTL_MS,
@@ -1425,6 +1429,8 @@ interface StatusSelection {
 interface StatusRun {
   id: string;
   directory: string;
+  history?: RetiredStageUsage[];
+  historyError?: string;
   state: {
     projectDir?: string;
     taskDescription?: string;
@@ -1517,7 +1523,19 @@ function latestStatusRun(root: string, runIds: string[], selection: StatusSelect
       const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StatusRun['state'];
       const matchesProject = typeof state.projectDir === 'string'
         && canonicalProjectPath(state.projectDir) === selection.projectDir;
-      if (selection.all || matchesProject) return { id, directory, state };
+      if (selection.all || matchesProject) {
+        try {
+          const diagnostics: string[] = [];
+          const history = projectRunStageHistory(readArchivedRunState('', id).state,
+            diagnostic => diagnostics.push(`${diagnostic.code}: ${diagnostic.path}: ${diagnostic.detail}`));
+          return { id, directory, state, history,
+            ...(diagnostics.length ? { historyError: diagnostics.join('; ') } : {}) };
+        } catch (error) {
+          // Keep the previously readable active projection when an archived
+          // prefix is absent or damaged; never silently hide the selected run.
+          return { id, directory, state, historyError: error instanceof Error ? error.message : String(error) };
+        }
+      }
     } catch { /* malformed or concurrently removed run: try the next one */ }
   }
   return undefined;
@@ -1565,6 +1583,11 @@ function cmdStatus() {
     const icon = ss.status === STAGE_STATUS.COMPLETE ? '✓' : ss.status === STAGE_STATUS.RUNNING ? '⟳' : ss.status === STAGE_STATUS.FAILED ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
   }
+  for (const { stageId, iteration, status } of selected.history ?? []) {
+    const dur = status.duration_ms ? ` (${formatHumanDuration(status.duration_ms)})` : '';
+    console.log(`  ${stageId} [iteration ${iteration}, archived]: ${status.status}${dur}`);
+  }
+  if (selected.historyError) console.log(`History unavailable: ${selected.historyError}`);
   if (selection.details) {
     const summaryPath = join(runDir, 'summary.md');
     const progressPath = join(runDir, 'progress.md');

@@ -6,6 +6,7 @@ import { ArtifactContractSchema, artifactDeclarationErrors, type ArtifactContrac
 import type { StageStatus } from './store.js';
 import { declaredArtifactPreimages, inspectDeclaredStageArtifactContract } from './declared-artifact-audit.js';
 import { executeDeclaredReplays, type ReplayBudget } from './declared-replay-execution.js';
+import type { ReplayTests } from './declared-replay-results.js';
 
 export type StageArtifactObligationKind = 'prompt_artifact' | 'replay_command_target' | 'declared_artifact' | 'declared_replay';
 
@@ -86,7 +87,44 @@ export interface StageArtifactReplayExecution {
   declarationId?: string;
   effectiveTimeoutMs?: number;
   elapsedMs?: number;
-  targets?: Array<{ artifact: string; path: string; collected: number; executed: number; passed: number; failed: number; skipped: number; failures: string[]; error?: string }>;
+  targets?: Array<ReplayTests & { artifact: string; path: string; executed: number }>;
+  /** Every direct process outcome, including earlier targets and abnormal exits.
+   * These observations explain a refusal; they cannot overrule it. */
+  processes?: StageArtifactReplayProcess[];
+  observation?: {
+    policy: 'single_execution_no_confirmation';
+    startedAt: string;
+    completedAt?: string;
+    loadStart: number[];
+    loadEnd?: number[];
+    inputsBefore: StageArtifactContractPreimage[];
+    inputsAfter?: StageArtifactContractPreimage[];
+    runtime: { modulePath: string; moduleIdentity: LiveConstraintContentIdentity; manifestIdentity: LiveConstraintContentIdentity };
+  };
+}
+
+export interface StageArtifactReplayProcess {
+  command: string;
+  argv: string[];
+  cwd: string;
+  startedAt: string;
+  completedAt: string;
+  elapsedMs: number;
+  loadStart: number[];
+  loadEnd: number[];
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  aborted: boolean;
+  processError?: string;
+  stdout: string;
+  stderr: string;
+  stdoutBytes: number;
+  stderrBytes: number;
+  stdoutSha256: string;
+  stderrSha256: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
 }
 
 export interface StageArtifactContractPreimage {

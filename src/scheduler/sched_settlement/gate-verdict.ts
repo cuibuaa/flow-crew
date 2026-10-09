@@ -2,7 +2,7 @@
 import { readResearchGateCandidate } from '../../research-candidate.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { AuditFindingsSchema } from '../../scoped-audit-repair.js';
-import { CriterionDischargeRecord, STAGE_STATUS, StageEvidenceRecord, StoreState, runDir, stageDir } from '../../store.js';
+import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, runDir, stageDir } from '../../store.js';
 import { validateGateControls } from '../../verdict-controls.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport } from '../sched_admission/dispatch.js';
@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateContract, loadGateContract, validateVerdictAgainstContract, validateVerdictAgainstMetricFile } from './gate-contract.js';
-import { readWrittenGateVerdict, assignedGateCriterionRefs, explicitPassContradiction, validateGateCriterionEvidence } from './gate-evidence.js';
+import { readWrittenGateVerdict, assignedGateCriterionRefs, explicitPassContradiction, validateGateCriterionEvidence, validateGateRepairability, retainGateVerdictIdentity, projectGateVerdict } from './gate-evidence.js';
 import { GateValidationDeltaArtifact, settledGateValidationExecution } from './gate-validation.js';
 
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
@@ -21,7 +21,8 @@ export function readTerminalStudyCompletionEvidence(projectDir: string, runId: s
   for (const file of [`verdict_${stageId}.json`, `pre_gate_verdict_${stageId}.json`]) {
     try {
       const parsed = JSON.parse(readFileSync(join(base, file), 'utf-8')) as Record<string, unknown>;
-      if (isTerminalStudyCompletionArtifact(parsed)) return parsed;
+      // Legacy success recovery cannot adopt a new rejected-run disposition.
+      if (isTerminalStudyCompletionArtifact(parsed) && !('repairability' in parsed)) return parsed;
     } catch { /* optional */ }
   }
   return null;
@@ -66,7 +67,7 @@ export function readGateVerdict(
   contract?: GateContract | null,
   allowSharedFallback = true,
   requireValidationDelta = true,
-): { pass: boolean; reason?: string } | null {
+): GateVerdict | null {
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   const v = readWrittenGateVerdict(base, stageId, allowSharedFallback);
   if (!v && runId && allowSharedFallback) {
@@ -77,9 +78,26 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
+  const repairabilityViolation = validateGateRepairability(v);
+  if (repairabilityViolation) return { pass: false, reason: repairabilityViolation, contractViolation: 'repairability' };
+  if (v.repairability && isTerminalStudyCompletionArtifact(v)) {
+    return { pass: false, reason: 'Gate contract violation: rejected repairability and terminal study completion success are incompatible outcome declarations; remove one conflicting declaration', contractViolation: 'repairability' };
+  }
+  // A secondary refusal cannot turn an irreversible rejected fact into repair
+  // work. Keep the disposition and parsed-byte identity while retaining failure.
+  const reject = (reason: string): GateVerdict => v.repairability
+    ? retainGateVerdictIdentity(v, { ...projectGateVerdict(v), pass: false, reason })
+    : { pass: false, reason };
+  if (v.repairability && runId) {
+    // Shared legacy carriers cannot authorize a new terminal disposition.
+    const exact = readWrittenGateVerdict(base, stageId, false);
+    if (!exact || JSON.stringify(exact) !== JSON.stringify(v)) {
+      return { pass: false, reason: 'Gate contract violation: repairability must be written to the gate\'s exact declared verdict_<stage_id>.json output', contractViolation: 'repairability' };
+    }
+  }
   if (v.audit_findings !== undefined) {
     const findings = AuditFindingsSchema.safeParse(v.audit_findings);
-    if (!findings.success) return { pass: false, reason: `AUDIT_FINDINGS_INVALID: ${findings.error.message}` };
+    if (!findings.success) return reject(`AUDIT_FINDINGS_INVALID: ${findings.error.message}`);
     if (v.pass === true && findings.data.findings.length) return { pass: false, reason: 'AUDIT_FINDINGS_OPEN: a passing verdict cannot contain unresolved structured findings' };
   }
   if (runId && v.pass === true) {
@@ -155,7 +173,7 @@ export function readGateVerdict(
   const criterionViolation = validateGateCriterionEvidence(base, stageId, v);
   if (criterionViolation) {
     log.warn({ stageId, runId, criterionViolation }, 'Gate verdict rejected by canonical criterion coverage contract');
-    return { pass: false, reason: criterionViolation };
+    return reject(criterionViolation);
   }
   if (runId) {
     const controls = validateGateControls({
@@ -193,7 +211,7 @@ export function readGateVerdict(
     }
     if (controls.violation) {
       log.warn({ stageId, runId, violation: controls.violation }, 'Gate verdict rejected by guidance and feasibility controls');
-      return { pass: false, reason: controls.violation };
+      return reject(controls.violation);
     }
   }
   if (runId && isTerminalStudyCompletionArtifact(v)) {
@@ -211,7 +229,7 @@ export function readGateVerdict(
       const violation = validateVerdictAgainstMetricFile(v, metric, applicableContract);
       if (violation) {
         log.warn({ stageId, runId, violation }, 'Gate verdict rejected by metric.json consistency check');
-        return { pass: false, reason: violation };
+        return reject(violation);
       }
     } catch { /* optional/back-compat */ }
   }
@@ -223,10 +241,14 @@ export function readGateVerdict(
     const violation = validateVerdictAgainstContract(v, metric, contract, stageId);
     if (violation) {
       log.warn({ stageId, runId, violation }, 'Gate verdict rejected by contract');
-      return { pass: false, reason: `Gate contract violation: ${violation}` };
+      return reject(`Gate contract violation: ${violation}`);
     }
   }
-  return v as { pass: boolean; reason?: string };
+  // Preserve the public reader's legacy fields; only engine refusals can carry
+  // the private classification marker into runtime facts.
+  const verdict = { ...v };
+  delete verdict.contractViolation;
+  return retainGateVerdictIdentity(v, verdict) as unknown as GateVerdict;
 }
 
 /**

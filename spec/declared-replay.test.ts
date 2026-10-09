@@ -11,6 +11,7 @@ import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatc
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
 import { createRun, runDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { nodeReplayTests, pytestReplayTests, replayDiagnostic, vitestReplayTests } from '../src/declared-replay-results.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 
 const roots: string[] = [];
@@ -60,6 +61,16 @@ describe('declared replay execution', () => {
     expect(audit.violations).toEqual([]);
     expect(audit.replayVerification).toBe('verified');
     expect(audit.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode: 1, failedTests: 1, executedTests: 1 });
+    expect(audit.replayExecutions[0].targets?.[0].tests).toEqual([
+      expect.objectContaining({ name: 'observed defect', status: 'failed', diagnostic: expect.objectContaining({
+        cause: expect.objectContaining({ code: 'ERR_ASSERTION', actual: 1, expected: 2, operator: 'strictEqual' }),
+      }) }),
+    ]);
+    expect(audit.replayExecutions[0].processes).toEqual([
+      expect.objectContaining({ exitCode: 1, signal: null, timedOut: false, aborted: false, stderrBytes: 0 }),
+    ]);
+    expect(audit.replayExecutions[0].observation).toMatchObject({ policy: 'single_execution_no_confirmation',
+      inputsBefore: [expect.objectContaining({ identity: expect.objectContaining({ state: 'present', type: 'file' }) })] });
     expect((await verifyStageArtifactContract({ ...i, artifactContract: contract(['case.test.mjs'], 'node_test', [{ artifact: 'file_0', test: 'other defect' }]) }, budget())).violations[0].reason).toContain('REPLAY_FAILURE_MISMATCH');
   });
   it('executes every entry beyond four and every target after an expected failure', async () => {
@@ -72,7 +83,84 @@ describe('declared replay execution', () => {
     expect(audit.violations).toEqual([]);
     expect(audit.replayExecutions).toHaveLength(5);
     expect(audit.replayExecutions.every((entry) => entry.targets?.length === 2 && entry.executedTests === 2)).toBe(true);
+    expect(audit.replayExecutions.every((entry) => entry.processes?.map(process => process.exitCode).join(',') === '1,0')).toBe(true);
     expect(readFileSync(join(f.project, 'count'), 'utf8')).toBe('xxxxx');
+  });
+  it('retains nested Node causes and bounded streams when stderr alone cannot explain a failure', async () => {
+    const f = fixture();
+    writeFileSync(join(f.project, 'case.test.mjs'), nodeTest('nested failure', 'process.stderr.write("x".repeat(20000)); throw new Error("outer diagnostic", {cause: new Error("inner diagnostic")})'));
+    const audit = await verifyStageArtifactContract(input(f, contract(['case.test.mjs'])), budget());
+    const execution = audit.replayExecutions[0];
+    expect(execution.status).toBe('failed');
+    expect(execution.targets?.[0].tests?.[0].diagnostic).toMatchObject({ message: 'outer diagnostic', cause: { message: 'outer diagnostic', cause: { message: 'inner diagnostic' } } });
+    expect(execution.processes?.[0]).toMatchObject({ exitCode: 1, stderrBytes: 0, stderrTruncated: false });
+    expect(execution.processes?.[0].stderrSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(execution.targets?.[0].runnerOutput)).toContain('test:stderr');
+    expect(JSON.stringify(execution.targets?.[0].runnerOutput)).toContain('omittedCharacters');
+  });
+  it('retains every named result before process-log truncation', async () => {
+    const f = fixture();
+    writeFileSync(join(f.project, 'case.test.mjs'), 'import {test} from "node:test";\n' + Array.from({ length: 200 }, (_, i) => `test("named result ${i}",()=>{});`).join('\n'));
+    const audit = await verifyStageArtifactContract(input(f, contract(['case.test.mjs'])), budget());
+    const execution = audit.replayExecutions[0];
+    expect(audit.violations).toEqual([]);
+    expect(execution.targets?.[0].tests).toHaveLength(200);
+    expect(execution.targets?.[0].tests?.[199].name).toBe('named result 199');
+    expect(execution.processes?.[0].stdoutTruncated).toBe(true);
+    expect(execution.processes?.[0].stdout).toContain('[replay output truncated]');
+  });
+  it('retains Vitest assertion details and rejected collection observations without converting either to success', () => {
+    const target = resolve('private.test.ts');
+    const value = { numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, numPendingTests: 0,
+      testResults: [{ name: target, status: 'failed', message: 'suite diagnostic', assertionResults: [
+        { fullName: 'passes', status: 'passed' },
+        { fullName: 'fails', status: 'failed', failureMessages: ['actual 2, expected 1'], failureDetails: [{ actual: 2, expected: 1 }] },
+      ] }] };
+    const result = vitestReplayTests(JSON.stringify(value), [target]).get(target)!;
+    expect(result).toMatchObject({ collected: 2, passed: 1, failed: 1, failures: ['fails'] });
+    expect(result.tests?.map(test => test.name)).toEqual(['passes', 'fails']);
+    expect(result.tests?.[1].diagnostic).toEqual({ failureMessages: ['actual 2, expected 1'], failureDetails: [{ actual: 2, expected: 1 }] });
+    const rejected = vitestReplayTests(JSON.stringify({ ...value, unhandledErrors: [{ message: 'runtime failed' }] }), [target]).get(target)!;
+    expect(rejected.error).toContain('collection/runtime');
+    expect(JSON.stringify(rejected.diagnostic)).toContain('runtime failed');
+    expect(JSON.stringify(rejected.diagnostic)).toContain('actual 2, expected 1');
+    expect(rejected.tests?.map(test => test.name)).toEqual(['passes', 'fails']);
+  });
+  it('retains pytest failure bodies and Node collection errors as diagnostic data', () => {
+    const xml = '<testsuites><testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="case" name="test_case"><failure message="expected 1">actual &lt;2&gt;</failure></testcase></testsuite></testsuites>';
+    const result = pytestReplayTests(xml);
+    expect(result.failures).toEqual(['case::test_case']);
+    expect(JSON.stringify(result.tests?.[0].diagnostic)).toContain('actual <2>');
+    const wrapper = { flowcrewReplay: 1, summary: {}, tests: [{ file: '/private/case.mjs', name: '/private/case.mjs', status: 'failed', diagnostic: { message: 'import failed' } }] };
+    const refused = nodeReplayTests(JSON.stringify(wrapper), '/private/case.mjs');
+    expect(refused.error).toContain('file wrapper');
+    expect(JSON.stringify(refused.tests)).toContain('import failed');
+  });
+  it('labels diagnostic cycles, depth and size limits without letting property names affect the carrier', () => {
+    const value: Record<string, unknown> = JSON.parse('{"__proto__":{"untrusted":true}}'); value.self = value;
+    const result = replayDiagnostic(value) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+    expect(Object.hasOwn(result, '__proto__')).toBe(true);
+    expect(result.self).toEqual({ truncated: 'cycle' });
+    expect(replayDiagnostic('x'.repeat(9000))).toEqual({ text: 'x'.repeat(8192), omittedCharacters: 808 });
+    expect(JSON.stringify(replayDiagnostic(Array.from({ length: 130 }, () => 1)))).toContain('omittedEntries');
+  });
+  it('bounds aggregate Node assertion diagnostics without losing declared failing identities', async () => {
+    const f = fixture();
+    // Carried unchanged from the independent diagnostic-ceiling construction:
+    // each deepEqual fails, and the complete reporter used to exceed 8 MiB.
+    writeFileSync(join(f.project, 'volume.test.mjs'), `import test from 'node:test';import assert from 'node:assert/strict';for(let i=0;i<64;i++)test('large assertion '+i,()=>assert.deepEqual(Array.from({length:128},()=>('actual').repeat(167)),Array.from({length:128},()=>('expected').repeat(125))));`);
+    const c = contract(['volume.test.mjs'], 'node_test', Array.from({ length: 64 }, (_, i) => ({ artifact: 'file_0', test: 'large assertion ' + i })));
+    const audit = await verifyStageArtifactContract(input(f, c), budget());
+    const execution = audit.replayExecutions[0];
+    expect(execution.status).toBe('passed');
+    expect(execution.exitCode).toBe(1);
+    expect(execution.collectedTests).toBe(64);
+    expect(execution.failedTests).toBe(64);
+    expect(execution.targets?.[0].failures).toEqual(Array.from({ length: 64 }, (_, i) => 'large assertion ' + i));
+    expect(execution.targets?.[0].tests).toHaveLength(64);
+    expect(execution.targets?.[0].tests?.some(test => JSON.stringify(test.diagnostic).includes('aggregate diagnostic byte limit'))).toBe(true);
+    expect(execution.processes?.[0].stdoutBytes).toBeLessThan(1024 * 1024);
   });
   it.each(['empty', 'skipped', 'import_error'])('refuses %s even when a direct outcome is claimed', async (kind) => {
     const f = fixture(); const path = join(f.project, 'case.test.mjs');

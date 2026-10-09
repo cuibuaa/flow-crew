@@ -2,6 +2,8 @@ The engine offers one read view through `flowcrew state --project <project> --ru
 
 The view includes admitted plan revisions, stage and attempt statuses, declared and observed artifacts, known and unknown token usage, elapsed time and iteration budget, resource leases and waits, open findings, guidance envelopes and prompt coverage. Older runs remain readable. Their `input.md` aliases are explicitly inexact because the engine did not retain every rendered retry, correction, fallback or provider invocation. New records distinguish the adapter boundary from the built-in transport boundary. Provider defaults and hidden provider instructions remain unresolved rather than being invented.
 
+Retired stage history is optional read evidence, separate from the active stage graph. Malformed history rows are omitted with `RUN_STAGE_HISTORY_INVALID` diagnostics: the run-detail API exposes `stageHistoryDiagnostics`, and status and summary output name the gap. Valid retired rows and readable core run data remain visible; no record is repaired or retired stage reactivated.
+
 Newly submitted dispatched stages declare outputs, reads and replay commands in
 `artifact_contract` version 1. Each of `produces`, `reads` and `replays` is present;
 an explicit empty list is valid:
@@ -87,6 +89,27 @@ the immutable attempt's remaining time. The audit records effective budget,
 elapsed time, direct exit, signal and timeout. A timeout is reported before
 secondary missing-runner-output diagnostics.
 
+`stages/<id>/artifact_contract.json` retains one observation per declared replay,
+with `processes` for each direct invocation and `targets[].tests` for every
+reported name and outcome, including observations from refused collection.
+Node errors retain nested `cause` and assertion fields; Vitest retains emitted
+failure messages/details; pytest retains JUnit failure bodies. Node's forwarded
+test stdout/stderr and diagnostic events live in `targets[].runnerOutput`,
+separately from the direct process pipes. Stream records include byte counts,
+hashes and explicit truncation flags; text prefixes are limited to 16,384
+characters. Nested diagnostics limit strings to 8,192 characters, depth to eight,
+and object/array entries to 128, with omissions labelled. Forwarded Node output
+keeps at most 128 events and 262,144 serialized characters, with omitted-event
+counts. Named results are retained before process-log truncation.
+
+`observation` records timing/load and declared-target identities before and after
+execution, plus the module and manifest observed on disk at replay start. These
+snapshots do not attest transitive inputs, external state or already loaded code.
+The policy is `single_execution_no_confirmation`: no automatic confirmation or
+retry changes acceptance. An unexpected failing check remains refused; a later
+pass does not identify the earlier failure as a flake. Legacy audits retain their
+original fields; absent diagnostics are not reconstructed or written back.
+
 Earlier run artifacts remain readable: their recorded obligations, replay
 executions, advisories and verdicts stay data. Reading them does not derive new
 commands or duties. A resident process on the old admitted generation may finish
@@ -116,6 +139,10 @@ A settled stage can write a complete proposal to its own stage directory's `plan
 Replace `stages` with the complete proposed list, including existing stages. New stages require the complete declared contract, including `replays`. Revisions occur only when all stages are idle. Existing stages, artifact duties and execution conditions remain present and unchanged; `PLAN_REVISION_EXECUTION_CHANGED` refuses a predicate change that could skip an existing producer. Executed work stages are immutable, and new scopes must fit the initial capability union. The scheduler reruns the same whole-plan admission for roles, dependencies, scope, criteria, terminal ownership and gates, declared inputs, research bindings and reality-check reachability. It retains a digest-bound history carrier and a durable accepted or refused decision committed in the same run-state transaction. Decision files are immutable projections; a retry reconstructs a lost projection without committing the revision again. An unjournaled decision file is refused with `PLAN_REVISION_DECISION_UNJOURNALED`; it cannot grant acceptance by naming an unrelated history entry. Preserve that evidence and submit a new request ID against the current admitted view. Stages cannot declare engine decision projections as their products. Stale requests and reused IDs with different bytes are refused. Removing an existing obligation or migrating an undeclared historical plan requires a new initial plan, rather than an amendment that silently erases authority.
 
 A gate can publish `audit_findings: {version: 1, findings: [...]}` in its declared verdict. Each finding names `id`, exact project `paths`, `reason`, `criterion_ids`, `invalidates_plan` and a configured `repair_role`. A finding that leaves the plan valid produces a repair stage limited to those paths, admitted as a full revision, followed by the authoring gate's re-evaluation. Passing re-evaluation resolves the finding. The initial rejected verdict is retained by content hash. The engine can add a repair prerequisite and reopen the authoring gate for re-evaluation; the prior gate definition and attempts remain in history. A finding that invalidates the plan follows the existing replan path. Undeclared verdicts, foreign criteria, unconfigured roles and scopes beyond the initial capabilities cannot create repair authority.
+
+Generated repairs retain the rejected producers' and gate's declared reads and replay checks. Named outputs keep their declared shape; other outputs remain reads bound to their existing owners. The existing stages and their duties stay unchanged in the revision. The repair reads the durable rejected verdict, with its content digest and gate execution recorded in the prompt. The engine refuses a changed or stale verdict whose protected artifact receipt does not match the current completed execution. Conditional stages, conditional outputs and exactly-one groups require a complete outcome repair and are refused by the narrowed file repair builder with `SCOPED_REPAIR_CONDITIONAL_DUTY`; declare that repair in a new complete plan. Checks exceeding the combined replay limit are also refused rather than dropped. Fixed `retry_to` repairs remain available alongside generated repairs.
+
+A rejected gate may declare `repairability: {version: 1, disposition: "repairable" | "irreparable", evidence: "<reproducible evidence>"}`. `irreparable` means that no repair or re-plan can undo the observed failure. A completed gate's unchanged exact declared verdict and protected execution receipt authorize that disposition: the scheduler retains the rejected criteria and evidence, records `run_completed`, and settles `escalated` before dispatching repair or a new plan. An incomplete gate or an unbound/shared carrier cannot authorize it. The disposition never turns a rejection into a pass. Legacy verdicts without this field keep their bounded repair route; reason words do not determine terminality. All neighbouring projects retain that legacy behaviour. Unknown versions/dispositions, extra fields, empty evidence, any repairability field with `pass: true`, or repairability combined with the terminal study completion success contract are refused with a message naming the conflicting declaration; the evidence producer is re-evaluated within the existing budget. Historical records are neither migrated nor rewritten.
 
 New stage declarations containing `resources` are refused with `RESOURCES_RETIRED`;
 remove that key. Archived resource observations remain displayable in recorded runs.

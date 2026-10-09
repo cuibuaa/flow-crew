@@ -14,7 +14,7 @@ import { collectGateRuntimeFacts, lastGatePassed } from '../sched_settlement/gat
 import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal, isPausedRunStatus, isPendingStageStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
 import { createResearchBudgetFinalizer } from './research-terminal.js';
-import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, writeCampaignEntry } from './services.js';
+import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -150,6 +150,8 @@ export async function concludeWorkflowIteration(
     // that survives the whole iteration earns a durable archive here.
     if (iterationDispatchedIds.length > 0) {
       const stableGateFacts = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+      if (stableGateFacts.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
+          && terminateForGateContractRefusal(state, stableGateFacts, projectDir, runId, iteration)) return { kind: 'settled', state };
       archiveRejectedGateRuntimeFacts(
         runDirPath,
         gateArchiveCoordinate(iteration, innerRetriesUsed + 1),

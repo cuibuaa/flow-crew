@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { GateRuntimeFacts } from './gate-recovery.js';
+import { validateSettledGateVerdict } from './gate-evidence.js';
 
 export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof createDispatchAdmission>) {
 
@@ -39,10 +40,12 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
         continue;
       }
       const gate = sorted.find((stage) => stage.id === evaluation.id);
-      if (!gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE || evaluation.authoredVerdict?.pass !== false) continue;
+      if (!gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE || evaluation.authoredVerdict?.pass !== false
+          || evaluation.rejectionKind === 'irreparable_rejection' || evaluation.effectiveVerdict?.contractViolation) continue;
       const verdictPath = join(directory, `verdict_${gate.id}.json`);
       let raw: Record<string, unknown>;
-      try { raw = JSON.parse(readFileSync(verdictPath, 'utf8')) as Record<string, unknown>; } catch { continue; }
+      let verdictBytes: Buffer;
+      try { verdictBytes = readFileSync(verdictPath); raw = JSON.parse(verdictBytes.toString('utf8')) as Record<string, unknown>; } catch { continue; }
       if (raw.audit_findings === undefined) continue;
       const parsed = AuditFindingsSchema.safeParse(raw.audit_findings);
       if (!parsed.success) continue; // readGateVerdict records the precise malformed declaration refusal.
@@ -60,15 +63,22 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
       writeRunState(projectDir, runId, state);
       if (parsed.data.findings.some((finding) => finding.invalidates_plan)) continue;
       for (const finding of parsed.data.findings) {
-        const refusal = join(directory, `scoped_repair_refusal_${gate.id}_${finding.id}.json`);
+        const refusal = join(directory, `scoped_repair_refusal_${gate.id}_${finding.id}_${evidenceName.slice(gate.id.length + 1, -5)}.json`);
         if (existsSync(refusal)) continue;
         try {
           if (!gate.artifact_contract?.produces.some((artifact) => artifact.root === 'run' && artifact.path === `verdict_${gate.id}.json`)) throw new Error('SCOPED_REPAIR_VERDICT_UNBOUND: authoring gate must declare its exact run verdict output');
-          const repair = buildScopedRepair(gate, finding);
-          if (sorted.some((stage) => stage.id === repair.id)) continue;
           const revision = state.queryState?.planRevision;
           const attempt = state.stages[gate.id]?.attempts?.at(-1);
           if (!revision || !attempt) throw new Error('SCOPED_REPAIR_PLAN_UNBOUND: admitted plan and settled gate execution are required');
+          const bindingError = validateSettledGateVerdict(directory, runId, gate.id, attempt, createHash('sha256').update(verdictBytes).digest('hex'));
+          if (bindingError) throw new Error(bindingError);
+          const producers = sorted.filter((stage) => !stage.retry_to?.length && stage.artifact_contract?.produces.some((artifact) => artifact.root === 'project'
+            && finding.paths.some((path) => artifact.path === path || (artifact.kind === 'directory' && path.startsWith(`${artifact.path}/`)))));
+          const repair = buildScopedRepair(gate, finding, producers, {
+            evidencePath: `audit_findings/${evidenceName}`, verdictDigest: createHash('sha256').update(readFileSync(evidencePath)).digest('hex'),
+            attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
+          });
+          if (sorted.some((stage) => stage.id === repair.id)) continue;
           const result = applyPlanRevision({ projectDir, runId,
             request: { version: 1, requestId: repair.id, runId, stageId: gate.id, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, baseRevision: revision.revision, baseDigest: revision.digest, reason: `Scoped repair of ${gate.id} finding ${finding.id}: ${finding.reason}`, stages: [...sorted, repair] },
             parseStage: parseDispatchedStageConfig,

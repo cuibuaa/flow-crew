@@ -19,6 +19,7 @@ fcGlobalDir,
 STAGE_STATUS
 } from "./store.js";
 import type { RunStatus,StoreState } from "./store.js";
+import { budgetView, projectRunStageHistory } from './run-state-view.js';
 import { countStandaloneRunsFromIndex,readRunIndexRecordsByCampaign,readRunIndexRecords,listStandaloneRunIdsFromIndex,getMaxUpdatedAt } from './run-index.js';
 import {
 listCampaigns,readCampaignEntries,
@@ -717,6 +718,8 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
   }
   const kg = readKGSafe(projectDir, state.runId);
   const runDirectory = join(runsRoot(), state.runId);
+  const stageHistoryDiagnostics: Array<{ code: string; path?: string; detail: string }> = [];
+  const stageHistory = projectRunStageHistory(state, diagnostic => stageHistoryDiagnostics.push(diagnostic));
   return {
     runId: state.runId,
     workflowName: state.workflowName,
@@ -739,6 +742,9 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     supervisor: state.supervisor,
     stages,
     stageEvidence: state.stageEvidence ?? [],
+    stageHistory,
+    stageHistoryDiagnostics,
+    budget: budgetView(state, new Date().toISOString()),
     kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
     events: readRunEvents(state.runId),
     operational: readOperationalProjection(runDirectory, { state }),

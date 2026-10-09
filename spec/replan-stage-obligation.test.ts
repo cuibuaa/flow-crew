@@ -5,7 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { runWorkflow, StageConfigSchema, type WorkflowConfig } from '../src/scheduler.js';
+import { buildScopedRepair } from '../src/scoped-audit-repair.js';
 import {
   createRun,
   fcGlobalDir,
@@ -18,6 +19,33 @@ import {
 let fixtureRoot: string;
 let projectDir: string;
 let previousFcGlobalDir: string;
+
+describe('finding-derived repair duties', () => {
+  const finding = { id: 'late', paths: ['product.txt'], reason: 'Correct the admitted product', criterion_ids: [], invalidates_plan: false, repair_role: 'builder' };
+  const producer = () => StageConfigSchema.parse({ id: 'author', role: 'builder', scope: ['product.txt'],
+    artifact_contract: { version: 1, produces: [{ id: 'product', root: 'project', path: 'product.txt' }],
+      reads: [{ id: 'proof', root: 'project', path: 'proof.test.mjs', source: { kind: 'input' } }],
+      replays: [{ id: 'product_check', runner: 'node_test', targets: ['proof'], argv: [], expected: { exit_code: 0, failures: [] } }],
+    },
+  });
+  const gate = () => StageConfigSchema.parse({ id: 'gate', role: 'qa', scope: [], is_gate: true,
+    artifact_contract: fixtureArtifactContract('gate', true),
+  });
+  it('preserves producer reads and replay identities without broadening the named write scope', () => {
+    const repair = buildScopedRepair(gate(), finding, [producer()]);
+    expect(repair.scope).toEqual(['product.txt']);
+    expect(repair.artifact_contract?.produces.map((entry) => entry.path)).toEqual(['product.txt']);
+    expect(repair.artifact_contract?.reads).toContainEqual(expect.objectContaining({ path: 'proof.test.mjs', source: { kind: 'input' } }));
+    const replay = repair.artifact_contract!.replays![0];
+    expect(replay).toMatchObject({ runner: 'node_test', expected: { exit_code: 0, failures: [] } });
+    expect(replay.targets).toEqual([repair.artifact_contract!.reads.find((entry) => entry.path === 'proof.test.mjs')!.id]);
+    expect(repair.artifact_contract?.reads).toContainEqual(expect.objectContaining({ path: 'verdict_gate.json', source: { kind: 'stage', stage: 'gate', artifact: 'verdict' } }));
+  });
+  it('refuses to narrow conditional producer duties and refuses plan-invalidating findings', () => {
+    expect(() => buildScopedRepair(gate(), finding, [{ ...producer(), condition: 'facts.choice == true' }])).toThrow('SCOPED_REPAIR_CONDITIONAL_DUTY');
+    expect(() => buildScopedRepair(gate(), { ...finding, invalidates_plan: true }, [producer()])).toThrow('SCOPED_REPAIR_PLAN_LEVEL');
+  });
+});
 
 function workflow(maxIterations: number, dynamicDispatch = true): { config: WorkflowConfig; yaml: string } {
   const yaml = [

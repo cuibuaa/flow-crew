@@ -8,7 +8,7 @@ import { recordedResourceRegistry, appendRecordedResourceLease } from './test-su
 import { inspectStageArtifactContract, writeStageArtifactContractAudit } from '../src/stage-artifact-contract.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { summarizeRunStateView } from '../src/run-state-access.js';
-import { invocationInputPath, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
+import { invocationInputPath, projectRunStageHistory, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
 import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageInput, writeStageStatus, type StageAttempt } from '../src/store.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
@@ -41,6 +41,22 @@ function input(extra: Partial<InvocationInput> = {}): InvocationInput {
 function view(includePromptText = false) { return readRunStateView(project, runId, { observedAt, includePromptText }); }
 
 describe('versioned run state and immutable invocation inputs', () => {
+  it('projects each retired iteration once without adding it to the active DAG or budget', () => {
+    const old = { status: 'failed' as const, retries: 0, attempts: [attempt(1, startedAt, { status: 'failed', tokens_in: 700, tokens_out: 300 })] };
+    const newer = { status: 'complete' as const, retries: 0, attempts: [attempt(1, observedAt, { tokens_in: 700, tokens_out: 300 })] };
+    updateRunState(project, runId, (state) => {
+      state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: old }, { stageId: 'retired', iteration: 2, status: newer }];
+      state.stageEvidence = [{ stageId: 'retired', iteration: 1, status: old, statusPath: 'unused.json', attemptOutputPaths: [] }];
+    });
+    const state = readRunState(project, runId);
+    expect(projectRunStageHistory(state)).toEqual(state.retiredStageUsage);
+    expect(Object.keys(state.stages)).toEqual(['writer', 'audit']);
+    expect(view().budget.tokens).toMatchObject({ knownInputTokens: 1400, knownOutputTokens: 600 });
+    expect(view().stages).not.toHaveProperty('retired');
+    const diagnostics: Array<{ code: string; path?: string; detail: string }> = [];
+    expect(projectRunStageHistory(JSON.parse('{"retiredStageUsage":[null]}'), diagnostic => diagnostics.push(diagnostic))).toEqual([]);
+    expect(diagnostics).toEqual([expect.objectContaining({ code: 'RUN_STAGE_HISTORY_INVALID', path: 'retiredStageUsage[0]' })]);
+  });
   it('reproduces the latest-alias overwrite, then preserves final bytes of multiple invocations', () => {
     writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt(1), attempt(2, observedAt)] });
     writeStageInput(project, runId, 'writer', 'initial prompt before late guidance');

@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { z } from 'zod';
 import { parseGuidanceLedger, type GuidanceEnvelope } from './guidance.js';
 import { readResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseRegistryRead } from './resource-leases.js';
-import { STAGE_STATUS, readArchivedRunState, runDir, type ArchivedStoreState, type StageAttempt, type StageStatus } from './store.js';
+import { STAGE_STATUS, readArchivedRunState, runDir, type ArchivedStoreState, type RetiredStageUsage, type StageAttempt, type StageStatus } from './store.js';
 
 const safeId = z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/);
 const nonempty = z.string().min(1);
@@ -282,7 +282,34 @@ export interface RunStateView {
   diagnostics: Diagnostic[];
 }
 
-function budgetView(state: ArchivedStoreState, observedAt: string) {
+/** Iteration-qualified read rows, never members of the scheduler's active DAG.
+ * Evidence and usage can refer to the same retired stage; prefer its immutable
+ * evidence snapshot, and retain usage-only history from earlier formats. */
+export function projectRunStageHistory(
+  state: Pick<ArchivedStoreState, 'retiredStageUsage' | 'stageEvidence'>,
+  diagnose: (diagnostic: Diagnostic) => void = (diagnostic) => console.warn(`${diagnostic.code}: ${diagnostic.path}: ${diagnostic.detail}`),
+): RetiredStageUsage[] {
+  const rows = new Map<string, RetiredStageUsage>();
+  // Optional history cannot make an otherwise readable run disappear. Keep
+  // valid rows and expose every omitted carrier/row, without repairing state.
+  for (const field of ['retiredStageUsage', 'stageEvidence'] as const) {
+    const entries = state[field];
+    if (entries === undefined) continue;
+    const omit = (path: string) => diagnose({ code: 'RUN_STAGE_HISTORY_INVALID', path,
+      detail: 'optional history omitted: expected an array of stage ID, iteration and status rows' });
+    if (!Array.isArray(entries)) { omit(field); continue; }
+    entries.forEach((entry, index) => {
+      if (typeof entry?.stageId !== 'string' || !Number.isSafeInteger(entry.iteration)
+        || typeof entry.status?.status !== 'string') { omit(`${field}[${index}]`); return; }
+      rows.set(JSON.stringify([entry.iteration, entry.stageId]), {
+        stageId: entry.stageId, iteration: entry.iteration, status: entry.status,
+      });
+    });
+  }
+  return [...rows.values()];
+}
+
+export function budgetView(state: ArchivedStoreState, observedAt: string) {
   const seen = new Set<string>();
   let knownInputTokens = 0, knownOutputTokens = 0, unknownTokenAttempts = 0, unknownLegacyStages = 0, knownAttemptDurationMs = 0, unknownDurationAttempts = 0;
   const add = (stageId: string, status: StageStatus) => {

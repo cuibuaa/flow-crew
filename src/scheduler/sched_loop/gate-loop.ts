@@ -63,8 +63,17 @@ export async function settleGateRetries(
           }
         }
       }
+      // Terminal rejection is independent of dynamic dispatch and repair budget.
+      // Settle it before any finding-derived revision or repair can be admitted.
+      if (iterationDispatchedIds.length === 0) {
+        const terminalFacts = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+        if (terminalFacts.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
+            && terminateForGateContractRefusal(state, terminalFacts, projectDir, runId, iteration)) return { kind: 'settled', state };
+      }
     if (iterationDispatchedIds.length > 0) {
       const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+      if (outerCheck.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
+          && terminateForGateContractRefusal(state, outerCheck, projectDir, runId, iteration)) return { kind: 'settled', state };
       const { allPass, failedGateIds, rejectedGateIds } = outerCheck;
       state = admitScopedAuditRepairs(sorted, state, outerCheck, projectDir, runId, runDirPath, workflow, roleRegistry);
       log.info({
@@ -112,6 +121,8 @@ export async function settleGateRetries(
             // fact read. Round zero must not inherit the outer snapshot because a
             // verdict/metric/status may have been reconciled after that snapshot.
             const currentCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
+            if (currentCheck.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
+                && terminateForGateContractRefusal(state, currentCheck, projectDir, runId, iteration)) return { kind: 'settled', state };
             if (currentCheck.contractRefusals.length > 0) {
               archiveRejectedGateRuntimeFacts(
                 runDirPath,
@@ -178,6 +189,8 @@ export async function settleGateRetries(
               projectDir,
               runId,
             );
+            if (dispatchCheck.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
+                && terminateForGateContractRefusal(dispatchState, dispatchCheck, projectDir, runId, iteration)) return { kind: 'settled', state: dispatchState };
             if (dispatchCheck.contractRefusals.length > 0) {
               archiveRejectedGateRuntimeFacts(
                 runDirPath,

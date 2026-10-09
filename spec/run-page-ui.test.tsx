@@ -44,6 +44,20 @@ function markup(run: RunDetailData): string {
 }
 
 describe("run-page canonical scenes", () => {
+  it('shows same-ID archived iterations separately without putting them in the current DAG', () => {
+    const data = fixture('complete');
+    data.stageHistory = [1, 2].map(iteration => ({
+      stageId: 'retired', iteration,
+      status: { status: iteration === 1 ? 'failed' : 'complete', attempts: [{ index: 1, status: iteration === 1 ? 'failed' : 'complete', startedAt: `2026-01-01T00:0${iteration}:00.000Z`, duration_ms: 1000 }] },
+    }));
+    const out = markup(data);
+    expect(out).toContain('retired [iteration 1, archived]');
+    expect(out).toContain('retired [iteration 2, archived]');
+    expect(out).toContain('data-testid="attempt-ledger-retired-iteration-1"');
+    expect(out).toContain('data-testid="failed-attempt-count">1');
+    expect(out).not.toContain('dag-node-retired');
+    expect(out).toContain('Final failed stages</dt><dd>none recorded');
+  });
   it.each(NON_TERMINAL_RUN_STATUSES)("renders %s as a truthful non-terminal scene", (status) => {
     const out = markup(fixture(status));
     expect(out).toContain('data-run-scene="non-terminal"');

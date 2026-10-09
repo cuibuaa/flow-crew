@@ -295,6 +295,12 @@ export interface RunStageAttempt {
   writeAttribution?: "structured" | "snapshot" | "unknown";
 }
 
+export interface RunStageHistory {
+  stageId: string;
+  iteration: number;
+  status: Pick<RunStage, 'status' | 'duration_ms' | 'retries' | 'reruns' | 'attempts' | 'tokens_in' | 'tokens_out'>;
+}
+
 export interface SupervisorAttempt {
   index: number;
   startedAt: string;
@@ -374,6 +380,8 @@ export interface RunDetailData {
   taskDescriptionPreview?: string;
   campaignId?: string;
   stages: RunStage[];
+  stageHistory?: RunStageHistory[];
+  budget?: { tokens: { knownInputTokens: number; knownOutputTokens: number; complete: boolean } };
   supervisor?: SupervisorUsage;
   kg: { nodes: CampaignKGNode[]; edges: CampaignKGEdge[] };
   events: RunEvent[];
