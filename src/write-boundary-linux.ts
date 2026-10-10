@@ -2,7 +2,6 @@
  * policy is installed. File descriptors opened here are closed before exec. */
 export const LINUX_ENGINE_WRITE_BOUNDARY = String.raw`
 import ctypes, errno, json, os, platform, stat, sys, time
-from collections import deque
 
 class PrerequisiteChanged(RuntimeError):
     pass
@@ -30,77 +29,50 @@ try:
             if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
                 raise RuntimeError('unsupported Linux syscall architecture')
             protected = set()
-            protected_aliases = {}
+            protected_paths = {}
 
-            def protect(info, alias=None):
+            def protect(info, path):
                 key = identity(info)
                 protected.add(key)
-                if alias:
-                    protected_aliases.setdefault(key, alias)
+                protected_paths.setdefault(key, path)
 
             def conflict(message, path, key):
-                alias = protected_aliases.get(key)
-                raise RuntimeError(message + path + ('; protected link ' + alias if alias else ''))
-
-            def protected_target(path, alias):
-                # Resolve in kernel component order. Every consulted link/directory is
-                # load-bearing: replacing an intermediate hop must not retarget a
-                # carrier even when its current final inode lives outside the grants.
-                cursor = '/'
-                pending = deque(path.split('/'))
-                hops = 0
-                while pending:
-                    name = pending.popleft()
-                    if not name or name == '.':
-                        continue
-                    if name == '..':
-                        cursor = os.path.dirname(cursor)
-                        protect(os.stat(cursor), alias)
-                        continue
-                    current = os.path.join(cursor, name)
-                    info = os.lstat(current)
-                    protect(info, alias)
-                    if stat.S_ISLNK(info.st_mode):
-                        hops += 1
-                        if hops > 40:
-                            raise OSError(errno.ELOOP, 'protected symbolic link loop', path)
-                        protect(os.stat(cursor), alias)
-                        target = os.readlink(current)
-                        if target.startswith('/'):
-                            cursor = '/'
-                        pending.extendleft(reversed(target.split('/')))
-                    else:
-                        if pending and not stat.S_ISDIR(info.st_mode):
-                            raise OSError(errno.ENOTDIR, 'protected component is not a directory', current)
-                        cursor = current
-                return os.stat(cursor)
+                recorded = protected_paths.get(key)
+                raise RuntimeError(message + path + ('; protected entry ' + recorded if recorded else ''))
 
             for entry in config['protected']:
                 path = entry['path']
                 if not os.path.lexists(path):
                     continue
-                pending = [(path, None)]
+                pending = [path]
                 seen = set()
                 while pending:
-                    current, alias = pending.pop()
-                    # Ordinary entries avoid a repeated full ancestor walk. Links use
-                    # the component walk; broken/looped/unknown chains still refuse.
-                    info = os.lstat(current)
-                    if stat.S_ISLNK(info.st_mode):
-                        alias = alias or current + ' -> ' + os.readlink(current)
-                        try:
-                            info = protected_target(current, alias)
-                        except OSError as error:
-                            raise RuntimeError('cannot resolve protected link ' + alias + ': ' + str(error)) from error
-                    protect(info, alias)
-                    if entry['tree'] and stat.S_ISDIR(info.st_mode) and identity(info) not in seen:
-                        seen.add(identity(info))
-                        # Inspect the referent just like any other protected tree.
-                        # Inode identities bound directory cycles and retain every
-                        # recorded descendant, including hard-link aliases in grants.
-                        with os.scandir(current) as members:
-                            pending.extend((member.path, alias) for member in members)
-                ancestor = os.path.dirname(os.path.realpath(path))
+                    current = pending.pop()
+                    try:
+                        info = os.lstat(current)
+                        protect(info, current)
+                        if stat.S_ISLNK(info.st_mode):
+                            # A recorded reference owns its link inode, not the
+                            # target or intermediate hops. Live project grants
+                            # may change them; immutable evidence must be copied.
+                            target = os.readlink(current)
+                            try: os.stat(current)
+                            except OSError as error:
+                                # Broken/looped references remain a prompt refusal,
+                                # distinct from a listed entry disappearing below.
+                                if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                                    raise RuntimeError('cannot resolve protected link ' + current + ' -> ' + target + ': ' + str(error)) from error
+                                raise
+                        elif entry['tree'] and stat.S_ISDIR(info.st_mode) and identity(info) not in seen:
+                            seen.add(identity(info))
+                            with os.scandir(current) as members:
+                                pending.extend(member.path for member in members)
+                    except OSError as error:
+                        if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                            raise PrerequisiteChanged('protected tree changed during inspection: ' + current + ': ' + str(error)) from error
+                        raise
+                # Protect the recorded namespace's parents, not link-target parents.
+                ancestor = os.path.dirname(os.path.abspath(path))
                 while True:
                     protected.add(identity(os.stat(ancestor)))
                     parent = os.path.dirname(ancestor)
@@ -118,6 +90,10 @@ try:
                     key = identity(info)
                     if key in protected:
                         conflict('writable member aliases an engine carrier or ancestor: ', label, key)
+                    if stat.S_ISLNK(info.st_mode):
+                        # Check the link inode, but grant no rights on its target
+                        # and never traverse mutable directory links.
+                        return
                     if stat.S_ISREG(info.st_mode):
                         # A link name is a directory inode plus basename, independent
                         # of path spelling, bind views or renames. No per-file realpath
@@ -174,10 +150,6 @@ try:
                                 frames.pop()
                                 continue
                             current = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
-                            if stat.S_ISLNK(current.st_mode):
-                                # Links grant no rights on their targets. Never traverse
-                                # mutable directory links, including during inspection.
-                                continue
                             child = os.path.join(label, entry.name)
                             member(current, parent_key, entry.name, child)
                             if stat.S_ISDIR(current.st_mode):

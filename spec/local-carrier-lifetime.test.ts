@@ -81,18 +81,23 @@ describe('engine-owned local carrier lifetime', () => {
     expect(result.writeBoundary?.kind).toBe('waiting'); expect(existsSync(ran)).toBe(false);
   });
 
-  native.each([false, true])('refuses a protected link through a mutable intermediate hop (dangling=%s)', async (dangling) => {
+  native.each([false, true])('protects a recorded link inode while permitting granted intermediate hops (dangling=%s)', async (dangling) => {
     const f = fixture(), output = join(f.runDir, 'stages', 'earlier', 'out'); mkdirSync(output, { recursive: true });
     const outside = join(f.root, 'outside'); mkdirSync(outside);
     const target = join(outside, 'target');
     if (!dangling) writeFileSync(target, 'engine');
     const hop = join(f.projectDir, 'hop'); symlinkSync(target, hop);
     const carrier = join(output, 'result.json'); symlinkSync(hop, carrier);
+    const recordedLink = lstatSync(carrier);
     const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage');`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
-    expect(result.exitCode).toBe(125); expect(result.timedOut).toBe(false);
-    expect(result.writeBoundary?.kind).toBe('refused');
-    if (!dangling) expect(readFileSync(carrier, 'utf8')).toBe('engine');
-    expect(lstatSync(hop).isSymbolicLink()).toBe(true);
+    expect(result.exitCode).toBe(dangling ? 125 : 0); expect(result.timedOut).toBe(false);
+    expect(result.writeBoundary?.kind).toBe(dangling ? 'refused' : 'installed');
+    if (!dangling) {
+      expect(readFileSync(carrier, 'utf8')).toBe('stage');
+      expect(readFileSync(target, 'utf8')).toBe('engine');
+    }
+    expect(lstatSync(carrier).ino).toBe(recordedLink.ino);
+    expect(lstatSync(hop).isSymbolicLink()).toBe(dangling);
   });
 
   native('preserves direct executable launch failure and stdin without accepting counterfeit boundary prose', async () => {
