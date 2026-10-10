@@ -164,9 +164,10 @@ describe('race candidate instructions', () => {
     fake.deps.readRun = (t) => exits.get(t) === 0 ? readRun(t) : undefined;
     fake.deps.runCli = async (a, stdin) => {
       const result = await runCli(a, stdin);
-      if (a[0] !== 'quick' || a.includes('--existing-run-id')) return result;
+      if (a[0] !== 'quick') return result;
       // Enforce quick's exact-input digest and acknowledgement checks using its shared inspector.
-      const report = inspectBrief(stdin!);
+      const candidate = a[a.indexOf('--project') + 1].endsWith('-a') ? 0 : 1;
+      const report = inspectBrief(stdin ?? fake.quickBriefs[candidate]);
       const ack = a.find((arg) => arg.startsWith('--acknowledge-brief-warnings='))?.split('=')[1];
       const code = ack === report.digest || (!ack && !report.requiresAcknowledgement) ? 0 : 2;
       exits.set(a[a.indexOf('--project') + 1], code);
@@ -195,8 +196,10 @@ describe('race candidate instructions', () => {
     expect(() => readFileSync(aPath)).toThrow();
   });
 
-  it('launches A with its own digest when the operator acknowledged the original brief', async () => {
+  it('launches and resumes preferred A with its own digest when the operator acknowledged the original brief', async () => {
     const { deps, calls, setupBriefs, quickBriefs, written } = admissionDeps();
+    let order = 0;
+    deps.judge = async () => ({ choice: order++ === 0 ? 'A' : 'B' });
     const original = inspectBrief(brief);
     expect(original.requiresAcknowledgement).toBe(true);
     expect(await runRace([...args, `--acknowledge-brief-warnings=${original.digest}`], deps)).toBe(0);
@@ -206,6 +209,9 @@ describe('race candidate instructions', () => {
     const launches = calls.filter((a) => a[0] === 'quick');
     expect(launches[0]).toContain(`--acknowledge-brief-warnings=${inspectBrief(quickBriefs[0]).digest}`);
     expect(launches[1]).toContain(`--acknowledge-brief-warnings=${original.digest}`);
+    expect(launches[2]).toContain('--existing-run-id');
+    expect(launches[2]).toContain(`--acknowledge-brief-warnings=${inspectBrief(quickBriefs[0]).digest}`);
+    expect(JSON.parse(written['/w/cand-race.json']).decision.choice).toBe('A');
     expect(JSON.parse(written['/w/cand-race.json']).candidates.map((c: { launchExit: number }) => c.launchExit)).toEqual([0, 0]);
   });
 
