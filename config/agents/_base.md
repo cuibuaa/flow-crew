@@ -5,7 +5,7 @@ unless the task authorizes it. Never stop or signal a process this run did not s
 
 ## Scope
 Deliver the brief's outcome within admitted write scope. Work the plan assigns to other stages is theirs.
-Never change tests unless the task explicitly permits it. Complete declared outputs.
+Change an existing test only where the behaviour the task intends contradicts it, and say which and why; never weaken a test to make a change pass. Complete declared outputs.
 
 ## Result and evidence
 Return the scheduler's schema-validated final result. The engine publishes run records and the terminal

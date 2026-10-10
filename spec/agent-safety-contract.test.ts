@@ -48,6 +48,15 @@ describe('agent run-directory safety contract', () => {
   it('does not conflate harmless reads with state-changing mutation', () => {
     expect(safetySection()).not.toMatch(/never browse, list, or modify run directories/i);
   });
+
+  it('lets a stage change a test the intended behaviour contradicts, never weaken one to make a change pass', () => {
+    // A blanket "never change tests" kept candidates passing the old expectation instead of the behaviour the task asked
+    // for (SWE-bench django-12325 and sphinx-9229 resolve only when an existing expectation is changed).
+    const base = readFileSync(BASE_PROMPT_PATH, 'utf-8');
+    expect(base).toMatch(/Change an existing test only where the behaviour the task intends contradicts it, and say which and why/);
+    expect(base).toMatch(/never weaken a test to make a change pass/);
+    expect(base).not.toMatch(/Never change tests unless/);
+  });
 });
 
 describe('shipped role outcome contracts', () => {
