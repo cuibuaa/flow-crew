@@ -1,0 +1,159 @@
+# Proposed dispatches from one real run whose plan admission failed (project names generalized).
+# Preserve schema-bearing fields; omit task prose and criterion assignments.
+# Attempts 1/2 omitted contracts; only attempt 3 had malformed contracts.
+- attempt: 1
+  stages:
+    - id: implement_probe
+      role: coder
+      scope:
+        - app
+        - runs/app/eval
+        - tests
+        - docs/example/report.draft.md
+        - docs/example/parity.draft.json
+        - docs/example/benchmark.draft.json
+    - id: qa_gate
+      role: qa
+      depends_on:
+        - implement_probe
+      is_gate: true
+    - id: repair_probe
+      role: coder
+      scope:
+        - app
+        - runs/app/eval
+        - tests
+        - docs/example/report.draft.md
+        - docs/example/parity.draft.json
+        - docs/example/benchmark.draft.json
+      depends_on:
+        - qa_gate
+      retry_to:
+        - qa_gate
+      condition: Run only if qa_gate rejects with repairable findings.
+    - id: publish_outputs
+      role: doc_writer
+      scope:
+        - docs/example/report.md
+        - docs/example/parity.json
+        - docs/example/benchmark.json
+      depends_on:
+        - qa_gate
+      condition: Run only after qa_gate passes.
+      dependency_reasons:
+        qa_gate: Only QA-vetted draft evidence should be promoted to the declared
+          deliverables.
+- attempt: 2
+  stages:
+    - id: implement_probe
+      role: coder
+      scope:
+        - app
+        - tools
+        - tests
+        - docs/example/parity.json
+        - docs/example/benchmark.json
+    - id: qa_gate
+      role: qa
+      depends_on:
+        - implement_probe
+      is_gate: true
+      scope: []
+    - id: repair_probe
+      role: coder
+      depends_on:
+        - qa_gate
+      retry_to:
+        - implement_probe
+      scope:
+        - app
+        - tools
+        - tests
+        - docs/example/parity.json
+        - docs/example/benchmark.json
+    - id: finalize_report
+      role: doc_writer
+      depends_on:
+        - qa_gate
+      scope:
+        - docs/example/report.md
+- attempt: 3
+  stages:
+    - id: implement_probe
+      role: coder
+      scope:
+        - app
+        - runs/app/eval/probe_gpu
+        - tools
+        - tests
+        - docs/example/parity.json
+        - docs/example/benchmark.json
+      artifact_contract:
+        version: 1
+        produces:
+          - id: parity_json
+            root: project
+            path: docs/example/parity.json
+            kind: file
+          - id: benchmark_json
+            root: project
+            path: docs/example/benchmark.json
+            kind: file
+    - id: qa_gate
+      role: qa
+      depends_on:
+        - implement_probe
+      is_gate: true
+      scope: []
+      artifact_contract:
+        version: 1
+        reads:
+          - id: parity_json
+            root: project
+            path: docs/example/parity.json
+            kind: file
+          - id: benchmark_json
+            root: project
+            path: docs/example/benchmark.json
+            kind: file
+    - id: repair_probe
+      role: coder
+      depends_on:
+        - qa_gate
+      retry_to:
+        - qa_gate
+      condition: Run only if qa_gate rejects and reports repairable findings.
+      scope:
+        - app
+        - runs/app/eval/probe_gpu
+        - tools
+        - tests
+        - docs/example/parity.json
+        - docs/example/benchmark.json
+      dependency_reasons:
+        qa_gate: The repair stage must be driven by and retry the independent rejecting
+          gate.
+      max_retries: 2
+    - id: finalize_report
+      role: doc_writer
+      depends_on:
+        - qa_gate
+      condition: Run only if qa_gate passes.
+      scope:
+        - docs/example/report.md
+      artifact_contract:
+        version: 1
+        reads:
+          - id: parity_json
+            root: project
+            path: docs/example/parity.json
+            kind: file
+          - id: benchmark_json
+            root: project
+            path: docs/example/benchmark.json
+            kind: file
+        produces:
+          - id: probe_report
+            root: project
+            path: docs/example/report.md
+            kind: file

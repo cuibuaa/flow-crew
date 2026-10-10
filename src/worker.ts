@@ -8,7 +8,7 @@ import { runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { sumInvocationUsage } from './invocation-usage.js';
 import { renderPlanInterface } from './plan-interface.js';
-import { artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
+import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
@@ -514,6 +514,7 @@ async function runStageWithWriterLease(
     .replace(/\{ledger_digest\}/g, opts.ledgerDigest ?? 'none')
     .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))
     .replace(/\{verdict_contract\}/g, VERDICT_CONTRACT_DOC)
+    .replace(/\{artifact_contract_schema\}/g, () => ARTIFACT_CONTRACT_SCHEMA_DOC)
     .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)
     .replace(/\{project_contract\}/g, projectContract)
     .replace(/\{run_dir\}/g, opts.runDir)

@@ -39,8 +39,9 @@ prompt: |
   A numeric gate metric is optional unless supplied by an authoritative acceptance contract; supplied
   criteria, scores and thresholds remain binding. Rejected verdict evidence is durable under
   gate_reevaluation/iteration_<n>/round_<n>/.
-  Optional artifact_contract version 1 declares produces/reads with id, root (project/run), path and kind
-  (file/directory); no separate audit proof, replay or intermediate freshness protocol is required.
+  Optional artifact_contract must match this input JSON schema (use [] for empty produces/reads):
+  {artifact_contract_schema}
+  No separate audit proof, replay or intermediate freshness protocol is required.
 
   # Optional reality checks
   When needed, reality_checks.md contains a fenced YAML checks list: name, type, reads, params.

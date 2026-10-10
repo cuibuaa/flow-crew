@@ -65,6 +65,8 @@ export const RecordedArtifactContractSchema = z.object({
 // Declarations carry capability/ownership metadata, not an extra verification
 // protocol. Historical replay data remains readable and is never executed.
 export const ArtifactContractSchema = RecordedArtifactContractSchema;
+// Describe accepted input, so defaulted fields are not advertised as required.
+export const ARTIFACT_CONTRACT_SCHEMA_DOC = JSON.stringify(z.toJSONSchema(RecordedArtifactContractSchema, { io: 'input' }));
 export type ArtifactContract = z.infer<typeof RecordedArtifactContractSchema>;
 export function artifactDeclarationErrors(value: unknown, stageId: string): string[] {
   if (!value) return [`ARTIFACT_DECLARATION_REQUIRED: ${stageId}.artifact_contract: declare output/input locations explicitly`];
