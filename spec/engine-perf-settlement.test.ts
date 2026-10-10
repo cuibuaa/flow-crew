@@ -37,6 +37,43 @@ function interrupted(checkpoint = true) {
 }
 
 describe('interrupted runs have a durable outcome without takeover', () => {
+  it.each([
+    ['same-boot', 'same-boot', 'fixture-generation', 'RECOVERY_FATE_UNKNOWN'],
+    ['changed-generation', 'next-boot', 'changed-generation', 'RECOVERY_GENERATION_MISMATCH'],
+    ['same-boot-and-changed-generation', 'same-boot', 'changed-generation', 'RECOVERY_FATE_UNKNOWN'],
+    ['previous-boot', 'next-boot', 'fixture-generation', undefined],
+  ])('audits first existing-run continuation (%s)', (kind, currentBootId, currentGeneration, refusal) => {
+    const id = interrupted(), base = runDir(project, id), ledger = join(base, 'stages/work/status.json');
+    updateRunState(project, id, state => { state.currentIteration = 2; state.maxIterations = 3; state.maxRetries = 4; });
+    const before = readFileSync(ledger, 'utf8');
+    // No process is launched or signalled: only the recovery inputs differ.
+    vi.spyOn(runLock, 'inspectRunScheduler').mockReturnValue({ kind: 'dead', pid: 2147483647 });
+    const reconcile = recovery.reconcileHostInterruptedRun;
+    vi.spyOn(recovery, 'reconcileHostInterruptedRun').mockImplementation((directory, runId) => reconcile(directory, runId, { currentBootId, currentGeneration }));
+    vi.spyOn(recovery, 'engineGeneration').mockReturnValue(currentGeneration);
+    const launch = () => prepareWorkflowLaunch({ name: 'fixture', description: '', defaults: { max_iterations: 1, max_retries: 0 }, stages: [] }, 'name: fixture\nstages: []\n', project, id);
+    try {
+      if (refusal) {
+        expect(launch).toThrow(refusal);
+        expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' }, currentIteration: 2, maxIterations: 3, maxRetries: 4 });
+        expect(readRunState(project, id).completedAt).toBeTruthy();
+        expect(readFileSync(ledger, 'utf8')).toBe(before);
+        const reason = readRunState(project, id).failureReason!;
+        if (kind === 'same-boot-and-changed-generation') expect(reason).toContain('RECOVERY_GENERATION_MISMATCH');
+        expect(readFileSync(join(base, 'events.jsonl'), 'utf8')).toContain(reason);
+        expect(launch).toThrow(refusal);
+        expect(readFileSync(ledger, 'utf8')).toBe(before);
+      } else {
+        expect(launch()).toMatchObject({ kind: 'ready', runId: id, resumingFromPark: true, resumeAtIteration: 2, maxIterations: 3 });
+        expect(readRunState(project, id)).toMatchObject({ recovery: { kind: 'resumable' }, currentIteration: 2, maxIterations: 3, maxRetries: 4 });
+        expect(readRunState(project, id).stages.work).toMatchObject({ status: 'pending', retries: 0, attempts: [{ status: 'failed', exitCode: 143 }] });
+      }
+    } finally {
+      removeSchedulerPidIfOwned(join(base, 'scheduler.pid'));
+      runLock.releaseLaunchIntent(project, id);
+    }
+  });
+
   it.each(['same-boot', 'different-generation', 'previous-boot', 'live-owner'])('checks current proof after a second interruption (%s)', kind => {
     const id = interrupted(false), proof = { currentBootId: 'current-fixture-boot', currentGeneration: 'fixture-generation' };
     const reconcile = recovery.reconcileHostInterruptedRun;

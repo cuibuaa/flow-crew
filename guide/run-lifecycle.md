@@ -29,7 +29,7 @@ a separate archive-read error.
 |---|---:|---:|---|---|
 | `pending` | No | No | Dashboard task creation and rerun preparation | Execute the task from the dashboard, or leave it queued while editing its plan. |
 | `running` | No | No | Run initialization, scheduler resume, and dashboard execute/rerun paths | Monitor with `flowcrew status`, the dashboard, or `flowcrew task show <id>` for background tasks. Guidance and cancellation are still available. |
-| `parked` | No | No | The scheduler after it ingests an unresolved approval request | Review `/inbox` or run `flowcrew inbox show <requestId>`, then approve or deny. The decision resumes the same run by default. |
+| `parked` | No | No | The scheduler after an unresolved approval request, or recovery after a proven interruption | Resolve the bound request in `/inbox`, or resume a recovery marked `resumable` with `quick --existing-run-id <run-id>`. Both continue the same run. |
 | `complete` | Yes | Yes | The scheduler when an engineering run finishes its DAG and gates | Review `summary.md` and the evidence. No recovery action is required. |
 | `failed` | Yes | No | The scheduler on unrecoverable stage failure; the dashboard on orphan reconciliation (scheduler process gone), staleness (no progress within the timeout), or a detached launch that never started | Read the failure reason and failed stage output, fix the cause, then rerun or submit a corrected brief. |
 | `awaiting_approval` | No | No | No current write path; retained for legacy plan-approval records | Use the dashboard's legacy plan approval/re-execute controls. New consequential-action approvals use `parked` instead. |
@@ -157,6 +157,27 @@ the request, sets `parked`, persists the current DAG and iteration, and exits th
 run process. There is no live worker while the operator decides. Resolving the
 request resumes the same run ID, DAG, and iteration; it does not create a fresh
 run. See [Approvals](approvals.md).
+
+Interrupted-run recovery can also park a run when its checkpoint proves a
+previous-boot interruption under the same engine generation. Recovery retains
+interrupted attempts and resumes the existing iteration and retry budgets.
+Commit `b4825db` added daemon discovery of unbound orphans; it did not relax
+those recovery requirements.
+
+Since `a55d8cb`, a bound parked run with neither its own pending approval nor
+resume authority makes the daemon task `stuck` with the recovery reason.
+Manual task retry cannot turn that run into an indefinite approval wait.
+An interrupted execution without boot or generation proof ends `failed` with
+a durable reason and unchanged execution ledgers. `quick --existing-run-id`
+still refuses same-boot death and changed generations. Supporting those cases
+requires deciding how to prove all consumers stopped and how to validate the
+persisted execution contracts under another generation; scheduler PID absence
+alone supplies neither guarantee.
+
+Regression fixtures: the parked-recovery cases in
+`spec/orchestrator.test.ts` and the first existing-run continuation matrix in
+`spec/engine-perf-settlement.test.ts`, including a permitted previous-boot
+control. These exercise the same work without starting a daemon or consumer.
 
 ## Terminal artifacts and deterministic checks
 

@@ -497,16 +497,25 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
-  it.each(['unit-exit', 'queued-retry'])('reports a parked recovery without approval at %s', async path => {
+  it.each(['unit-exit', 'queued-retry', 'manual-retry'])('reports a parked recovery without approval at %s', async path => {
     const runId = `recovery-${path}`;
-    writeRun(runId, 'parked', undefined, 'RECOVERY_FATE_UNKNOWN: consumers may still be alive');
+    const runPath = writeRun(runId, 'parked', undefined, 'RECOVERY_FATE_UNKNOWN: consumers may still be alive');
+    const before = readFileSync(join(runPath, 'run.json'), 'utf8');
     const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir,
-      status: path === 'unit-exit' ? 'running' : 'deferred', run_id: runId });
+      status: path === 'unit-exit' ? 'running' : path === 'manual-retry' ? 'stuck' : 'deferred', run_id: runId });
     systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    if (path === 'manual-retry') {
+      expect(await orchestrator.retry(task.id)).toMatchObject({ status: 'deferred', defer_kind: 'retry', run_id: runId, attempt: 1 });
+      advance(31_000);
+    }
     await orchestrator.tickOnce();
-    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId });
+    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId, attempt: 1 });
     expect(registry.get(task.id)?.notes).toContain('RECOVERY_FATE_UNKNOWN');
     expect(registry.get(task.id)?.notes).toContain('no pending approval');
+    advance(120_000);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('stuck');
+    expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
     expect(systemd.runs).toHaveLength(0);
   });
 
