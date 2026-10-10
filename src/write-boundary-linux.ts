@@ -2,6 +2,7 @@
  * policy is installed. File descriptors opened here are closed before exec. */
 export const LINUX_ENGINE_WRITE_BOUNDARY = String.raw`
 import ctypes, errno, json, os, platform, stat, sys, time
+from collections import deque
 
 class PrerequisiteChanged(RuntimeError):
     pass
@@ -40,6 +41,38 @@ try:
                 recorded = protected_paths.get(key)
                 raise RuntimeError(message + path + ('; protected entry ' + recorded if recorded else ''))
 
+            def protected_target(path, carrier):
+                # Explicit carriers own every consulted component and the final
+                # target. A granted intermediate hop must not retarget engine state.
+                cursor = '/'
+                pending = deque(path.split('/'))
+                hops = 0
+                while pending:
+                    name = pending.popleft()
+                    if not name or name == '.':
+                        continue
+                    if name == '..':
+                        cursor = os.path.dirname(cursor)
+                        protect(os.stat(cursor), carrier)
+                        continue
+                    current = os.path.join(cursor, name)
+                    info = os.lstat(current)
+                    protect(info, carrier)
+                    if stat.S_ISLNK(info.st_mode):
+                        hops += 1
+                        if hops > 40:
+                            raise OSError(errno.ELOOP, 'protected symbolic link loop', path)
+                        protect(os.stat(cursor), carrier)
+                        target = os.readlink(current)
+                        if target.startswith('/'):
+                            cursor = '/'
+                        pending.extendleft(reversed(target.split('/')))
+                    else:
+                        if pending and not stat.S_ISDIR(info.st_mode):
+                            raise OSError(errno.ENOTDIR, 'protected component is not a directory', current)
+                        cursor = current
+                return os.stat(cursor)
+
             for entry in config['protected']:
                 path = entry['path']
                 if not os.path.lexists(path):
@@ -52,18 +85,21 @@ try:
                         info = os.lstat(current)
                         protect(info, current)
                         if stat.S_ISLNK(info.st_mode):
-                            # A recorded reference owns its link inode, not the
-                            # target or intermediate hops. Live project grants
-                            # may change them; immutable evidence must be copied.
                             target = os.readlink(current)
-                            try: os.stat(current)
+                            try:
+                                if current == path:
+                                    info = protected_target(current, current)
+                                else:
+                                    # Discovered references own only their link inode;
+                                    # live project grants may change targets and hops.
+                                    os.stat(current)
                             except OSError as error:
                                 # Broken/looped references remain a prompt refusal,
                                 # distinct from a listed entry disappearing below.
                                 if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                                     raise RuntimeError('cannot resolve protected link ' + current + ' -> ' + target + ': ' + str(error)) from error
                                 raise
-                        elif entry['tree'] and stat.S_ISDIR(info.st_mode) and identity(info) not in seen:
+                        if entry['tree'] and stat.S_ISDIR(info.st_mode) and identity(info) not in seen:
                             seen.add(identity(info))
                             with os.scandir(current) as members:
                                 pending.extend(member.path for member in members)
@@ -71,7 +107,7 @@ try:
                         if error.errno in (errno.ENOENT, errno.ENOTDIR):
                             raise PrerequisiteChanged('protected tree changed during inspection: ' + current + ': ' + str(error)) from error
                         raise
-                # Protect the recorded namespace's parents, not link-target parents.
+                # Also protect namespace parents for ordinary entries and references.
                 ancestor = os.path.dirname(os.path.abspath(path))
                 while True:
                     protected.add(identity(os.stat(ancestor)))

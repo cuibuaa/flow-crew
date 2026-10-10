@@ -18,6 +18,59 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+describe.skipIf(process.platform !== 'linux')('explicit engine carrier links', () => {
+  it('refuses a later project writer when a verdict link consults a project hop', async () => {
+    const f = fixture(), target = join(f.root, 'engine-verdict.json');
+    writeFileSync(target, 'engine verdict');
+    const hop = join(f.projectDir, 'verdict-hop'), carrier = join(f.runDir, 'verdict_repair.json');
+    symlinkSync(target, hop); symlinkSync(hop, carrier);
+    const originalHop = lstatSync(hop), marker = join(f.output, 'ran');
+    const result = await withEngineWriteBoundary({ ...f.input, projectWriteScope: ['**'] }, () => f.command(`
+      const fs=require('node:fs');
+      fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage verdict');
+      fs.writeFileSync(${JSON.stringify(marker)},'ran');
+    `));
+    expect(readFileSync(carrier, 'utf8')).toBe('engine verdict');
+    expect(readFileSync(target, 'utf8')).toBe('engine verdict');
+    expect(lstatSync(hop).ino).toBe(originalHop.ino);
+    expect(readlinkSync(hop)).toBe(target);
+    expect(result.exitCode, result.output).toBe(125);
+    expect(result.timedOut).toBe(false);
+    expect(result.writeBoundary?.kind).toBe('refused');
+    expect(result.output).toContain(carrier);
+    expect(result.output).toContain(f.projectDir);
+    expect(f.receipts().map(row => row.kind)).toEqual(['refused']);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('refuses a verdict link whose final target has a writable file grant', async () => {
+    const f = fixture(), target = join(f.runDir, 'report.md'), carrier = join(f.runDir, 'verdict_repair.json');
+    writeFileSync(target, 'engine verdict');
+    const marker = join(f.output, 'ran');
+    const artifactContract = { ...f.input.artifactContract, produces: [...f.input.artifactContract.produces,
+      { id: 'report', root: 'run' as const, path: 'report.md', kind: 'file' as const }] };
+    const result = await withEngineWriteBoundary({ ...f.input, artifactContract }, () => {
+      // Publish after declaration admission to exercise the launcher's inode
+      // check. File grants have no directory physical-path overlap precheck.
+      symlinkSync('report.md', carrier);
+      return f.command(`
+        const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(target)},'stage verdict');
+        fs.writeFileSync(${JSON.stringify(marker)},'ran');
+      `);
+    });
+    expect(readFileSync(carrier, 'utf8')).toBe('engine verdict');
+    expect(readFileSync(target, 'utf8')).toBe('engine verdict');
+    expect(readlinkSync(carrier)).toBe('report.md');
+    expect(result.exitCode, result.output).toBe(125);
+    expect(result.timedOut).toBe(false);
+    expect(result.writeBoundary?.kind).toBe('refused');
+    expect(result.output).toContain(carrier);
+    expect(result.output).toContain(target);
+    expect(f.receipts().map(row => row.kind)).toEqual(['refused']);
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'boundary-link-')); roots.push(root);
   const projectDir = join(root, 'project'); mkdirSync(projectDir);
