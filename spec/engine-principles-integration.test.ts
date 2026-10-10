@@ -133,7 +133,7 @@ describe('worker state, invocation capture and engine resources', () => {
   });
   it('captures exact final role and user input, including adapter internal retries', async () => {
     let received = '', suppliedSystem = '';
-    const adapter: Adapter = { async run(prompt, role, opts) {
+    const adapter: Adapter = { capturesInvocationInput: true, async run(prompt, role, opts) {
       received = prompt; suppliedSystem = role.prompt;
       opts.onInvocationInput?.({ userPrompt: prompt, systemPrompt: role.prompt, transport: { kind: 'stdin', payload: prompt } });
       opts.onInvocationInput?.({ userPrompt: `${prompt}\ninternal retry`, systemPrompt: role.prompt });
@@ -141,9 +141,9 @@ describe('worker state, invocation capture and engine resources', () => {
     } };
     await runStage(adapter, { stageId: 'writer', role: agent(), dependsOn: [], promptTemplate: 'Do the declared work.', artifactContract: empty(), timeout_ms: 10000, projectDir: project, runId, runDir: directory, retries: 0 });
     const view = readRunStateView(project, runId, { includePromptText: true });
-    expect(received).toContain('# Engine state query'); expect(view.prompts.invocations).toHaveLength(3);
+    expect(received).toContain('# Engine state query'); expect(view.prompts.invocations).toHaveLength(2);
     expect(view.prompts.invocations[0].record).toMatchObject({ userPrompt: received, systemPrompt: suppliedSystem });
-    expect(view.prompts.invocations[2].record?.userPrompt).toBe(`${received}\ninternal retry`);
+    expect(view.prompts.invocations[1].record?.userPrompt).toBe(`${received}\ninternal retry`);
     expect(view.prompts.invocations.every((entry) => entry.attemptBinding === 'matched')).toBe(true);
     let output = ''; expect(cmdState(['state', '--project', project, '--run', runId, '--prompts'], { write: (text: string) => { output += text; return true; } })).toBe(0);
     expect(JSON.parse(output).prompts.invocations[0].record.userPrompt).toBe(received);

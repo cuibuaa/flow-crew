@@ -14,7 +14,7 @@ import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js'
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, StageConfigSchema, WorkflowConfigSchema, type StageConfig } from '../src/scheduler.js';
 import { applyPlanRevision, planDigest, recordAdmittedPlan } from '../src/plan-revisions.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
-import { readRunStateView, recordInvocationInput } from '../src/run-state-view.js';
+import { readInvocationInput, readRunStateView, recordInvocationInput } from '../src/run-state-view.js';
 import { classifyDeclarationAdmissionChange } from '../src/recorded-replay-policy.js';
 import { RUN_HISTORY_FILE, RUN_STATUS, beginStageAttempt, captureStageEvidence, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
 
@@ -247,7 +247,7 @@ describe('independent revision and exact-input controls', () => {
   it('marks corrupted exact-input bytes invalid instead of treating the alias as exact', () => {
     writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt, status: 'complete', exitCode: 0 }] });
     const captured = recordInvocationInput(directory, { runId, stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, invocationIndex: 1, boundary: 'adapter', adapter: 'fixture', model: 'fixture', systemPrompt: 'system', userPrompt: 'original' });
-    const mutated = JSON.parse(readFileSync(captured.path, 'utf8')); mutated.userPrompt = 'replacement'; writeFileSync(captured.path, JSON.stringify(mutated));
+    const mutated = readInvocationInput(captured.path); mutated.userPrompt = 'replacement'; writeFileSync(captured.path, JSON.stringify(mutated));
     const view = readRunStateView(project, runId, { includePromptText: true });
     expect(view.prompts.invocations[0].integrity).toBe('invalid');
     expect(view.prompts.missingAttemptInputs).toHaveLength(1);

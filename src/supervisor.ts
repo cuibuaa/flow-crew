@@ -2724,7 +2724,7 @@ export class Supervisor {
     };
     let result: RunResult;
     try {
-      capture({ systemPrompt: agentConfig.prompt, userPrompt: prompt }, 'adapter');
+      if (!this.adapter.capturesInvocationInput) capture({ systemPrompt: agentConfig.prompt, userPrompt: prompt }, 'adapter');
       result = await withEngineWriteBoundary({
         projectDir: this.projectDir, runDir: this.runDir(), stageId: '_supervisor', attemptIndex,
         authority: 'observer', artifactContract: { version: 1, produces: [], reads: [], groups: [], replays: [] },

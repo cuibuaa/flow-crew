@@ -22,7 +22,6 @@ export interface EngineWriteBoundaryInput {
   /** A typed final answer replaces the child's plan/verdict publication slot. */
   structuredResult?: boolean;
   artifactContract: ArtifactContract;
-  sessionOwnerStageId?: string;
   attemptIndex?: number;
   /** Trusted observer calls may read project/run state, never publish it. */
   authority?: 'stage' | 'observer' | 'project-command';
@@ -114,7 +113,7 @@ export function spawnEngineChild(command: string, args: string[], options: {
 }
 export function engineChildAdapterHome(): string | undefined {
   const input = activeBoundary.getStore()?.input;
-  return input && join(input.runDir, 'stages', input.sessionOwnerStageId ?? input.stageId, 'codex_home');
+  return input && join(input.runDir, 'stages', input.stageId, 'codex_home');
 }
 const inside = (root: string, path: string): boolean => {
   const rel = relative(root, path);
@@ -142,8 +141,7 @@ function protectedCarriers(input: EngineWriteBoundaryInput): Array<{ path: strin
     for (const name of readdirSync(folder)) {
       const path = join(folder, name), local = relative(run, path).split('\\').join('/');
       const info = lstatSync(path);
-      const ownStageParent = local === 'stages' || local === `stages/${input.stageId}` || local === `stages/${input.sessionOwnerStageId}`;
-      if (input.sessionOwnerStageId && local === `stages/${input.sessionOwnerStageId}/codex_home`) continue;
+      const ownStageParent = local === 'stages' || local === `stages/${input.stageId}`;
       if (isEngineOwnedRunPath(local, stage) || (input.structuredResult && (local === 'dispatch.yaml' || local === `verdict_${input.stageId}.json` || local === `handoff_${input.stageId}.md`))) paths.push({ path, tree: info.isDirectory() && !ownStageParent });
       // Ownership is rooted in the run namespace. Only these namespace
       // parents can contain mixed engine/stage entries; arbitrary authored
@@ -362,11 +360,9 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
       }
       if (!input.structuredResult) fileSlot(join(run, `handoff_${input.stageId}.md`));
     }
-    for (const owner of new Set([input.stageId, input.sessionOwnerStageId].filter((id): id is string => id !== undefined))) {
-      if (!/^_?[a-z][a-z0-9_]*$/.test(owner)) throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: invalid adapter-home stage identity');
-      const directory = join(run, 'stages', owner, 'codex_home');
-      makeDirectory(directory); directories.push(directory);
-    }
+    if (!/^_?[a-z][a-z0-9_]*$/.test(input.stageId)) throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: invalid adapter-home stage identity');
+    const adapterHome = join(run, 'stages', input.stageId, 'codex_home');
+    makeDirectory(adapterHome); directories.push(adapterHome);
     return await activeBoundary.run({ input, scratch, scratchDirectories: [scratch], directories, files }, action);
   } finally {
     for (const previous of created) {

@@ -231,22 +231,6 @@ function initializeTemporaryGitRepository(projectDir: string, stateDir: string):
   });
 }
 
-async function settleDeferredRunWrites(runDirectory: string): Promise<void> {
-  const refreshPath = join(runDirectory, 'attempt_summary_refresh.json');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      const refresh = JSON.parse(readFileSync(refreshPath, 'utf-8')) as { pending?: unknown };
-      if (refresh.pending !== true) return;
-    } catch {
-      // No refresh request means this run has no debounced write to drain.
-      return;
-    }
-    await new Promise<void>((resolvePoll) => setTimeout(resolvePoll, 25));
-  }
-  throw new Error('rehearsal run-event summary refresh did not settle within 5000 ms');
-}
-
 export async function cmdRehearse(argv: string[]): Promise<void> {
   try {
     const result = await runRehearsal(argv);
@@ -319,7 +303,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   let tempFcHome = '';
   let tempProject = '';
   let noCandidateProject = '';
-  let rehearsalRunDir = '';
   let noCandidateRunDir = '';
   let retainedArtifacts: IsolatedRehearsalResult['retainedArtifacts'];
   let retainedOutcomeArtifacts: IsolatedRehearsalResult['retainedOutcomeArtifacts'];
@@ -512,7 +495,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       );
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       const runDirPath = join(tempFcHome, 'runs', state.runId!);
-      rehearsalRunDir = runDirPath;
 
       // ---------- verdicts on the simulated run ----------
       const statusResolution = resolveRunStatus(state.status);
@@ -693,16 +675,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         add('fail', `The isolated scheduler rehearsal could not complete: ${conciseError(error)}\n  Next: ${retry}`);
       }
     } finally {
-      for (const deferredRunDir of [rehearsalRunDir, noCandidateRunDir].filter(Boolean)) {
-        // Keep the rehearsal home active until framework-owned debounced writes
-        // settle. Restoring the caller's FC home first redirects their mutable
-        // global path lookup into the caller after rehearsal returns.
-        try {
-          await settleDeferredRunWrites(deferredRunDir);
-        } catch (error) {
-          add('fail', `The isolated scheduler rehearsal left deferred writes pending: ${conciseError(error)}`);
-        }
-      }
       store.setFcGlobalDir(realFcHome);
       if (!keep) {
         rmSync(tempFcHome, { recursive: true, force: true });

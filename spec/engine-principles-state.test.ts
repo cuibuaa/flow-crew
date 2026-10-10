@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -8,7 +9,7 @@ import { recordedResourceRegistry, appendRecordedResourceLease } from './test-su
 import { inspectStageArtifactContract, writeStageArtifactContractAudit } from '../src/stage-artifact-contract.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { summarizeRunStateView } from '../src/run-state-access.js';
-import { invocationInputPath, projectRunStageHistory, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
+import { invocationInputPath, projectRunStageHistory, readInvocationInput, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
 import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageInput, writeStageStatus, type StageAttempt } from '../src/store.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
@@ -76,17 +77,51 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(after.prompts.invocations).toHaveLength(3);
     expect(after.prompts.invocations.every((entry) => entry.integrity === 'verified' && entry.attemptBinding === 'matched')).toBe(true);
     expect(after.prompts.invocations[0].record).toMatchObject({ userPrompt: input().userPrompt, systemPrompt: input().systemPrompt, userSha256: hash(input().userPrompt), systemSha256: hash(input().systemPrompt), guidanceIds: ['late_guidance'] });
-    expect(readFileSync(first.path, 'utf8')).toContain('late_guidance');
+    expect(readInvocationInput(first.path).guidanceIds).toContain('late_guidance');
     expect(after.prompts.legacyInputs[0].exact).toBe(false);
   });
 
   it('is idempotent for identical inputs and refuses mutation of an invocation identity', () => {
     const first = recordInvocationInput(directory, input());
-    const bytes = readFileSync(first.path, 'utf8');
+    const bytes = readFileSync(first.path);
     expect(recordInvocationInput(directory, input({ capturedAt: '2026-10-03T00:02:00.000Z' })).record.capturedAt).toBe(observedAt);
     expect(() => recordInvocationInput(directory, input({ userPrompt: 'changed bytes' }))).toThrow('INVOCATION_INPUT_CONFLICT');
-    expect(readFileSync(first.path, 'utf8')).toBe(bytes);
+    expect(readFileSync(first.path)).toEqual(bytes);
     expect(readFileSync(join(directory, 'run.json'), 'utf8')).not.toContain('changed bytes');
+  });
+
+  it('recovers oversized Unicode system, user and transport bytes from one independent record', () => {
+    const systemPrompt = 'Role\r\n界🧪'.repeat(20_000);
+    const userPrompt = 'Task\n🌿'.repeat(20_000);
+    const payload = JSON.stringify({ argv: ['exec', '--', '-'], stdin: userPrompt, developer_instructions: systemPrompt });
+    const captured = recordInvocationInput(directory, input({ boundary: 'model', systemPrompt, userPrompt, transport: { kind: 'request', payload } }));
+    expect(readInvocationInput(captured.path)).toMatchObject({ systemPrompt, userPrompt, transport: { payload } });
+    expect(readFileSync(captured.path).length).toBeLessThan(Buffer.byteLength(payload));
+    expect(view(true).prompts.invocations).toHaveLength(1);
+    expect(view(true).prompts.invocations[0].record).toMatchObject({ systemPrompt, userPrompt, transport: { payload } });
+  });
+
+  it('reads legacy and compressed inputs together and does not duplicate a historical identity', () => {
+    const compressedPath = invocationInputPath(directory, input());
+    mkdirSync(join(compressedPath, '..'), { recursive: true });
+    const legacyPath = compressedPath.slice(0, -3);
+    const legacy = { ...input(), version: 1, systemSha256: hash(input().systemPrompt), userSha256: hash(input().userPrompt) };
+    const original = JSON.stringify(legacy) + '\n';
+    writeFileSync(legacyPath, original);
+    expect(recordInvocationInput(directory, input()).path).toBe(legacyPath);
+    expect(existsSync(compressedPath)).toBe(false);
+    expect(readFileSync(legacyPath, 'utf8')).toBe(original);
+    expect(() => recordInvocationInput(directory, input({ userPrompt: 'changed' }))).toThrow('INVOCATION_INPUT_CONFLICT');
+    recordInvocationInput(directory, input({ invocationIndex: 2, userPrompt: 'fallback input' }));
+    expect(view(true).prompts.invocations).toHaveLength(2);
+    expect(view(true).prompts.invocations.every(entry => entry.integrity === 'verified')).toBe(true);
+  });
+
+  it('reports truncated compressed records as invalid input evidence', () => {
+    const captured = recordInvocationInput(directory, input());
+    const bytes = readFileSync(captured.path);
+    writeFileSync(captured.path, bytes.subarray(0, bytes.length - 8));
+    expect(view(true).prompts.invocations[0].integrity).toBe('invalid');
   });
 
   it('fences stage/run/path identity and existing symlink escapes', () => {
@@ -236,9 +271,9 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(metadata?.systemPrompt).toBeUndefined();
     expect(metadata?.transport?.payload).toBeUndefined();
     expect(view(true).prompts.invocations[0].record?.transport?.payload).toContain('exact payload');
-    const bytes = JSON.parse(readFileSync(captured.path, 'utf8'));
+    const bytes = readInvocationInput(captured.path);
     bytes.userPrompt += '\ntampered';
-    writeFileSync(captured.path, JSON.stringify(bytes));
+    writeFileSync(captured.path, gzipSync(JSON.stringify(bytes)));
     const corrupted = view();
     expect(corrupted.prompts.invocations[0]).toMatchObject({ integrity: 'invalid', reason: expect.stringContaining('HASH_MISMATCH') });
     expect(corrupted.prompts.missingAttemptInputs).toHaveLength(1);

@@ -10,7 +10,7 @@
  *    codex-cli 0.144.3), which is why effort pins never took effect before.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -21,12 +21,15 @@ import type { AgentConfig } from '../src/adapters/base.js';
 let globalHome: string;
 let stageHome: string;
 let savedEnv: string | undefined;
+const initialCacheEnvironment = { CODEX_PLUGINS_CACHE: process.env.CODEX_PLUGINS_CACHE, CODEX_SKILLS_CACHE: process.env.CODEX_SKILLS_CACHE };
 
 beforeEach(() => {
   globalHome = mkdtempSync(join(tmpdir(), `codex-global-${randomBytes(4).toString('hex')}-`));
   stageHome = mkdtempSync(join(tmpdir(), `codex-stage-${randomBytes(4).toString('hex')}-`));
   savedEnv = process.env.CODEX_HOME;
   process.env.CODEX_HOME = globalHome;   // userCodexHome() resolves here
+  process.env.CODEX_PLUGINS_CACHE = join(globalHome, 'plugins');
+  process.env.CODEX_SKILLS_CACHE = join(globalHome, 'skills');
 });
 
 describe('codex capability executable selection', () => {
@@ -84,6 +87,9 @@ describe('codex capability executable selection', () => {
 
 afterEach(() => {
   if (savedEnv === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedEnv;
+  for (const [key, value] of Object.entries(initialCacheEnvironment)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
   rmSync(globalHome, { recursive: true, force: true });
   rmSync(stageHome, { recursive: true, force: true });
 });
@@ -92,6 +98,47 @@ const role = (model?: string, effort?: string): AgentConfig =>
   ({ model, reasoning_effort: effort, prompt: 'p' } as AgentConfig);
 
 describe('codex config inheritance from the global config', () => {
+  it('privately copies caches and relocates internal absolute links without a shared writable alias', () => {
+    const source = process.env.CODEX_PLUGINS_CACHE!;
+    mkdirSync(source);
+    writeFileSync(join(source, 'tool'), 'original tool');
+    symlinkSync(join(source, 'tool'), join(source, 'tool-link'));
+    writeCodexConfig(stageHome, role('first-model', 'high'));
+    const other = join(globalHome, 'second-stage');
+    writeCodexConfig(other, role('second-model', 'low'));
+    writeFileSync(join(stageHome, '.tmp', 'plugins', 'tool-link'), 'stage edit');
+    expect(readFileSync(join(source, 'tool'), 'utf8')).toBe('original tool');
+    expect(readFileSync(join(other, '.tmp', 'plugins', 'tool-link'), 'utf8')).toBe('original tool');
+    expect(readFileSync(join(stageHome, 'config.toml'), 'utf8')).toContain('first-model');
+    expect(readFileSync(join(other, 'config.toml'), 'utf8')).toContain('second-model');
+  });
+
+  it.each(['plugins', 'skills'])('retries a refused %s copy without reusing incomplete tools', (cache) => {
+    const source = process.env[cache === 'plugins' ? 'CODEX_PLUGINS_CACHE' : 'CODEX_SKILLS_CACHE']!;
+    const parent = cache === 'plugins' ? join(stageHome, '.tmp') : stageHome;
+    const destination = join(parent, cache);
+    mkdirSync(source);
+    mkdirSync(join(source, 'nested'));
+    writeFileSync(join(source, 'nested', 'tool'), 'original tool');
+    writeFileSync(join(globalHome, 'outside-tool'), 'outside');
+    symlinkSync(join(globalHome, 'outside-tool'), join(source, 'tool-link'));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(() => writeCodexConfig(stageHome, role('fixture', 'low'))).toThrow('cache link leaves private copy');
+      expect(existsSync(destination)).toBe(false);
+      expect(readdirSync(parent).some(name => name.startsWith('.flowcrew-'))).toBe(false);
+    }
+    rmSync(join(source, 'tool-link'));
+    symlinkSync(join(source, 'nested', 'tool'), join(source, 'tool-link'));
+    writeCodexConfig(stageHome, role('fixture', 'low'));
+    expect(readFileSync(join(destination, 'tool-link'), 'utf8')).toBe('original tool');
+    writeFileSync(join(destination, 'tool-link'), 'stage edit');
+    writeCodexConfig(stageHome, role('retry-model', 'high'));
+    expect(readFileSync(join(destination, 'nested', 'tool'), 'utf8')).toBe('stage edit');
+    expect(readFileSync(join(source, 'nested', 'tool'), 'utf8')).toBe('original tool');
+    expect(readFileSync(join(stageHome, 'config.toml'), 'utf8')).toContain('retry-model');
+    expect(readFileSync(join(globalHome, 'outside-tool'), 'utf8')).toBe('outside');
+  });
+
   it('unpinned (default) model and effort inherit ~/.codex/config.toml', () => {
     writeFileSync(join(globalHome, 'config.toml'), 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "max"\n');
     const cfg = readFileSync(writeCodexConfig(stageHome, role('default', 'default')), 'utf-8');

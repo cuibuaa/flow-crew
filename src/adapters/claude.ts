@@ -40,6 +40,7 @@ function parseTokens(output: string): { tokens_in?: number; tokens_out?: number 
  *   --max-turns N: limit agentic turns
  */
 export class ClaudeAdapter implements Adapter {
+  readonly capturesInvocationInput = true;
 
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
     const args = [

@@ -419,7 +419,6 @@ async function runStageWithWriterLease(
   // included only run-wide guidance. Add notices bound to this execution now.
   const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
   if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
-  writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   recordRunEvent(opts.projectDir, opts.runId, {
     type: 'attempt_started',
@@ -855,8 +854,10 @@ async function runStageWithWriterLease(
     };
     // input.md remains a compatible latest alias; immutable records carry exact inputs.
     writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
-    captureInput({ systemPrompt: selectedRole.prompt, userPrompt: effectiveInvocationPrompt,
-      resumeSessionId: continuation?.sessionId }, 'adapter');
+    if (!selectedAdapter.capturesInvocationInput) {
+      captureInput({ systemPrompt: selectedRole.prompt, userPrompt: effectiveInvocationPrompt,
+        resumeSessionId: continuation?.sessionId }, 'adapter');
+    }
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
     activeInvocationAbortController = invocationAbortController;
@@ -1041,8 +1042,7 @@ async function runStageWithWriterLease(
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
-        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex,
-        sessionOwnerStageId: continuation?.ownerStageId },
+        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex },
       () => selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,

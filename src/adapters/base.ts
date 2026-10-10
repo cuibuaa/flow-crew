@@ -107,7 +107,7 @@ export interface RunOpts {
   attemptStartedAt?: string;
   /** Resume only this explicit UUID; global-most-recent selection is forbidden. */
   resumeSessionId?: string;
-  /** Stage whose isolated adapter home owns resumeSessionId. */
+  /** Closed stage whose conversation is copied into this stage's private home. */
   sessionOwnerStageId?: string;
   /** Retain the isolated home across this stage lifecycle or an eligible successor. */
   preserveSession?: boolean;
@@ -134,6 +134,9 @@ export interface AgentConfig {
 }
 
 export interface Adapter {
+  /** Calls onInvocationInput before every native call, including internal retries.
+   * Other adapters are recorded at their public run boundary. */
+  readonly capturesInvocationInput?: boolean;
   run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult>;
 }
 

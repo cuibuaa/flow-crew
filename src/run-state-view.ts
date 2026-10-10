@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { parseGuidanceLedger, type GuidanceEnvelope } from './guidance.js';
 import { readResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseRegistryRead } from './resource-leases.js';
 import { STAGE_STATUS, readArchivedRunState, runDir, type ArchivedStoreState, type RetiredStageUsage, type StageAttempt, type StageStatus } from './store.js';
@@ -123,7 +124,7 @@ export function invocationInputPath(runDirectory: string, identity: Pick<Invocat
   quantity.positive().parse(identity.attemptIndex);
   quantity.positive().parse(identity.invocationIndex);
   timestamp.parse(identity.attemptStartedAt);
-  return carrierPath(runDirectory, join('stages', identity.stageId, 'invocations', attemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json`));
+  return carrierPath(runDirectory, join('stages', identity.stageId, 'invocations', attemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json.gz`));
 }
 
 function checkedInvocation(value: unknown): InvocationInputRecord {
@@ -131,6 +132,13 @@ function checkedInvocation(value: unknown): InvocationInputRecord {
   if (sha256(record.systemPrompt) !== record.systemSha256 || sha256(record.userPrompt) !== record.userSha256
     || (record.transport && sha256(record.transport.payload) !== record.transport.sha256)) throw new RunStateViewError('INVOCATION_INPUT_HASH_MISMATCH', 'immutable invocation input bytes do not match their hashes');
   return record;
+}
+
+/** Both formats are self-contained. Compression removes repeated prompt bytes
+ * in transport payloads without changing the public record or its hashes. */
+export function readInvocationInput(path: string): InvocationInputRecord {
+  const bytes = readFileSync(path);
+  return checkedInvocation(JSON.parse((path.endsWith('.gz') ? gunzipSync(bytes) : bytes).toString('utf8')));
 }
 
 /** Publish after final rendering, before execution, for EVERY actual invocation.
@@ -148,7 +156,10 @@ export function recordInvocationInput(runDirectory: string, input: InvocationInp
   const run = JSON.parse(readFileSync(carrierPath(runDirectory, 'run.json'), 'utf8')) as { runId?: unknown; stages?: Record<string, unknown>; supervise?: unknown; supervisor?: unknown; auxiliaryAttempts?: Record<string, unknown> };
   const knownActor = Object.hasOwn(run.stages ?? {}, record.stageId) || (record.stageId === '_supervisor' && (run.supervise === true || recordObject(run.supervisor) !== undefined)) || (record.stageId === '_summary' && Array.isArray(run.auxiliaryAttempts?._summary));
   if (run.runId !== record.runId || basename(resolve(runDirectory)) !== record.runId || !knownActor) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation must bind an initialized run and a known stage or configured supervisor');
-  const path = invocationInputPath(runDirectory, record);
+  const compressedPath = invocationInputPath(runDirectory, record);
+  // Replays of a historical identity must not create a second record.
+  const legacyPath = carrierPath(runDirectory, relative(runDirectory, compressedPath.slice(0, -3)));
+  const path = existsSync(legacyPath) ? legacyPath : compressedPath;
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // Recheck after directory creation; a preexisting outside-root symlink is never a capability.
   invocationInputPath(runDirectory, record);
@@ -156,13 +167,13 @@ export function recordInvocationInput(runDirectory: string, input: InvocationInp
   let fd: number | undefined;
   try {
     fd = openSync(temporary, 'wx', 0o600);
-    writeFileSync(fd, `${JSON.stringify(record)}\n`, 'utf8');
+    writeFileSync(fd, gzipSync(`${JSON.stringify(record)}\n`));
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
     try { linkSync(temporary, path); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const existing = checkedInvocation(JSON.parse(readFileSync(path, 'utf8')));
+      const existing = readInvocationInput(path);
       const withoutCaptureTime = (entry: InvocationInputRecord): string => JSON.stringify({ ...entry, capturedAt: undefined });
       if (withoutCaptureTime(existing) !== withoutCaptureTime(record)) throw new RunStateViewError('INVOCATION_INPUT_CONFLICT', 'attempt/invocation identity already has different immutable input');
       return { path, record: existing };
@@ -199,7 +210,7 @@ class ViewReadFence {
     const expected = bytes === undefined ? undefined : sha256(bytes);
     this.sources.push({ path, sha256: expected ?? null, bytes: bytes?.length ?? null, ...(prefix === undefined ? {} : { prefix }) });
     this.checks.push(() => { const current = observe(); return (current === undefined ? undefined : sha256(current)) === expected; });
-    return bytes?.toString('utf8');
+    return bytes === undefined ? undefined : (path.endsWith('.json.gz') ? gunzipSync(bytes) : bytes).toString('utf8');
   }
   json(path: string): unknown {
     const raw = this.read(path);
@@ -464,12 +475,13 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       const invocationRoot = stagePath('invocations');
       for (const directory of fence.list(invocationRoot).filter((name) => /^attempt_\d+_[0-9a-f]{24}$/.test(name))) {
         const directoryPath = stagePath(join('invocations', directory));
-        for (const filename of fence.list(directoryPath).filter((name) => /^invocation_\d+\.json$/.test(name))) {
+        for (const filename of fence.list(directoryPath).filter((name) => /^invocation_\d+\.json(?:\.gz)?$/.test(name))) {
           const invocationPath = stagePath(join('invocations', directory, filename));
-          const value = fence.json(invocationPath);
           try {
+            const value = fence.json(invocationPath);
             const record = checkedInvocation(value);
-            if (record.runId !== runId || record.stageId !== stageId || invocationInputPath(runDirectory, record) !== invocationPath) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation carrier path and identity differ');
+            const expectedPath = invocationInputPath(runDirectory, record);
+            if (record.runId !== runId || record.stageId !== stageId || (expectedPath !== invocationPath && expectedPath.slice(0, -3) !== invocationPath)) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation carrier path and identity differ');
             const matched = attempts.some((entry) => entry.index === record.attemptIndex && entry.startedAt === record.attemptStartedAt);
             const { systemPrompt, userPrompt, transport, ...metadata } = record;
             invocations.push({ path: invocationPath, integrity: 'verified', attemptBinding: matched ? 'matched' : 'unmatched', record: { ...metadata, ...(options.includePromptText ? { systemPrompt, userPrompt } : {}), ...(transport ? { transport: { kind: transport.kind, sha256: transport.sha256, ...(options.includePromptText ? { payload: transport.payload } : {}) } } : {}) } });
