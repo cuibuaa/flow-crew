@@ -115,7 +115,7 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
   const criteria = rawCriteria.filter(validCriterion);
   if (results.length !== rawResults.length || criteria.length !== rawCriteria.length) return false;
   return results.every((result) => {
-    const criterion = criteria.find((candidate) => candidate.role === result.role);
+    const criterion = criteria.find(candidate => candidate.role === result.role && (candidate.display === undefined || candidate.display === result.display));
     if (result.failureEvidence === undefined && criterion?.baselineFailureEvidence === undefined) return true;
     return result.failureEvidence === criterion?.baselineFailureEvidence;
   });

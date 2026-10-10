@@ -183,14 +183,14 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     if (!existsSync(artifactPath)) return '';
     try {
       const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8')) as {
-        baseline?: { gateCriteria?: Array<{ role?: unknown; rule?: unknown; baselineFailureIdentifiers?: unknown }> };
+        baseline?: { gateCriteria?: Array<{ role?: unknown; display?: unknown; rule?: unknown; baselineFailureIdentifiers?: unknown }> };
       };
       const criteria = artifact.baseline?.gateCriteria ?? [];
       const rows = criteria.map((criterion) => {
         const identifiers = Array.isArray(criterion.baselineFailureIdentifiers)
           ? criterion.baselineFailureIdentifiers.filter((value) => typeof value === 'string')
           : [];
-        return `- ${String(criterion.role)}: ${String(criterion.rule)}; baseline failures=${identifiers.length}${identifiers.length ? ` (${identifiers.join(', ')})` : ''}`;
+        return `- ${String(criterion.role)}${criterion.display ? ` (${String(criterion.display)})` : ''}: ${String(criterion.rule)}; baseline failures=${identifiers.length}${identifiers.length ? ` (${identifiers.join(', ')})` : ''}`;
       });
       return `## Engine-enforced validation baseline\nExact run-local evidence: ${artifactPath}\n${rows.join('\n')}\nThe engine supplies the current comparison before review. Read validation_delta_<stage_id>.json; a regressed or unresolved delta cannot authorize success.`;
     } catch {

@@ -1,9 +1,8 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, statSync, copyFileSync, symlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname, relative } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { assertDistFresh, createBuildManifest, publishBuildGeneration, computeBuildInputDigest, isBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
 import { computeBuildFingerprint } from '../src/daemon-identity.js';
@@ -164,10 +163,10 @@ describe('one backend and UI build identity', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'flowcrew-build-production-'))); roots.push(root);
     roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`));
     const repository = resolve(import.meta.dirname, '..');
-    const uiRequire = createRequire(join(repository, 'ui/package.json'));
-    const vitePackage = dirname(uiRequire.resolve('vite/package.json'));
-    const fakeVitePackage = join(root, relative(repository, vitePackage));
-    for (const dir of ['src', 'scripts', 'ui/src', relative(root, join(fakeVitePackage, 'bin'))]) mkdirSync(join(root, dir), { recursive: true });
+    // Keep fixture writes local even when review dependencies are symlinked.
+    const fakeVitePackage = join(root, 'ui', 'node_modules', 'vite');
+    for (const dir of ['src', 'scripts', 'ui/src']) mkdirSync(join(root, dir), { recursive: true });
+    mkdirSync(join(fakeVitePackage, 'bin'), { recursive: true });
     for (const file of ['build-manifest.ts', 'daemon-identity.ts', 'process-liveness.ts']) copyFileSync(join(repository, 'src', file), join(root, 'src', file));
     copyFileSync(join(repository, 'scripts/build.ts'), join(root, 'scripts/build.ts'));
     copyFileSync(join(repository, 'tsconfig.json'), join(root, 'tsconfig.json'));

@@ -277,7 +277,7 @@ function writeAdapterSetting(projectDir: string, adapter: AdapterName | 'auto'):
 async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
   const { commandSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
   const socketPath = commandSocketPath();
-  const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
+  const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task, acknowledgement: 'persisted' });
   console.log(formatDaemonRegistration(response));
 }
 

@@ -8,8 +8,8 @@ import { declaredDispatch, fixtureArtifactContract } from './test-support/declar
  *   CONTINUE (fix 1a), a premature ceiling must be DEFERRED by the declared
  *   floor (fix 1b), the engine-initiated terminal must write the declared
  *   artifact path (fix 2), a planner-authored reality check may rely on a
- *   pre-gate stage artifact, and the engine-consumed round_result.json must
- *   still be restored at terminal time (fix 4).
+ *   pre-gate stage artifact, and terminal checks must use the framework-owned
+ *   manifest instead of the optional shared round slot (fix 4).
  *
  *   Scenario B (unified terminal gate): an agent writing ship_report.md
  *   directly must be REJECTED by the confirm gate (hole 5), the run must end
@@ -227,9 +227,11 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
     expect(existsSync(join(projectDir, 'research/val/ceiling_report.md'))).toBe(true);
     expect(state.terminalArtifact).toBe('ceiling_report.md');
 
-    // Fix 4: the hard check uses the always-emitted manifest, while the direct
-    // assertion keeps covering restoration of the optional consumed result.
-    expect(existsSync(join(projectDir, 'research/val/round_result.json'))).toBe(true);
+    // A later round may replace/remove the optional shared slot. The manifest
+    // retains the consumed population and the rejected candidate's outcome.
+    const manifest = JSON.parse(readFileSync(join(projectDir, 'research/val/run_manifest.json'), 'utf8')) as { rounds: Array<{ label: string; confirmFailed?: boolean }> };
+    expect(manifest.rounds).toHaveLength(journal.rounds.length);
+    expect(manifest.rounds.find(row => row.label === decoy?.label)?.confirmFailed).toBe(true);
     const gate = JSON.parse(readRun('.reality-gate.json')) as { pass: boolean };
     expect(gate.pass).toBe(true);
   }, 60000);

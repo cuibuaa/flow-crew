@@ -115,6 +115,24 @@ afterEach(() => {
 });
 
 describe('ship-setup test population integrity', () => {
+  it('keeps mixed Python/JS population unverified while executing and recording both configured commands', async () => {
+    const briefPath = writeRunnerProject('vitest run');
+    const python = '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n';
+    writeFileSync(join(projectDir, 'pyproject.toml'), python);
+    const targetDir = join(root, 'target-mixed');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: '1 passed' }));
+    const collector = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: '[]' }));
+    const report = await runShipSetup(setupArgs(briefPath, targetDir), {
+      createWorktree: vi.fn<GitWorktreeCreator>(request => { copyManifest(request.targetDir); writeFileSync(join(request.targetDir, 'pyproject.toml'), python); return { exitCode: 0 }; }),
+      runValidationCommand: runner, runTestCollectionCommand: collector,
+      globalDir: () => join(root, 'state'),
+    });
+    expect(report).toMatchObject({ state: 'ready', testPopulation: { state: 'unverified', reason: expect.stringContaining('one collector cannot attest another') } });
+    expect(collector).not.toHaveBeenCalled();
+    expect(runner.mock.calls.map(([request]) => [request.display, request.cwd])).toEqual([['npm run test', targetDir], ['python -m pytest', targetDir]]);
+    expect(report.validationBaseline?.gateCriteria.filter(criterion => criterion.role === 'test')).toHaveLength(2);
+  });
+
   it('refuses equal-sized source and target populations when their identities differ', async () => {
     writeNodeProject();
     mkdirSync(join(projectDir, 'spec'), { recursive: true });

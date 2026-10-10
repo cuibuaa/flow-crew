@@ -97,6 +97,7 @@ export interface ValidationCommandResult {
 
 export interface ValidationGateCriterion {
   role: ValidationRole;
+  display?: string;
   rule: 'must_remain_green' | 'no_regression_from_baseline' | 'baseline_unresolved' | 'not_configured';
   baselineFailureCount?: number;
   baselineFailureIdentifiers: string[];
@@ -129,6 +130,7 @@ export interface ProjectValidationDependencies {
 
 export interface ValidationDeltaResult {
   role: ValidationRole;
+  display?: string;
   state: 'pass' | 'regression' | 'unresolved';
   reason: string;
   newFailureIdentifiers: string[];
@@ -512,8 +514,11 @@ function discoverProjectValidationDetails(
   const packagePath = join(root, 'package.json');
   const makefilePath = join(root, 'Makefile');
   const pyprojectPath = join(root, 'pyproject.toml');
-  const configPaths = [packagePath, makefilePath, pyprojectPath].filter((path) => fs.exists(path));
-  const commands = new Map<ValidationRole, ValidationCommand>();
+  const toxPath = join(root, 'tox.ini');
+  const pytestPath = join(root, 'pytest.ini');
+  const configPaths = [packagePath, makefilePath, pyprojectPath, toxPath, pytestPath].filter((path) => fs.exists(path));
+  const commands: ValidationCommand[] = [];
+  const hasRole = (role: ValidationRole): boolean => commands.some(command => command.role === role);
   const unresolvedProjectRoles = new Set<ValidationRole>();
   const diagnostics: string[] = [];
   let runner: PackageRunner | undefined;
@@ -544,7 +549,7 @@ function discoverProjectValidationDetails(
       }
       if (runner) {
         for (const role of scriptRoles) {
-          commands.set(role, { ...commandFor(role, runner), evidencePath: packagePath });
+          commands.push({ ...commandFor(role, runner), evidencePath: packagePath });
         }
       } else {
         scriptRoles.forEach((role) => unresolvedProjectRoles.add(role));
@@ -558,8 +563,8 @@ function discoverProjectValidationDetails(
     try {
       const makefile = fs.readText(makefilePath);
       for (const role of ROLES) {
-        if (commands.has(role) || !new RegExp(`^${role}\\s*:(?!=)`, 'm').test(makefile)) continue;
-        commands.set(role, inferredCommand(role, 'make', [role], makefilePath));
+        if (hasRole(role) || !new RegExp(`^${role}\\s*:(?!=)`, 'm').test(makefile)) continue;
+        commands.push(inferredCommand(role, 'make', [role], makefilePath));
       }
     } catch (error) {
       diagnostics.push(`Cannot read Makefile: ${errorMessage(error)}`);
@@ -570,35 +575,43 @@ function discoverProjectValidationDetails(
     try {
       const pyproject = fs.readText(pyprojectPath);
       const sections = pyprojectSections(pyproject);
-      if (!commands.has('build') && sections.has('build-system')) {
-        commands.set('build', inferredCommand('build', 'python', ['-m', 'build'], pyprojectPath));
+      if (sections.has('build-system')) {
+        commands.push(inferredCommand('build', 'python', ['-m', 'build'], pyprojectPath));
       }
-      if (!commands.has('test')
-          && ([...sections.keys()].some((section) => /^tool\.pytest(?:\.|$)/.test(section))
+      if (([...sections.keys()].some((section) => /^tool\.pytest(?:\.|$)/.test(section))
             || declaresPythonDependency(sections, 'pytest'))) {
-        commands.set('test', inferredCommand('test', 'python', ['-m', 'pytest'], pyprojectPath));
+        commands.push(inferredCommand('test', 'python', ['-m', 'pytest'], pyprojectPath));
       }
-      if (!commands.has('lint')
-          && ([...sections.keys()].some((section) => /^tool\.ruff(?:\.|$)/.test(section))
+      if (([...sections.keys()].some((section) => /^tool\.ruff(?:\.|$)/.test(section))
             || declaresPythonDependency(sections, 'ruff'))) {
-        commands.set('lint', inferredCommand('lint', 'python', ['-m', 'ruff', 'check', '.'], pyprojectPath));
+        commands.push(inferredCommand('lint', 'python', ['-m', 'ruff', 'check', '.'], pyprojectPath));
       }
     } catch (error) {
       diagnostics.push(`Cannot read pyproject.toml: ${errorMessage(error)}`);
     }
   }
 
-  const discoveredCommands = ROLES.flatMap((role) => {
-    const command = commands.get(role);
-    return command ? [command] : [];
-  });
+  // Legacy Python projects declare the runner in INI files. setup.py alone
+  // describes packaging, not a test recipe; do not guess one from its presence.
+  for (const path of [toxPath, pytestPath]) {
+    if (!fs.exists(path)) continue;
+    try {
+      const text = fs.readText(path);
+      if (/^\s*\[testenv(?::[^\]]+)?\]/m.test(text) && /^\s*commands\s*=/m.test(text)) {
+        commands.push(inferredCommand('test', 'tox', [], path));
+      } else if (/^\s*\[pytest\]/m.test(text) && !commands.some(command => command.command === 'python' && command.args.join(' ') === '-m pytest')) {
+        commands.push(inferredCommand('test', 'python', ['-m', 'pytest'], path));
+      }
+    } catch (error) { diagnostics.push(`Cannot read ${path}: ${errorMessage(error)}`); }
+  }
+  const discoveredCommands = ROLES.flatMap(role => commands.filter(command => command.role === role));
   const unresolvedRoles = ROLES.filter((role) => unresolvedProjectRoles.has(role));
-  const missingRoles = ROLES.filter((role) => !commands.has(role));
+  const missingRoles = ROLES.filter((role) => !hasRole(role));
   const state: ValidationDiscovery['state'] = discoveredCommands.length === 0
     ? 'unknown'
     : missingRoles.length === 0 ? 'configured' : 'partial';
   const defaultReason = configPaths.length === 0
-    ? 'No recognized package.json, Makefile, or pyproject.toml validation declarations were found'
+    ? 'No recognized Node, Make, or Python validation declarations were found'
     : 'Recognized project configuration declares no inferable build, test, or lint command';
   return {
     discovery: {
@@ -686,32 +699,27 @@ export function reconcileProjectValidation(
     );
   }
 
-  const projectByRole = new Map(discovery.commands.map((command) => [command.role, command]));
   const commands: ValidationCommand[] = [];
   for (const role of ROLES) {
-    const projectCommand = projectByRole.get(role);
+    const projectCommands = discovery.commands.filter(command => command.role === role);
+    const projectCommand = projectCommands[0];
     const declaration = declaredByRole.get(role);
     if (projectCommand && declaration) {
-      if (!sameArgv(projectCommand, declaration)) {
+      const matching = projectCommands.find(command => sameArgv(command, declaration));
+      if (!matching) {
         const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
         return unknownReconciliation(
           discovery,
           `Validation command conflict for ${role}: project declaration at ${projectEvidence} specifies ${JSON.stringify(argv(projectCommand))}, but brief declaration at ${declaration.evidencePath} specifies ${JSON.stringify(argv(declaration))}. Project configuration governs; remove the overlapping brief declaration or make its argv exactly agree.`,
         );
       }
-      const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
-      commands.push({
-        ...projectCommand,
-        provenance: {
-          source: 'project',
-          evidencePath: projectEvidence,
-          corroboratedBy: [declaration.evidencePath],
-        },
-      });
+      commands.push(...projectCommands.map(command => command === matching ? {
+        ...command, provenance: { source: 'project' as const, evidencePath: command.evidencePath ?? discovery.configPath, corroboratedBy: [declaration.evidencePath] },
+      } : command));
       continue;
     }
     if (projectCommand) {
-      commands.push(projectCommand);
+      commands.push(...projectCommands);
       continue;
     }
     if (declaration) {
@@ -1016,9 +1024,12 @@ export async function runProjectValidationBaseline(
   // configured like a project without a lint command; only an operator declaration that cannot be honoured is unresolved.
   const unresolved = discovery.state === 'unknown' && (declaredCommands?.length ?? 0) > 0;
 
-  for (const role of ROLES) {
-    const command = discovery.commands.find((candidate) => candidate.role === role);
-    if (!command) {
+  for (const command of ROLES.flatMap<ValidationCommand | Pick<ValidationCommand, 'role'>>(role => {
+    const configured = discovery.commands.filter(candidate => candidate.role === role);
+    return configured.length ? configured : [{ role }];
+  })) {
+    const role = command.role;
+    if (!('display' in command)) {
       results.push({
         role,
         state: unresolved ? 'unresolved' : 'not_configured',
@@ -1115,7 +1126,7 @@ export async function runProjectValidationBaseline(
     projectDir: root,
     discovery,
     results,
-    gateCriteria: results.map(criterionFor),
+    gateCriteria: results.map(result => ({ ...criterionFor(result), ...(result.display ? { display: result.display } : {}) })),
   };
 }
 
@@ -1130,7 +1141,8 @@ export function evaluateValidationDelta(
   current: ValidationCommandResult[],
 ): ValidationDeltaResult[] {
   return baseline.results.map((prior): ValidationDeltaResult => {
-    const next = current.find((result) => result.role === prior.role);
+    const siblings = baseline.results.filter(result => result.role === prior.role);
+    const next = current.find(result => result.role === prior.role && (siblings.length === 1 || result.display === prior.display));
     if (!next) return { role: prior.role, state: 'unresolved', reason: 'Current validation result is missing', newFailureIdentifiers: [] };
     if (prior.state === 'passed') {
       if (next.state === 'passed') {
@@ -1215,5 +1227,5 @@ export function evaluateValidationDelta(
           newFailureIdentifiers,
         }
       : { role: prior.role, state: 'pass', reason: 'No new failure and no known count increase', newFailureIdentifiers: [] };
-  });
+  }).map((result, index) => ({ ...result, ...(baseline.results[index].display ? { display: baseline.results[index].display } : {}) }));
 }

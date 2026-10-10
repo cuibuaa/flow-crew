@@ -1050,7 +1050,7 @@ async function runStageWithWriterLease(
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
-        stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex },
+        stageId: opts.stageId, isGate: opts.isGate, projectWriteScope: opts.projectWriteScope ?? [], dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex },
       () => selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,

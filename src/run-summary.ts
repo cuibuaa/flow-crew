@@ -404,7 +404,7 @@ function renderValidation(runDir: string): string {
   for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
     const receipt = readJson<{ stageId: string; checkedAt: string; pass: boolean;
       immutablePath?: string; current: ValidationCommandResult[];
-      delta: Array<{ role: string; state: string; reason: string }> }>(join(runDir, name));
+      delta: Array<{ role: string; display?: string; state: string; reason: string }> }>(join(runDir, name));
     if (!receipt || !Array.isArray(receipt.current) || !Array.isArray(receipt.delta)) {
       sections.push(`- ${name}: validation receipt unavailable or invalid.`);
       continue;
@@ -427,7 +427,7 @@ function renderValidation(runDir: string): string {
       for (const failure of result.failureIdentifiers) lines.push(`  - Failure: ${failure}`);
     }
     for (const delta of receipt.delta) lines.push(delta
-      ? `- ${delta.role} baseline comparison: ${delta.state} — ${delta.reason}`
+      ? `- ${delta.display ?? delta.role} baseline comparison: ${delta.state} — ${delta.reason}`
       : 'Baseline comparison entry unavailable or invalid.');
     sections.push(lines.join('\n\n'));
   }

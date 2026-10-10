@@ -11,7 +11,7 @@ function fixture() {
   const projectDir = join(root, 'p'), runDir = join(root, 'r');
   mkdirSync(projectDir); mkdirSync(runDir);
   const artifactContract = { version: 1 as const, produces: [{ id: 'output', root: 'run' as const, path: 'out', kind: 'directory' as const }], reads: [], groups: [], replays: [] };
-  const input = { projectDir, runDir, stageId: 'subject', attemptIndex: 1, artifactContract };
+  const input = { projectDir, runDir, stageId: 'subject', projectWriteScope: ['**'], attemptIndex: 1, artifactContract };
   const receiptPath = join(runDir, 'stages', 'subject', 'write_boundary_attempt_1.jsonl');
   const receipts = () => existsSync(receiptPath) ? readFileSync(receiptPath, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
   const command = (code: string, timeout_ms = 5000, abortSignal?: AbortSignal) => execWithStdin(process.execPath, ['-e', code], '', { cwd: projectDir, timeout_ms, abortSignal, captureStreams: true });

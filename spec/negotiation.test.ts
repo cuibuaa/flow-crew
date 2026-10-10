@@ -28,6 +28,7 @@ import {
   type StoreState,
 } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import {
   ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS,
   createTechnicalRetryBudgetState,
@@ -783,6 +784,9 @@ describe('bounded timeout negotiation', () => {
       writeStageStatus(projectDir, created.runId, 'work', priorStatus);
       const state = readRunState(projectDir, created.runId);
       state.stages.work = priorStatus;
+      // The retry clock is separate from recovery authority: this fixture
+      // supplies previous-boot/same-generation provenance for its executed run.
+      state.engineCheckpoint = { ...captureEngineCheckpoint(projectDir, created.runId), bootId: 'prior-fixture-boot' };
       writeRunState(projectDir, created.runId, state);
       const budgets: number[] = [];
       const adapter: Adapter = { async run(_prompt, _agent, opts) {

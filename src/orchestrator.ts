@@ -48,6 +48,7 @@ import {
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
+import { getItem, isPendingInboxItemState } from './inbox.js';
 import {
   RunCancellationCoordinator,
   type CancellationResult,
@@ -85,7 +86,8 @@ interface BoundRun {
   path: string;
   status: string;
   failureReason?: string;
-  checkpointed?: boolean;
+  pendingApprovalId?: string;
+  resumeAuthorized?: boolean;
 }
 
 export interface GitAdapter {
@@ -244,7 +246,16 @@ export class Orchestrator {
 
   /** Persist admission before launch work. The daemon queue resumes after a restart. */
   enqueue(input: TaskCreateInput): TaskEntry {
-    if (input.run_id) throw new Error('Queued registration requires a new run; omit acknowledgement for an existing-run resume.');
+    if (input.run_id) {
+      try {
+        const identity = resolveRunIdentity(this.boundRunPath(input.run_id), runsRoot(input.projectDir));
+        const state = readRunState(input.projectDir, identity.runId);
+        if (state.runId !== identity.runId || resolve(state.projectDir) !== resolve(input.projectDir)) throw new Error('run/project binding mismatch');
+        input = { ...input, run_id: identity.runId };
+      } catch (error) {
+        throw new Error(`Invalid existing-run resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    }
     return this.createAdmittedTask({ ...input, status: TASK_STATUS.PENDING });
   }
 
@@ -487,10 +498,7 @@ export class Orchestrator {
         );
         return;
       }
-      if (isPausedRunStatus(bound.status)) {
-        this.defer(task, `bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
-        return;
-      }
+      if (this.waitForBoundApproval(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
       if (task.defer_kind !== 'retry') {
@@ -722,18 +730,34 @@ export class Orchestrator {
         status?: unknown;
         failureReason?: unknown;
         engineCheckpoint?: unknown;
+        projectDir?: string;
+        parked?: { requestId?: string; pausedAt?: string };
+        recovery?: { kind?: string };
       };
-      if (typeof parsed.status !== 'string') return undefined;
+      if (typeof parsed.status !== 'string' || parsed.runId !== identity.runId || typeof parsed.projectDir !== 'string' || resolve(parsed.projectDir) !== resolve(task.projectDir)) return undefined;
+      const requestId = parsed.parked?.requestId;
+      const item = requestId && Number.isFinite(Date.parse(parsed.parked?.pausedAt ?? '')) ? getItem(identity.runId, requestId) : undefined;
+      const boundApproval = item?.runId === identity.runId && resolve(item.projectDir) === resolve(task.projectDir) ? item : undefined;
       return {
         runId: identity.runId,
         path,
         status: parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
-        ...(parsed.engineCheckpoint ? { checkpointed: true } : {}),
+        ...(boundApproval && isPendingInboxItemState(boundApproval.state) ? { pendingApprovalId: requestId } : {}),
+        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
       };
     } catch {
       return undefined;
     }
+  }
+
+  private waitForBoundApproval(task: TaskEntry, bound: BoundRun, prefix = ''): boolean {
+    if (!isPausedRunStatus(bound.status)) return false;
+    if (bound.pendingApprovalId) {
+      this.defer(task, `${prefix}bound run ${bound.runId} is awaiting approval resume (request ${bound.pendingApprovalId})`, 'wait', task.run_id);
+    } else if (bound.resumeAuthorized) return false;
+    else this.failClosed(task, `${prefix}bound run ${bound.runId} has no pending approval and no proven resume authority; ${bound.failureReason ?? 'RECOVERY_FATE_UNKNOWN: inspect the run recovery record before starting new work'}`);
+    return true;
   }
 
   private isSingleFlightCollision(bound: BoundRun): boolean {
@@ -780,10 +804,7 @@ export class Orchestrator {
         await this.reconcileTerminalBoundRun(task, bound);
         return true;
       }
-      if (isPausedRunStatus(bound.status)) {
-        this.defer(task, `${reason}; bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
-        return true;
-      }
+      if (this.waitForBoundApproval(task, bound, `${reason}; `)) return true;
       const recovery = this.boundRunRecoveryDecision(task, bound, reason);
       if (recovery.kind === 'resume') await this.retryOrStuck(task, recovery.reason);
       return true;
@@ -833,11 +854,11 @@ export class Orchestrator {
       );
       return { kind: 'stop' };
     }
-    let recovered = false;
-    if (bound.checkpointed && readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
+    let recovered = bound.resumeAuthorized === true;
+    if (readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
       const reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId);
       if (isTerminalRunStatus(reconciled.status)) {
-        this.failClosed(task, `${leading}bound run ${bound.runId} ended ${reconciled.status}; refusing to resume it`);
+        this.failClosed(task, `${leading}bound run ${bound.runId} ended ${reconciled.status}: ${reconciled.failureReason ?? 'unknown outcome'}; inspect its recovery record before starting new work`);
         return { kind: 'stop' };
       }
       if (reconciled.recovery?.kind !== 'resumable') {

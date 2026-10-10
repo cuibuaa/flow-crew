@@ -43,9 +43,11 @@ function readValidationDelta(path: string): GateValidationDeltaArtifact | undefi
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as GateValidationDeltaArtifact;
     if (value.version !== 2 || typeof value.pass !== 'boolean' || !Array.isArray(value.current) || !Array.isArray(value.delta)
-      || value.delta.length !== 3 || new Set(value.delta.map((entry) => entry.role)).size !== 3
+      || value.delta.length < 3 || new Set(value.delta.map((entry) => entry.role)).size !== 3
+      || new Set(value.delta.map(entry => JSON.stringify([entry.role, entry.display ?? null]))).size !== value.delta.length
       || value.delta.some((entry) => !['build', 'test', 'lint'].includes(entry.role)
-        || !['pass', 'regression', 'unresolved'].includes(entry.state) || typeof entry.reason !== 'string')
+        || !['pass', 'regression', 'unresolved'].includes(entry.state) || typeof entry.reason !== 'string'
+        || (entry.display !== undefined && (typeof entry.display !== 'string' || !entry.display)))
       || (value.validationAttemptIndex !== undefined && (!Number.isSafeInteger(value.validationAttemptIndex) || value.validationAttemptIndex < 1))) return undefined;
     return value;
   } catch { return undefined; }
@@ -267,7 +269,7 @@ export async function settleGateValidationEvidence(
     && validationDeltaMatchesCurrentExecution(projectDir, runId, previous) && previous.baselineSha256 === digest;
   if (previous && bound && (previous.pass === true || previous.delta.some((entry) => entry.state === 'regression'))) return { kind: 'unchanged' };
   const refuse = (delta?: GateValidationDeltaArtifact) => ({ kind: 'refused' as const,
-    reason: `Validation settlement for ${stageId} remains unresolved after its mechanical retry; authored review is preserved. ${delta?.delta.filter((entry) => entry.state !== 'pass').map((entry) => `${entry.role}: ${entry.reason}`).join('; ') ?? 'No comparable validation receipt'}` });
+    reason: `Validation settlement for ${stageId} remains unresolved after its mechanical retry; authored review is preserved. ${delta?.delta.filter((entry) => entry.state !== 'pass').map((entry) => `${entry.display ?? entry.role}: ${entry.reason}`).join('; ') ?? 'No comparable validation receipt'}` });
   if (previous && bound && (previous.validationAttemptIndex ?? 1) >= 2) return refuse(previous);
   const next = await recordGateValidationDelta(projectDir, runId, stageId, dependencies);
   if (!next || !validationDeltaMatchesCurrentExecution(projectDir, runId, next)) return refuse(next);

@@ -11,7 +11,7 @@ import { log } from '../sched_admission/shared.js';
 import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
-import { RUN_STATUS, StoreState, initializeReservedRun, isPausedRunStatus, readRunReservation, readRunState, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, initializeReservedRun, isPausedRunStatus, readRunReservation, readRunState, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
@@ -66,9 +66,14 @@ export function prepareWorkflowLaunch(
     if (hasRunState) {
       let archived = readRunState(projectDir, runId);
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
-      if (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint && !archived.recovery) {
+      // createRun prepares a running projection before dispatch. Every consumer
+      // gets a durable attempt before launch; an untouched preparation is not an
+      // interrupted execution. Every interrupted execution needs current proof;
+      // an earlier recovery does not authorize a later checkpoint or crash.
+      const dispatched = archived.engineCheckpoint || Object.values(archived.stages).some(stage => stage.status === STAGE_STATUS.RUNNING || (stage.attempts?.length ?? 0) > 0);
+      if (archived.status === RUN_STATUS.RUNNING && dispatched) {
         const owner = inspectRunScheduler(runId, runDirPath);
-        if (owner.kind !== 'dead' && owner.kind !== 'missing') throw new Error(`RECOVERY_FATE_UNKNOWN: scheduler identity is ${owner.kind}; exclude a live or unverifiable owner before reconciliation`);
+        if (owner.kind !== 'dead' && owner.kind !== 'missing' && owner.kind !== 'reused') throw new Error(`RECOVERY_FATE_UNKNOWN: scheduler identity is ${owner.kind}; exclude a live or unverifiable owner before reconciliation`);
         archived = reconcileHostInterruptedRun(projectDir, runId);
       }
       // User cancellation is authoritative for this run. Return before launch

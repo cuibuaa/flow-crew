@@ -2,7 +2,10 @@
 import { readResearchGateCandidate } from '../../research-candidate.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { AuditFindingsSchema } from '../../scoped-audit-repair.js';
-import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, runDir, stageDir } from '../../store.js';
+import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, runDir, stageDir } from '../../store.js';
+import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { declaredOutputSource } from '../../declared-output-archive.js';
+import { scopeContainsPath } from '../sched_scope/path-capabilities.js';
 import { validateGateControls } from '../../verdict-controls.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport } from '../sched_admission/dispatch.js';
@@ -78,6 +81,21 @@ export function readGateVerdict(
     }
   }
   if (!v) return null;
+  if (runId && v.pass === true && existsSync(join(base, 'run.json'))) {
+    const state = readRunState(projectDir, runId);
+    const outputs = state.declaredOutputs ?? (existsSync(join(base, 'task_brief.md')) ? parseBriefFrontmatter(readFileSync(join(base, 'task_brief.md'), 'utf8')).outputs : undefined);
+    const stages = state.planControl?.stages ?? [];
+    const byId = new Map(stages.map(stage => [stage.id, stage]));
+    for (const output of outputs ?? []) {
+      // A product explicitly assigned to later ordinary work is not due at an
+      // intermediate gate. Repair wiring cannot postpone a missing product.
+      if (stages.some(stage => stage.id !== stageId && !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length
+          && state.stages[stage.id]?.status !== STAGE_STATUS.COMPLETE && !transitivelyDependsOn(stageId, stage.id, byId)
+          && scopeContainsPath(stage.scope ?? [], output.path))) continue;
+      try { declaredOutputSource(projectDir, output); }
+      catch (error) { return { pass: false, reason: `DECLARED_OUTPUT_REQUIRED: ${output.path}: ${String(error)}; restore the required product before gate acceptance; GUIDE cannot override the brief` }; }
+    }
+  }
   const repairabilityViolation = validateGateRepairability(v);
   if (repairabilityViolation) return { pass: false, reason: repairabilityViolation, contractViolation: 'repairability' };
   if (v.repairability && isTerminalStudyCompletionArtifact(v)) {

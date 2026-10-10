@@ -22,6 +22,8 @@ export interface EngineWriteBoundaryInput {
   /** A typed final answer replaces the child's plan/verdict publication slot. */
   structuredResult?: boolean;
   artifactContract: ArtifactContract;
+  /** The already-admitted project capability; absent/empty is read-only. */
+  projectWriteScope?: readonly string[];
   attemptIndex?: number;
   /** Trusted observer calls may read project/run state, never publish it. */
   authority?: 'stage' | 'observer' | 'project-command';
@@ -316,7 +318,8 @@ export async function withEngineWriteBoundary<T>(input: EngineWriteBoundaryInput
   if (inside(project, run) || inside(run, project)) throw new Error('ENGINE_WRITE_BOUNDARY_REFUSED: project and engine run storage must be separate physical trees');
   const stage = { id: input.stageId, is_gate: input.isGate };
   const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-stage-write-'));
-  const directories = observer ? [scratch] : [project, scratch], files: string[] = [];
+  const directories = !observer && (input.authority === 'project-command' || input.projectWriteScope?.length)
+    ? [project, scratch] : [scratch], files: string[] = [];
   const createdDirectories: string[] = [];
   const makeDirectory = (path: string): void => {
     if (existsSync(path)) return;

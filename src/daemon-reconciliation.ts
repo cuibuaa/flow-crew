@@ -32,7 +32,6 @@ export function createDaemonReconciler(
     const ids = listRunningRunIdsFromIndex('') ?? [];
     if (!ids.length) { cursor = 0; return; }
     const boot = readHostBootId();
-    if (!boot) return;
     const generation = engineGeneration();
     for (let i = 0, count = Math.min(ids.length, 32); i < count; i++) {
       const id = ids[cursor++ % ids.length];
@@ -40,7 +39,7 @@ export function createDaemonReconciler(
       try {
         const state = readRunState('', id);
         const checkpoint = state.engineCheckpoint;
-        if (state.status !== RUN_STATUS.RUNNING || !checkpoint?.bootId || checkpoint.bootId === boot) continue;
+        if (state.status !== RUN_STATUS.RUNNING) continue;
         const scheduler = inspectRunScheduler(id, join(runsRoot(), id));
         if (scheduler.kind === 'live' || scheduler.kind === 'corrupt' || scheduler.kind === 'unverifiable') continue;
         // Existing recovery owns generation/plan/attempt/intent refusals and

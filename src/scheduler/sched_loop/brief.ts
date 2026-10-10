@@ -56,6 +56,7 @@ export function configureWorkflowBrief(
     if (briefContent) {
       const { terminalStates, program, research, outputs, stripped, frontmatterError } = parseBriefFrontmatter(briefContent);
       taskDescription = stripped || briefContent;
+      if (outputs?.length) taskDescription += `\n\nDeclared outputs (required by the brief):\n${outputs.map(output => `- ${output.path} (${output.expectedType})`).join('\n')}\nGUIDE cannot remove these obligations. Report conflicting actual constraints rather than silently overriding either one.`;
       if (terminalStates || program || research || outputs) {
         const s = readRunState(projectDir, runId);
         if (terminalStates) s.terminalStates = terminalStates;

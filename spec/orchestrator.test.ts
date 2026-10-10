@@ -477,7 +477,8 @@ describe('Orchestrator', () => {
   // ownership; the missing/dead-owner behavior is covered by the replay suite.
   it.each(['running', 'parked'])('waits for a readable %s bound run when its unit reports failed', async (runStatus) => {
     const runId = `bound-${runStatus}`;
-    const runPath = writeRun(runId, runStatus);
+    const runPath = writeRun(runId, runStatus, runStatus === 'parked' ? { requestId: 'bound-request', pausedAt: new Date(clock).toISOString() } : undefined);
+    if (runStatus === 'parked') addPendingApproval(runId, 'bound-request');
     if (runStatus === 'running') {
       writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
       writeSchedulerProcessIdentity(runPath, runId);
@@ -493,6 +494,29 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
 
     expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 1, run_id: runId });
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['unit-exit', 'queued-retry'])('reports a parked recovery without approval at %s', async path => {
+    const runId = `recovery-${path}`;
+    writeRun(runId, 'parked', undefined, 'RECOVERY_FATE_UNKNOWN: consumers may still be alive');
+    const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir,
+      status: path === 'unit-exit' ? 'running' : 'deferred', run_id: runId });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId });
+    expect(registry.get(task.id)?.notes).toContain('RECOVERY_FATE_UNKNOWN');
+    expect(registry.get(task.id)?.notes).toContain('no pending approval');
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it('does not let an unrelated pending approval justify a bound run wait', async () => {
+    writeRun('actual-bound', 'parked', { requestId: 'other-request', pausedAt: new Date(clock).toISOString() });
+    writeRun('other-run', 'parked', { requestId: 'other-request', pausedAt: new Date(clock).toISOString() });
+    addPendingApproval('other-run', 'other-request');
+    const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir, status: 'deferred', run_id: 'actual-bound' });
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('stuck');
     expect(systemd.runs).toHaveLength(0);
   });
 

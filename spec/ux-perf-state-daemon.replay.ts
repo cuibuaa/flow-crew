@@ -173,43 +173,22 @@ function recoveryFixture(options: { maxRetries?: number; attempt?: number } = {}
 }
 
 describe('identity-bound dead scheduler recovery', () => {
-  it('queues one budgeted retry and relaunches only the exact existing run when scheduler.pid is missing', async () => {
+  it('ends a checkpointless missing-controller run explicitly without spending retry budget', async () => {
     const fixture = recoveryFixture();
-
+    const before = readRunState(projectDir, fixture.created.runId).stages;
     await fixture.orchestrator.tickOnce();
     expect(fixture.registry.get(fixture.task.id)).toMatchObject({
-      status: 'deferred',
-      attempt: 1,
-      defer_kind: 'retry',
-      run_id: fixture.created.runId,
+      status: 'stuck', attempt: 1, run_id: fixture.created.runId,
     });
-    expect(fixture.registry.get(fixture.task.id)?.defer_reason).toContain('scheduler is missing');
-    expect(fixture.units.launches).toHaveLength(0);
-
+    expect(fixture.registry.get(fixture.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
+    const state = readRunState(projectDir, fixture.created.runId);
+    expect(state).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
+    expect(state.completedAt).toBeTruthy();
+    expect(state.stages).toEqual(before);
     clock += 31_000;
     await fixture.orchestrator.tickOnce();
-
-    const recovered = fixture.registry.get(fixture.task.id)!;
-    expect(recovered).toMatchObject({ status: 'running', attempt: 2, run_id: fixture.created.runId });
-    expect(fixture.units.launches).toHaveLength(1);
-    expect(fixture.units.launches[0].command).toContain(`'--existing-run-id' '${fixture.created.runId}'`);
+    expect(fixture.units.launches).toHaveLength(0);
     expect(readdirSync(runsRoot())).toEqual([fixture.created.runId]);
-
-    // The resumed scheduler consumes the exact recorded terminal candidate and
-    // reaches its declared status instead of leaving the daemon in a defer loop.
-    const state = readRunState(projectDir, fixture.created.runId);
-    const adapter = {
-      async run() { return { output: 'summary unavailable in replay', exitCode: 1, duration_ms: 1 }; },
-    } as Adapter;
-    const terminal = await tryTerminateOnTerminalState(state, {
-      projectDir,
-      runId: fixture.created.runId,
-      runDirPath: fixture.created.runDirPath,
-      iteration: state.currentIteration ?? 1,
-      adapter,
-    });
-    expect(terminal.decision).toBe('matched');
-    expect(readRunState(projectDir, fixture.created.runId).status).toBe('ceiling_hit');
     const exactRecordedTick = recordedEvidence('item5_nonterminal_state_before_crash');
     expect(readFileSync(fixture.task.tick_log_path).subarray(0, exactRecordedTick.byteLength))
       .toEqual(exactRecordedTick);
@@ -234,12 +213,14 @@ describe('identity-bound dead scheduler recovery', () => {
     await fixture.orchestrator.tickOnce();
 
     expect(fixture.registry.get(fixture.task.id)).toMatchObject({
-      status: 'deferred', attempt: 1, defer_kind: 'retry', run_id: fixture.created.runId,
+      status: 'stuck', attempt: 1, run_id: fixture.created.runId,
     });
-    expect(fixture.registry.get(fixture.task.id)?.defer_reason).toContain('scheduler is reused');
+    expect(fixture.registry.get(fixture.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
+    expect(readRunState(projectDir, fixture.created.runId).status).toBe('failed');
+    expect(fixture.units.launches).toHaveLength(0);
   });
 
-  it('fails visibly on corrupt identity and on an exhausted retry budget, with executable remedies', async () => {
+  it('fails visibly on corrupt identity and unproved recovery even at the retry limit', async () => {
     const corrupt = recoveryFixture();
     writeFileSync(join(corrupt.created.runDirPath, 'scheduler.pid'), 'not-a-pid\n', 'utf-8');
     await corrupt.orchestrator.tickOnce();
@@ -249,7 +230,7 @@ describe('identity-bound dead scheduler recovery', () => {
     const exhausted = recoveryFixture({ maxRetries: 1, attempt: 1 });
     await exhausted.orchestrator.tickOnce();
     expect(exhausted.registry.get(exhausted.task.id)).toMatchObject({ status: 'stuck', attempt: 1 });
-    expect(exhausted.registry.get(exhausted.task.id)?.notes).toContain('retry budget exhausted (1/1)');
+    expect(exhausted.registry.get(exhausted.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
     expect(exhausted.units.launches).toHaveLength(0);
   });
 

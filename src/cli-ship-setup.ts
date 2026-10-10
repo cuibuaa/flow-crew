@@ -1728,7 +1728,12 @@ async function discoverTestPopulationMethod(
   const validation = declaredCommands.length === 0
     ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
     : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
-  const testCommand = validation.commands.find((command) => command.role === 'test');
+  const testCommands = validation.commands.filter(command => command.role === 'test');
+  if (testCommands.length > 1) return {
+    hasConfiguredTests: true, validationUnknown: validation.state === 'unknown',
+    reason: `Joint test population is unverified for configured commands: ${testCommands.map(command => command.display).join('; ')}. Every command still runs for validation; one collector cannot attest another runner's population`,
+  };
+  const testCommand = testCommands[0];
   if (!testCommand) {
     return {
       hasConfiguredTests: false,
@@ -2371,7 +2376,7 @@ export async function runShipSetup(
   // operator's to correct.
   const noneLaunched = validationBaseline.results.every((result) => result.state !== 'passed' && result.state !== 'failed');
   validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
-    const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
+    const command = validationBaseline.discovery.commands.find(candidate => candidate.role === result.role && candidate.display === result.display);
     if (result.state !== 'launch_error' || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
     return [{
       phase: 'validation',

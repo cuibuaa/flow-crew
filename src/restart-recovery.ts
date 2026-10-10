@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { sha256Canonical as digest } from './runtime-negotiation.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
-import { processStartToken, type ProcessStartToken } from './run-lock.js';
+import { inspectRunScheduler, processStartToken, type ProcessStartToken } from './run-lock.js';
 
 import { RUN_STATUS, STAGE_STATUS, completedStageAttemptStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
@@ -86,11 +86,28 @@ export function captureEngineCheckpoint(projectDir: string, runId: string): Engi
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   let state = readRunState(projectDir, runId);
-  if (state.status !== RUN_STATUS.RUNNING || (!state.engineCheckpoint && !state.recoveryIntent)) return state;
+  if (state.status !== RUN_STATUS.RUNNING) return state;
+  if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: state is not bound to this run/project');
+  if (Object.hasOwn(evidence, 'expectedCheckpoint') && digest(state.engineCheckpoint ?? null) !== digest(evidence.expectedCheckpoint ?? null)) throw new Error('RECOVERY_STATE_CHANGED: checkpoint changed since daemon observation');
+  evidence.assertSchedulerAbsent ??= () => {
+    const owner = inspectRunScheduler(runId, join(runsRoot(projectDir), runId));
+    if (owner.kind !== 'missing' && owner.kind !== 'dead' && owner.kind !== 'reused') throw new Error(`RECOVERY_FATE_CHANGED: scheduler identity is ${owner.kind}`);
+  };
+  if (!state.engineCheckpoint) {
+    const snapshot = digest(state);
+    const reason = 'RECOVERY_CHECKPOINT_MISSING: controller absent but descendant fate, admitted plan and generation cannot be proved; run ended without resuming or claiming stage completion';
+    return updateRunState(projectDir, runId, current => {
+      evidence.assertSchedulerAbsent!();
+      if (digest(current) !== snapshot) throw new Error('RECOVERY_STATE_CHANGED: run changed before unknown-fate settlement');
+      current.status = RUN_STATUS.FAILED;
+      current.completedAt = new Date().toISOString();
+      current.failureReason = reason;
+      current.recovery = { kind: 'blocked', reason, at: current.completedAt, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
+    }, current => recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: 'warning' }));
+  }
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || state.engineCheckpoint.version !== 1 || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');
-  if (evidence.expectedCheckpoint && digest(state.engineCheckpoint) !== digest(evidence.expectedCheckpoint)) throw new Error('RECOVERY_STATE_CHANGED: checkpoint changed since daemon observation');
-  const boot = evidence.currentBootId ?? readHostBootId();
-  const generation = evidence.currentGeneration ?? engineGeneration();
+  const boot = Object.hasOwn(evidence, 'currentBootId') ? evidence.currentBootId : readHostBootId();
+  const generation = Object.hasOwn(evidence, 'currentGeneration') ? evidence.currentGeneration : engineGeneration();
   const previous = state.engineCheckpoint;
   const errors: string[] = [];
   if (!previous.bootId || !boot || previous.bootId === boot) errors.push('RECOVERY_FATE_UNKNOWN: no proven previous-boot death; a missing controller may leave consumers alive');
@@ -184,8 +201,9 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       if (intent.stages.some((stage) => current.stages[stage.stageId]?.status !== STAGE_STATUS.PENDING || !matchesStage(current.stages[stage.stageId], stage, previous))) throw new Error('RECOVERY_NOT_RUNNABLE: interrupted work must be pending before resumable publication');
       current.recoveryIntent = { ...intent, phase: 'committed' };
     }
-    current.status = 'parked';
-    delete current.completedAt;
+    current.status = errors.length ? RUN_STATUS.FAILED : RUN_STATUS.PARKED;
+    if (errors.length) current.completedAt = new Date().toISOString();
+    else delete current.completedAt;
     current.failureReason = reason;
     current.recovery = { kind: errors.length ? 'blocked' : 'resumable', reason, at: new Date().toISOString(), fromBoot: previous.bootId, toBoot: boot, generation: previous.generation, interruptedStages };
     published = true;

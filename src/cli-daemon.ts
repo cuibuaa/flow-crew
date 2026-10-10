@@ -244,13 +244,13 @@ function runVerdict(verdict: unknown, realityGate: unknown): string | undefined 
   return undefined;
 }
 
-/** New tasks may acknowledge durable admission; bound resumes retain launch semantics. */
+/** Explicit persisted requests acknowledge durable admission before launch work. */
 export async function handleDaemonRegistrationRequest(
   orchestrator: Orchestrator,
   request: Extract<RpcRequest, { cmd: 'register' }>,
   identity: Pick<DaemonIdentity, 'pid' | 'build'>,
 ): Promise<RegisterRpcResponse> {
-  const persisted = request.acknowledgement === 'persisted' && !request.task.run_id;
+  const persisted = request.acknowledgement === 'persisted';
   const task = persisted ? orchestrator.enqueue(request.task) : await orchestrator.register(request.task);
   return { id: task.id, unit: task.systemd_unit, pid: identity.pid, build: identity.build.hash,
     ...(persisted ? { acknowledgement: 'persisted' as const } : {}) };

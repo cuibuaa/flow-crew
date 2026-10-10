@@ -28,7 +28,7 @@ function fixture() {
   updateRunState(projectDir, runId, (state) => { state.stageEvidence = [evidence]; });
   const registry = recordedResourceRegistry(resourceLeaseRegistryPath(fc));
   appendRecordedResourceLease(registry.path, runId);
-  return { root, projectDir, runId, runDir: directory, fc, registry, stageId: 'writer' };
+  return { root, projectDir, runId, runDir: directory, fc, registry, stageId: 'writer', projectWriteScope: ['**'] };
 }
 function contract(root: 'project' | 'run', path: string, kind: 'file' | 'directory' = 'file') {
   return ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root, path, kind }], reads: [], replays: [] });

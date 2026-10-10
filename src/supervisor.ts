@@ -1218,7 +1218,9 @@ export function buildSupervisorRolePrompt(stuckThresholdMs: number, taskDescript
     + `A brief prohibition on modifying ~/.fc/ history applies to other runs and shared registry or ledger files; `
     + `do not treat a stage's authorized own run directory write as a violation of that prohibition. `
     + `Check the current run ID and the path's actual target before issuing GUIDE or ABORT about a .fc path.\n\n`
-    + `# Original Goal\n${taskDescription}`;
+    + `# Original Goal\n${taskDescription}\n\n`
+    + `Declared outputs are required products. GUIDE cannot override the brief or remove a required product. `
+    + `If an output conflicts with another actual brief constraint, report the conflict and request clarification; do not silently choose which constraint to discard.`;
 }
 
 export type SupervisorAssessmentTrigger = 'event' | 'none';

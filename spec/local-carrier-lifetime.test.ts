@@ -23,7 +23,7 @@ function fixture() {
   const evidence = captureStageEvidence(projectDir, runId, 1, 'writer', { status: 'complete', retries: 0 });
   updateRunState(projectDir, runId, (state) => { state.stageEvidence = [evidence]; });
   const artifactContract = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'notes', root: 'run', path: 'notes', kind: 'directory' }], reads: [], replays: [] });
-  return { root, projectDir, runId, runDir: directory, stageId: 'writer', artifactContract };
+  return { root, projectDir, runId, runDir: directory, stageId: 'writer', projectWriteScope: ['**'], artifactContract };
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const native = process.platform === 'linux' ? it : it.skip;

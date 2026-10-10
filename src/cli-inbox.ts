@@ -185,8 +185,8 @@ export async function cmdInbox(
           brief_text: resumeSnapshot!.exactBrief, brief_admission: resumeSnapshot!.admission,
           launch_args: approvalResumeArgs(state),
         };
-        const registered = await (opts.registerTask ?? ((task) => sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task })))(task);
-        out.write(`▶ registered resume for run ${runId} (task #${registered.id})\n`);
+        const registered = await (opts.registerTask ?? ((task) => sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task, acknowledgement: 'persisted' })))(task);
+        out.write(`▶ registered resume for run ${runId} (task #${registered.id}${registered.acknowledgement === 'persisted' ? ', durable launch queue' : ''})\n`);
       } else {
         out.write(`(run ${runId} is ${runState.status ?? 'unknown'}, not parked — nothing to resume)\n`);
       }

@@ -31,6 +31,13 @@ import {
 } from './run-lock.js';
 import type { SupervisorBackend, UnitStatus } from './supervision.js';
 
+/** Blocked recovery ends the workflow without asserting consumer death. An
+ * explicit interrupt must still be able to run the normal owned stop barrier. */
+function preservesTerminalRun(state: StoreState): boolean {
+  return isTerminalRunStatus(state.status)
+    && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked');
+}
+
 export interface RunCancellationOptions {
   registry: TaskRegistry;
   units: SupervisorBackend;
@@ -263,7 +270,7 @@ export class RunCancellationCoordinator {
     const target: CancellationTarget = { task, run, runBinding: run.binding, unit };
     const observation = await this.observe(target);
     const current = this.readRunTarget(run.binding) ?? run;
-    const runAlreadyTerminal = isTerminalRunStatus(current.state.status);
+    const runAlreadyTerminal = preservesTerminalRun(current.state);
     if (runAlreadyTerminal) {
       return {
         ok: true,
@@ -278,7 +285,7 @@ export class RunCancellationCoordinator {
     if (observation.unitState.kind === 'terminal-unknown') {
       return { ok: false, status: 'outcome-unknown', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation outcome remains unknown', observation) };
     }
-    if (this.isStopped(observation) && isTerminalRunStatus(current.state.status)) {
+    if (this.isStopped(observation) && preservesTerminalRun(current.state)) {
       return {
         ok: true,
         status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
@@ -319,7 +326,7 @@ export class RunCancellationCoordinator {
     const before = await this.observe(target);
     const taskAlreadyTerminal = task ? !isActiveTaskStatus(task.status) : true;
     const runAlreadyTerminal = run
-      ? isTerminalRunStatus(run.state.status)
+      ? preservesTerminalRun(run.state)
       : !runBinding;
     const lifecycleAlreadyTerminal = run
       ? runAlreadyTerminal
@@ -504,7 +511,7 @@ export class RunCancellationCoordinator {
             ? latest.state.status
             : statusResolution.display;
           unrecognizedRunStatusReason = statusResolution.reason;
-        } else if (isTerminalRunStatus(statusResolution.status)) {
+        } else if (preservesTerminalRun(latest.state)) {
           preservedRunStatus = latest.state.status;
         } else {
           if (!this.updateRun(latest, completedAt, task)) {
@@ -820,7 +827,7 @@ export class RunCancellationCoordinator {
     updateRunStateAtPath(run.runPath, (state) => {
       committed = false;
       requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
-      if (!isTerminalRunStatus(state.status)) {
+      if (!preservesTerminalRun(state)) {
         // A scheduler claim is published under this same physical run lock.
         // An earlier observation cannot authorize cancellation past that claim.
         let pid: number | null = null;

@@ -191,7 +191,7 @@ describe('proven restart recovery', () => {
     beginStageAttempt(project, runId, 'writer', 0);
     updateRunState(project, runId, (state) => { state.engineCheckpoint = { version: 1, runId, projectDir: project, bootId: 'test-boot', generation: engineGeneration(), pid: 99999999, at: new Date().toISOString() }; state.stages.writer = readStageStatus(project, runId, 'writer'); });
     const after = reconcileHostInterruptedRun(project, runId, { currentBootId: kind === 'same_boot' ? 'test-boot' : 'new-boot', currentGeneration: kind === 'different_generation' ? 'different-generation' : engineGeneration() });
-    expect(after.recovery?.kind).toBe('blocked'); expect(after.status).toBe('parked'); expect(after.stages.writer.status).toBe('running');
+    expect(after.recovery?.kind).toBe('blocked'); expect(after.status).toBe('failed'); expect(after.completedAt).toBeTruthy(); expect(after.stages.writer.status).toBe('running');
     expect(after.stages.writer.attempts?.[0].status).toBe('running');
   });
 });

@@ -836,8 +836,8 @@ function failingValidationCommands(
 ): FailingValidationCommand[] {
   if (!baseline) return [];
   return baseline.discovery.commands.flatMap((command) => {
-    const result = baseline.results.find((candidate) => candidate.role === command.role);
-    const criterion = baseline.gateCriteria.find((candidate) => candidate.role === command.role);
+    const result = baseline.results.find(candidate => candidate.role === command.role && candidate.display === command.display);
+    const criterion = baseline.gateCriteria.find(candidate => candidate.role === command.role && (candidate.display === undefined || candidate.display === command.display));
     return result?.state === 'failed' && criterion?.rule === 'no_regression_from_baseline'
       ? [{ command, result, criterion }]
       : [];

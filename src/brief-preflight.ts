@@ -206,10 +206,10 @@ export function lintInstrumentCriteria(text: string): CriterionLintWarning[] {
       || EXACT_MEANS_MARKER.test(normalized)
       || OBSERVABLE_PLACEMENT.test(normalized)
     ) continue;
-    if (
-      !INSTRUMENT_DIRECTIVE.test(normalized)
-      || !(CODE_SHAPED_TARGET.test(normalized) || BARE_MODULE_TARGET.test(normalized))
-    ) continue;
+    if (!normalized.split(/(?:[;；]+|(?<=[.!?。！？])\s+)/).some(sentence =>
+      INSTRUMENT_DIRECTIVE.test(sentence)
+      && (CODE_SHAPED_TARGET.test(sentence) || BARE_MODULE_TARGET.test(sentence))
+    )) continue;
 
     warnings.push({
       line: unit.line,
@@ -394,19 +394,13 @@ function hasPositiveDecisionFieldRequirement(brief: string, field: string): bool
   });
 }
 
-function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; excerpt: string } | undefined {
-  const unit = foldedDecisionRequirementUnits(brief).find(({ text }) => pattern.test(text));
-  return unit ? { line: unit.line, excerpt: unit.text.trim() } : undefined;
-}
-
 /**
  * Deliberately broad textual property: explicit “headline”/“quoted” language
  * plus a numeric-result noun means the value is intended for prominent reuse.
  */
 function headlineStatisticEvidence(brief: string): { line: number; excerpt: string } | undefined {
-  const body = foldedDecisionRequirementUnits(brief).map(({ text }) => text).join('\n');
-  if (!HEADLINE_USAGE.test(body) || !NUMERIC_RESULT.test(body)) return undefined;
-  return firstEvidenceLine(brief, HEADLINE_USAGE) ?? firstEvidenceLine(brief, NUMERIC_RESULT);
+  const unit = foldedDecisionRequirementUnits(brief).find(({ text }) => HEADLINE_USAGE.test(text) && NUMERIC_RESULT.test(text));
+  return unit ? { line: unit.line, excerpt: unit.text.trim() } : undefined;
 }
 
 function hasHeadlineDistribution(brief: string): boolean {

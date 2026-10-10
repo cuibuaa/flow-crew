@@ -63,8 +63,13 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     if (kind === 'unreadable-binding') registry.create({ projectDir: project, brief_text: 'task', status: 'running', run_id: 'unreadable' });
     if (kind === 'damaged-registry') appendFileSync(registry.registryPath, '{bad}\n');
     const bytes = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
+    const ledger = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
     createDaemonReconciler(registry, vi.fn())();
-    expect(readFileSync(join(runsRoot(), id, 'run.json'), 'utf8')).toBe(bytes);
+    if (['same-boot', 'unknown-boot', 'legacy'].includes(kind)) {
+      expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
+      expect(readRunState(project, id).failureReason).toMatch(/RECOVERY_FATE_UNKNOWN|RECOVERY_CHECKPOINT_MISSING/);
+      expect(readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+    } else expect(readFileSync(join(runsRoot(), id, 'run.json'), 'utf8')).toBe(bytes);
   });
 
   it.each(['generation', 'plan', 'attempt'])('keeps %s refusal in the authoritative recovery mechanism', kind => {

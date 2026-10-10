@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'fc-boundary-routes-')); roots.push(root);
   const projectDir = join(root, 'project'), runDir = join(root, 'run');
   mkdirSync(projectDir); mkdirSync(runDir);
-  return { root, projectDir, runDir, stageId: 'writer',
+  return { root, projectDir, runDir, stageId: 'writer', projectWriteScope: ['**'],
     artifactContract: { version: 1 as const, produces: [], reads: [], replays: [], groups: [] } };
 }
 const native = process.platform === 'linux' ? it : it.skip;
@@ -20,6 +20,17 @@ const listen = (server: Server, endpoint: string | { host: string; port: number 
   new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(endpoint, resolve); });
 
 describe('stage transport and native communication scopes', () => {
+  native('keeps read-only review scratch and run products writable while denying failed-temp project fallback', async () => {
+    const f = fixture();
+    const artifactContract = { ...f.artifactContract, produces: [{ root: 'run' as const, path: 'review.txt', id: 'review', kind: 'file' as const, nonempty: true }] };
+    const input = { ...f, isGate: true, projectWriteScope: [], artifactContract };
+    const run = (command: string) => withEngineWriteBoundary(input, () => execWithStdin('/bin/sh', ['-c', command], '', { cwd: f.projectDir, timeout_ms: 5000 }));
+    expect((await run(`set -eu; d=$(mktemp -d); printf probe > "$d/check"; printf review > ${JSON.stringify(join(f.runDir, 'review.txt'))}`)).exitCode).toBe(0);
+    expect(readFileSync(join(f.runDir, 'review.txt'), 'utf8')).toBe('review');
+    expect((await run('d=$(mktemp -d /tmp/release-config-review-XXXXXX 2>&1); mkdir -p "$d/legacy"')).exitCode).not.toBe(0);
+    expect(readdirSync(f.projectDir)).toEqual([]);
+  });
+
   it('removes inherited and adapter-supplied daemon routing after merging the environment', async () => {
     const f = fixture(), saved = process.env.FLOWCREW_DAEMON_SOCKET;
     process.env.FLOWCREW_DAEMON_SOCKET = join(f.root, 'owned-not-listening.sock');

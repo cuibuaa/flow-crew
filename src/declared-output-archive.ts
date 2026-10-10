@@ -43,7 +43,8 @@ function digestMembers(members: readonly ArchivedMember[]): string {
   return hash.digest('hex');
 }
 
-function archiveOne(projectDir: string, archiveBase: string, declaration: BriefOutputDeclaration): ArchivedDeclaredOutput {
+/** The same physical path/type precondition governs gate acceptance and archival. */
+export function declaredOutputSource(projectDir: string, declaration: BriefOutputDeclaration): string {
   const path = normalized(declaration.path);
   if (!path) throw new Error(`declared output is not a project-relative path: ${declaration.path}`);
   const segments = path.split('/');
@@ -60,6 +61,12 @@ function archiveOne(projectDir: string, archiveBase: string, declaration: BriefO
   if (actualType !== declaration.expectedType) {
     throw new Error(`declared output ${path} expected ${declaration.expectedType}, found ${actualType}`);
   }
+  return source;
+}
+
+function archiveOne(projectDir: string, archiveBase: string, declaration: BriefOutputDeclaration): ArchivedDeclaredOutput {
+  const source = declaredOutputSource(projectDir, declaration);
+  const path = normalized(declaration.path)!;
   const archiveRoot = `declared_outputs/${path}`;
   const destination = join(archiveBase, path);
   const members: ArchivedMember[] = [];
