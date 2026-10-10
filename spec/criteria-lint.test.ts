@@ -54,13 +54,15 @@ describe('QA property-versus-means contract', () => {
     expect(qa.prompt).toContain('reproducible evidence');
   });
 
-  it('keeps explicit exact means and measurable thresholds hard', () => {
+  it('keeps exact means and thresholds hard, and compatibility binding unless the brief allows documentation', () => {
     const qa = parseYaml(readFileSync(join(repositoryRoot, 'config', 'agents', 'qa.yaml'), 'utf-8')) as {
       prompt: string;
     };
     const base = readFileSync(join(repositoryRoot, 'config', 'agents', '_base.md'), 'utf-8');
     expect(base).toContain('unless the criterion explicitly requires that means');
-    expect(base).toContain('confirmed compatibility requirements remain binding');
+    expect(base).toContain(
+      'a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it',
+    );
     expect(base).toContain('never invent a threshold or waive a supplied one');
     expect(qa.prompt).toContain('reproducible evidence');
   });

@@ -21,7 +21,7 @@ Give every assigned criterion and every score required by the brief or role/gate
 and evidence. Pass only when all meet their acceptance lines. Disclose missing or ambiguous lines;
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
-sentence; confirmed compatibility requirements remain binding. Say briefly what you did not examine and why.
+sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Say briefly what you did not examine and why.
 On the first review, check every assigned criterion. On RE-EVALUATION, reject again only for an unresolved
 finding, a regression introduced by the repair, or a failure a user of the brief's outcome would meet;
 other differences are stated limitations. The repair diff and durable rejected verdict are the evidence.
