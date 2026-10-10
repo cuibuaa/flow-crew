@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 18 -->
+<!-- flowcrew-skill-revision: 19 -->
 
 # ship — Hand off a plan to FlowCrew
 
@@ -193,6 +193,13 @@ codes and totals; never read `$?` after a pipe.
 Choose loop mode by decision structure, not keywords. Convergence to a known pass/fail outcome is
 engineering; candidate generation where a supported ceiling is valid is research. Propose the mode and
 ask the user—do not silently choose. Research requires the canonical `research:` frontmatter.
+
+The brief's frontmatter also routes it, and rehearsal prints the route (`Workflow without --workflow:`).
+A `research:` block runs the research loop. One declared output or none, with no declared inputs,
+program or terminal states, runs the fixed author → gate → repair plan (`direct`) without a planner;
+anything a planner has to arrange runs the planner (`default`). Declaring an input therefore selects the
+planner: still declare every input, never drop one to get the shorter plan. Pass `--workflow` only when
+the user chooses against the printed route, and show the route in the confirmation.
 
 ### 1.4 `rehearse`: exercise the exact contract
 

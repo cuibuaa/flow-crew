@@ -24,7 +24,8 @@ import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { routeLogsToFile } from './logging.js';
 import { assessResearchShipTarget } from './research-policy.js';
-import { extractBriefPathMentions, inspectBriefOutputs } from './ship-inputs.js';
+import { extractBriefPathMentions, extractDeclaredBriefInputPaths, inspectBriefOutputs } from './ship-inputs.js';
+import { autoSelectedWorkflow } from './scheduler/sched_admission/brief-contract.js';
 import { resolveRunStatus, RUN_STATUS, type RunStatus } from './store.js';
 
 export { lintInstrumentCriteria } from './brief-preflight.js';
@@ -298,6 +299,8 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   }
   add('ok', `Exact brief digest: ${preflight.digest}`);
   const fm = scheduler.parseBriefFrontmatter(brief);
+  const auto = autoSelectedWorkflow(fm, extractDeclaredBriefInputPaths(brief));
+  add('ok', `Workflow without --workflow: ${auto.workflow} (${auto.reason})`);
   const rc = fm.research;
   const ts = fm.terminalStates;
 

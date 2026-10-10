@@ -1127,23 +1127,16 @@ async function cmdQuick() {
     );
   }
 
-  // Auto-select the research workflow only after the shared report is visible.
-  // The canonical frontmatter parser owns this decision; quick has no YAML regex.
-  const { parseBriefFrontmatter } = await import('./scheduler.js');
+  // Auto-select the workflow only after the shared report is visible. The canonical frontmatter parser owns this
+  // decision, quick has no YAML regex, and rehearse reports the same choice.
+  const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+  const { extractDeclaredBriefInputPaths } = await import('./ship-inputs.js');
   const parsedBrief = parseBriefFrontmatter(task);
-  if (!workflowExplicit && workflow === 'default' && parsedBrief.research) {
-    workflow = 'research';
-    launchArgs.push('--workflow', 'research');
-    console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
-  }
-  if (!workflowExplicit && workflow === 'default') {
-    const { isFixedPlanBrief } = await import('./scheduler/sched_admission/brief-contract.js');
-    const { extractDeclaredBriefInputPaths } = await import('./ship-inputs.js');
-    if (isFixedPlanBrief(parsedBrief, extractDeclaredBriefInputPaths(task))) {
-      workflow = 'direct';
-      launchArgs.push('--workflow', 'direct');
-      console.error('Note: one deliverable and nothing for a planner to arrange -> auto-selected --workflow direct (pass --workflow default to plan).');
-    }
+  const auto = autoSelectedWorkflow(parsedBrief, extractDeclaredBriefInputPaths(task));
+  if (!workflowExplicit && workflow === 'default' && auto.workflow !== 'default') {
+    workflow = auto.workflow;
+    launchArgs.push('--workflow', workflow);
+    console.error(`Note: ${auto.reason} -> auto-selected --workflow ${workflow} (pass --workflow to override).`);
   }
 
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));

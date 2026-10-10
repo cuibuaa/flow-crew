@@ -117,13 +117,25 @@ export function assessResearchIterationBudget(
 }
 
 /**
- * Whether a brief can run the fixed author -> gate -> repair plan (`--workflow direct`) instead of a planner call: one
- * declared output or none, and no research loop, program, terminal states or declared inputs for a planner to arrange.
- * On the pilot ruler the fixed plan matched planned runs' quality in 25-55% less time.
+ * The workflow a brief runs on when no --workflow is given, and why: `research` for a research block; the fixed
+ * author -> gate -> repair plan (`direct`) for one declared output or none with nothing for a planner to arrange;
+ * otherwise the planner (`default`). On the pilot ruler the fixed plan matched planned runs' quality in 25-55% less time.
  */
-export function isFixedPlanBrief(parsed: ParsedBriefFrontmatter, declaredInputs: readonly string[]): boolean {
-  return !parsed.frontmatterError && !parsed.research && !parsed.program && !parsed.terminalStates
-    && declaredInputs.length === 0 && (parsed.outputs?.length ?? 0) <= 1;
+export function autoSelectedWorkflow(
+  parsed: ParsedBriefFrontmatter,
+  declaredInputs: readonly string[],
+): { workflow: 'research' | 'direct' | 'default'; reason: string } {
+  if (parsed.research) return { workflow: 'research', reason: 'the brief has a `research:` block' };
+  const toArrange = [
+    parsed.frontmatterError ? 'a frontmatter that did not parse' : '',
+    declaredInputs.length > 0 ? `${declaredInputs.length} declared input(s)` : '',
+    parsed.program ? 'a program' : '',
+    parsed.terminalStates ? 'terminal states' : '',
+    (parsed.outputs?.length ?? 0) > 1 ? `${parsed.outputs?.length} declared outputs` : '',
+  ].filter(Boolean);
+  return toArrange.length === 0
+    ? { workflow: 'direct', reason: 'one deliverable and nothing for a planner to arrange' }
+    : { workflow: 'default', reason: `the planner arranges ${toArrange.join(', ')}` };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
