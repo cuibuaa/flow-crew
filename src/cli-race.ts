@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { RUN_STATUS, runsRoot } from './store.js';
+import { shipSetupBriefDigest } from './ship-setup-record.js';
 
 /** A candidate as the decision sees it. */
 export interface RaceCandidate {
@@ -79,6 +80,8 @@ function valueOf(args: readonly string[], flag: string): string | undefined {
 }
 
 const DIFF_LIMIT = 120_000;
+// Verbatim docs/race-diverse/inputs/restate-instruction.txt; embedded for the packaged CLI.
+const RESTATE_INSTRUCTION = "Before changing any code, write down in one or two sentences the observable behaviour the task's author expects once it is resolved, using the author's own words wherever they state it. Then make the change deliver exactly that behaviour.\n\n";
 
 export async function runRace(args: readonly string[], deps: RaceDeps): Promise<number> {
   const brief = valueOf(args, '--brief'), project = valueOf(args, '--project'), base = valueOf(args, '--base');
@@ -93,19 +96,30 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
   const workflow = valueOf(args, '--workflow');
   const labels = ['A', 'B'] as const;
   const targets = labels.map((l) => `${resolve(target)}-${l.toLowerCase()}`);
-  for (const [i, t] of targets.entries()) {
-    const setup = await deps.runCli(['ship-setup', '--brief', resolve(brief), '--project', resolve(project), '--target', t,
-      '--base', base, '--branch', `${branch}-${labels[i].toLowerCase()}`]);
-    if (setup.code !== 0 || !setup.output.includes('Ship setup: READY')) {
-      deps.out(`Race: setup for candidate ${labels[i]} was not ready (exit ${setup.code}); nothing launched.`);
-      return 1;
+  // A top-level heading closes the report criteria before adding authoring guidance.
+  const briefs = [`${briefText}\n\n# Authoring instruction\n\n${RESTATE_INSTRUCTION}`, briefText];
+  const acknowledgements = [ack === shipSetupBriefDigest(briefText) ? shipSetupBriefDigest(briefs[0]) : ack, ack];
+  const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-race-brief-'));
+  let launches: Awaited<ReturnType<RaceDeps['runCli']>>[];
+  try {
+    const briefPaths = [join(scratch, 'a.md'), resolve(brief)];
+    writeFileSync(briefPaths[0], briefs[0], 'utf-8');
+    for (const [i, t] of targets.entries()) {
+      const setup = await deps.runCli(['ship-setup', '--brief', briefPaths[i], '--project', resolve(project), '--target', t,
+        '--base', base, '--branch', `${branch}-${labels[i].toLowerCase()}`]);
+      if (setup.code !== 0 || !setup.output.includes('Ship setup: READY')) {
+        deps.out(`Race: setup for candidate ${labels[i]} was not ready (exit ${setup.code}); nothing launched.`);
+        return 1;
+      }
     }
+    deps.out(`Race: launching ${labels.length} candidates on ${targets.join(' and ')}`);
+    launches = await Promise.all(targets.map((t, i) => deps.runCli([
+      'quick', '--project', t, ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
+      ...(workflow ? ['--workflow', workflow] : []), ...(acknowledgements[i] ? [`--acknowledge-brief-warnings=${acknowledgements[i]}`] : []), '-',
+    ], briefs[i])));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  deps.out(`Race: launching ${labels.length} candidates on ${targets.join(' and ')}`);
-  const launches = await Promise.all(targets.map((t) => deps.runCli([
-    'quick', '--project', t, ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
-    ...(workflow ? ['--workflow', workflow] : []), ...(ack ? [`--acknowledge-brief-warnings=${ack}`] : []), '-',
-  ], briefText)));
   const runs = targets.map((t) => deps.readRun(t));
   const candidates: RaceCandidate[] = labels.map((label, i) => ({
     label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, repairs: runs[i]?.repairs ?? 0,
@@ -125,7 +139,7 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
   }
   const decision = decideRace(candidates, judgments);
   const record = {
-    version: 1, brief: resolve(brief), base,
+    version: 1, brief: resolve(brief), base, instructionCandidate: 'A',
     candidates: candidates.map((c, i) => ({ ...c, runId: runs[i]?.runId, launchExit: launches[i].code })),
     judgments, decision, chosenTarget: decision.choice ? targets[labels.indexOf(decision.choice)] : undefined,
   };
