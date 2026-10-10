@@ -1,5 +1,5 @@
 import { errorMessage } from './source_services/cli-inputs.js';
-import { spawnEngineChild, withEngineCommandBoundary, engineCommandDirectory, withEngineWriteBoundaryDirectory } from './write-boundary.js';
+import { spawnEngineChild, withEngineCommandBoundary, engineCommandDirectory, withEngineWriteBoundaryDirectory, type EngineCommandBoundaryInput } from './write-boundary.js';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, type Dirent } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { validationEnvironment } from './validation-environment.js';
@@ -56,6 +56,8 @@ export interface ValidationRunRequest extends ValidationCommand {
   cwd: string;
   /** Parent-supplied run anchor; pre-admission validation uses a private one. */
   runDir?: string;
+  /** Attempt whose pre-execution prerequisites this configured command serves. */
+  execution?: EngineCommandBoundaryInput['execution'];
   /** Ordinary project inputs and explicit home/config reads. Reserved control,
    * credential and executable-injection settings are suppressed with a diagnostic. */
   env?: NodeJS.ProcessEnv;
@@ -796,6 +798,7 @@ export function outwardProjectSymlinks(projectDir: string): OutwardProjectSymlin
 
 export const runValidationCommand: ValidationCommandRunner = (request) => withEngineCommandBoundary({
   projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
+  execution: request.execution,
 }, async () => {
   if (request.abortSignal?.aborted || (request.timeoutMs !== undefined && request.timeoutMs <= 0)) return { exitCode: null, error: 'Validation refused: enclosing stage deadline or control abort', durationMs: 0 };
   const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));

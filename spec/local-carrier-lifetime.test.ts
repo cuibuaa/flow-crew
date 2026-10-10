@@ -89,8 +89,8 @@ describe('engine-owned local carrier lifetime', () => {
     const hop = join(f.projectDir, 'hop'); symlinkSync(target, hop);
     const carrier = join(output, 'result.json'); symlinkSync(hop, carrier);
     const result = await withEngineWriteBoundary(f, () => execWithStdin(process.execPath, ['-e', child(`fs.unlinkSync(${JSON.stringify(hop)});fs.writeFileSync(${JSON.stringify(hop)},'stage');`)], '', { cwd: f.projectDir, timeout_ms: 5_000 }));
-    expect(result.exitCode).toBe(124); expect(result.timedOut).toBe(true);
-    expect(result.writeBoundary?.kind).toBe('waiting');
+    expect(result.exitCode).toBe(125); expect(result.timedOut).toBe(false);
+    expect(result.writeBoundary?.kind).toBe('refused');
     if (!dangling) expect(readFileSync(carrier, 'utf8')).toBe('engine');
     expect(lstatSync(hop).isSymbolicLink()).toBe(true);
   });

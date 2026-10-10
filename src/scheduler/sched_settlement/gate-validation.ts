@@ -167,9 +167,12 @@ export async function recordGateValidationDelta(
   const snapshot = readRunValidationBaseline(base);
   if (!snapshot) return undefined;
   const validationStartedAt = new Date().toISOString();
+  const runningExecution = gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.RUNNING);
+  const executionOwner = runningExecution ? { stageId, attemptIndex: runningExecution.attemptIndex,
+    attemptStartedAt: runningExecution.attemptStartedAt } : undefined;
   const guardedRunner: ValidationCommandRunner = dependencies.runCommand ?? ((request) => {
     const links = outwardProjectSymlinks(projectDir);
-    if (links.length === 0) return runValidationCommand({ ...request, runDir: base });
+    if (links.length === 0) return runValidationCommand({ ...request, runDir: base, execution: executionOwner });
     const projectRoot = realpathSync(projectDir);
     const refuse = (reason: string) => ({ exitCode: null, durationMs: 0,
       error: `Gate validation replay refused: ${reason}` });
@@ -205,7 +208,7 @@ export async function recordGateValidationDelta(
     }
     // The common positive write policy resolves each open's physical inode,
     // so external linked inputs stay readable without gaining write authority.
-    return runValidationCommand({ ...request, runDir: base });
+    return runValidationCommand({ ...request, runDir: base, execution: executionOwner });
   });
   const current = await runProjectValidationBaseline(projectDir, {
     ...dependencies,

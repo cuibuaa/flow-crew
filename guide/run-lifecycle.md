@@ -106,6 +106,19 @@ attempt-and-command-bound signal is published. The adapter is then continued ins
 the same execution and deadline. Events distinguish the request and controlled
 interruption from a crash; a repeated normalized command is reported separately.
 
+Before launching a command, the write boundary inspects protected trees, including
+directory symlinks left by earlier stages. Linked targets and their descendants
+remain protected by inode identity; directory cycles do not repeat the scan.
+A later stage can read those inputs, but a writable capability overlapping them
+is refused before execution, with the link path and target in the diagnostic.
+Broken protected links and other permanent policy or enforcement failures also
+refuse promptly. Closure or identity churn and transient kernel conditions may
+wait under the attempt's existing deadline and abort control. Environment-wait
+events name the owning attempt, including pre-review configured validation.
+If the watchdog aborts that attempt during a wait, its reason includes the
+pre-execution wait message. A cleared, closed, or older attempt's wait does not
+describe the current execution.
+
 ## The distinctions that carry meaning
 
 ### `ceiling_hit` is a successful honest negative

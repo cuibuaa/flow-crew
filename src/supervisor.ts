@@ -2298,8 +2298,8 @@ export class Supervisor {
         );
         if (abort.written) {
           this.watchdogAbortedStages.add(attemptKey);
-          log.warn({ runId: this.runId, stageId, stalledMs }, 'Watchdog ABORT — stage made no progress past threshold');
-          this.observations.push(`Watchdog aborted stuck stage '${stageId}' (${Math.round(stalledMs / 1000)}s no progress)`);
+          log.warn({ runId: this.runId, stageId, stalledMs, reason: abort.reason }, 'Watchdog ABORT — attempt exceeded idle threshold');
+          this.observations.push(abort.reason);
         } else {
           log.warn({ runId: this.runId, stageId, reason: abort.reason }, 'Watchdog ABORT suppressed by verified stage facts');
         }
@@ -2835,7 +2835,20 @@ export class Supervisor {
           reason: `Idle ABORT suppressed for ${stageId}: verified idle duration is unavailable or below the configured threshold; ${factSummary}.`,
         };
       }
-      verifiedBasis = `no verified live/artifact/transition progress for ${Math.round(verifiedIdleMs / 1000)}s (threshold ${Math.round(this.config.stuckThresholdMs / 1000)}s)`;
+      const environmentWaits = new Map<string, string>();
+      for (const event of readRunEvents(this.projectDir, this.runId)) {
+        const eventMs = Date.parse(event.timestamp);
+        if (event.stageId !== stageId || event.attemptIndex !== facts.attemptIndex
+          || !Number.isFinite(eventMs) || eventMs < Date.parse(facts.attemptStartedAt!)
+          || (event.attemptStartedAt !== undefined && event.attemptStartedAt !== facts.attemptStartedAt)) continue;
+        const key = event.observationId ?? 'legacy';
+        if (event.type === 'stage_environment_wait_started' && event.detail) environmentWaits.set(key, event.detail);
+        else if (event.type === 'stage_environment_wait_finished') environmentWaits.delete(key);
+      }
+      const waits = [...environmentWaits.values()];
+      verifiedBasis = waits.length
+        ? `pre_execution environment wait at watchdog threshold (${Math.round(verifiedIdleMs / 1000)}s idle; threshold ${Math.round(this.config.stuckThresholdMs / 1000)}s): ${waits.join('; ')}`
+        : `no verified live/artifact/transition progress for ${Math.round(verifiedIdleMs / 1000)}s (threshold ${Math.round(this.config.stuckThresholdMs / 1000)}s)`;
     } else {
       if (!basis.persistence.verified) {
         return {

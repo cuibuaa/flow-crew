@@ -4,6 +4,9 @@ export const LINUX_ENGINE_WRITE_BOUNDARY = String.raw`
 import ctypes, errno, json, os, platform, stat, sys, time
 from collections import deque
 
+class PrerequisiteChanged(RuntimeError):
+    pass
+
 def checked(value, operation):
     if value < 0:
         raise OSError(ctypes.get_errno(), operation)
@@ -27,8 +30,19 @@ try:
             if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
                 raise RuntimeError('unsupported Linux syscall architecture')
             protected = set()
+            protected_aliases = {}
 
-            def protected_target(path):
+            def protect(info, alias=None):
+                key = identity(info)
+                protected.add(key)
+                if alias:
+                    protected_aliases.setdefault(key, alias)
+
+            def conflict(message, path, key):
+                alias = protected_aliases.get(key)
+                raise RuntimeError(message + path + ('; protected link ' + alias if alias else ''))
+
+            def protected_target(path, alias):
                 # Resolve in kernel component order. Every consulted link/directory is
                 # load-bearing: replacing an intermediate hop must not retarget a
                 # carrier even when its current final inode lives outside the grants.
@@ -41,16 +55,16 @@ try:
                         continue
                     if name == '..':
                         cursor = os.path.dirname(cursor)
-                        protected.add(identity(os.stat(cursor)))
+                        protect(os.stat(cursor), alias)
                         continue
                     current = os.path.join(cursor, name)
                     info = os.lstat(current)
-                    protected.add(identity(info))
+                    protect(info, alias)
                     if stat.S_ISLNK(info.st_mode):
                         hops += 1
                         if hops > 40:
                             raise OSError(errno.ELOOP, 'protected symbolic link loop', path)
-                        protected.add(identity(os.stat(cursor)))
+                        protect(os.stat(cursor), alias)
                         target = os.readlink(current)
                         if target.startswith('/'):
                             cursor = '/'
@@ -65,22 +79,27 @@ try:
                 path = entry['path']
                 if not os.path.lexists(path):
                     continue
-                pending = [path]
+                pending = [(path, None)]
                 seen = set()
                 while pending:
-                    current = pending.pop()
+                    current, alias = pending.pop()
                     # Ordinary entries avoid a repeated full ancestor walk. Links use
                     # the component walk; broken/looped/unknown chains still refuse.
                     info = os.lstat(current)
                     if stat.S_ISLNK(info.st_mode):
-                        info = protected_target(current)
-                    protected.add(identity(info))
+                        alias = alias or current + ' -> ' + os.readlink(current)
+                        try:
+                            info = protected_target(current, alias)
+                        except OSError as error:
+                            raise RuntimeError('cannot resolve protected link ' + alias + ': ' + str(error)) from error
+                    protect(info, alias)
                     if entry['tree'] and stat.S_ISDIR(info.st_mode) and identity(info) not in seen:
                         seen.add(identity(info))
-                        if os.path.islink(current):
-                            raise RuntimeError('protected directory alias closure is unknown: ' + current)
+                        # Inspect the referent just like any other protected tree.
+                        # Inode identities bound directory cycles and retain every
+                        # recorded descendant, including hard-link aliases in grants.
                         with os.scandir(current) as members:
-                            pending.extend(member.path for member in members)
+                            pending.extend((member.path, alias) for member in members)
                 ancestor = os.path.dirname(os.path.realpath(path))
                 while True:
                     protected.add(identity(os.stat(ancestor)))
@@ -98,7 +117,7 @@ try:
                 def member(info, parent, name, label):
                     key = identity(info)
                     if key in protected:
-                        raise RuntimeError('writable member aliases an engine carrier or ancestor: ' + label)
+                        conflict('writable member aliases an engine carrier or ancestor: ', label, key)
                     if stat.S_ISREG(info.st_mode):
                         # A link name is a directory inode plus basename, independent
                         # of path spelling, bind views or renames. No per-file realpath
@@ -106,7 +125,7 @@ try:
                         aliases.setdefault(key, set()).add((parent, name))
                         labels[key] = label
                         if key in links and links[key] != info.st_nlink:
-                            raise RuntimeError('writable hard-link identity changed during inspection: ' + label)
+                            raise PrerequisiteChanged('writable hard-link identity changed during inspection: ' + label)
                         links[key] = info.st_nlink
                     elif not stat.S_ISDIR(info.st_mode):
                         raise RuntimeError('writable member is not a regular file/directory: ' + label)
@@ -115,15 +134,15 @@ try:
                     info = os.lstat(path)
                     key = identity(info)
                     if key in protected:
-                        raise RuntimeError('writable identity aliases an engine carrier or ancestor: ' + path)
+                        conflict('writable identity aliases an engine carrier or ancestor: ', path, key)
                     if stat.S_ISLNK(info.st_mode):
-                        raise RuntimeError('writable capability is a symbolic link: ' + path)
+                        raise RuntimeError('writable capability is a symbolic link: ' + path + ' -> ' + os.readlink(path))
                     if not stat.S_ISDIR(info.st_mode):
                         parent = os.open(os.path.dirname(path), os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
                         try:
                             current = os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)
                             if identity(current) != key:
-                                raise RuntimeError('writable file capability changed during inspection: ' + path)
+                                raise PrerequisiteChanged('writable file capability changed during inspection: ' + path)
                             member(current, identity(os.fstat(parent)), os.path.basename(path), path)
                         finally: os.close(parent)
                         continue
@@ -132,8 +151,10 @@ try:
                         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
                         try:
                             current = os.fstat(fd)
-                            if identity(current) != expected or identity(current) in protected:
-                                raise RuntimeError('writable directory identity changed during inspection: ' + label)
+                            if identity(current) in protected:
+                                conflict('writable directory aliases an engine carrier or ancestor: ', label, identity(current))
+                            if identity(current) != expected:
+                                raise PrerequisiteChanged('writable directory identity changed during inspection: ' + label)
                             if expected in visited:
                                 os.close(fd)
                                 return
@@ -167,7 +188,7 @@ try:
                             os.close(fd)
                 for key, names in aliases.items():
                     if links[key] != len(names):
-                        raise RuntimeError('writable hard-link closure is unknown: ' + labels[key])
+                        raise PrerequisiteChanged('writable hard-link closure is unknown: ' + labels[key])
 
             inspect_writable()
             libc = ctypes.CDLL(None, use_errno=True)
@@ -199,7 +220,9 @@ try:
                 try:
                     info = os.fstat(fd)
                     if path != os.devnull and (identity(info) in protected or stat.S_ISLNK(info.st_mode)):
-                        raise RuntimeError('capability changed to a protected identity or link: ' + path)
+                        if identity(info) in protected:
+                            conflict('capability changed to a protected identity: ', path, identity(info))
+                        raise RuntimeError('capability changed to a symbolic link: ' + path + ' -> ' + os.readlink(path))
                     pinned.append((path, identity(info), info.st_mode))
                     rule = PathRule(rights, fd)
                     checked(libc.syscall(445, ruleset, 1, ctypes.byref(rule), 0), 'landlock_add_rule')
@@ -219,6 +242,11 @@ try:
             libc, ruleset, pinned, inspect_writable, abi = prepare()
             break
         except Exception as error:
+            # Policy conflicts, broken protected links and missing enforcement
+            # support require an operator change. Only closure/identity churn or
+            # an explicitly transient kernel condition can clear while we wait.
+            if not isinstance(error, PrerequisiteChanged) and not (isinstance(error, OSError) and error.errno in (errno.EAGAIN, errno.EBUSY, errno.EINTR, errno.ESTALE)):
+                raise
             message = 'ENGINE_WRITE_BOUNDARY_WAITING: ' + str(error)
             if message != previous:
                 os.write(3, (json.dumps({'kind': 'waiting', 'phase': 'pre_execution', 'pid': os.getpid(), 'message': message}) + '\n').encode())

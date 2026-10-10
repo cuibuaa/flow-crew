@@ -25,6 +25,8 @@ export interface EngineWriteBoundaryInput {
   /** The already-admitted project capability; absent/empty is read-only. */
   projectWriteScope?: readonly string[];
   attemptIndex?: number;
+  /** Owning attempt for auxiliary pre-execution waits; grants remain auxiliary. */
+  execution?: { stageId: string; attemptIndex: number; attemptStartedAt: string };
   /** Trusted observer calls may read project/run state, never publish it. */
   authority?: 'stage' | 'observer' | 'project-command';
 }
@@ -41,6 +43,7 @@ export interface EngineCommandBoundaryInput {
   stageId: string;
   authority?: 'observer' | 'project-command';
   attemptIndex?: number;
+  execution?: EngineWriteBoundaryInput['execution'];
 }
 interface BoundaryPolicy {
   input: EngineWriteBoundaryInput;
@@ -191,12 +194,19 @@ export function observeEngineChildBoundary(child: ChildProcess, receiptPath: str
   const environmentEvent = (type: 'stage_environment_wait_started' | 'stage_environment_wait_finished', detail: string): void => {
     if (!policy) return;
     const event: RunEvent = { type, runId: basename(policy.input.runDir), stageId: policy.input.stageId,
-      attemptIndex: policy.input.attemptIndex, timestamp: new Date().toISOString(), detail, status: 'running' };
+      attemptIndex: policy.input.attemptIndex, ...policy.input.execution,
+      observationId: `write_boundary:${child.pid}`, timestamp: new Date().toISOString(), detail, status: 'running' };
     appendTextRecord(join(policy.input.runDir, 'events.jsonl'), JSON.stringify(event));
   };
+  const finishWait = (detail: string): void => {
+    if (waiting) environmentEvent('stage_environment_wait_finished', detail);
+    waiting = undefined;
+  };
+  child.once('close', () => finishWait('Pre-execution launcher closed before the prerequisite cleared'));
   const refuse = (error: unknown): void => {
     if (failed) return;
     failed = true;
+    finishWait('Pre-execution launcher receipt refused: ' + String(error));
     observe({ kind: 'refused', message: `ENGINE_WRITE_BOUNDARY_UNVERIFIED: ${String(error)}; child fate is unknown` });
     try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
   };
@@ -214,9 +224,8 @@ export function observeEngineChildBoundary(child: ChildProcess, receiptPath: str
           waiting = receipt.message;
         } else if (receipt.kind === 'installed') {
           installed = true;
-          if (waiting) environmentEvent('stage_environment_wait_finished', 'Prerequisite cleared; renewed enforcement installed before execution');
-          waiting = undefined;
-        }
+          finishWait('Prerequisite cleared; renewed enforcement installed before execution');
+        } else finishWait(receipt.message);
         mkdirSync(dirname(receiptPath), { recursive: true });
         appendTextRecord(receiptPath, JSON.stringify({ at: new Date().toISOString(), childPid: child.pid, ...receipt }));
         observe(receipt);
