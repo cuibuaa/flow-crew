@@ -116,6 +116,16 @@ export function assessResearchIterationBudget(
   return assessment;
 }
 
+/**
+ * Whether a brief can run the fixed author -> gate -> repair plan (`--workflow direct`) instead of a planner call: one
+ * declared output or none, and no research loop, program, terminal states or declared inputs for a planner to arrange.
+ * On the pilot ruler the fixed plan matched planned runs' quality in 25-55% less time.
+ */
+export function isFixedPlanBrief(parsed: ParsedBriefFrontmatter, declaredInputs: readonly string[]): boolean {
+  return !parsed.frontmatterError && !parsed.research && !parsed.program && !parsed.terminalStates
+    && declaredInputs.length === 0 && (parsed.outputs?.length ?? 0) <= 1;
+}
+
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return { stripped: brief };
   const open = brief.indexOf('\n', 3) + 1;

@@ -1136,6 +1136,15 @@ async function cmdQuick() {
     launchArgs.push('--workflow', 'research');
     console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
   }
+  if (!workflowExplicit && workflow === 'default') {
+    const { isFixedPlanBrief } = await import('./scheduler/sched_admission/brief-contract.js');
+    const { extractDeclaredBriefInputPaths } = await import('./ship-inputs.js');
+    if (isFixedPlanBrief(parsedBrief, extractDeclaredBriefInputPaths(task))) {
+      workflow = 'direct';
+      launchArgs.push('--workflow', 'direct');
+      console.error('Note: one deliverable and nothing for a planner to arrange -> auto-selected --workflow direct (pass --workflow default to plan).');
+    }
+  }
 
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
   if (!initializedContinuation) {
