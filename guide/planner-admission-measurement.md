@@ -57,3 +57,8 @@ excluded for the harness/context differences, before the matched comparison was 
 
 Across final and exploratory trials, 12 real-model planner calls spent 3,529,692 tokens. Setup failures before a model
 was invoked are not model trials. There were no scheduler planning retries in either comparison.
+
+Full-suite verification also exposed an existing negotiation fixture that allotted only 50 ms to real planner setup.
+The same test failed on main before any work adapter call. Its adapter already supplies a synthetic timeout result,
+so it now uses the suite's existing pinned setup budget while still asserting the configured retry and doubled budget.
+This changes no engine timeout policy.

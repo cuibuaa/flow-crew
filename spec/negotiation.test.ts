@@ -889,7 +889,9 @@ describe('bounded timeout negotiation', () => {
   it('does not let planner-authored max_retries suppress the configured timeout retry', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'config'), { recursive: true });
     writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-      'default_timeout_ms: 50',
+      // The adapter supplies the timeout result below. Give planner setup the
+      // existing fixture budget so host load cannot preempt the plan first.
+      `default_timeout_ms: ${OWNED_STAGE_TIMEOUT_MS}`,
       'default_stage_technical_retries: 1',
       'adapter: mock',
       'model: default',
@@ -941,7 +943,7 @@ describe('bounded timeout negotiation', () => {
     };
     const observed = { workCalls, budgets, finalStatus: final.status };
     process.stdout.write(`PLAN_RETRY_SUPPRESSION=${JSON.stringify(observed)}\n`);
-    expect(observed).toEqual({ workCalls: 2, budgets: [50, 100], finalStatus: 'complete' });
+    expect(observed).toEqual({ workCalls: 2, budgets: [OWNED_STAGE_TIMEOUT_MS, OWNED_STAGE_TIMEOUT_MS * 2], finalStatus: 'complete' });
     expect((final.dispatchedStages as Array<{ id: string; max_retries?: number }> | undefined)
       ?.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
     expect(recorded.stages.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
