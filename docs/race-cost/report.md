@@ -1,6 +1,6 @@
 # Independent acceptance of FlowCrew task 2319
 
-Acceptance is **withheld pending an authenticated final-code measurement**. The repaired code, the rebase onto `dc606777150ef8143d7bba4dbc24baac2110c0b4`, and the independent regression checks pass. The prescribed live-model harness was attempted on the final code but exited 1 with HTTP 401 before its first comparison. Prior-code after figures below are retained as historical evidence and are not substituted for a final-code re-run.
+Acceptance is **PASS on the reported bounded evidence**. The authenticated before/after pair reran the supplied three-case workload against the preserved baseline and final code `7505e0b` in one session. All six deliveries passed independent live-model gates and the exhaustive clamp oracle; recorded output decreased **51.07%** and summed case wall decreased **15.88%**. The repaired code, rebase onto `dc606777150ef8143d7bba4dbc24baac2110c0b4` and independent regressions pass. Historical staged measurements do not substitute for this final-code pair.
 
 The run output was first committed unchanged as `7d9e7cc`, then rebased as `24ce2b0`. Main’s candidate-A restatement, blind comparison, exact-digest acknowledgement translation, and embedded instruction are preserved. The original digest-admission regression now also checks preferred A’s continuation against its stored exact brief (18 race-command tests, direct exit 0). Continuation uses the corresponding candidate’s translated digest too. Independent fix `6c10a1b` keeps completed workflows with verified gates eligible when their final ordinary stage follows the gate. No push or merge into main was performed.
 
@@ -14,7 +14,7 @@ The run output was first committed unchanged as `7d9e7cc`, then rebased as `24ce
 - A workflow ending after a prerequisite gate can already be complete by comparison. The independent fix accepts its effective passing gate facts rather than requiring an artificial park. Such a topology has no remaining final gate to save. Removing prerequisite verification would violate workflow dependencies or weaken the gate.
 - The judge retains declared-output exclusion and the 120,000 JavaScript-string-unit diff cap. It receives the original task, not A’s additional authoring guidance or review history. Thus missing report text and truncated changes remain comparison limitations.
 - The old uncertain-comparison fallback used repair counts available only after paying both gates. Stable A-then-B verification replaces it. Paired oracle evidence below is bounded evidence for this policy, not a statistical accuracy guarantee.
-- Model execution needs authentication. The supplied implementation harness defaults to a Codex home under the old run. This acceptance uses an empty private home in the ignored worktree scratch area to avoid any writes under `~/.fc` or handling prohibited credential files. Authentication was unavailable there.
+- Model authentication now uses the user's Codex home in place, while explicit CLI arguments match the original stage's model and high effort and disable MCP/multi-agent integrations. Runtime writes remain in temporary storage; native usage covers every completed model call in the accepted pair.
 
 **1. Historical discarded review and repair**
 
@@ -40,29 +40,51 @@ There are 33 partial-usage attempts and 12 unknown native invocations nested wit
 
 The scheduler reuses DAG reachability to defer only gates that unlock no remaining ordinary authors (`src/scheduler/sched_loop/stage-batch.ts:30`). Race compares the candidates in both orders, resumes the preferred exact run through normal admission/gating/repair, and tries the other only after failure (`src/cli-race.ts:134`, `src/cli-race.ts:158`). Gate checks are fresh before delivery (`src/cli-race.ts:165`). Existing repair-round artifacts preserve budget and archive coordinates across a hold (`src/scheduler/sched_loop/gate-loop.ts:40`); no new repair counter or workflow profile was added.
 
-The following figures reuse the run’s **pre-change baseline** and record its **post-repair, pre-rebase after** measurement. Baseline code is preserved at `stages/repair/evidence/baseline-project` and was measured unchanged; baseline provenance is `77a60b0`. The after orchestration changed during this rebase and acceptance fix, so those after figures are historical only. They are not accepted final-code figures.
+The supplied implementation harness was rerun sequentially, **before then after in one session**, on its unchanged three-case `workload.json`. The preserved baseline race source matches `77a60b0` byte-for-byte apart from its relocated store import. The after phase imports final `src/cli-race.ts` at `7505e0b`, including the rebase and independent completion fix. As the supplied harness specifies, both phases share the final scheduler and actual built ship-setup CLI; the imported race orchestration is the code variable. No staged extension was rerun or substituted for this pair.
 
-| Frozen workload | Reused baseline output tokens | Baseline wall s | Delivered / gate | Prior-code after output tokens | Prior-code after wall s | Delivered / gate |
+| Frozen workload | Before output tokens | Before wall s | Delivered / gate | Final-code after output tokens | After wall s | Delivered / gate |
 |---|---:|---:|---|---:|---:|---|
-| normal-a | 880 | 57.335 | A / pass | 353 | 41.854 | A / pass |
-| normal-b | 854 | 53.661 | B / pass | 341 | 41.819 | B / pass |
-| repair | 1148 | 58.445 | A / pass | 763 | 60.810 | A / pass |
-| staged-normal-a | 1292 | 74.972 | A / pass | 809 | 55.431 | A / pass |
-| staged-normal-b | 1322 | 70.056 | B / pass | 823 | 54.803 | B / pass |
-| staged-prerequisite-repair | 1675 | 71.133 | A / pass | 1086 | 67.614 | A / pass |
-| **Total** | **7171** | **385.602** | 6/6 gated | **4175** | **322.331** | 6/6 gated |
+| normal-a | 713 | 62.455 | A / pass | 294 | 37.031 | A / pass |
+| normal-b | 806 | 54.344 | B / pass | 262 | 39.154 | B / pass |
+| repair | 956 | 51.441 | A / pass | 655 | 65.336 | A / pass |
+| **Total** | **2,475** | **168.239** | **3/3 gated** | **1,211** | **141.521** | **3/3 gated** |
 
-These retained measurements used live model gate/comparison calls and actual ship-setup/scheduler execution, with two independently passing criterion results per delivery and an independently re-executed exhaustive 105-input clamp oracle. The three staged cases start with equal or repairable prefixes; distinguishing code exists only at `finish`. Direct losers execute no final review or repair after the change. Staged losers still execute prerequisite review, while their final review and repair are omitted. The prior repaired sample reduced recorded output by 41.78% and wall by 16.41%; its `repair` case was 4.05% slower. These percentages apply to that prior version and sample only.
+Recorded output fell **51.07%** and summed case wall fell **15.88%** on this pair. `repair` was 27.01% slower. All six deliveries passed both model-reviewed criteria and the separately executed exhaustive **105-input** clamp oracle. The baseline pays both candidates' final gates and necessary repairs before comparison; final code compares authored snapshots first and pays only the selected candidate's final gate/repair on these cases. Per-call receipts and stage calls remain in the raw results. This is one sequential paired sample: provider variability, cache warmth and measurement order can affect tokens and wall time. It establishes bounded review/comparison cost payback, not full authoring savings or population selection accuracy.
 
-Evidence roots for the table are the read-only original run’s `stages/repair/evidence/before-retry1/measurements.json`, `after-final/measurements.json`, and `workload-summary.json`. Those two successful phases spent 11,346 recorded model output tokens. An earlier aborted baseline phase spent 792 known output tokens plus one unknown-usage call, and is not silently counted as zero or filtered by outcome.
+Raw harness results are committed as `docs/race-cost/measurements/before.json` and `docs/race-cost/measurements/after.json`. They retain every case's delivery record, gate verdict, executable oracle, authored/repaired snapshots, calls, timing receipts and native `turn.completed` usage. Metadata records the shared session `44e821f8-3e26-491d-a177-300334acaf66`, CLI version `codex-cli 0.162.0`, exact model arguments, workload and source hashes, final revision and timestamps. Harness/environment hashes and settings were checked equal across the pair. Raw per-call prompts, JSONL events, final responses and stderr remain in `.cache/race-cost/implement/authenticated-verified-before/` and `authenticated-verified-after/`; direct phase receipts are `.cache/race-cost/authenticated/pair-receipts.json`. **Both phase exit codes: 0.**
 
-The requested implementation harness and its original `workload.json` were copied by name into `.cache/race-cost/implement/`; source and workload bytes were unchanged. It was attempted on final code with this exact command:
+Authentication used the user's **`CODEX_HOME=/home/qian/.codex` in place**, explicitly set by `RACE_COST_MODEL_HOME`. No credential file was manually opened, copied or printed. The original implementation invocation record confirms model `gpt-6.1-sol`; both phases use that model and effort **high**. `--ignore-user-config` avoids the home's effort-max, MCP, multi-agent and service-tier settings; the explicit empty MCP table and app/plugin feature disables also prevent default remote MCP clients. Both phases use the same CLI, inherited host network, CPU affinity 2–5, private fixture-store/home construction and shared temporary model runtime. Model execution is ephemeral and read-only, with shell snapshots disabled.
+
+The session command was:
 
 ```sh
-RACE_COST_MODEL_HOME="$PWD/.cache/race-cost/model-home" timeout --kill-after=10s 1800s taskset -c 2-5 node --import tsx .cache/race-cost/implement/measure.ts after final
+unshare -Urm python3 .cache/race-cost/authenticated/namespace.py python3 .cache/race-cost/authenticated/run-pair.py
 ```
 
-**Direct exit: 1.** The first model comparison returned HTTP 401 “Missing bearer or basic authentication”. No completed-turn usage or complete race measurement was produced; no model output was generated, and billed input/output usage has no provider receipt. This is a failed measurement attempt, not a zero-token race or a passing measurement. The failure is retained in `.cache/race-cost/measure-final.log`; the harness’s private temporary store is recorded there. Model authentication is the remaining prerequisite for item 2. No rerun of the staged extension is claimed.
+The runner creates one shared temporary runtime/session and invokes, sequentially for `PHASE=before` then `PHASE=after`:
+
+```sh
+RACE_COST_MODEL_HOME=/home/qian/.codex RACE_COST_RUNTIME="$RUNTIME" RACE_COST_SESSION="$SESSION" \
+  taskset -c 2-5 python3 .cache/race-cost/authenticated/write-boundary.py \
+  node --import tsx .cache/race-cost/implement/measure.ts "$PHASE" "authenticated-verified-$PHASE"
+```
+
+Every live model call uses the following exact flags (its scratch directory is cwd, `prompt.txt` is stdin, and `last.txt` is its explicit output path):
+
+```sh
+CODEX_HOME=/home/qian/.codex codex exec --json --ignore-user-config --ephemeral \
+  -s read-only --skip-git-repo-check -m gpt-6.1-sol \
+  -c 'model_reasoning_effort="high"' -c 'features.multi_agent=false' -c 'mcp_servers={}' \
+  -c 'features.apps=false' -c 'features.plugins=false' -c 'features.remote_plugin=false' \
+  -c 'features.shell_snapshot=false' -c "sqlite_home=\"$RUNTIME/sqlite\"" -c "log_dir=\"$RUNTIME/log\"" \
+  -o "$SCRATCH/last.txt" -
+```
+
+Model-call HOME/USERPROFILE use the private fixture home; TMPDIR and XDG cache/data/state paths use the shared temporary runtime. A private **mount-only** namespace retains host networking and hides the user's CLI runtime identity and CLI temporary directory behind fresh temporary storage; the original identity file is never opened. Inherited Linux Landlock rules limit mutations to this worktree, temporary storage and `/dev/null`. This also blocks writes under `~/.fc` and to the original Codex home. Codex's model-cache write warnings were nonfatal and are retained in stderr; model calls authenticated and completed. No Chrome or MCP server was started, and no FlowCrew process or daemon was signaled.
+
+The successful pair spent **3,686 model output tokens** in **26 completed model calls**: before **2,475**, after **1,211**. Native usage also records **388,122 input tokens**, including **316,160 cached input tokens** (a subset, not an additional token charge); input plus output is **391,808** recorded tokens. Frozen authors/repairs spend zero model tokens. These are usage receipts, not billing estimates.
+
+The original empty-home HTTP 401 attempt remains in `.cache/race-cost/measure-final.log`. Setup attempts in this follow-up failed first at MCP-config parsing, then at a blocked runtime-identity write, and then at provider routing in an accidentally isolated network namespace. Their logs/receipts are retained as `config-preflight-failed`, `boundary-preflight-failed`, `trace-preflight-failed` and `offline-preflight-failed` under `.cache/race-cost/authenticated/`. They produced no completed-turn usage and no complete paired measurement; no failed attempt is treated as a zero-token successful race. Only the successful pair above is used for acceptance. Earlier six-case pre-rebase figures remain historical in the original run's evidence, not current final-code measurements.
 
 **3. Comparison inputs and independent choice evidence**
 
@@ -78,7 +100,7 @@ Twelve pairs, byte-identical comparison prompts in both orders, zero executable-
 
 The rejected-prefix regression is independently covered by `spec/race-workflow.test.ts:141`: A and B initially agree, differ only after their prerequisite review, both finish before comparison, and only the preferred candidate executes the final gate. Both winning directions pass. The prerequisite-repair, preserved-round and exhausted-budget cases are at `spec/race-workflow.test.ts:172`, `:183`, and `:196`. The additional completion regression is at `spec/race-workflow.test.ts:159`: the supported DAG completes after its gate and final author; both finished diffs are compared and the preferred effectively gated candidate is delivered without repeated execution.
 
-Before the independent completion fix, the new regression command exited 1 (`expected 1 to be +0`); after the fix the full targeted command exited 0 with 5 files and 66 tests. Raw receipts: `.cache/race-cost/complete-regression-before.log` and `targeted-fixed.log`. No general population accuracy claim, new live judgment on final code, full model-authoring savings, default-supervisor cost or live dynamic-planner/research cost is established.
+Before the independent completion fix, the new regression command exited 1 (`expected 1 to be +0`); after the fix the full targeted command exited 0 with 5 files and 66 tests. Raw receipts: `.cache/race-cost/complete-regression-before.log` and `targeted-fixed.log`. The authenticated final-code direct workload is now measured in item 2. No general population accuracy claim, full model-authoring savings, default-supervisor cost or live dynamic-planner/research cost is established.
 
 **4. Net lines and architecture**
 
@@ -90,7 +112,7 @@ Before the independent completion fix, the new regression command exited 1 (`exp
 | spec | 354 | 48 | +306 |
 | config | 0 | 0 | 0 |
 
-The report itself is outside these trees. Source additions reuse parked-run continuation, normal gate facts, DAG reachability and durable repair artifacts. They replace routine loser final verification, newest-run discovery and repair-count preference. One internal hold flag and one internal quick argument remain. This is an explicit source-growth exception to AGENTS.md, supported by the prior paired savings and the passing scheduler regressions; final-model cost payback is not yet independently accepted because the required rerun failed authentication. No additional workflow, gate implementation, credential route or isolation mode was introduced.
+The report itself is outside these trees. Source additions reuse parked-run continuation, normal gate facts, DAG reachability and durable repair artifacts. They replace routine loser final verification, newest-run discovery and repair-count preference. One internal hold flag and one internal quick argument remain. This is an explicit source-growth exception to AGENTS.md, supported by the authenticated final-code paired output/wall savings in item 2 and the passing scheduler regressions. No additional workflow, gate implementation, credential route or isolation mode was introduced.
 
 **Clause-by-clause independent verdict**
 
@@ -98,23 +120,23 @@ The report itself is outside these trees. Source additions reuse parked-run cont
 |---|---|---|
 | Two independent candidates of the brief; preferred delivery | PASS | `src/cli-race.ts:113`, `:122`, `:140`, `:174`; `spec/race.test.ts:70`, `:178` |
 | Deliver only a change passing independent gates | PASS | Effective gate facts at `src/cli-race.ts:166`, `:212`; oracle-backed scheduler tests at `spec/race-workflow.test.ts:115`, `:207` |
-| Comparison at least as reliable | PASS on the bounded same-pair evidence; population claim unmeasured | Twelve-pair replay exit 0, unchanged two-order prompts, downstream-distinction regression at `spec/race-workflow.test.ts:141`; final live rerun still missing |
+| Comparison at least as reliable | PASS on the bounded same-pair evidence; population claim unmeasured | Twelve-pair replay exit 0, unchanged two-order prompts, downstream-distinction regression at `spec/race-workflow.test.ts:141`; authenticated final-code three-case gates/oracles pass in item 2 |
 | Avoid discarded loser review/repair | PASS for deferrable final work; prerequisite/fallback expenditure retained | `spec/race-workflow.test.ts:115`, `:141`, `:172`, `:159`; mandatory prerequisites cannot be removed without compromising full comparison inputs |
 | Preferred candidate fails: gated alternative or reason none passed | PASS | `spec/race-workflow.test.ts:219`, `:226`; `spec/race.test.ts:114`, `:121`, `:130` |
 | Each assigned criterion and supplied score independently meets its line | PASS | Omitted criterion and score-zero false-pass regressions: `spec/race-workflow.test.ts:233`, `:239`; existing gate readers remain unchanged |
 | Text-only comparison in both orders | PASS | `src/cli-race.ts:57`, `:140`, `:229`; `spec/race.test.ts:70`, `:96`; byte-identical replay prompts |
-| Read-only ~/.fc; no prohibited files or process signals | PASS | Only named brief/review/evidence/config and project copies were read; harness copied into ignored scratch and uses a private store/home; no FlowCrew run was launched outside authorized harness/test fixtures |
+| Read-only ~/.fc; no prohibited files or process signals | PASS | Only named brief/review/evidence/config and project copies were read; no credential files manually opened/copied/printed; Codex authenticates in place with original runtime identity hidden; writes confined to worktree/temp; no FlowCrew processes signaled |
 | Isolation and credential protection do not weaken | PASS | Unchanged ship-setup and sandbox/stage paths; unchanged gate readers; `src/cli-race.ts:113`, `:212`, `:216`, `:229`; approval parks remain ineligible (`spec/race-workflow.test.ts:245`) |
 | Review attempt 1: comparison before distinguishing author work | RESOLVED | `stage-batch.ts:30` retains prerequisite gates; both finishing authors appear in the comparison in both winner directions; targeted 66-test command exit 0; completed-after-gate case additionally fixed |
 | Report item 1: per-race and pooled accounting | PASS | Table and independent ten-race reconciliation exit 0 |
-| Report item 2: paired final-code output tokens, wall, delivery and gate | INCOMPLETE | Prior-code evidence retained; prescribed final-code harness exit 1 / HTTP 401, no complete final race receipt |
+| Report item 2: paired final-code output tokens, wall, delivery and gate | PASS | Authenticated same-session before/after raw results committed; both direct exits 0; 6/6 gates and exhaustive oracles pass; model usage reconciles |
 | Report item 3: inputs and same-pair choice evidence | PASS, bounded | Twelve-pair replay exit 0 and scheduler regressions; no population threshold invented |
 | Report item 4: net lines in src/spec/config | PASS | Exact current-main numstat above |
 | Report item 5: full configured validation after last report write | PASS | Four direct exit codes 0 and 243 files / 2746 tests; commands repeated after the final report write as recorded below |
 
 **5. Configured validation and direct exits**
 
-The full configured set passes. The table was finalized from the passing preparatory commands, then every command is repeated after this report’s final write and commit. Final direct subprocess return codes and full logs are retained in `.cache/race-cost/final-validation/receipts.json` and its adjacent logs; the completion message confirms that repetition. No acceptance is claimed for the failed live-model rerun.
+The full configured set passes. Every command below is repeated after this report’s final tracked write and before the follow-up commit. Direct subprocess return codes and full logs for that repetition are retained in `.cache/race-cost/authenticated/validation/receipts.json` and its adjacent logs. The accepted model pair is the successful authenticated run in item 2; failed setup attempts remain separate evidence.
 
 | Command | Direct exit code | Result |
 |---|---:|---|
@@ -125,6 +147,6 @@ The full configured set passes. The table was finalized from the passing prepara
 
 The initial targeted attempts exited 1 at the stale-dist guard before test execution; rebuilding resolved that guard. The intentionally failing completion regression exited 1 before its production fix. The independent selection replay exited 0, the fixed five-file targeted check exited 0 (66 tests), and the strengthened restatement/continuation spec exited 0 (18 tests).
 
-The final verification also checks `test -s docs/race-cost/report.md`, `git merge-base --is-ancestor dc60677 HEAD`, and an empty `git status --porcelain`. Build, UI build, lint and test are invoked in full with the requested CPU affinity, following the report’s last tracked write; no production or report files are modified after those checks.
+The final verification also parses both committed measurement JSON files and checks `test -s docs/race-cost/report.md`, `git merge-base --is-ancestor dc60677 HEAD`, a follow-up commit after `7505e0b`, and an empty `git status --porcelain`. Build, UI build, lint and test are invoked in full with the requested CPU affinity, following the report’s last tracked write; no production or report files are modified after those checks.
 
 All acceptance work is confined to branch `race-cost`, this worktree and temporary directories. Historical evidence under `/home/qian/.fc/runs/2026-10-10T17-53-28-1b2bd5` remains read-only. The report is committed by this independent acceptance task because the original FlowCrew run ended before its terminal report stage.
