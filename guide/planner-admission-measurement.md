@@ -62,3 +62,12 @@ Full-suite verification also exposed an existing negotiation fixture that allott
 The same test failed on main before any work adapter call. Its adapter already supplies a synthetic timeout result,
 so it now uses the suite's existing pinned setup budget while still asserting the configured retry and doubled budget.
 This changes no engine timeout policy.
+
+Repeated full runs also exceeded existing fixture limits for build publication, TypeScript heartbeat startup,
+graceful child startup and CLI terminal-record publication. Those tests now allow more startup time; their safety
+assertions remain intact. The cleanup test still records an exact immutable budget and checks bounded overrun and
+child closure, the heartbeat still detects a 100 ms stall, and the build replay still checks continuous availability
+through real publication. These test-only timing changes do not affect the planner measurement above.
+The long-grace supervision fixture uses the production compiled shim through the existing `shimPath` option, avoiding
+TypeScript bootstrap inside its synchronous manager stub's five-second launch timeout; it still requires the entire
+child tree to be dead before the wrapper returns.

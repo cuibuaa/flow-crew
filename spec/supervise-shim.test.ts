@@ -226,7 +226,12 @@ describe('durable portable supervision shim', () => {
       '});',
       'descendant.once("error", (error) => { throw error; });',
     ].join('\n');
-    const backend = new NodeSystemd(root, { shellPath: '/bin/sh', shutdownGraceMs: 2_500 });
+    // Use the production shim so TypeScript bootstrap cannot consume the
+    // manager's 5 s launch timeout before the intentional 2.5 s shutdown grace.
+    const backend = new NodeSystemd(root, {
+      shellPath: '/bin/sh', shutdownGraceMs: 2_500,
+      shimPath: join(repositoryRoot, 'dist', 'supervise-shim.js'),
+    });
     let descendantPid: number | undefined;
     try {
       await backend.runUnit({

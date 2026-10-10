@@ -120,7 +120,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(output).toMatch(/Status: (?:done|failed|stuck|cancelled|complete|terminal(?:-unknown)?)/);
   });
 
-  it('[4] returns already-terminal without clearing completed_at', async () => {
+  it('[4] returns already-terminal without clearing completed_at', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'already-terminal'), 'terminal fixture');
     await waitForTerminalRun(harness, task.id);
@@ -145,7 +145,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     ).toEqual({ responseStatus: 'already-terminal', error: undefined, completedAt });
   });
 
-  it('[5] returns non-empty portable task tail output containing the mock sentinel', async () => {
+  it('[5] returns non-empty portable task tail output containing the mock sentinel', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'tail'), 'tail fixture');
     await waitForTerminalRun(harness, task.id);
@@ -157,7 +157,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
   });
 
-  it('[6] merges terminal run.json state over a stale running registry status', async () => {
+  it('[6] merges terminal run.json state over a stale running registry status', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'show-terminal'), 'show fixture');
     const terminal = await waitForTerminalRun(harness, task.id);
@@ -436,7 +436,7 @@ async function waitForTerminalRun(harness: Harness, id: number): Promise<RunSnap
     } catch {
       return false;
     }
-  }, 12_000);
+  }, 30_000);
   if (!found || !snapshot) throw new Error(`run for task #${id} did not reach a terminal record`);
   return snapshot;
 }

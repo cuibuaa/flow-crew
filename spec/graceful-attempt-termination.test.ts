@@ -29,7 +29,8 @@ import { runStage } from '../src/worker.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.js';
 
 const CLEANUP_TRIALS = 3;
-const FIXTURE_TIMEOUT_MS = 350;
+// Leave room for the child to install its signal handler under full-suite load.
+const FIXTURE_TIMEOUT_MS = 1_500;
 const DESCENDANT_FIXTURE_TIMEOUT_MS = 1_500;
 const DESCENDANT_READY_TIMEOUT_MS = 1_200;
 const ABORT_FIXTURE_TIMEOUT_MS = 10_000;
@@ -291,7 +292,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('applies graceful cleanup to stdin timeouts and both supervisor-abort paths', { timeout: 15_000 }, async () => {
+  it('applies graceful cleanup to stdin timeouts and both supervisor-abort paths', { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-matrix-'));
     try {
       const observations: CleanupObservation[] = [];
@@ -411,13 +412,13 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('records post-deadline cleanup as real overrun without moving the immutable deadline', { timeout: 15_000 }, async () => {
+  it('records post-deadline cleanup as real overrun without moving the immutable deadline', { timeout: 30_000 }, async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-project-'));
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-state-'));
     const previousStateRoot = fcGlobalDir();
     setFcGlobalDir(stateRoot);
     try {
-      const budgetMs = 600;
+      const budgetMs = 2_000;
       const observations: DeadlineObservation[] = [];
       for (let trial = 1; trial <= CLEANUP_TRIALS; trial++) {
         const stageId = `deadline_${trial}`;
@@ -493,7 +494,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
       expect(observations.every(({ exitCode }) => exitCode === 124)).toBe(true);
       expect(observations.every(({ budgetMs, deadlineSpanMs }) => (
-        budgetMs === 600 && deadlineSpanMs === budgetMs
+        budgetMs === 2_000 && deadlineSpanMs === budgetMs
       ))).toBe(true);
       expect(observations.every(({ elapsedMs, budgetMs }) => elapsedMs >= budgetMs)).toBe(true);
       expect(observations.every(({ deadlineOverrunMs }) => (

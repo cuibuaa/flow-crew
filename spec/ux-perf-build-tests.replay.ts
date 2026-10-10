@@ -256,7 +256,7 @@ describe('transactional build and truthful fast-test contracts', () => {
     }]);
   });
 
-  liveBuildTest('unchanged-base seam: a live gate survives npm run build and the operator sees the affected run', { timeout: 60_000 }, async () => {
+  liveBuildTest('unchanged-base seam: a live gate survives npm run build and the operator sees the affected run', { timeout: 120_000 }, async () => {
     expect(EVIDENCE.exit.sha256).toHaveLength(64);
     const root = temporaryRoot('flowcrew-item12-live-build-');
     const projectRoot = join(root, 'project');
@@ -325,7 +325,9 @@ describe('transactional build and truthful fast-test contracts', () => {
     try {
       const reachedPublicationOrGap = await waitUntil(
         () => buildOutput.includes('replacement_files_prepared') || !existsSync(checksDirectory),
-        30_000,
+        // Compilation competes with the full suite; publication, not build
+        // speed, is the boundary whose safety this fixture verifies.
+        90_000,
       );
       expect(reachedPublicationOrGap, buildOutput).toBe(true);
       writeFileSync(releasePath, 'release\n');

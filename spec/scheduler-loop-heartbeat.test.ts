@@ -96,7 +96,9 @@ describe('independent scheduler-loop heartbeat', () => {
     });
     void completion.catch(() => undefined);
     try {
-      await Promise.race([waitFor(readyPath, 2_000), completion.then(() => { throw new Error('fixture exited before readiness'); })]);
+      // Allow the TypeScript child and observer to initialize under suite load;
+      // the actual stall threshold below remains 100 ms.
+      await Promise.race([waitFor(readyPath, 10_000), completion.then(() => { throw new Error('fixture exited before readiness'); })]);
       await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
       // The warning is published before its event. Wait for that separate fact,
       // including its content when earlier events already created the file.
