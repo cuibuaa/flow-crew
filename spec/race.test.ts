@@ -56,7 +56,11 @@ describe('race command', () => {
     const record = JSON.parse(written['/w/cand-race.json']);
     // The judge always answered "A": first order names candidate A, second names B -> disagreement -> fallback.
     expect(record.decision).toMatchObject({ basis: 'fallback-fewer-repairs', choice: 'A' });
-    expect(comparisonPrompt('task', 'x', 'y')).toContain('as its author intends it');
+    // The judge favoured the change that kept existing behaviour and tests even where the task required changing them
+    // (34 discordant SWE pairs: 76% right; with this framing 97%, and 14.5/15 on earlier pairs it was not tuned on).
+    expect(comparisonPrompt('task', 'x', 'y')).toContain("behaviour is what the task's author intends");
+    expect(comparisonPrompt('task', 'x', 'y')).toContain('changing them is part of the task, not a regression');
+    expect(comparisonPrompt('task', 'x', 'y')).not.toContain('breaks nothing that should keep working');
   });
 
   it('launches nothing when a candidate workspace is not ready', async () => {

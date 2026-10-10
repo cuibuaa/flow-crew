@@ -50,9 +50,10 @@ export function decideRace(candidates: readonly RaceCandidate[], judgments: read
 export function comparisonPrompt(brief: string, first: string, second: string): string {
   return 'Two candidate changes, A and B, each attempt to achieve the task below.\n\n'
     + `Task:\n\n${brief.trim()}\n\n`
-    + 'Judge only from the task and the diffs; do not open files or run anything. Prefer the change that achieves the '
-    + "task's outcome as its author intends it, not only as its words can be read, and that breaks nothing that should "
-    + 'keep working.\n\n'
+    + "Judge only from the task and the diffs; do not open files or run anything. Prefer the change whose behaviour is what "
+    + "the task's author intends, not only what its words can be read to allow. Where that behaviour contradicts existing "
+    + 'code or tests, changing them is part of the task, not a regression; only behaviour the task does not ask to change '
+    + 'should keep working.\n\n'
     + `Change A:\n\`\`\`diff\n${first}\`\`\`\n\nChange B:\n\`\`\`diff\n${second}\`\`\`\n\n`
     + 'Reply with only JSON: {"choice": "A" or "B", "reason": "<one sentence>"}';
 }
