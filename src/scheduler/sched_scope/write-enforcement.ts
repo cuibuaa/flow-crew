@@ -1,5 +1,5 @@
 // Boundary: Restore out-of-scope writes at live and settlement boundaries, retain comparison-unavailable facts and generated-output provenance; receive only configured transient-output discovery.
-import { isLiveConstraintExemptPath, LiveConstraintGuard, type LiveConstraintGuardFactory, type LiveConstraintGuardOptions, isLiveConstraintExemptDirectory, scopeRevisionInstruction, type LiveConstraintIncident, resolvePersistedLiveConstraintIncident } from "../../live-constraint-guard.js";
+import { isLiveConstraintExemptPath, LiveConstraintGuard, type LiveConstraintGuardFactory, type LiveConstraintGuardOptions, isLiveConstraintExemptDirectory, scopeRevisionInstruction, type LiveConstraintContentIdentity } from "../../live-constraint-guard.js";
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { configuredValidationCommandRole, discoverConfiguredCommandScopes, type createTransientVitestScopeReader } from "../sched_admission/project-capabilities.js";
@@ -8,7 +8,6 @@ import { loadProjectDefaults } from "../../config.js";
 import { recordRunEvent } from "../../run-events.js";
 import { runDir } from "../../store.js";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
 import { restoreProjectPath } from './restore.js';
 import { type RepairFileImage, compareRepairFileContents } from './file-images.js';
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively } from './snapshots.js';
@@ -144,36 +143,7 @@ export function enforceStageScopeWrites(input: {
   };
 }
 
-export function readLiveConstraintIncidents(
-  runDirPath: string,
-  stageId: string,
-  attemptIndex: number,
-): LiveConstraintIncident[] {
-  const path = join(
-    runDirPath,
-    'stages',
-    stageId,
-    `live_constraint_incidents_attempt_${attemptIndex}.jsonl`,
-  );
-  try {
-    return readFileSync(path, 'utf-8').split(/\r?\n/).flatMap((line) => {
-      if (!line.trim()) return [];
-      try {
-        const incident = JSON.parse(line) as LiveConstraintIncident;
-        return incident.kind === 'live_constraint_incident'
-          && incident.stageId === stageId
-          && incident.attemptIndex === attemptIndex
-          && typeof incident.path === 'string'
-          ? [resolvePersistedLiveConstraintIncident(join(runDirPath, 'stages', stageId), incident)]
-          : [];
-      } catch {
-        return [];
-      }
-    });
-  } catch {
-    return [];
-  }
-}
+export { readLiveConstraintIncidents } from '../../live-constraint-guard.js';
 
 export interface ScopeValidationOutputs {
   transientVitestOutputScopes: ReturnType<typeof createTransientVitestScopeReader>;
@@ -420,7 +390,13 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
               comparisonOutcome: 'different',
               changeObserved: true,
               rollbackAttempted: true,
-              ...(restoration.restored ? {} : { rollbackFailure: restoration.failure ?? `could not restore ${path}` }),
+              ...(restoration.restored ? {} : {
+                rollbackFailure: restoration.failure ?? `could not restore ${path}`,
+                unrestoredContent: current.exists && current.sha256 !== undefined && current.byteLength !== undefined
+                  && (current.type === 'file' || current.type === 'symlink')
+                  ? { state: 'present', type: current.type, sha256: current.sha256, byteLength: current.byteLength } as LiveConstraintContentIdentity
+                  : undefined,
+              }),
               // The complete scheduler-selected batch is the attribution cohort.
               // A peer can reach its first guard scan just after this restoration,
               // so keying only the attempts registered at observation time would
@@ -435,6 +411,11 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
           const violations = input.context.liveViolations.flatMap((violation) => {
             if (!violation.targetStageIds.has(input.stage.id)
                 || violation.deliveredAttemptKeys.has(currentAttemptKey)) return [];
+            // A later admitted execution may recover this path. Keep the old
+            // failure as evidence, rather than replaying it as a fresh violation
+            // or falsely reporting that the engine restored an unknown preimage.
+            if (!attemptContext.acceptedDuringAttempt
+                && scopeContainsPath(attemptContext.effectiveScope, violation.path)) return [];
             violation.deliveredAttemptKeys.add(currentAttemptKey);
             // A restored fact is consumed once by each stage in its cohort,
             // even across readmission. Unrestored facts still reach each new
@@ -449,6 +430,7 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
               changeObserved: violation.changeObserved,
               rollbackAttempted: violation.rollbackAttempted,
               ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
+              ...(violation.unrestoredContent ? { unrestoredContent: violation.unrestoredContent } : {}),
             }];
           });
           for (const violation of violations) {

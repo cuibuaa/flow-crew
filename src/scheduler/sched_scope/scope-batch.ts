@@ -1,5 +1,5 @@
 // Boundary: Own batch partitions and per-attempt effective scopes/preimages/violation ledger; disjoint-peer ownership uses the shared scope predicate.
-import { type LiveConstraintGitIndexEntryKind } from "../../live-constraint-guard.js";
+import { type LiveConstraintContentIdentity, type LiveConstraintGitIndexEntryKind } from "../../live-constraint-guard.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { createHash } from "node:crypto";
 import { runDir } from "../../store.js";
@@ -26,6 +26,8 @@ export interface ScopeBatchContext {
     reason: string;
     restored: boolean;
     rollbackFailure?: string;
+    /** Engine-observed content left by a failed rollback; recovery grants are prospective. */
+    unrestoredContent?: LiveConstraintContentIdentity;
     entryKind: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
     comparisonOutcome: 'different' | 'unavailable';
     changeObserved: boolean;

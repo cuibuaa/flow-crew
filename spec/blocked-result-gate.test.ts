@@ -73,6 +73,20 @@ describe('a blocked author result goes to its gate', () => {
     expect(final.status).toBe('complete');
   });
 
+  it('lets a confirmed engine blocker proceed to repair when scope readmission can resolve it', async () => {
+    const blocked = JSON.stringify({ status: 'blocked', summary: 'Engine scope denial prevents comparison cleanup',
+      files_modified: ['docs/report.md'], checks: [],
+      caveats: ['A failed rollback left temporary dependency files outside the admitted scope'] });
+    const { final, calls, reviews } = await run([{ pass: false, reason: 'Confirmed blocker has a recovery route',
+      repairability: { version: 1, disposition: 'repairable', evidence: 'exact recorded paths can request scope readmission' } },
+    { pass: true, reason: 'cleanup and delivery verified' }], { implement: [blocked] });
+    expect(reviews[0]).toContain('A confirmed blocker does not establish irreparability');
+    expect(reviews[0]).toContain('Engine enforcement or a scope denial alone is not evidence that delivery is impossible');
+    expect(reviews[0]).not.toContain('Real, and the brief does not accept a blocked report');
+    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(final.status).toBe('complete');
+  });
+
   it('returns a repair that reports the blocker again to the same gate, which may then confirm it', async () => {
     const { final, calls, reviews } = await run([REPAIRABLE, IRREPARABLE], { implement: [BLOCKED], repair: [BLOCKED] });
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);

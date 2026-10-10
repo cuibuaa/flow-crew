@@ -389,6 +389,8 @@ export interface LiveConstraintViolationDetection {
   reason: string;
   restored: boolean;
   rollbackFailure?: string;
+  /** Content left by an engine-observed failed rollback, for prospective recovery admission. */
+  unrestoredContent?: LiveConstraintContentIdentity;
   entryKind?: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
   comparisonOutcome?: 'different' | 'unavailable';
   /** False records an unrepresentable comparison without claiming a write. */
@@ -421,11 +423,44 @@ export interface LiveConstraintIncident {
   rollbackAttempted: boolean;
   restored: boolean;
   rollbackFailure?: string;
+  /** Content left by an engine-observed failed rollback, for prospective recovery admission. */
+  unrestoredContent?: LiveConstraintContentIdentity;
   writeObservedAt: string;
   detectedAt: string;
   detectionLatencyMs: number;
   effectiveScope: string[];
   scopeRevisionInstruction?: string;
+}
+
+export function readLiveConstraintIncidents(
+  runDirPath: string,
+  stageId: string,
+  attemptIndex: number,
+): LiveConstraintIncident[] {
+  const path = join(
+    runDirPath,
+    'stages',
+    stageId,
+    `live_constraint_incidents_attempt_${attemptIndex}.jsonl`,
+  );
+  try {
+    return readFileSync(path, 'utf-8').split(/\r?\n/).flatMap((line) => {
+      if (!line.trim()) return [];
+      try {
+        const incident = JSON.parse(line) as LiveConstraintIncident;
+        return incident.kind === 'live_constraint_incident'
+          && incident.stageId === stageId
+          && incident.attemptIndex === attemptIndex
+          && typeof incident.path === 'string'
+          ? [resolvePersistedLiveConstraintIncident(join(runDirPath, 'stages', stageId), incident)]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** Persisted reference to an instruction stored once beside the incident file. */
@@ -846,6 +881,7 @@ export class LiveConstraintGuard {
             rollbackAttempted: violation.rollbackAttempted ?? violation.changeObserved !== false,
             restored: violation.restored,
             ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
+            ...(violation.unrestoredContent ? { unrestoredContent: violation.unrestoredContent } : {}),
             writeObservedAt: new Date(observedMs).toISOString(),
             detectedAt,
             detectionLatencyMs: Math.max(0, detectedMs - observedMs),

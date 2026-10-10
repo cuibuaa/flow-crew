@@ -1,6 +1,6 @@
 // Boundary: Authenticate attempt/path identity, validate capability expansion against frozen inputs/owners/peers/preimages, and read durable inherited decisions.
 import { type RuntimeConstraintDecisionV1, type ScopeRevisionRequestV1, parseScopeRevisionRequest, scopePathDigest, readAcceptedScopeRevisionDecisions } from "../../runtime-negotiation.js";
-import { SCOPE_REVISION_REQUEST_FILE } from "../../live-constraint-guard.js";
+import { readLiveConstraintIncidents, readLiveConstraintContentIdentity, compareLiveConstraintContentIdentities, type LiveConstraintContentIdentity, SCOPE_REVISION_REQUEST_FILE } from "../../live-constraint-guard.js";
 import { join, basename, relative } from "node:path";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { STAGE_STATUS, readStageStatus, readRunState, runDir } from "../../store.js";
@@ -15,6 +15,7 @@ import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js'
 import { compareRepairFileContents } from './file-images.js';
 import { createDispatchAdmission, readBriefCriteriaForAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
 import { firstDeclaredInputScopeConflict } from './path-capabilities.js';
+import { producesEngineOwnedArtifact } from '../../artifact-declarations.js';
 
 type ScopeRevisionDecision = RuntimeConstraintDecisionV1;
 
@@ -142,6 +143,18 @@ export function decideScopeRevision(input: {
   const conflicts: Array<{ path: string; reason: string; conflictingStageId?: string }> = [];
   const authorizedPaths: string[] = [];
   const alreadyAuthorizedPaths: string[] = [];
+  // Retries can recreate the batch. Recovery evidence belongs to the existing
+  // durable engine incident stream, never the stage's cleanup assertion.
+  const unrestoredWrites = new Map<string, LiveConstraintContentIdentity>();
+  for (let index = 1; index <= request.attemptIndex; index++) {
+    for (const incident of readLiveConstraintIncidents(runDir(projectDir, runId), stage.id, index)) {
+      if (incident.restored) { unrestoredWrites.delete(incident.path); continue; }
+      if (incident.changeObserved && incident.rollbackAttempted && incident.rollbackFailure
+          && incident.unrestoredContent?.state === 'present') {
+        unrestoredWrites.set(incident.path, incident.unrestoredContent);
+      }
+    }
+  }
   const changedSinceSnapshot = snapshot ? changedProjectPathsSinceSnapshot(snapshot, projectDir) : [];
   for (let index = 0; index < requestedPaths.length; index++) {
     const path = requestedPaths[index], scope = requestedScopes[index];
@@ -174,6 +187,9 @@ export function decideScopeRevision(input: {
     const alreadyAuthorized = scopeRequestAlreadyAuthorized(scope, priorScopes);
     if (snapshot && !alreadyAuthorized) {
       const candidates = new Set([path]);
+      for (const member of unrestoredWrites.keys()) {
+        if (scopeMatchesProjectPath(scope, member)) candidates.add(member);
+      }
       const root = scope.kind === 'glob' ? scope.directoryPrefix : scope.kind === 'unknown' ? undefined : scope.value;
       if (root) for (const member of listProjectFilesAt(projectDir, root)) {
         if (scopeMatchesProjectPath(scope, member)) candidates.add(member);
@@ -184,6 +200,22 @@ export function decideScopeRevision(input: {
       ) === 'different'));
       for (const member of changedSinceSnapshot) if (scopeMatchesProjectPath(scope, member)) changedPaths.add(member);
       for (const member of [...changedPaths].sort()) {
+        // A failed rollback must not make future authority impossible. Admit
+        // only the exact recorded path, still at the engine-observed content;
+        // the ordinary reservation/peer/admission checks above remain binding.
+        // This captures today's preimage below, without ratifying the old write
+        // or claiming that an unobserved baseline can be restored safely.
+        const unrestored = unrestoredWrites.get(member);
+        if (scope.kind === 'exact' && path === member && unrestored?.state === 'present'
+            && (unrestored.type === 'file' || unrestored.type === 'symlink')
+            && !member.split('/').some(segment => segment === '.git' || segment === '.fc')
+            && compareLiveConstraintContentIdentities(unrestored,
+              readLiveConstraintContentIdentity(join(projectDir, member))) === 'equal') {
+          try {
+            if (!producesEngineOwnedArtifact({ id: 'scope-recovery', root: 'project', path: member, kind: 'file', nonempty: false },
+              stage, runDir(projectDir, runId), projectDir)) continue;
+          } catch { /* Unverifiable identities cannot acquire recovery authority. */ }
+        }
         const stableParent = stableGeneratedScope(member);
         if (stableParent === path) continue;
         const correction = stableParent
@@ -253,7 +285,7 @@ export function decideScopeRevision(input: {
     decidedAt: new Date().toISOString(),
     policyBasis: (authorizedPaths.length === 0
       ? 'requested paths are already authorized by the stable effective scope'
-      : 'current attempt, unchanged requested-content preimage or recognized stable generated-parent churn, valid project path, and no active-peer scope conflict')
+      : 'current attempt, unchanged requested-content preimage, exact engine-recorded failed rollback, or recognized stable generated-parent churn; valid project path and no active-peer scope conflict; authority is prospective')
       + (rejectedPaths.length ? `; ${rejectedPaths.length} requested capabilities withheld: ${conflicts.map((conflict) => `${conflict.path}: ${conflict.reason}`).join('; ')}` : ''),
     priorScope,
     effectiveScope: [...new Set([...(priorScope ?? []), ...authorizedPaths])],

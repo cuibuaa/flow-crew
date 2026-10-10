@@ -1,12 +1,13 @@
 import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun, fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { publishConstraintDecision, readAcceptedScopeRevisionDecisions, scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
 import type { StageConfig } from '../src/scheduler.js';
 import * as scheduler from '../src/scheduler.js';
+import { readLiveConstraintContentIdentity } from '../src/live-constraint-guard.js';
 
 describe('scope dotfile authorization', () => {
   it('[J7] treats a terminal directory glob as including nested dotfiles without reaching a peer scope', () => {
@@ -52,6 +53,15 @@ describe('path-wise scope admission', () => {
     return { created, request, input: { request, stage: writer, priorScope: [], activePeers: [] as StageConfig[],
       projectDir: project, runId: created.runId, attemptIndex: 1 } };
   }
+  function recordFailedRollbacks(runId: string, paths: string[]): void {
+    const directory = join(runDir(project, runId), 'stages/writer');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'live_constraint_incidents_attempt_1.jsonl'), paths.map(path => JSON.stringify({
+      version: 1, kind: 'live_constraint_incident', stageId: 'writer', attemptIndex: 1, path,
+      changeObserved: true, rollbackAttempted: true, restored: false, rollbackFailure: 'unobserved preimage',
+      unrestoredContent: readLiveConstraintContentIdentity(join(project, path)),
+    })).join('\n') + '\n');
+  }
   it('grants two safe paths and reports every conflicting capability and owner', () => {
     const { created, request, input } = setup(['safe/a.txt', 'shared/one.txt', 'shared/two.txt', 'safe/b.txt']);
     input.activePeers = [stage('first', ['shared/one.txt', 'shared/two.txt']), stage('second', ['shared/two.txt'])];
@@ -92,6 +102,76 @@ describe('path-wise scope admission', () => {
       expect(snapshot.files.has('safe.txt')).toBe(true);
       expect(snapshot.files.has('changed.txt')).toBe(false);
       expect(readFileSync(join(project, 'input.txt'), 'utf8')).toBe('read-only evidence');
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('admits exact failed-rollback recovery without ratifying unrecorded or subsequently changed writes', () => {
+    const parent = ['docs', '.comparison', 'node_modules'].join('/');
+    const paths = ['recorded.txt', 'tampered.txt', 'unrecorded.txt'].map(name => `${parent}/${name}`);
+    const { input } = setup(paths);
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
+    try {
+      mkdirSync(join(project, parent), { recursive: true });
+      for (const path of paths) writeFileSync(join(project, path), 'unauthorized content');
+      recordFailedRollbacks(input.runId, paths.slice(0, 2));
+      writeFileSync(join(project, paths[1]), 'changed after the engine observation');
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: [paths[0]],
+        rejectedPaths: paths.slice(1), effectiveScope: [paths[0]] });
+      expect(snapshot.files.get(paths[0])).toMatchObject({ exists: true, text: 'unauthorized content' });
+      expect(snapshot.files.has(paths[1])).toBe(false);
+      const tree = ['docs/.comparison/'];
+      expect(scheduler.decideScopeRevision({ ...input, request: { ...input.request,
+        requestedPaths: tree, pathDigest: scopePathDigest(tree) }, snapshot })).toMatchObject({ accepted: false });
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('keeps read-only inputs, terminal owners and peers binding even for recorded failed rollbacks', () => {
+    const paths = ['input.txt', 'terminal.txt', 'peer.txt'];
+    for (const path of paths) writeFileSync(join(project, path), 'before');
+    const { created, input } = setup(paths);
+    writeFileSync(join(created.runDirPath, 'task_brief.md'), '---\ninputs:\n  - input.txt\n---\nRead the evidence.');
+    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({ terminalOwners: { 'terminal.txt': 'publisher' } }));
+    input.activePeers = [stage('peer', ['peer.txt'])];
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
+    try {
+      for (const path of paths) writeFileSync(join(project, path), 'failed rollback content');
+      recordFailedRollbacks(input.runId, paths);
+      expect(scheduler.decideScopeRevision({ ...input, snapshot })).toMatchObject({
+        accepted: false, authorizedPaths: [], rejectedPaths: paths,
+        conflicts: [expect.objectContaining({ reason: expect.stringContaining('declared read-only input') }),
+          expect.objectContaining({ conflictingStageId: 'publisher' }), expect.objectContaining({ conflictingStageId: 'peer' })],
+      });
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('never uses failed-rollback evidence to acquire repository or engine dot-directory authority', () => {
+    const paths = ['.git/config', '.fc/state.json', 'nested/.git/config', 'nested/.fc/state.json'];
+    const { input } = setup(paths);
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
+    try {
+      for (const path of paths) {
+        mkdirSync(join(project, path, '..'), { recursive: true });
+        writeFileSync(join(project, path), 'protected content');
+      }
+      recordFailedRollbacks(input.runId, paths);
+      expect(scheduler.decideScopeRevision({ ...input, snapshot })).toMatchObject({
+        accepted: false, authorizedPaths: [], rejectedPaths: paths,
+      });
+      expect(scheduler.scopeContainsPath(['**'], '.git/config')).toBe(false);
+      expect(scheduler.scopeContainsPath(['**'], '.fc/state.json')).toBe(false);
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('withholds engine carrier aliases even when their content matches a recorded failed rollback', () => {
+    const paths = ['.carrier-link', '.carrier-inode'].map(name => ['node_modules', name].join('/'));
+    const { created, input } = setup(paths);
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
+    try {
+      mkdirSync(join(project, 'node_modules'));
+      const carrier = join(created.runDirPath, 'run.json');
+      symlinkSync(carrier, join(project, paths[0]));
+      linkSync(carrier, join(project, paths[1]));
+      recordFailedRollbacks(input.runId, paths);
+      expect(scheduler.decideScopeRevision({ ...input, snapshot })).toMatchObject({
+        accepted: false, authorizedPaths: [], rejectedPaths: paths,
+      });
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
   it.each(['run', 'stage', 'attempt', 'digest', 'malformed'] as const)('never partially accepts an invalid %s binding', (kind) => {

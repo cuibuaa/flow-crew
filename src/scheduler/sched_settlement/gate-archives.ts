@@ -261,8 +261,8 @@ function reportedBlockerNotice(runDirPath: string, authorIds: readonly string[])
     'REPORTED BLOCKER: each author below answered "blocked" instead of delivering, with this stated reason and evidence:',
     ...reports,
     'Judge each blocker from your own reproduction, not from the author\'s account:',
-    '- Real, and the brief does not accept a blocked report as a valid outcome: reject with repairability "irreparable", say in the reason that the blocker is confirmed, and give evidence that reproduces it. The run then ends escalated for the operator.',
-    '- Not real: reject with repairability "repairable" and findings that show how the brief can be met; the repair then has to do that work.',
+    '- A confirmed blocker does not establish irreparability. If the brief is unmet and a repair or accepted scope revision can resolve the blocker, reject with repairability "repairable" and findings showing that route. Engine enforcement or a scope denial alone is not evidence that delivery is impossible.',
+    '- Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief; explain why the blocker needs operator action. The run then ends escalated for the operator.',
     '- Pass only if every assigned criterion holds, for instance because the brief explicitly accepts a blocked report as a valid outcome.',
   ].join('\n');
 }

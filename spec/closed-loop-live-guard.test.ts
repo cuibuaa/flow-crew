@@ -14,13 +14,17 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { stringify } from 'yaml';
 import type { Adapter } from '../src/adapters/base.js';
 import {
   LiveConstraintGuard,
   acquireAttributableWriterLease,
 } from '../src/live-constraint-guard.js';
 import { loadProjectDefaults } from '../src/config.js';
-import { scopePathDigest } from '../src/runtime-negotiation.js';
+import { runProjectValidationBaseline } from '../src/project-validation.js';
+import { publishConstraintDecision, scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
+import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
+import { readmitScopeContinuation } from '../src/scheduler/sched_scope/stage-group.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
   createRun,
@@ -149,6 +153,107 @@ function seedInitializedGitlink(): string {
 }
 
 describe('portable live constraint guard', () => {
+
+  it.each([
+    { label: 'nested hidden dependency copy', scope: ['**', 'node_modules' + '/', '.venv/'], parent: ['docs', '.comparison', 'node_modules'].join('/') },
+    { label: 'root dependency dotfiles', scope: ['**'], parent: 'node_modules' },
+    { label: 'narrow capability', scope: ['src/allowed.ts'], parent: ['docs', '.comparison', 'node_modules'].join('/') },
+  ])('recovers $label through scope readmission, cleanup and independent gated repair', { timeout: 30_000 }, async ({ scope, parent }) => {
+    seedProject();
+    mkdirSync(join(projectDir, parent), { recursive: true });
+    writeFileSync(join(projectDir, parent, 'operator-owned.txt'), 'pre-existing dependency\n');
+    writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'scope-recovery-fixture', private: true, packageManager: 'npm@10.0.0',
+      scripts: { test: 'node -e "process.exit(0)"' } }));
+    const { config } = workflowFixture(scope);
+    config.defaults.max_retries = 1;
+    config.stages.push({ ...config.stages[0], id: 'review', scope: [], is_gate: true,
+      depends_on: ['writer'], artifact_contract: fixtureArtifactContract('review', true) },
+    { ...config.stages[0], id: 'repair', depends_on: ['review'], retry_to: ['review'] });
+    config.dispatch = config.stages;
+    config.stages = [{ ...config.stages[0], id: 'plan', scope: [], dynamic_dispatch: true,
+      artifact_contract: fixtureArtifactContract('plan') }];
+    const yaml = stringify(config);
+    const created = createRun(projectDir, config.name, yaml, config.stages.map(stage => stage.id));
+    const baseline = await runProjectValidationBaseline(projectDir);
+    expect(baseline.results.find(result => result.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+    writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
+      version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline,
+    }));
+    const state = readRunState(projectDir, created.runId);
+    state.maxRetries = 1;
+    state.autoApprove = true;
+    writeRunState(projectDir, created.runId, state);
+    const paths = [`${parent}/.package-lock.json`, `${parent}/.bin/tool`];
+    const calls: string[] = [];
+    let writerCalls = 0, reviews = 0;
+    let denied = false;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+      calls.push(opts.stageId);
+      if (opts.stageId === 'review') {
+        reviews++;
+        const pass = !denied && reviews > 1;
+        writeFileSync(join(opts.runDir, 'verdict_review.json'), JSON.stringify({ pass,
+          reason: denied ? 'cleanup authority denied' : pass ? 'repair verified' : 'technical defect reproduced',
+          ...(!pass ? { repairability: { version: 1, disposition: denied ? 'irreparable' : 'repairable',
+            evidence: denied ? 'durable scope denial' : 'source still needs repair' } } : {}),
+        }));
+        return fixtureResult({ output: 'independent review', exitCode: 0, duration_ms: 1 }, opts);
+      }
+      if (opts.stageId === 'repair') {
+        writeFileSync(join(projectDir, 'src/allowed.ts'), 'repaired\n');
+        return fixtureResult({ output: 'repaired technical defect', exitCode: 0, duration_ms: 1,
+          writes: ['src/allowed.ts'], writeAttribution: 'structured' }, opts);
+      }
+      writerCalls++;
+      if (writerCalls === 1) {
+        mkdirSync(join(projectDir, parent, '.bin'), { recursive: true });
+        writeFileSync(join(projectDir, paths[0]), 'temporary dependency metadata\n');
+        symlinkSync('../.package-lock.json', join(projectDir, paths[1]));
+        return fixtureResult({ output: 'temporary comparison created', exitCode: 0, duration_ms: 1,
+          writes: paths, writeAttribution: 'structured' }, opts);
+      }
+      if (writerCalls === 2) {
+        expect(prompt).toContain('Do not rewrite those paths unless a scope revision is accepted');
+        const directory = join(opts.runDir, 'stages', opts.stageId);
+        const requestId = 'recover-comparison';
+        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({ version: 1,
+          kind: 'scope_revision', requestId, runId: created.runId, stageId: opts.stageId,
+          attemptIndex: opts.attemptIndex, requestedPaths: paths, pathDigest: scopePathDigest(paths),
+          reason: 'remove the temporary comparison artifacts recorded by the failed rollback' }));
+        const decision = await waitForDecision(directory, requestId);
+        denied = decision.accepted !== true;
+        return fixtureResult({ output: denied ? JSON.stringify({ status: 'blocked', summary: 'cleanup authority denied',
+          files_modified: [], checks: [], caveats: ['Failed rollback requires accepted cleanup authority'] })
+          : 'authority accepted; await readmission', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+      }
+      expect(prompt).toContain('# Accepted scope revision');
+      for (const path of paths) rmSync(join(projectDir, path));
+      writeFileSync(join(projectDir, 'src/allowed.ts'), 'technical defect\n');
+      return fixtureResult({ output: 'comparison removed', exitCode: 0, duration_ms: 1,
+        writes: [...paths, 'src/allowed.ts'], writeAttribution: 'structured' }, opts);
+    } };
+    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined,
+      join(projectDir, 'config/agents'), created.runId, 'Recover temporary comparison and deliver reviewed source.', true);
+    const deltas = readdirSync(created.runDirPath).filter(name => /^validation_delta_review.*\.json$/.test(name));
+    expect(deltas.length).toBeGreaterThan(0);
+    for (const name of deltas) expect(JSON.parse(readFileSync(join(created.runDirPath, name), 'utf8')).pass).toBe(true);
+    expect(final.status).toBe('complete');
+    expect(denied).toBe(false);
+    expect(writerCalls).toBe(3);
+    expect(calls.slice(-3)).toEqual(['review', 'repair', 'review']);
+    for (const path of paths) expect(existsSync(join(projectDir, path))).toBe(false);
+    expect(readFileSync(join(projectDir, parent, 'operator-owned.txt'), 'utf8')).toBe('pre-existing dependency\n');
+    expect(readFileSync(join(projectDir, 'operator-note.txt'), 'utf8')).toContain('pre-existing dirt');
+    const directory = join(created.runDirPath, 'stages/writer');
+    const audits = readdirSync(directory).filter(name => /^constraint_audit_attempt_\d+\.json$/.test(name))
+      .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')));
+    expect(audits[0].liveIncidents).toEqual(expect.arrayContaining(paths.map(path => expect.objectContaining({
+      path, restored: false, rollbackFailure: expect.stringContaining('preimage absence was not observed'),
+    }))));
+    expect(audits.at(-1).liveIncidents).toEqual([]);
+    expect(readFileSync(join(projectDir, 'src/allowed.ts'), 'utf8')).toBe('repaired\n');
+  });
 
   it.each([
     { label: 'non-empty', scope: ['src/allowed.ts'] },
@@ -302,6 +407,41 @@ describe('portable live constraint guard', () => {
         }));
       }
     }
+  });
+
+  it('retains a failed rollback as history instead of aborting its admitted recovery in the same batch', async () => {
+    seedProject();
+    const writer = StageConfigSchema.parse(workflowFixture([]).config.stages[0]);
+    const created = createRun(projectDir, 'scope-recovery', '', ['writer']);
+    const context = createScopeBatchContext(projectDir, [writer], undefined, created.runId);
+    const parent = join(projectDir, 'docs', '.comparison', 'node_modules');
+    const path = ['docs', '.comparison', 'node_modules', 'file.txt'].join('/');
+    mkdirSync(parent, { recursive: true });
+    writeFileSync(join(projectDir, path), 'temporary comparison');
+    const { createSchedulerLiveConstraintGuardFactory } = createLiveGuardFactory({ transientVitestOutputScopes: () => [] });
+    const scan = (stage: typeof writer, attemptIndex: number) => {
+      const guard = createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId: created.runId, context })!({
+        attemptIndex, attemptStartedAt: new Date().toISOString() });
+      const monitor = guard.beginInvocation(1, () => {});
+      monitor.observePaths([path]);
+      return monitor;
+    };
+    expect((await scan(writer, 1).finish()).incidents).toContainEqual(expect.objectContaining({
+      path, restored: false, unrestoredContent: expect.objectContaining({ state: 'present', type: 'file' }),
+    }));
+    const request: ScopeRevisionRequestV1 = { version: 1, kind: 'scope_revision', requestId: 'recover',
+      requestedBy: 'stage', runId: created.runId, stageId: 'writer', attemptIndex: 1,
+      requestedPaths: [path], pathDigest: scopePathDigest([path]), reason: 'clean up the recorded comparison' };
+    const decision = decideScopeRevision({ request, stage: writer, priorScope: [], activePeers: [],
+      projectDir, runId: created.runId, attemptIndex: 1, snapshot: context.snapshot });
+    expect(decision.accepted).toBe(true);
+    publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/writer'), request,
+      decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
+    const revised = readmitScopeContinuation(writer, [writer], context.activeStageIds, created.runDirPath, context)!;
+    const monitor = scan(revised, 2);
+    rmSync(join(projectDir, path));
+    expect((await monitor.finish()).incidents).toEqual([]);
+    expect(context.liveViolations[0]).toMatchObject({ path, restored: false });
   });
 
   it('keeps a clean initialized gitlink intact during an explicit read-only stage', { timeout: 20_000 }, async () => {
