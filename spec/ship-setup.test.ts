@@ -1235,6 +1235,30 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(noReadyRecord()).toBe(true);
   });
 
+  it('records a project command that cannot run here while the others run, and reaches READY', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const runner = vi.fn<ValidationCommandRunner>(({ role }) => role === 'test'
+      ? { exitCode: 127, stderr: 'sh: karma: command not found' }
+      : { exitCode: 0, stdout: 'ok' });
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      blockers: [],
+      validationBaseline: {
+        results: expect.arrayContaining([
+          expect.objectContaining({ role: 'build', state: 'passed' }),
+          expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127 }),
+        ]),
+      },
+    });
+    expect(noReadyRecord()).toBe(false);
+  });
+
   it('materializes a bare directory named in the explicit inputs list', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     writeFileSync(join(fixture.project, 'dependency_cache', 'tool.js'), 'export {};\n', 'utf-8');

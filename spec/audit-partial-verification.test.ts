@@ -234,6 +234,15 @@ describe('partial failure evidence audit', () => {
     expect(testDelta(unknownBaseline, testResult(unknownBaseline))).toMatchObject({
       state: 'pass', reason: expect.stringContaining('cannot show a regression'),
     });
+    const unlaunched: ValidationCommandResult = {
+      role: 'test', state: 'launch_error', exitCode: 127, durationMs: 1, output: 'sh: karma: not found',
+      failureIdentifiers: [], failureIdentity: 'unknown',
+    };
+    const unlaunchedBaseline = { ...unknownBaseline, results: [unlaunched] };
+    expect(testDelta(unlaunchedBaseline, unlaunched)).toMatchObject({ state: 'pass', reason: expect.stringContaining('cannot show a regression') });
+    expect(testDelta(unlaunchedBaseline, passed)).toMatchObject({ state: 'pass' });
+    expect(testDelta(unlaunchedBaseline, completeNew)).toMatchObject({ state: 'unresolved', reason: 'Baseline was not executable/configured' });
+    expect(testDelta(greenBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
     expect(testDelta(completeBaseline, testResult(unknownBaseline))).toMatchObject({
       state: 'unresolved', reason: 'Current failure identity/count is unavailable',
     });

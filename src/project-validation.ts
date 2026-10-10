@@ -1120,6 +1120,11 @@ export async function runProjectValidationBaseline(
 }
 
 /** Compare a later validation result with its recorded baseline, never assuming unknown means zero. */
+/** A run of a configured command that produced nothing to compare: it could not launch, or failed unidentifiably. */
+function unmeasured(result: ValidationCommandResult): boolean {
+  return (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
+}
+
 export function evaluateValidationDelta(
   baseline: ProjectValidationBaseline,
   current: ValidationCommandResult[],
@@ -1167,21 +1172,21 @@ export function evaluateValidationDelta(
       // unresolved made every gate on a build-less/lint-less project unpassable.
       return { role: prior.role, state: 'pass', reason: 'Role is not configured in the baseline or now', newFailureIdentifiers: [] };
     }
-    if (prior.state !== FAILED_VALIDATION_STATE) {
-      return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
-    }
     if (next.state === 'passed') {
       return { role: prior.role, state: 'pass', reason: 'The red baseline improved to green', newFailureIdentifiers: [] };
     }
-    if (next.state === FAILED_VALIDATION_STATE && next.failureIdentity === 'unknown' && prior.failureIdentity === 'unknown') {
+    if (unmeasured(prior) && unmeasured(next)) {
       // Neither run produced a comparable result, so nothing here can show a regression; treating it as unresolved
       // parked every run whose environment cannot run the command at all, such as a browser suite without a browser.
       return {
         role: prior.role,
         state: 'pass',
-        reason: 'Failed without identifiable failures at baseline and now, so this command cannot show a regression here; the gate judges the change by its own checks',
+        reason: 'Could not run or failed without identifiable failures at baseline and now, so this command cannot show a regression here; the gate judges the change by its own checks',
         newFailureIdentifiers: [],
       };
+    }
+    if (prior.state !== FAILED_VALIDATION_STATE) {
+      return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
     }
     if (next.state !== FAILED_VALIDATION_STATE || next.failureIdentity === 'unknown') {
       return { role: prior.role, state: 'unresolved', reason: 'Current failure identity/count is unavailable', newFailureIdentifiers: [] };

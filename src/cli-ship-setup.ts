@@ -2366,18 +2366,18 @@ export async function runShipSetup(
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,
       }]
     : [];
-  validationBlockers.push(...validationBaseline.results
-    .filter((result) => result.state === 'launch_error')
-    .map((result): ShipSetupBlockerInput => {
-      const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
-      const declaration = command?.provenance?.source === 'brief'
-        ? ` declared at ${command.provenance.evidencePath}`
-        : '';
-      return {
-        phase: 'validation',
-        reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${declaration}: ${result.reason ?? 'command ended without an exit code'}`,
-      };
-    }));
+  // A project command that cannot run here while others do is an environment gap the baseline records, and it cannot
+  // show a regression; a declared command that cannot launch, or a project none of whose commands launch, is the
+  // operator's to correct.
+  const noneLaunched = validationBaseline.results.every((result) => result.state !== 'passed' && result.state !== 'failed');
+  validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
+    const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
+    if (result.state !== 'launch_error' || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
+    return [{
+      phase: 'validation',
+      reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${command?.provenance?.source === 'brief' ? ` declared at ${command.provenance.evidencePath}` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
+    }];
+  }));
   if (validationBlockers.length > 0) return refuse(validationBlockers);
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,
