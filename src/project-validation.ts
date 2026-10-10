@@ -979,7 +979,7 @@ function criterionFor(result: ValidationCommandResult): ValidationGateCriterion 
         ? failureEvidence === 'partial'
           ? `${result.role} failed with partial evidence: retained failing identifiers are a lower bound and any observed count is not a proven whole-run count; a later failure remains unresolved because red-to-red comparisons require complete evidence. ${result.reason ?? 'Validation output was incomplete'}`
           : `${result.role} may improve, but may not add a failing identifier or exceed the baseline failure count${result.reason ? `. ${result.reason}` : ''}`
-        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure is unresolved, never treated as zero. ${result.reason ?? 'Failure identification did not record a cause'}`,
+        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure with identifiable failures is unresolved, never treated as zero, and one that again has none cannot show a regression. ${result.reason ?? 'Failure identification did not record a cause'}`,
     };
   }
   return {
@@ -1169,6 +1169,16 @@ export function evaluateValidationDelta(
     }
     if (next.state === 'passed') {
       return { role: prior.role, state: 'pass', reason: 'The red baseline improved to green', newFailureIdentifiers: [] };
+    }
+    if (next.state === FAILED_VALIDATION_STATE && next.failureIdentity === 'unknown' && prior.failureIdentity === 'unknown') {
+      // Neither run produced a comparable result, so nothing here can show a regression; treating it as unresolved
+      // parked every run whose environment cannot run the command at all, such as a browser suite without a browser.
+      return {
+        role: prior.role,
+        state: 'pass',
+        reason: 'Failed without identifiable failures at baseline and now, so this command cannot show a regression here; the gate judges the change by its own checks',
+        newFailureIdentifiers: [],
+      };
     }
     if (next.state !== FAILED_VALIDATION_STATE || next.failureIdentity === 'unknown') {
       return { role: prior.role, state: 'unresolved', reason: 'Current failure identity/count is unavailable', newFailureIdentifiers: [] };

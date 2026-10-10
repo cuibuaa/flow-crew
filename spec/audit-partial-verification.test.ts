@@ -231,6 +231,12 @@ describe('partial failure evidence audit', () => {
     expect(testDelta(unknownBaseline, completeNew)).toMatchObject({
       state: 'unresolved', reason: 'Baseline failure identity/count was unavailable',
     });
+    expect(testDelta(unknownBaseline, testResult(unknownBaseline))).toMatchObject({
+      state: 'pass', reason: expect.stringContaining('cannot show a regression'),
+    });
+    expect(testDelta(completeBaseline, testResult(unknownBaseline))).toMatchObject({
+      state: 'unresolved', reason: 'Current failure identity/count is unavailable',
+    });
     expect(testDelta(completeBaseline, completeSame)).toMatchObject({ state: 'pass' });
     expect(testDelta(completeBaseline, completeNew)).toMatchObject({
       state: 'regression', newFailureIdentifiers: ['spec/new.test.ts'],
