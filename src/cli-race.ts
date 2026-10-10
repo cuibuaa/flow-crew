@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { runsRoot } from './store.js';
+import { RUN_STATUS, runsRoot } from './store.js';
 
 /** A candidate as the decision sees it. */
 export interface RaceCandidate {
@@ -34,7 +34,7 @@ export interface RaceDecision {
  * two orders disagree the judgment is position-driven, so the candidate whose own gate needed fewer repairs is kept.
  */
 export function decideRace(candidates: readonly RaceCandidate[], judgments: readonly RaceJudgment[]): RaceDecision {
-  const complete = candidates.filter((c) => c.status === 'complete');
+  const complete = candidates.filter((c) => c.status === RUN_STATUS.COMPLETE);
   if (complete.length === 0) return { basis: 'none-complete', reason: `no candidate completed (${candidates.map((c) => `${c.label}=${c.status}`).join(', ')})` };
   if (complete.length === 1) return { choice: complete[0].label, basis: 'only-complete', reason: `only ${complete[0].label} completed` };
   // A judgment names the preferred candidate by the letter it was shown under; map it back to the candidate.
@@ -110,7 +110,7 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
     label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, repairs: runs[i]?.repairs ?? 0,
   }));
   const judgments: RaceJudgment[] = [];
-  if (candidates.every((c) => c.status === 'complete')) {
+  if (candidates.every((c) => c.status === RUN_STATUS.COMPLETE)) {
     const exclude = [...new Set(runs.flatMap((r) => r?.declaredOutputs ?? []))];
     const diffs = targets.map((t) => {
       const d = deps.diff(t, base, exclude);
