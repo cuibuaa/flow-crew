@@ -91,7 +91,10 @@ describe('race command', () => {
 });
 
 describe('race candidate instructions', () => {
-  const instruction = readFileSync('docs/race-diverse/inputs/restate-instruction.txt', 'utf-8');
+  // Verbatim from the evidence (docs/race-diverse/inputs/restate-instruction.txt, gitignored, so not read here).
+  const instruction = "Before changing any code, write down in one or two sentences the observable behaviour the task's author "
+    + "expects once it is resolved, using the author's own words wherever they state it. Then make the change deliver "
+    + 'exactly that behaviour.\n\n';
   // No trailing newline: appended guidance must not continue the last report criterion.
   const brief = '# Goal\nThe implementation must import `probe.ts`.\n\n# What the report must show\n1. The requested behaviour works.';
   let scratch: string, args: string[];
