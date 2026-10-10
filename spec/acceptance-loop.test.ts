@@ -523,6 +523,7 @@ describe('compressed acceptance loop', () => {
     expect(base).toContain('say briefly what you did not examine and why');
     expect(base).not.toContain('explore risks exhaustively');
     expect(base).toContain('Check each rejected finding against the repair diff');
+    expect(base).toContain('Reject again only for a rejected finding the repair did not resolve');
     expect(base).toContain('do not open unrelated audit dimensions');
     expect(planner).toContain('returns concrete repairable findings');
     expect(planner).toContain('Do NOT turn the brief into a finite planner-owned checklist');
@@ -530,6 +531,7 @@ describe('compressed acceptance loop', () => {
     expect(qa).not.toContain('Make each claim reproducible');
     expect(qa).not.toContain('write NEW tests');
     expect(preamble).toContain('Check each rejected finding against the repair diff');
+    expect(preamble).toContain('Reject again only for a rejected finding the repair did not resolve');
     expect(preamble).toContain('The engine re-runs the configured validation for this gate');
     expect(preamble).toContain('untruncated repair-round diff');
     expect(preamble).not.toContain('Write NEW and DIFFERENT tests');

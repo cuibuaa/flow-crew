@@ -306,6 +306,7 @@ export function buildGateDispatchPreamble(input: {
     ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
     '',
     'Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. The engine re-runs the configured validation for this gate.',
+    'Reject again only for a rejected finding the repair did not resolve, a regression the repair introduced, or a failure that a user of the outcome the brief describes would meet; record any other difference you find as a stated limitation in the verdict and pass.',
     'Do not treat a repair summary or the existence of changed code as proof.',
   ].join('\n');
 }
