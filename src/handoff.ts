@@ -100,7 +100,7 @@ function buildDependencyContext(opts: HandoffOpts): string {
     try { const source = readStageStatus(opts.projectDir, opts.runId, depId); status = source.status; artifacts = source.artifacts ?? []; } catch { /* absent history */ }
     const output = readStageOutput(opts.projectDir, opts.runId, depId);
     const heading = visibility === 'minimal' ? `## Previous stage: ${depId}` : `## Context from stage: ${depId}`;
-    const candidate = `${heading}\nStatus: ${status}\n${visibility === 'minimal' ? 'Files changed' : 'Artifacts'}: ${artifacts.join(', ') || 'none'}\n${visibility === 'minimal' ? 'Verify the changes are correct.' : `Summary:\n${output}`}`;
+    const candidate = `${heading}\nStatus: ${status}\nArtifacts: ${artifacts.join(', ') || 'none'}\n${visibility === 'minimal' ? 'Review the change against the brief.' : `Summary:\n${output}`}`;
     if (Buffer.byteLength(candidate) <= MAX_PREDECESSOR_CONTEXT_BYTES) return candidate;
     const header = `${heading}\nStatus: ${status}\nInline predecessor block: ${Buffer.byteLength(candidate)} UTF-8 bytes; limit: ${MAX_PREDECESSOR_CONTEXT_BYTES} bytes.\nComplete predecessor stage directory: ${join(opts.runDir, 'stages', depId)}\nArtifact names omitted from this prompt: ${artifacts.length}. Read status.json for complete status and artifacts.\nComplete output: output.md (${Buffer.byteLength(output)} UTF-8 bytes).\nInline output excerpt (head and tail when truncated):`;
     const budget = Math.min(visibility === 'minimal' ? 512 : MAX_PREDECESSOR_CONTEXT_BYTES, Math.max(0, MAX_PREDECESSOR_CONTEXT_BYTES - Buffer.byteLength(header) - 1));
