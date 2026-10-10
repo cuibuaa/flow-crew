@@ -278,13 +278,13 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
           level: 'info', detail,
         });
       }
-      const activeStageIds = new Set(selected.map((stage) => stage.id));
       const context = createScopeBatchContext(
         projectDir,
         selected.map((stage) => declaredStageById.get(stage.id) ?? stage),
         snapshot,
         runId,
       );
+      const activeStageIds = context.activeStageIds;
       const redispatch: StageConfig[] = [];
       const wave = await runStageWave(selected, {
         activeStageIds,

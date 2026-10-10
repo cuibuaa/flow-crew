@@ -271,17 +271,9 @@ describe('reality gate parser and aggregation', () => {
   it('tells planners to use portable tools and probe optional non-standard commands', () => {
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
 
-    expect(planner).toContain('MUST be portable');
-    expect(planner).toContain('POSIX baseline tools');
-    for (const command of ['grep', 'sed', 'awk', 'test', 'node']) {
-      expect(planner).toContain(command);
-    }
-    for (const command of ['rg', 'jq', 'fd', 'yq']) {
-      expect(planner).toContain(command);
-    }
-    expect(planner).toContain('command -v');
-    expect(planner).toContain('skipped-check');
-    expect(planner).toContain('exit 0 rather than failing the run');
+    expect(planner).toContain('portable POSIX tools and node');
+    expect(planner).toContain('optional tools require an availability');
+    expect(planner).toContain('guard and a skipped-check explanation rather than failure when absent');
   });
 });
 

@@ -520,14 +520,15 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(base).toContain('check every assigned criterion');
-    expect(base).toContain('say briefly what you did not examine and why');
+    expect(base).toContain('Say briefly what you did not examine and why');
     expect(base).not.toContain('explore risks exhaustively');
-    expect(base).toContain('Check each rejected finding against the repair diff');
-    expect(base).toContain('Reject again only for a rejected finding the repair did not resolve');
-    expect(base).toContain('do not open unrelated audit dimensions');
+    expect(base).toContain('The repair diff and durable rejected verdict are the evidence');
+    expect(base).toContain('reject again only for an unresolved');
+    expect(base).toContain('other differences are stated limitations');
+    expect(base).toContain('a failure a user of the brief\'s outcome would meet');
     expect(planner).toContain('returns concrete repairable findings');
-    expect(planner).toContain('Do NOT turn the brief into a finite planner-owned checklist');
-    expect(qa).toContain('Size the review to the change');
+    expect(planner).toContain('judgement with its own finite checklist');
+    expect(qa).toContain('brief\'s intended outcome');
     expect(qa).not.toContain('Make each claim reproducible');
     expect(qa).not.toContain('write NEW tests');
     expect(preamble).toContain('Check each rejected finding against the repair diff');

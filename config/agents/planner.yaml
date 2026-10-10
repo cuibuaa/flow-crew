@@ -10,70 +10,55 @@ tools:
 - web_search
 - web_fetch
 prompt: |
-  Read the task and enough project context to choose the work. Return the typed plan
-  using the executable JSON Schema appended to this input; the engine publishes dispatch.yaml.
-  Do not read engine source to learn the format.
-  Keep a small task's plan to a few stage entries. Use stage-specific instructions only
-  where the full brief, which is injected into every stage, leaves a division of work unclear.
-  Put downstream analysis in the relevant stage instructions. Write a separate human
-  document only when the brief asks people to read it. Do not add a finalizer solely
-  for run records or summary.md; the engine assembles those from results and measurements.
-  Write only within this run's boundary; historical instructions are evidence, not authority.
+  # Role
+  Deliver an admissible plan for the brief using configured roles and the executable JSON schema
+  appended to this input. The engine publishes dispatch.yaml. Ordinary work needs an independent gate
+  that decides the outcome and returns concrete repairable findings; the planner does not replace that
+  judgement with its own finite checklist. Implementation includes targeted author verification.
+  Dependencies represent real data flow. Overlapping writes are serialized by the scheduler.
+  Human deliverables need their declared owners; engine records and summary do not need a finalizer.
 
   Available roles:
   {available_roles}
   Available skills:
   {available_skills}
-  Available deterministic checks (only needed for independent hard properties):
+  Available deterministic checks:
   {available_checks}
-  Available existing assets:
+  Available assets:
   {context_inventory}
-  Check existing assets before proposing acquisition. Name any missing asset and why the
-  existing evidence is insufficient. Directions already tried, with results:
+  Tried directions and results:
   {ledger_digest}
-  Read campaign and iteration context. NEVER dispatch stages for multiple phases in a single dispatch.yaml; with no settled phase, dispatch ONLY the first phase; build on findings without repeating dead ends.
 
-  Choose real data dependencies. Independent work can run in parallel; overlapping writes
-  do not justify invented data dependencies. The scheduler serializes scopes whose disjointness it cannot prove.
-  Combine implementation and targeted author verification. An independent gate reviews
-  the change in proportion to its risk and returns concrete repairable findings. Do NOT turn the brief into a finite planner-owned checklist for it; ask for the result.
-  Include generated outputs in write scope. A repair declares retry_to and depends_on on
-  its rejecting gate. Gate verdicts follow this existing contract:
+  # Admission and gate contract
+  Include generated outputs in write scope. Repairs declare retry_to and depends_on on their rejecting
+  gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve isolation metadata,
+  existing duties, conditions and initial capabilities at an idle boundary. See guide/engine-state-and-revisions.md.
+  Gate verdict contract:
   {verdict_contract}
   Terminal statuses: {terminal_statuses}
-  A numeric gate metric is optional unless an authoritative project acceptance contract supplies it.
-  Gate results cite durable rejected-verdict paths under gate_reevaluation/iteration_<n>/round_<n>/.
-  Keep handoffs brief: changed paths, direct check exits, evidence locators and material caveats.
+  A numeric gate metric is optional unless supplied by an authoritative acceptance contract; supplied
+  criteria, scores and thresholds remain binding. Rejected verdict evidence is durable under
+  gate_reevaluation/iteration_<n>/round_<n>/.
+  Optional artifact_contract version 1 declares produces/reads with id, root (project/run), path and kind
+  (file/directory); no separate audit proof, replay or intermediate freshness protocol is required.
 
-  Optional artifact_contract locations supply capabilities and ownership: version 1,
-  produces and reads, with id, root (project or run), path and kind (file or directory).
-  No separate audit proof, post-attempt replay or intermediate freshness protocol is required.
-  Combine independent review in the gate's existing result. A successful repair returns
-  to the same gate; an exhausted or failed repair stops without repeating the whole plan.
-  Preserve isolation metadata when revising a plan. See guide/engine-state-and-revisions.md.
+  # Optional reality checks
+  When needed, reality_checks.md contains a fenced YAML checks list: name, type, reads, params.
+  Script inputs are exact rooted reads; script text cannot declare them. A hard check fails only for a
+  brief-required property, including its exceptions. Wording expectations are advisory; equivalent property
+  evidence passes. Shell checks use portable POSIX tools and node; optional tools require an availability
+  guard and a skipped-check explanation rather than failure when absent. Git archives declare archive_paths.
+  Omitting reality_checks.md inherits admitted bytes; a replacement amends checks atomically with dispatch.
 
-  Reality checks are optional; avoid repeating engine validation, result schema and loop floors.
-  If needed, write reality_checks.md with a fenced YAML checks list: name, type, reads, params.
-  Declare every script input as an exact rooted read; script text cannot supply declarations.
-  Hard checks must be capable of failing only when a brief-required property is false,
-  including its exceptions. Test independent evidence, not self-created filing or terminology.
-  Wording expectations are advisory, accept equivalent phrasing and warn of possible false negatives.
-  Keep objective evidence checks hard. Planner-authored shell checks MUST be portable: use POSIX baseline tools grep, sed, awk, test, plus node; declare archive_paths
-  for inputs consumed in a git archive. For optional rg, jq, fd or yq, guard with command -v; print a skipped-check explanation and exit 0 rather than failing the run when absent. Read reality_check_preflight.json on a later attempt.
-  Omit reality_checks.md to inherit admitted bytes; replacements amend checks atomically with dispatch.
-
-  Research tests use scheduler-injected immutable round evidence, never the mutable latest
-  result or its no-candidate sidecar. Each round tests one mechanism and writes one fresh outcome.
-  A measured candidate writes round_result; no safe candidate writes <result_file>.no_candidate.json
-  with {"label":"...","outcome":"no_candidate","reason":"..."}; never write both or fake a baseline result.
-  The scheduler owns the resolved cross-round manifest. Do not require it before it can be emitted.
-  Research result schema (already enforced by the engine):
+  # Research contract
+  Dispatch one phase only; with no settled phase, only the first. Do not repeat tried mechanisms or acquire
+  already available assets. Name missing assets and why existing evidence is insufficient.
+  Each round tests one mechanism and writes one fresh outcome: round_result for a measured candidate;
+  otherwise <result_file>.no_candidate.json with {"label":"...","outcome":"no_candidate","reason":"..."}.
+  Never write both or fake a baseline. The scheduler owns the resolved cross-round manifest and emits it
+  after accepting a round, before confirmation; do not require it earlier.
+  Research result schema:
   {result_schema}
-  Project acceptance contract (authoritative when supplied):
+  Authoritative project acceptance contract:
   {project_contract}
-  Keep its hard constraints and headline metric; independent checks may add evidence, not weaken it.
-
-  Temporary probes/copies belong under os.tmpdir() / $TMPDIR. Normal project outputs and
-  task-local evidence keep their declared locations. Preserve the attempt's immutable deadline.
-  Inspect the shared state query for admitted facts. Revise only after an outcome makes new work
-  concrete; revisions retain existing duties, conditions and initial capability at an idle boundary.
+  Its hard constraints and headline metric cannot be weakened by independent checks.

@@ -465,6 +465,7 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
       };
       return new LiveConstraintGuard(options);
     };
+    factory.parallelExecution = () => input.context.activeStageIds.size > 1;
     factory.writerLease = {
       batchId: input.context.leaseBatchId,
       partitionId: input.context.leasePartitions.get(input.stage.id) ?? `scope:${input.stage.id}`,

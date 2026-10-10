@@ -47,22 +47,22 @@ describe('QA property-versus-means contract', () => {
     };
     expect(scenario.instruction).toContain('例如');
     expect(scenario.evidence).toContain('证明了性质');
-    expect(qa.prompt).toContain('Mechanize observable properties and hard numbers.');
-    expect(qa.prompt).toContain('cannot override equivalent evidence.');
-    expect(qa.prompt).toContain('cannot override equivalent evidence.');
-    expect(qa.prompt).toContain('property-vs-wording conflict');
-    expect(qa.prompt).toContain('originating sentence and property-vs-wording conflict');
-    expect(qa.prompt).toContain('passing property evidence');
+    const base = readFileSync(join(repositoryRoot, 'config', 'agents', '_base.md'), 'utf-8');
+    expect(base).toContain('Examples do not exclude equivalent property evidence');
+    expect(base).toContain('A wording/property conflict identifies its originating');
+    expect(base).toContain('sentence');
+    expect(qa.prompt).toContain('reproducible evidence');
   });
 
   it('keeps explicit exact means and measurable thresholds hard', () => {
     const qa = parseYaml(readFileSync(join(repositoryRoot, 'config', 'agents', 'qa.yaml'), 'utf-8')) as {
       prompt: string;
     };
-    expect(qa.prompt).toContain('Exact means are binding only when explicitly required as the criterion.');
-    expect(qa.prompt).toContain('explicit hard threshold or confirmed compatibility requirement.');
-    expect(qa.prompt).toContain('never waive an');
-    expect(qa.prompt).toContain('Make claims reproducible from durable evidence.');
+    const base = readFileSync(join(repositoryRoot, 'config', 'agents', '_base.md'), 'utf-8');
+    expect(base).toContain('unless the criterion explicitly requires that means');
+    expect(base).toContain('confirmed compatibility requirements remain binding');
+    expect(base).toContain('never invent a threshold or waive a supplied one');
+    expect(qa.prompt).toContain('reproducible evidence');
   });
 });
 

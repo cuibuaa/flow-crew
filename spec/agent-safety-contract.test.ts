@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const BASE_PROMPT_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', '_base.md');
@@ -46,5 +47,42 @@ describe('agent run-directory safety contract', () => {
 
   it('does not conflate harmless reads with state-changing mutation', () => {
     expect(safetySection()).not.toMatch(/never browse, list, or modify run directories/i);
+  });
+});
+
+describe('shipped role outcome contracts', () => {
+  const directory = resolve(BASE_PROMPT_PATH, '..');
+  const prompt = (role: string): string => parse(readFileSync(resolve(directory, `${role}.yaml`), 'utf8')).prompt;
+
+  it('retains all eleven roles, including the unused paper roles, without permanent parallel rules', () => {
+    const roles = readdirSync(directory).filter(file => file.endsWith('.yaml')).map(file => file.slice(0, -5)).sort();
+    expect(roles).toEqual(['ai_detector', 'campaign_planner', 'campaign_scout', 'coder', 'doc_reviewer', 'doc_writer', 'paper_reviewer', 'paper_writer', 'planner', 'qa', 'researcher']);
+    for (const text of [readFileSync(BASE_PROMPT_PATH, 'utf8'), ...roles.map(prompt)]) {
+      expect(text).not.toMatch(/git add \.|git commit -a|Keep diffs minimal|ONLY scope|at least 3 weaknesses/);
+    }
+  });
+
+  it('retains every paper review score and the zero-flag line without inventing score thresholds or findings', () => {
+    for (const role of ['paper_reviewer', 'ai_detector']) {
+      const text = prompt(role);
+      for (const score of ['Novelty', 'Rigor', 'Clarity', 'Soundness']) expect(text).toContain(score);
+      expect(text).toContain('1–10 score');
+      expect(text).toMatch(/no numerical[\s\S]*threshold/);
+      expect(text).toContain('missing or ambiguous thresholds');
+    }
+    expect(prompt('paper_reviewer')).toContain('Reproducibility');
+    expect(prompt('paper_reviewer')).toContain('no minimum count');
+    expect(prompt('ai_detector')).toContain('zero flagged sections');
+    expect(prompt('ai_detector')).toContain('Every quantitative claim must have a source');
+  });
+
+  it('gives criteria and required scores their own results and limits re-review rejection', () => {
+    const base = readFileSync(BASE_PROMPT_PATH, 'utf8');
+    expect(base).toContain('every assigned criterion and every score');
+    expect(base).toContain('Pass only when all meet their acceptance lines');
+    expect(base).toContain('never invent a threshold or waive a supplied one');
+    expect(base).toContain('regression introduced by the repair');
+    expect(base).toContain("failure a user of the brief's outcome would meet");
+    expect(base).toContain('other differences are stated limitations');
   });
 });

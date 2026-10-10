@@ -89,8 +89,8 @@ describe('FM Anomaly Detection Campaign — Multi-Phase Orchestration', () => {
   describe('Phase 1: First iteration — planner should dispatch only research', () => {
     it('planner prompt contains phase discipline instructions', () => {
       const plannerYaml = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
-      expect(plannerYaml).toContain('NEVER dispatch stages for multiple phases in a single dispatch.yaml');
-      expect(plannerYaml).toContain('dispatch ONLY the first phase');
+      expect(plannerYaml).toContain('Dispatch one phase only');
+      expect(plannerYaml).toContain('with no settled phase, only the first');
     });
 
     it('with no campaign history, phase progress shows nothing — planner must self-constrain', () => {

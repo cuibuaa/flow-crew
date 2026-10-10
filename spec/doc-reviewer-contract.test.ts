@@ -28,19 +28,20 @@ describe('doc reviewer design contract', () => {
 
     // A proposal that puts an unmotivated internal score in the primary view is
     // explicitly a finding, and every finding remains in the independently returned verdict.
-    expect(prompt).toContain('every element the design places in the primary view must be traceable');
-    expect(prompt).toContain('Include each violation below in the findings');
-    expect(prompt).toContain('Reject when critical inaccuracies or missing required sections remain');
-    expect(prompt).toContain("Return the scheduler's typed verdict");
+    expect(prompt).toContain('primary-view elements answer a stated user question or goal');
+    expect(prompt).toContain('Each violation is a finding');
+    expect(prompt).toContain('Reject for critical inaccuracies');
+    expect(prompt).toContain('or missing required sections');
+    expect(prompt).toContain("Return the scheduler's typed PASS/FAIL verdict");
     expect(prompt).not.toContain('ALWAYS write the verdict file');
     for (const standard of proposalStandards) expect(prompt).toContain(`- ${standard}:`);
   });
 
   it('does not apply proposal-only dimensions to README reviews', () => {
     const prompt = reviewerPrompt();
-    expect(prompt).toContain('Apply ONLY when the document under review');
-    expect(prompt).toContain('Do NOT apply these to READMEs,');
-    expect(prompt).toContain('parenthetical examples above are ILLUSTRATIVE, not criteria');
+    expect(prompt).toContain('apply only to proposed designs');
+    expect(prompt).toContain('not descriptions of existing systems (READMEs,');
+    expect(prompt).toContain('property, not an illustrative means');
   });
 
   it('keeps the seven operator read-through dimensions aligned with the UI self-check', () => {
@@ -55,7 +56,7 @@ describe('doc reviewer design contract', () => {
       'Uninterrupted primary reading flow',
     ];
 
-    expect(prompt).toContain('metric assertions are supporting evidence, never a substitute');
+    expect(prompt).toContain('Metric assertions support these properties; they do not replace them');
     for (const dimension of readThroughDimensions) expect(prompt).toContain(`- ${dimension}:`);
   });
 });

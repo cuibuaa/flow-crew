@@ -106,8 +106,8 @@ describe('planning and reality declaration admission', () => {
 
   it('carries a many-criterion first proposal with explicit coverage through admission', () => {
     const prompt = (parseYaml(readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf8')) as { prompt: string }).prompt;
-    expect(prompt).toContain('executable JSON Schema');
-    expect(prompt).toContain('Return the typed plan');
+    expect(prompt).toContain('executable JSON schema');
+    expect(prompt).toContain('Deliver an admissible plan');
     expect(prompt).toContain('engine publishes dispatch.yaml');
     const brief = ['# Task', '## Requirements', ...Array.from({ length: 12 }, (_, index) =>
       `${index + 1}. Requirement ${index + 1} must be implemented and checked.`)].join('\n');

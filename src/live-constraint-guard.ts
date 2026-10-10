@@ -515,6 +515,8 @@ export interface LiveConstraintGuardAttemptContext {
 
 export interface LiveConstraintGuardFactory {
   (attempt: LiveConstraintGuardAttemptContext): LiveConstraintGuard;
+  /** Scheduler-owned wave context, observed afresh for every adapter invocation. */
+  parallelExecution?: () => boolean;
   /** Scheduler proof consumed by runStage before the attempt begins. */
   writerLease?: WriterLeaseBinding;
 }

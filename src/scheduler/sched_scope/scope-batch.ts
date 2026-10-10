@@ -9,6 +9,8 @@ import { acceptedInheritedScope } from './scope-revisions.js';
 import { scopeContainsPath } from './path-capabilities.js';
 
 export interface ScopeBatchContext {
+  /** The selected wave, updated on child closure; shared by prompt and scope consumers. */
+  activeStageIds: Set<string>;
   snapshot: RepairRoundSnapshot;
   leaseBatchId: string;
   leasePartitions: Map<string, string>;
@@ -74,6 +76,7 @@ export function createScopeBatchContext(
     return [stage.id, `scope:${stage.id}:${digest}`];
   }));
   return {
+    activeStageIds: new Set(stages.map((stage) => stage.id)),
     snapshot: resolvedSnapshot,
     leaseBatchId,
     leasePartitions,

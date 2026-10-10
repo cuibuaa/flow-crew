@@ -94,7 +94,7 @@ export async function executeReadyBatch(
       undefined,
       runId,
     );
-    const activeScopeStageIds = new Set(toRun.map((stage) => stage.id));
+    const activeScopeStageIds = ordinaryScopeContext.activeStageIds;
     const wave = await runStageWave(toRun, {
       activeStageIds: activeScopeStageIds,
       monitorScope: (isComplete) => monitorScopeRevisionRequests({ selected: toRun, activeStageIds: activeScopeStageIds, projectDir, runId, context: ordinaryScopeContext, isComplete }),

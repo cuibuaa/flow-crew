@@ -173,9 +173,9 @@ describe('planner dispatch contract', () => {
   });
 
   it('loads a planner that returns the plan and carries downstream analysis in stage instructions', () => {
-    expect(readPlannerPrompt()).toContain('Return the typed plan');
-    expect(readPlannerPrompt()).toContain('Put downstream analysis in the relevant stage instructions');
-    expect(readPlannerPrompt()).toContain('Do not add a finalizer solely');
+    expect(readPlannerPrompt()).toContain('Deliver an admissible plan');
+    expect(readPlannerPrompt()).toContain('executable JSON schema');
+    expect(readPlannerPrompt()).toContain('engine records and summary do not need a finalizer');
     expect(readPlannerPrompt()).not.toContain('Write {run_dir}/dispatch.yaml');
     expect(readPlannerPrompt()).not.toContain('Write {run_dir}/tech_solution.md');
   });

@@ -25,7 +25,7 @@ export function planStageErrors(value: unknown): string[] {
 
 export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
-    + 'Return a JSON object {stages: [...]}; the engine publishes it in dispatch.yaml for existing consumers. This executable interface replaces older compulsory planning boilerplate.\n'
+    + 'Return a JSON object {stages: [...]}; the engine publishes it in dispatch.yaml for existing consumers.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
     + 'Supply id, configured role, and the project-relative scope needed for writes. Missing scope is closed. '
     + 'Omitted depends_on means a root. Use edges only for real data dependencies; stage instructions supplement the injected full brief. '
@@ -34,7 +34,6 @@ export function renderPlanInterface(): string {
     + 'The engine supplies empty artifact duties and each gate verdict when artifact_contract is omitted. '
     + 'Optional artifact contracts describe output/input locations for capabilities and ownership; they do not impose proof, replay or intermediate freshness duties. '
     + 'Put downstream analysis in stage instructions; human documents and their finalizer are needed only when the brief asks people to read them. The engine publishes run records and summary.md. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
-    + 'Check a draft without launching: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>. '
     + 'A sibling reality_checks.md is checked when present. Timeout/resource overrides remain retired.';
 }
 

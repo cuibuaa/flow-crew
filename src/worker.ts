@@ -142,6 +142,10 @@ export interface StageOpts {
 
 const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
+const PARALLEL_EXECUTION_BOUNDARY = '# Parallel execution boundary\n'
+  + 'Other stages share this wave. Do not revert or stage their edits. Never use git add . or git commit -a. '
+  + 'Shared git status or diff does not attribute changes to you; use your own changed-file record.';
+
 function inferAdapterName(adapter: Adapter): string | undefined {
   const name = adapter.constructor?.name;
   if (!name) return undefined;
@@ -828,6 +832,10 @@ async function runStageWithWriterLease(
       effectiveBudgetMs,
     });
     invocationIndex++;
+    // Keep cached roles topology-neutral, including retries after a peer closes.
+    const invocationRole = opts.liveConstraintGuardFactory?.parallelExecution?.()
+      ? { ...selectedRole, prompt: `${selectedRole.prompt}\n\n${PARALLEL_EXECUTION_BOUNDARY}` }
+      : selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
     const continuation = continuations.get(selectedAdapter);
     // A fresh child (including a failed-resume fallback) needs both its duties
@@ -847,15 +855,15 @@ async function runStageWithWriterLease(
       recordInvocationInput(opts.runDir, {
         runId: opts.runId, stageId: opts.stageId, attemptIndex, attemptStartedAt,
         invocationIndex: ++inputRecordIndex, boundary,
-        adapter: selectedRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
-        model: input.model ?? selectedRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
+        adapter: invocationRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
+        model: input.model ?? invocationRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
         resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: guidanceForExecution(deliveredGuidance, attemptIndex).map((entry) => entry.id),
       });
     };
     // input.md remains a compatible latest alias; immutable records carry exact inputs.
     writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
     if (!selectedAdapter.capturesInvocationInput) {
-      captureInput({ systemPrompt: selectedRole.prompt, userPrompt: effectiveInvocationPrompt,
+      captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
         resumeSessionId: continuation?.sessionId }, 'adapter');
     }
     const invocationAbortController = new AbortController();
@@ -1043,7 +1051,7 @@ async function runStageWithWriterLease(
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineWriteBoundary({ projectDir: opts.projectDir, runDir: opts.runDir,
         stageId: opts.stageId, isGate: opts.isGate, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract!, attemptIndex },
-      () => selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
+      () => selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
         timeout_ms: effectiveBudgetMs,
         workDir: opts.projectDir,
         runDir: opts.runDir,

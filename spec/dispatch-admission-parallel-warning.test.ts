@@ -56,7 +56,7 @@ describe('parallel scope dispatch admission', () => {
     ])).toEqual([]);
 
     const plannerPrompt = readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf-8');
-    expect(plannerPrompt).toContain('The scheduler serializes scopes whose');
+    expect(plannerPrompt).toContain('Overlapping writes are serialized by the scheduler');
     expect(selectRunnableBatch([stage('left', ['src/shared/**']), stage('right', ['src/shared/file.ts'])]).selected).toHaveLength(1);
   });
 });
