@@ -217,9 +217,11 @@ check('early shim exit cannot certify an orphaned agent as stopped', async () =>
     ].join('\n'), 'utf-8');
     const backend = new NodeSystemd(root, { shimPath: fakeShim, shellPath: '/bin/sh', startupGraceMs: 100 });
     await backend.runUnit({ unit, workingDirectory: root, command: shellJoin([process.execPath, '-e', '']) });
-    assert.equal(await waitUntil(() => existsSync(orphanPidPath)), true);
-    const orphanPid = Number.parseInt(readFileSync(orphanPidPath, 'utf-8'), 10);
-    assert.ok(Number.isSafeInteger(orphanPid) && orphanPid > 1);
+    // writeFileSync creates the file before it writes the pid, so existence alone can be observed with no content.
+    const readOrphanPid = () => existsSync(orphanPidPath) ? Number.parseInt(readFileSync(orphanPidPath, 'utf-8'), 10) : NaN;
+    assert.equal(await waitUntil(() => Number.isSafeInteger(readOrphanPid())), true);
+    const orphanPid = readOrphanPid();
+    assert.ok(orphanPid > 1);
     own(orphanPid, true);
     assert.equal(processIsAlive(orphanPid), true);
     const status = await waitForSettledStatus(backend, unit);
