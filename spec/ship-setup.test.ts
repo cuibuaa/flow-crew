@@ -262,7 +262,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const sentinel = join(fixture.target, 'foreign.txt');
     writeFileSync(sentinel, 'not created by this invocation\n');
     const preExisting = await runShipSetup(setupArgs(), { runGitCommand: runner });
-    expect(preExisting.state).toBe('refused');
+    // The mocked git lists this directory as the branch's worktree at the base, so setup reuses it without touching it.
+    expect(preExisting.state).toBe('ready');
     expect(readFileSync(sentinel, 'utf8')).toBe('not created by this invocation\n');
 
     rmSync(fixture.target, { recursive: true, force: true });
@@ -858,7 +859,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     ]);
   });
 
-  it('refuses UNKNOWN validation before READY when no command can be inferred', async () => {
+  it('reaches READY without engine validation when no command can be inferred and none is declared', async () => {
     writeBrief(['# Goal', 'Validate the repository.']);
     const git = vi.fn<GitWorktreeCreator>((request) => {
       mkdirSync(request.targetDir, { recursive: true });
@@ -873,20 +874,18 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     expect(runner).not.toHaveBeenCalled();
     expect(report).toMatchObject({
-      state: 'refused',
+      state: 'ready',
       validationBaseline: {
         discovery: { state: 'unknown', commands: [] },
         results: [
-          expect.objectContaining({ role: 'build', state: 'unresolved' }),
-          expect.objectContaining({ role: 'test', state: 'unresolved' }),
-          expect.objectContaining({ role: 'lint', state: 'unresolved' }),
+          expect.objectContaining({ role: 'build', state: 'not_configured', reason: expect.stringContaining('No recognized') }),
+          expect.objectContaining({ role: 'test', state: 'not_configured' }),
+          expect.objectContaining({ role: 'lint', state: 'not_configured' }),
         ],
       },
-      blockers: [expect.objectContaining({
-        phase: 'validation', reason: expect.stringContaining('Validation baseline is unknown'),
-      })],
+      blockers: [],
     });
-    expect(noReadyRecord()).toBe(true);
+    expect(noReadyRecord()).toBe(false);
   });
 
   it('defaults the source project to the injected current directory and reports human-readable delta criteria', async () => {

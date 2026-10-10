@@ -1012,17 +1012,20 @@ export async function runProjectValidationBaseline(
       ? discoverProjectValidation(root, fs)
       : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
+  // Nothing discovered and nothing declared leaves the engine without validation for this project, recorded as not
+  // configured like a project without a lint command; only an operator declaration that cannot be honoured is unresolved.
+  const unresolved = discovery.state === 'unknown' && (declaredCommands?.length ?? 0) > 0;
 
   for (const role of ROLES) {
     const command = discovery.commands.find((candidate) => candidate.role === role);
     if (!command) {
       results.push({
         role,
-        state: discovery.state === 'unknown' ? 'unresolved' : 'not_configured',
+        state: unresolved ? 'unresolved' : 'not_configured',
         durationMs: 0,
         output: '',
         failureIdentifiers: [],
-        failureIdentity: discovery.state === 'unknown' ? 'unknown' : 'none',
+        failureIdentity: unresolved ? 'unknown' : 'none',
         reason: discovery.state === 'unknown'
           ? discovery.reason ?? 'Validation baseline is unknown'
           : declaredCommands && declaredCommands.length > 0

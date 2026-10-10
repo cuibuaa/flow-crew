@@ -414,7 +414,7 @@ export interface DeclaredInputStabilityCheck {
 }
 
 export interface ShipSetupBlocker {
-  phase: 'source' | 'worktree' | 'target' | 'dependency' | 'validation' | 'record';
+  phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
   reason: string;
   repair: string;
   input?: string;
@@ -655,9 +655,6 @@ function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
   }
   if (blocker.phase === 'target') {
     return `Reconcile the named target input${subject} without overwriting unique data, ensure it stays inside the worktree and is readable, then rerun ship-setup.`;
-  }
-  if (blocker.phase === 'dependency') {
-    return 'The target lacks node_modules; run npm ci successfully in that target, then rerun ship-setup with the same arguments.';
   }
   if (blocker.phase === 'validation') {
     return 'Correct the named validation declaration, command/environment, or test-population mismatch; run that command successfully from the target, then rerun ship-setup.';
@@ -1285,10 +1282,7 @@ async function prepareNodeDependencies(
   targetDir: string,
   fs: ShipSetupFileSystem,
   runner: DependencyInstallRunner,
-): Promise<{
-  observation?: DependencyInstallObservation;
-  blocker?: ShipSetupBlockerInput;
-}> {
+): Promise<{ observation?: DependencyInstallObservation }> {
   const packagePath = join(targetDir, 'package.json');
   if (!fs.exists(packagePath) || fs.entryExists(join(targetDir, 'node_modules'))) return {};
   const request: DependencyInstallRequest = {
@@ -1301,20 +1295,7 @@ async function prepareNodeDependencies(
     || fs.exists(join(targetDir, 'npm-shrinkwrap.json'));
   if (!hasNpmLock) {
     const reason = 'Target has package.json but no node_modules or npm lockfile, so ship-setup cannot safely run npm ci.';
-    return {
-      observation: {
-        state: 'manual_required',
-        ...request,
-        exitCode: null,
-        durationMs: 0,
-        reason,
-      },
-      blocker: {
-        phase: 'dependency',
-        reason,
-        repair: 'Restore the project npm lockfile and run npm ci, or install dependencies with the project\'s declared package manager, then rerun ship-setup with the same arguments.',
-      },
-    };
+    return { observation: { state: 'manual_required', ...request, exitCode: null, durationMs: 0, reason } };
   }
 
   const started = Date.now();
@@ -1347,7 +1328,6 @@ async function prepareNodeDependencies(
       durationMs,
       reason,
     },
-    blocker: { phase: 'dependency', reason },
   };
 }
 
@@ -2248,7 +2228,6 @@ export async function runShipSetup(
   if (dependencyPreparation.observation) {
     facts = { ...facts, dependencyInstall: dependencyPreparation.observation };
   }
-  if (dependencyPreparation.blocker) return refuse([dependencyPreparation.blocker]);
 
   // A copy must bind one stable source tree, not assemble leaves observed
   // across a source mutation. Reuse the existing content/member snapshot rule.
@@ -2381,6 +2360,7 @@ export async function runShipSetup(
   const validationBaseline = observedBaseline.outcome.value;
   facts = { ...facts, validationBaseline };
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
+      && declaredValidation.commands.length > 0
     ? [{
         phase: 'validation',
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,

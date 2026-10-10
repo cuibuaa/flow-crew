@@ -212,7 +212,7 @@ describe('configuration-driven project validation baseline', () => {
     ]);
   });
 
-  it('marks a zero-command baseline unknown and every role unresolved', async () => {
+  it('records every role of a zero-command discovery as not configured when nothing is declared', async () => {
     const runner = vi.fn(() => ({ exitCode: 0 }));
 
     const baseline = await runProjectValidationBaseline(root, { fs: memoryFs({}), runCommand: runner });
@@ -224,8 +224,8 @@ describe('configuration-driven project validation baseline', () => {
       reason: expect.stringContaining('No recognized'),
     });
     expect(runner).not.toHaveBeenCalled();
-    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
-    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
+    expect(baseline.results.every((result) => result.state === 'not_configured')).toBe(true);
+    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'not_configured')).toBe(true);
   });
 
   it('uses a brief declaration as an argv-literal fallback when project discovery is unknown', async () => {

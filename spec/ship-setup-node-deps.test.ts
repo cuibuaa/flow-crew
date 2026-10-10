@@ -109,7 +109,7 @@ afterEach(() => {
 });
 
 describe('ship-setup locked JavaScript dependency preparation', () => {
-  it('G1 installs locked JS dependencies before baseline, safely reruns, and uses Node lookup paths', async () => {
+  it('G1 installs locked JS dependencies before baseline, records a failed install, reruns, and uses Node lookup paths', async () => {
     const root = temporaryRoot('flowcrew-ship-setup-node-deps-');
     const upwardBuild = createUpwardResolutionBuildFixture(root);
     const build = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
@@ -195,19 +195,18 @@ describe('ship-setup locked JavaScript dependency preparation', () => {
     expect(events.indexOf('install')).toBeLessThan(events.findIndex((entry) => entry.startsWith('collect:')));
     expect(events.indexOf('install')).toBeLessThan(events.findIndex((entry) => entry.startsWith('baseline:')));
     expect(firstRetry).toMatchObject({
-      state: 'refused',
+      state: 'ready',
       worktreeCreated: true,
-      dependencyInstall: { state: 'failed', exitCode: 1, durationMs: 11 },
-      blockers: [{ phase: 'dependency', reason: expect.stringContaining('npm ci') }],
+      dependencyInstall: { state: 'failed', exitCode: 1, durationMs: 11, reason: expect.stringContaining('registry unavailable') },
+      blockers: [],
     });
-    expect(firstRetry.blockers[0].repair).toMatch(/node_modules.*npm ci.*rerun/i);
     expect(secondRetry).toMatchObject({ state: 'ready', worktreeCreated: false, worktreeReused: true });
     expect(retryWorktree).toHaveBeenCalledTimes(1);
     expect(git).toHaveBeenCalledTimes(2);
     expect(missingReport.testPopulation?.reason).toMatch(/Cannot resolve vitest.*lookup paths:/i);
   }, 180_000);
 
-  it('G1 refuses a missing node_modules without an npm lockfile with an actionable retry', async () => {
+  it('G1 records a missing node_modules without an npm lockfile and proceeds without installing', async () => {
     const root = temporaryRoot('flowcrew-ship-setup-node-no-lock-');
     writeParentVitest(root);
     const { projectDir, briefPath } = writeNodeProject(root);
@@ -226,13 +225,12 @@ describe('ship-setup locked JavaScript dependency preparation', () => {
     });
 
     expect(report).toMatchObject({
-      state: 'refused',
-      dependencyInstall: { state: 'manual_required', display: 'npm ci', exitCode: null },
-      blockers: [{
-        phase: 'dependency',
+      state: 'ready',
+      dependencyInstall: {
+        state: 'manual_required', display: 'npm ci', exitCode: null,
         reason: expect.stringMatching(/no node_modules or npm lockfile/i),
-        repair: expect.stringMatching(/restore.*lockfile.*or install dependencies.*rerun/i),
-      }],
+      },
+      blockers: [],
     });
     expect(install).not.toHaveBeenCalled();
   });
