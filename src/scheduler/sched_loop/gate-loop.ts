@@ -15,7 +15,7 @@ import { readRunValidationBaseline, settleGateValidationEvidence } from '../sche
 import { recordRunEvent } from '../../run-events.js';
 import { executeIteration } from './iteration.js';
 import { runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 export async function settleGateRetries(
@@ -38,6 +38,15 @@ export async function settleGateRetries(
       state.maxRetries ?? loadDefaults(projectDir).gate_retry_loops,
     )));
     let innerRetriesUsed = 0;
+    // Completed rounds already own durable evidence. Resume the same budget
+    // and archive coordinates after a park instead of granting fresh repairs.
+    const retryArchive = join(runDirPath, 'gate_reevaluation', `iteration_${iteration}`);
+    if (existsSync(retryArchive)) for (const name of readdirSync(retryArchive)) {
+      const round = /^round_(\d+)$/.exec(name);
+      if (round && existsSync(join(retryArchive, name, 'repair_diff.json'))) {
+        innerRetriesUsed = Math.max(innerRetriesUsed, Number(round[1]));
+      }
+    }
     let revisitRuntimeFacts = true;
     while (revisitRuntimeFacts) {
     revisitRuntimeFacts = false;
@@ -370,6 +379,7 @@ export async function settleGateRetries(
         skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
       );
       state = readRunState(projectDir, runId);
+      if (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status)) return { kind: 'settled', state };
       const afterContinuation = JSON.stringify(Object.fromEntries(
         sorted.map((stage) => [stage.id, [state.stages[stage.id]?.status, state.stages[stage.id]?.attempts?.length ?? 0]]),
       ));

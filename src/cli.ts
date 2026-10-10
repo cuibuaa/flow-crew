@@ -922,6 +922,7 @@ async function cmdQuick() {
   let inheritCampaignContext = true; // Context is independent from campaign ownership; legacy alias maps to skip.
   let campaignContextExplicit = false;
   let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
+  let deferGates = false; // race authoring holds at the gate frontier; never authorizes completion
   let background = false;
   let acknowledgementPresent = false;
   let acknowledgementDigest: string | undefined;
@@ -972,6 +973,7 @@ async function cmdQuick() {
       continue;
     }
     if (args[i] === '--existing-run-id' && args[i + 1]) { existingRunId = args[++i]; continue; }
+    if (args[i] === '--defer-gates') { deferGates = true; continue; }
     if (args[i] === '--background') { background = true; continue; }
     if (args[i] === '--acknowledge-brief-warnings') { acknowledgementPresent = true; continue; }
     if (args[i].startsWith('--acknowledge-brief-warnings=')) {
@@ -1326,13 +1328,20 @@ async function cmdQuick() {
     } catch { /* non-critical */ }
   }, 2000);
 
-  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext, briefAdmission);
-  clearInterval(progressTimer);
+  let finalState;
+  try {
+    finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext, briefAdmission, undefined, deferGates);
+  } finally {
+    clearInterval(progressTimer);
+  }
+  console.log(`FlowCrew run: ${finalState.runId}`);
 
   // Desktop notification
   try {
     const finalStatus = resolveRunStatus(finalState.status);
-    const title = finalStatus.kind === 'known'
+    const title = finalState.status === RUN_STATUS.PARKED && finalState.gatesDeferred && !finalState.parked
+      ? 'FlowCrew: Independent Gates Pending'
+      : finalStatus.kind === 'known'
       ? CLI_RUN_STATUS_PRESENTATION[finalStatus.status].notificationTitle
       : `FlowCrew: Unrecognized status ${finalStatus.display}`;
     const body = task.slice(0, 80);
@@ -1347,6 +1356,9 @@ async function cmdQuick() {
   const parked = isPausedRunStatus(finalState.status);
   const icon = succeeded ? '✓' : parked ? '⏸' : '✗';
   console.log(`\n${icon} Workflow "${config.name}" ${finalState.status} (${totalTime}s total)`);
+  if (parked && finalState.gatesDeferred && !finalState.parked) {
+    console.log('  Independent gates pending: parked for race comparison; resume this run to verify it.');
+  }
   if (parked && finalState.parked) {
     console.log(`  ⏸ awaiting approval: ${finalState.parked.action}${finalState.parked.target ? ` → ${finalState.parked.target}` : ''}`);
     console.log(`     resolve with: flowcrew inbox approve ${finalState.parked.requestId}   (or: flowcrew inbox deny ${finalState.parked.requestId})`);

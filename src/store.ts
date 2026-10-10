@@ -590,6 +590,9 @@ export interface StoreState {
   /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
   baseCommit?: string;
   status: RunStatus;
+  /** Race authoring stops with final independent gates pending, parked rather than complete.
+   * Resuming the same run consumes this hold; admission, gates and repairs stay intact. */
+  gatesDeferred?: boolean;
   /**
    * Set while status==='parked': the approval request this run suspended on.
    * `pausedAt` freezes the elapsed clock so a park that waits a day does not

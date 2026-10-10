@@ -1,20 +1,23 @@
-// Boundary: runs one brief as two independent candidate runs through the existing ship-setup and quick commands,
-// then keeps the candidate an independent text-only comparison prefers. No scheduler or stage machinery changes.
+// Boundary: author two isolated candidates, compare text in both orders, then resume only the preferred run
+// through the existing independent gates and bounded repairs; try the alternative only if it cannot pass.
 
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { RUN_STATUS, runsRoot } from './store.js';
+import { RUN_STATUS, readRunState } from './store.js';
 import { shipSetupBriefDigest } from './ship-setup-record.js';
+import { collectGateRuntimeFacts } from './scheduler/sched_settlement/gate-recovery.js';
 
 /** A candidate as the decision sees it. */
 export interface RaceCandidate {
   label: 'A' | 'B';
   target: string;
   status: string;
-  /** Repair attempts the run needed; fewer means the candidate's own gate found less to fix. */
-  repairs: number;
+  /** True only at the scheduler's parked gate frontier, without an approval request. */
+  gatesDeferred?: boolean;
+  /** Executed repairs remain telemetry; they do not determine pre-gate preference. */
+  repairs?: number;
 }
 
 /** One comparison: which candidate was shown first, and which letter the judge chose. */
@@ -26,26 +29,22 @@ export interface RaceJudgment {
 
 export interface RaceDecision {
   choice?: 'A' | 'B';
-  basis: 'only-complete' | 'comparison' | 'fallback-fewer-repairs' | 'none-complete';
+  basis: 'only-ready' | 'comparison' | 'fallback-order' | 'none-ready' | 'gated-fallback' | 'none-passed';
   reason: string;
 }
 
-/**
- * Keep a complete candidate. With two, the comparison asked in both orders decides when it agrees with itself; when the
- * two orders disagree the judgment is position-driven, so the candidate whose own gate needed fewer repairs is kept.
- */
+/** Both orders must agree on the same authored candidate. A missing/position-driven answer
+ * has no reliable preference; use stable author order, then let the independent gate decide eligibility. */
 export function decideRace(candidates: readonly RaceCandidate[], judgments: readonly RaceJudgment[]): RaceDecision {
-  const complete = candidates.filter((c) => c.status === RUN_STATUS.COMPLETE);
-  if (complete.length === 0) return { basis: 'none-complete', reason: `no candidate completed (${candidates.map((c) => `${c.label}=${c.status}`).join(', ')})` };
-  if (complete.length === 1) return { choice: complete[0].label, basis: 'only-complete', reason: `only ${complete[0].label} completed` };
-  // A judgment names the preferred candidate by the letter it was shown under; map it back to the candidate.
-  const preferred = judgments.map((j) => !j.choice ? undefined : j.first === 'A' ? j.choice : (j.choice === 'A' ? 'B' : 'A'));
-  if (preferred.length === 2 && preferred[0] && preferred[0] === preferred[1]) {
-    return { choice: preferred[0], basis: 'comparison', reason: judgments.find((j) => j.reason)?.reason ?? 'both orders agree' };
+  const ready = candidates.filter(c => c.status === RUN_STATUS.PARKED && c.gatesDeferred);
+  if (ready.length === 0) return { basis: 'none-ready', reason: `no candidate reached its gate frontier (${candidates.map(c => `${c.label}=${c.status}`).join(', ')})` };
+  if (ready.length === 1) return { choice: ready[0].label, basis: 'only-ready', reason: `only ${ready[0].label} reached its gate frontier` };
+  const preferred = judgments.map(j => j.choice !== 'A' && j.choice !== 'B' ? undefined
+    : j.first === 'A' ? j.choice : (j.choice === 'A' ? 'B' : 'A'));
+  if (judgments.length === 2 && judgments[0].first !== judgments[1].first && preferred[0] && preferred[0] === preferred[1]) {
+    return { choice: preferred[0], basis: 'comparison', reason: judgments.find(j => j.reason)?.reason ?? 'both orders agree' };
   }
-  const [a, b] = complete;
-  const choice = b.repairs < a.repairs ? b.label : a.label;
-  return { choice, basis: 'fallback-fewer-repairs', reason: `the two orders disagreed or did not answer; kept ${choice}, whose gate needed ${Math.min(a.repairs, b.repairs)} repair(s)` };
+  return { choice: 'A', basis: 'fallback-order', reason: 'the two orders disagreed or did not answer; verify A first, then B if A cannot pass' };
 }
 
 export function comparisonPrompt(brief: string, first: string, second: string): string {
@@ -62,8 +61,8 @@ export function comparisonPrompt(brief: string, first: string, second: string): 
 export interface RaceDeps {
   /** Run this CLI with arguments (and stdin); resolves the exit code and combined output. */
   runCli(args: string[], stdin?: string): Promise<{ code: number; output: string }>;
-  /** The newest run whose project is the target. */
-  readRun(target: string): { runId: string; status: string; repairs: number; declaredOutputs: string[] } | undefined;
+  /** The exact run launched for the target, with gate facts evaluated by the scheduler reader. */
+  readRun(target: string): { runId: string; status: string; gatesDeferred?: boolean; gatePassed: boolean; repairs?: number; failureReason?: string; declaredOutputs: string[] } | undefined;
   /** The candidate's change against the base, new files included, declared outputs excluded. */
   diff(target: string, base: string, exclude: readonly string[]): string;
   /** One text-only comparison; resolves the parsed answer or undefined. */
@@ -114,7 +113,7 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
     }
     deps.out(`Race: launching ${labels.length} candidates on ${targets.join(' and ')}`);
     launches = await Promise.all(targets.map((t, i) => deps.runCli([
-      'quick', '--project', t, ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
+      'quick', '--project', t, '--defer-gates', ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
       ...(workflow ? ['--workflow', workflow] : []), ...(acknowledgements[i] ? [`--acknowledge-brief-warnings=${acknowledgements[i]}`] : []), '-',
     ], briefs[i])));
   } finally {
@@ -122,14 +121,14 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
   }
   const runs = targets.map((t) => deps.readRun(t));
   const candidates: RaceCandidate[] = labels.map((label, i) => ({
-    label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, repairs: runs[i]?.repairs ?? 0,
+    label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, gatesDeferred: runs[i]?.gatesDeferred, repairs: runs[i]?.repairs ?? 0,
   }));
   const judgments: RaceJudgment[] = [];
-  if (candidates.every((c) => c.status === RUN_STATUS.COMPLETE)) {
+  if (candidates.every((c) => c.status === RUN_STATUS.PARKED && c.gatesDeferred)) {
     const exclude = [...new Set(runs.flatMap((r) => r?.declaredOutputs ?? []))];
     const diffs = targets.map((t) => {
       const d = deps.diff(t, base, exclude);
-      return d.length <= DIFF_LIMIT ? d : `${d.slice(0, DIFF_LIMIT)}\n[... ${d.length - DIFF_LIMIT} more bytes of this change omitted ...]\n`;
+      return d.length <= DIFF_LIMIT ? d : `${d.slice(0, DIFF_LIMIT)}\n[... ${d.length - DIFF_LIMIT} more characters of this change omitted ...]\n`;
     });
     for (const first of labels) {
       const [x, y] = first === 'A' ? [diffs[0], diffs[1]] : [diffs[1], diffs[0]];
@@ -137,45 +136,74 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
       judgments.push({ first, ...(answer?.choice ? { choice: answer.choice } : {}), ...(answer?.reason ? { reason: answer.reason } : {}) });
     }
   }
-  const decision = decideRace(candidates, judgments);
-  const record = {
-    version: 1, brief: resolve(brief), base, instructionCandidate: 'A',
+  const selection = decideRace(candidates, judgments);
+  let decision: RaceDecision = { basis: 'none-passed', reason: selection.reason };
+  const gateAttempts: Array<{ label: 'A' | 'B'; runId: string; exit: number; status?: string; pass: boolean; reason?: string }> = [];
+  const record = () => ({
+    version: 2, brief: resolve(brief), base, instructionCandidate: 'A',
     candidates: candidates.map((c, i) => ({ ...c, runId: runs[i]?.runId, launchExit: launches[i].code })),
-    judgments, decision, chosenTarget: decision.choice ? targets[labels.indexOf(decision.choice)] : undefined,
-  };
-  deps.write(`${resolve(target)}-race.json`, `${JSON.stringify(record, null, 2)}\n`);
-  if (!decision.choice) {
-    deps.out(`Race: ${decision.reason}`);
-    return 1;
+    judgments, selection, gateAttempts, decision,
+    chosenTarget: decision.choice ? targets[labels.indexOf(decision.choice)] : undefined,
+  });
+  const save = () => deps.write(`${resolve(target)}-race.json`, `${JSON.stringify(record(), null, 2)}\n`);
+  save(); // Keep the preference and every failed gate even if a later continuation is interrupted.
+  const order = selection.choice ? [selection.choice, ...labels.filter(l => l !== selection.choice)] : [];
+  for (const label of order) {
+    const i = labels.indexOf(label), run = runs[i];
+    if (!run?.gatesDeferred || run.status !== RUN_STATUS.PARKED) continue;
+    const gated = await deps.runCli(['quick', '--project', targets[i], '--existing-run-id', run.runId,
+      ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
+      ...(workflow ? ['--workflow', workflow] : []), ...(acknowledgements[i] ? [`--acknowledge-brief-warnings=${acknowledgements[i]}`] : []),
+    ]);
+    const final = deps.readRun(targets[i]);
+    const pass = gated.code === 0 && final?.runId === run.runId && final.status === RUN_STATUS.COMPLETE && final.gatePassed;
+    gateAttempts.push({ label, runId: run.runId, exit: gated.code, status: final?.status, pass,
+      reason: final?.failureReason ?? (pass ? 'all independent gates passed' : 'run did not complete with passing independent gates') });
+    candidates[i].status = final?.status ?? 'no bound run';
+    candidates[i].gatesDeferred = final?.gatesDeferred;
+    candidates[i].repairs = final?.repairs ?? 0;
+    if (pass) {
+      decision = label === selection.choice ? selection : { choice: label, basis: 'gated-fallback', reason: `${selection.choice} could not pass; ${label} completed with all independent gates passing` };
+      save();
+      deps.out(`Race: kept candidate ${label} at ${targets[i]} (${decision.basis}: ${decision.reason})`);
+      return 0;
+    }
+    decision = { basis: 'none-passed', reason: gateAttempts.map(a => `${a.label}: ${a.reason}`).join('; ') };
+    save();
   }
-  deps.out(`Race: kept candidate ${decision.choice} at ${record.chosenTarget} (${decision.basis}: ${decision.reason})`);
-  return 0;
+  deps.out(`Race: ${decision.reason}`);
+  return 1;
 }
 
 function nodeDeps(): RaceDeps {
   const cli = join(import.meta.dirname ?? '.', 'cli.js');
+  const runIds = new Map<string, string>();
   return {
     runCli: (args, stdin) => new Promise((resolveRun) => {
       const child = spawn(process.execPath, [cli, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
       let output = '';
       child.stdout.on('data', (chunk) => { output += String(chunk); });
       child.stderr.on('data', (chunk) => { output += String(chunk); });
-      child.on('close', (code) => resolveRun({ code: code ?? 1, output }));
+      child.on('error', error => resolveRun({ code: 1, output: String(error) }));
+      child.on('close', (code) => {
+        const id = output.match(/^FlowCrew run: ([a-zA-Z0-9_-]+)$/m)?.[1];
+        const target = valueOf(args, '--project');
+        if (id && target && args[0] === 'quick') runIds.set(resolve(target), id);
+        resolveRun({ code: code ?? 1, output });
+      });
       child.stdin.end(stdin ?? '');
     }),
     readRun: (target) => {
-      const root = runsRoot();
-      const wanted = resolve(target);
-      const found = (existsSync(root) ? readdirSync(root) : []).sort().reverse().find((id) => {
-        try { return resolve(JSON.parse(readFileSync(join(root, id, 'run.json'), 'utf-8')).projectDir) === wanted; } catch { return false; }
-      });
-      if (!found) return undefined;
-      const run = JSON.parse(readFileSync(join(root, found, 'run.json'), 'utf-8')) as {
-        status?: string; stages?: Record<string, { attempts?: unknown[] }>; declaredOutputs?: Array<{ path: string }>;
-      };
-      const repairs = Object.entries(run.stages ?? {}).filter(([id]) => id.startsWith('repair'))
-        .reduce((n, [, s]) => n + (s.attempts?.length ?? 0), 0);
-      return { runId: found, status: run.status ?? 'unknown', repairs, declaredOutputs: (run.declaredOutputs ?? []).map((o) => o.path) };
+      const runId = runIds.get(resolve(target));
+      if (!runId) return undefined;
+      const run = readRunState(target, runId);
+      if (resolve(run.projectDir) !== resolve(target)) return undefined;
+      const stages = run.planControl?.stages ?? [];
+      return { runId, status: run.status, failureReason: run.failureReason,
+        gatesDeferred: run.gatesDeferred === true && !run.parked,
+        gatePassed: stages.some(s => s.is_gate) && collectGateRuntimeFacts(stages, run, target, runId).allPass,
+        repairs: stages.filter(s => !s.is_gate && s.retry_to?.length).reduce((n, s) => n + (run.stages[s.id]?.attempts?.length ?? 0), 0),
+        declaredOutputs: (run.declaredOutputs ?? []).map(o => o.path) };
     },
     diff: (target, base, exclude) => {
       const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-race-index-'));

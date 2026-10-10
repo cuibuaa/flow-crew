@@ -6,7 +6,7 @@ import { evaluateCondition } from '../../condition.js';
 import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
 import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
-import { detectParallelWriteConflicts, selectRunnableBatch } from '../sched_admission/frontier.js';
+import { detectParallelWriteConflicts, selectRunnableBatch, transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
@@ -26,7 +26,23 @@ export async function executeReadyBatch(
   technicalRetries: Map<string, TechnicalRetryBudgetState>, skills?: string, taskDescription?: string,
   availableSkills?: string, attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<{kind: 'settled' | 'continue'; state: StoreState}> {
-    const ready = findAllReady(sorted, state);
+    let ready = findAllReady(sorted, state);
+    if (state.gatesDeferred && ready.some(stage => stage.is_gate)) {
+      // Intermediate gates remain prerequisites: both candidates must finish
+      // authoring before comparison. Hold only gates that unlock no pending
+      // ordinary work; retry_to stages belong to the existing repair route.
+      const authors = sorted.filter(stage => !stage.is_gate && !stage.retry_to?.length
+        && state.stages[stage.id]?.status !== STAGE_STATUS.COMPLETE
+        && state.stages[stage.id]?.status !== STAGE_STATUS.SKIPPED);
+      const byId = new Map(sorted.map(stage => [stage.id, stage]));
+      ready = ready.filter(stage => !stage.is_gate
+        || authors.some(author => transitivelyDependsOn(author.id, stage.id, byId)));
+      if (ready.length === 0 && authors.length === 0) {
+        state.status = RUN_STATUS.PARKED;
+        writeRunState(projectDir, runId, state);
+        return { kind: 'settled', state };
+      }
+    }
 
     if (ready.length === 0) {
       // Don't set final status here — let the outer iteration loop check gates

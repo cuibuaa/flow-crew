@@ -35,6 +35,7 @@ export async function runWorkflow(
   inheritCampaignContext: boolean = true,
   briefAdmission?: BriefAdmissionRecord,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
+  deferGates = false,
 ): Promise<StoreState> {
   const launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission);
   if (launch.kind === 'settled') return launch.state;
@@ -47,6 +48,8 @@ export async function runWorkflow(
   try {
   const checkpointState = updateRunState(projectDir, runId, (state) => {
     if (state.status === RUN_STATUS.STOPPED) return;
+    if (deferGates) state.gatesDeferred = true;
+    else delete state.gatesDeferred;
     state.engineCheckpoint = captureEngineCheckpoint(projectDir, runId);
     if (state.recovery?.kind === 'resumable') state.recovery.kind = 'resuming';
   });
