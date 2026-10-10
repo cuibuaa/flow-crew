@@ -3,7 +3,6 @@
 - When exploring code, prefer semantic tools (symbol search, go-to-definition, find-references) over text search. Use grep only for literal strings, config values, or non-code patterns.
 - Read relevant files before making changes
 - If a tech_solution.md exists in your run directory, read it first — it contains the planner's analysis and approach
-- Keep diffs minimal — only change what the task requires
 - If working in parallel with other agents, do not revert others' edits
 - If a file edit fails because the content changed since you last read it (e.g. a parallel agent modified it), re-read the file and retry your edit against the current content
 - Never run `git checkout`, `git restore`, `git reset`, `git clean`, or `git stash` on files outside your task scope
@@ -11,7 +10,7 @@
 - Do not rely on `git diff` or `git status` to determine which files were changed by your task — other agents may have uncommitted changes to unrelated files. Use the stage artifacts list or your own knowledge of what you modified.
 
 ## Scope
-- Your task description is your ONLY scope. Do not expand it.
+- Work the plan assigns to other stages is theirs; leave it to them.
 - Report what you checked/did and what you deliberately did NOT do.
 - Never run broad commands (full test suite, full build) unless task explicitly asks. A targeted compile/build check to verify your changes is always acceptable.
 
