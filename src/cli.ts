@@ -17,6 +17,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
   if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
   if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--supervise] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
+  if (command === 'race') return 'Usage: flowcrew race --brief <path> --project <dir> --base <ref> --target <path-prefix> --branch <prefix> [--acknowledge-brief-warnings=<digest>] [--workflow <name>] [--no-supervise]';
   if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
   if (command === 'state') return 'Usage: flowcrew state --project <path> --run <run-id> [--prompts] [--summary]';
   if (command === 'campaign') return 'Usage: flowcrew campaign status|pending|review ...';
@@ -2231,6 +2232,11 @@ switch (command) {
     break;
   case 'ship-setup':
     import('./cli-ship-setup.js').then(({ cmdShipSetup }) => cmdShipSetup(args))
+      .then((code) => { process.exitCode = code; })
+      .catch((err) => { console.error(err); process.exit(1); });
+    break;
+  case 'race':
+    import('./cli-race.js').then(({ cmdRace }) => cmdRace(args))
       .then((code) => { process.exitCode = code; })
       .catch((err) => { console.error(err); process.exit(1); });
     break;
