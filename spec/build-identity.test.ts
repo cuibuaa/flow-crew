@@ -3,9 +3,10 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertDistFresh, createBuildManifest, publishBuildGeneration, computeBuildInputDigest, isBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
-import { computeBuildFingerprint } from '../src/daemon-identity.js';
+import { computeBuildFingerprint, createDaemonIdentity } from '../src/daemon-identity.js';
 
 const roots: string[] = [];
 function fixture() {
@@ -21,15 +22,19 @@ function fixture() {
   })) writeFileSync(join(root, file), bytes);
   return { root, stagedDistDir, stagedUiDir };
 }
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('one backend and UI build identity', () => {
-  it('attests retained backend and UI resources without deleting them', () => {
+  it('replaces backend outputs and attests retained UI resources', () => {
     const f = fixture();
     writeFileSync(join(f.root, 'dist/retained.txt'), 'older runtime resource');
     writeFileSync(join(f.root, 'ui/dist/older.html'), 'older UI resource');
     const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
-    expect(manifest.artifacts?.backend.some(r => r.path === 'retained.txt')).toBe(true);
+    expect(manifest.artifacts?.backend).toEqual(manifest.outputs);
+    expect(readdirSync(join(f.root, 'dist'))).not.toContain('retained.txt');
     expect(manifest.artifacts?.ui.some(r => r.path === 'older.html')).toBe(true);
     expect(assertDistFresh(f.root).generation).toBe(manifest.generation);
     writeFileSync(join(f.root, 'ui/dist/extra.html'), 'undeclared');
@@ -38,7 +43,60 @@ describe('one backend and UI build identity', () => {
     const next = publishBuildGeneration({ projectRoot: f.root, ...f });
     expect(next.generation).not.toBe(manifest.generation);
     expect(assertDistFresh(f.root).generation).toBe(next.generation);
-    expect(readFileSync(join(f.root, 'dist/retained.txt'), 'utf8')).toBe('older runtime resource');
+    expect(readFileSync(join(f.root, 'ui/dist/older.html'), 'utf8')).toBe('older UI resource');
+  });
+
+  it('rolls back orphan removals when publication fails before the manifest commit', () => {
+    const f = fixture();
+    for (const dir of ['src/nested', 'staged/nested']) mkdirSync(join(f.root, dir));
+    writeFileSync(join(f.root, 'src/nested/obsolete.ts'), 'export const obsolete = true;');
+    writeFileSync(join(f.stagedDistDir, 'nested/obsolete.js'), 'export const obsolete = true;');
+    writeFileSync(join(f.stagedDistDir, 'nested/obsolete.d.ts'), 'export declare const obsolete = true;');
+    const first = publishBuildGeneration({ projectRoot: f.root, ...f });
+    rmSync(join(f.root, 'src/nested'), { recursive: true });
+    rmSync(join(f.stagedDistDir, 'nested'), { recursive: true });
+    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
+    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
+      if (phase === 'runtime_files_published') {
+        expect(readdirSync(join(f.root, 'dist/nested'))).toEqual([]);
+        throw new Error('injected after removal');
+      }
+    } })).toThrow('injected after removal');
+    expect(readFileSync(join(f.root, 'dist/nested/obsolete.js'), 'utf8')).toContain('obsolete = true');
+    expect(readFileSync(join(f.root, 'dist/nested/obsolete.d.ts'), 'utf8')).toContain('obsolete = true');
+    expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 1');
+    expect(JSON.parse(readFileSync(join(f.root, 'dist', BUILD_MANIFEST_FILENAME), 'utf8')).generation).toBe(first.generation);
+    const next = publishBuildGeneration({ projectRoot: f.root, ...f });
+    expect(next.artifacts?.backend).toEqual(next.outputs);
+    expect(readdirSync(join(f.root, 'dist/nested'))).toEqual([]);
+    expect(assertDistFresh(f.root).generation).toBe(next.generation);
+    expect(readFileSync(join(f.root, '.cache/build-generations', first.generation, 'nested/obsolete.js'), 'utf8')).toContain('obsolete = true');
+  });
+
+  it('refuses orphan removal before any writes while a live daemon uses the previous root', async () => {
+    const f = fixture();
+    writeFileSync(join(f.root, 'src/obsolete.ts'), 'export const obsolete = true;');
+    writeFileSync(join(f.stagedDistDir, 'obsolete.js'), 'export const obsolete = true;');
+    writeFileSync(join(f.stagedDistDir, 'obsolete.d.ts'), 'export declare const obsolete = true;');
+    publishBuildGeneration({ projectRoot: f.root, ...f });
+    const fcHome = join(f.root, 'control'); mkdirSync(fcHome);
+    vi.stubEnv('FC_HOME', fcHome);
+    writeFileSync(join(fcHome, 'daemon.json'), JSON.stringify(createDaemonIdentity({
+      pid: process.pid, socketPath: join(fcHome, 'daemon.sock'), distDir: join(f.root, 'dist'),
+    })));
+    const before = readdirSync(join(f.root, 'dist')).map(path => [path, readFileSync(join(f.root, 'dist', path), 'utf8')]);
+    rmSync(join(f.root, 'src/obsolete.ts'));
+    rmSync(join(f.stagedDistDir, 'obsolete.js'));
+    rmSync(join(f.stagedDistDir, 'obsolete.d.ts'));
+    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
+    const phases: string[] = [];
+    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f,
+      onPhase: phase => phases.push(phase),
+    })).toThrow('Refusing to remove previous build outputs while dist has live consumers');
+    expect(phases).toEqual([]);
+    expect(readdirSync(join(f.root, 'dist')).map(path => [path, readFileSync(join(f.root, 'dist', path), 'utf8')])).toEqual(before);
+    const lateImport = await import(pathToFileURL(join(f.root, 'dist/obsolete.js')).href);
+    expect(lateImport.obsolete).toBe(true);
   });
 
   it('refuses incomplete inventories, digest tampering and false absence provenance', () => {

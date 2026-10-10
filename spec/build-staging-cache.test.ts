@@ -10,11 +10,13 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { assertDistFresh } from '../src/build-manifest.js';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cleanupPaths: string[] = [];
@@ -49,6 +51,28 @@ afterEach(() => {
 });
 
 describe('transactional TypeScript build staging', () => {
+  it('removes orphaned JavaScript and declarations after deleting their source', () => {
+    const { projectDir, stagingRoot } = createBuildFixture();
+    mkdirSync(join(projectDir, 'src/nested'));
+    writeFileSync(join(projectDir, 'src/nested/obsolete.ts'), 'export const obsolete = true;');
+    const first = runBuild(projectDir);
+    expect(first.status, `${first.stdout ?? ''}\n${first.stderr ?? ''}`).toBe(0);
+    const previous = assertDistFresh(projectDir);
+    for (const extension of ['js', 'd.ts']) {
+      expect(existsSync(join(projectDir, `dist/nested/obsolete.${extension}`))).toBe(true);
+    }
+    rmSync(join(projectDir, 'src/nested/obsolete.ts'));
+    const second = runBuild(projectDir);
+    expect(second.status, `${second.stdout ?? ''}\n${second.stderr ?? ''}`).toBe(0);
+    for (const extension of ['js', 'd.ts']) {
+      expect(existsSync(join(stagingRoot, `dist/nested/obsolete.${extension}`))).toBe(false);
+      expect(existsSync(join(projectDir, `dist/nested/obsolete.${extension}`))).toBe(false);
+      expect(existsSync(join(projectDir, '.cache/build-generations', previous.generation, `nested/obsolete.${extension}`))).toBe(true);
+    }
+    const next = assertDistFresh(projectDir);
+    expect(next.artifacts?.backend).toEqual(next.outputs);
+  }, 180_000);
+
   it('F1 rebuilds after staging deletion while an older incremental build record exists', () => {
     const { projectDir, stagingRoot } = createBuildFixture();
     const first = runBuild(projectDir);

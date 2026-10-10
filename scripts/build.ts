@@ -133,8 +133,8 @@ function main(): void {
     if (manifest.inputs.hash !== before.hash) {
       throw new Error('Build inputs changed during compilation; rerun `npm run build` against a settled source tree.');
     }
-    // Publication attests both newly emitted and retained payloads; pruning the
-    // deployed roots would remove resources that admitted older runs may load.
+    // Publication replaces the backend output set transactionally and refuses
+    // removals while older consumers may still import from this deployed root.
     publishBuildGeneration({
       projectRoot,
       stagedDistDir: stagingDist,

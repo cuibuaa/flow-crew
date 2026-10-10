@@ -14,6 +14,15 @@ npm run lint
 npm test
 ```
 
+`npm run build` compiles in staging, then publishes exactly the current backend
+output set to `dist`. Replacements and orphan removals share the publication
+transaction; a failure restores the previous files and manifest. Previous
+generations remain archived in `.cache/build-generations`. UI resources remain
+available for older pages. If orphan removal would affect a live process using
+that `dist`, publication refuses before writing: use an isolated checkout or
+wait until its consumers stop. An archive does not redirect a running process's
+later imports, so it cannot make deletion from a live root safe.
+
 ## Tests
 
 `spec/` is the complete tracked, machine-independent suite. The root Vitest

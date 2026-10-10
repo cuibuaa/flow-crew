@@ -17,7 +17,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { findDeployedDistConsumers } from './daemon-identity.js';
 
 export const BUILD_MANIFEST_FILENAME = '.flowcrew-build-manifest.json';
 export const BUILD_MANIFEST_VERSION = 1;
@@ -42,7 +43,7 @@ export interface BuildManifest {
   ui?: { outputs: BuildFileRecord[] };
   /** New builds explicitly attest UI intent; legacy backend-only roots remain readable. */
   uiPresence?: 'required' | 'absent';
-  /** Complete published payload, including resources retained for older consumers. */
+  /** Complete published payload, including UI resources retained for older consumers. */
   artifacts?: { backend: BuildFileRecord[]; ui: BuildFileRecord[] };
 }
 
@@ -447,7 +448,8 @@ function legacyGeneration(distDir: string, touchedPaths: string[]): string {
 }
 
 /**
- * Publish a validated generation without ever removing dist or a runtime file.
+ * Publish the exact staged backend output set without removing the dist root.
+ * Refuse removals while a live consumer can still import the previous outputs.
  * Each replacement is complete before rename; the manifest is the commit record
  * and is renamed last. A synchronous failure rolls every touched path back from
  * the retained previous generation.
@@ -469,8 +471,22 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
     return [...records.values()].sort((a, b) => a.path.localeCompare(b.path));
   };
   const uiRoot = join(projectRoot, 'ui', 'dist');
+  const priorBackend = collectBuildArtifacts(distDir, true);
+  const currentPaths = new Set(manifest.outputs.map(({ path }) => path));
+  const removedOutputs = priorBackend.filter(({ path }) => !currentPaths.has(path))
+    .map(({ path }) => ({ key: path, target: join(distDir, path) }));
+  if (removedOutputs.length) {
+    const consumers = findDeployedDistConsumers(distDir, {
+      fcHome: resolve(process.env.FC_HOME ?? join(homedir(), '.fc')),
+    });
+    if (consumers.length) {
+      throw new Error('Refusing to remove previous build outputs while dist has live consumers: '
+        + consumers.map(({ label }) => label).join(', ')
+        + '. Publish from an isolated checkout or after those consumers stop.');
+    }
+  }
   const artifacts = {
-    backend: merge(collectBuildArtifacts(distDir, true), manifest.outputs),
+    backend: manifest.outputs,
     ui: merge(collectBuildArtifacts(uiRoot), manifest.ui?.outputs ?? []),
   };
   if (!manifest.ui && artifacts.ui.length) {
@@ -494,10 +510,10 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
     const bytes = readFileSync(target);
     return bytes.byteLength !== record.bytes || createHash('sha256').update(bytes).digest('hex') !== record.sha256;
   });
-  const touched = [...changedOutputs.map(({ key, target }) => ({ key, target })),
+  const touched = [...changedOutputs.map(({ key, target }) => ({ key, target })), ...removedOutputs,
     { key: BUILD_MANIFEST_FILENAME, target: manifestPath }];
   const archiveFiles = [
-    ...collectBuildArtifacts(distDir, true).map(({ path }) => ({ key: path, target: join(distDir, path) })),
+    ...priorBackend.map(({ path }) => ({ key: path, target: join(distDir, path) })),
     ...collectBuildArtifacts(uiRoot).map(({ path }) => ({ key: `ui-dist/${path}`, target: join(uiRoot, path) })),
     { key: BUILD_MANIFEST_FILENAME, target: manifestPath },
   ];
@@ -548,9 +564,13 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
       options.beforeFileCommit?.(file.relativePath, index);
       renameSync(file.temporary, file.target);
     }
+    for (const [index, file] of removedOutputs.entries()) {
+      options.beforeFileCommit?.(file.key, prepared.length + index);
+      unlinkSync(file.target);
+    }
     options.onPhase?.('runtime_files_published', manifest.generation);
-    // Reobserve retained payloads too. Only our exact pending commit record is
-    // excluded; an unrelated late file cannot be silently blessed as fresh.
+    // Reobserve the exact backend set and retained UI payloads. Only our pending
+    // commit record is excluded; a late file cannot be silently blessed as fresh.
     assertArtifactRecords(collectBuildArtifacts(distDir, true)
       .filter((record) => record.path !== basename(manifestTemporary)), artifacts.backend, 'dist');
     assertArtifactRecords(collectBuildArtifacts(uiRoot), artifacts.ui, 'UI');
