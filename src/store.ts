@@ -367,7 +367,7 @@ export interface ProgramSafeguards {
   maxWallHours?: number;
   /** Refuse to start if this file exists (project-relative path). */
   stopFile?: string;
-  /** After N consecutive phases with no improvement, write program_ceiling_report and stop. */
+  /** Refuse to start after N consecutive phases with no improvement. */
   haltAfterConsecutiveNoImprovement?: number;
 }
 export interface ProgramConfig {
@@ -471,7 +471,7 @@ export interface ResearchConfig {
    */
   resultFile?: string;
   /**
-   * Optional project-relative override for framework reports and run_manifest.json.
+   * Optional project-relative directory for research evidence discovery and run_manifest.json.
    * Without it, the framework uses the directory containing resultFile; the
    * default result file therefore keeps the historical docs/ directory.
    */

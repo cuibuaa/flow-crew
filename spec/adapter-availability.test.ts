@@ -373,6 +373,8 @@ describe('CLI adapter behavior', () => {
     const emptyResult = runCli(empty, ['init']);
     expect(emptyResult.status).toBe(0);
     expect(emptyResult.stdout).toContain('keeping adapter: auto');
+    expect(existsSync(join(empty.project, '.fc'))).toBe(false);
+    expect(existsSync(join(empty.project, '.gitignore'))).toBe(false);
     expect((parseYaml(readFileSync(join(empty.project, 'config', 'defaults.yaml'), 'utf-8')) as Record<string, unknown>).adapter).toBe('auto');
 
     const both = cliFixture();
@@ -384,7 +386,18 @@ describe('CLI adapter behavior', () => {
     expect((parseYaml(readFileSync(join(both.project, 'config', 'defaults.yaml'), 'utf-8')) as Record<string, unknown>).adapter).toBe('codex');
   });
 
-  it('prints the run failure reason and failed-stage error after the stage list', () => {
+  it('leaves existing local run records and gitignore intact during explicit init', () => {
+    const fixture = cliFixture();
+    mkdirSync(join(fixture.project, '.fc', 'runs'), { recursive: true });
+    writeFileSync(join(fixture.project, '.fc', 'runs', 'user.txt'), 'User state');
+    writeFileSync(join(fixture.project, '.gitignore'), 'build/\n');
+    const before = projectSnapshot(join(fixture.project, '.fc'));
+    expect(runCli(fixture, ['init']).status).toBe(0);
+    expect(projectSnapshot(join(fixture.project, '.fc'))).toEqual(before);
+    expect(readFileSync(join(fixture.project, '.gitignore'), 'utf8')).toBe('build/\n');
+  });
+
+  it.each([false, true])('launches foreground quick without project writes (existing brief=%s)', existingBrief => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'mock');
     const workflowDir = join(fixture.project, 'config', 'workflows');
@@ -417,6 +430,11 @@ describe('CLI adapter behavior', () => {
       exit_code: 1,
     }), 'utf-8');
 
+    if (existingBrief) {
+      mkdirSync(join(fixture.project, 'docs'));
+      writeFileSync(join(fixture.project, 'docs', 'task_brief.md'), 'User-authored brief');
+    }
+    const before = projectSnapshot(fixture.project);
     writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
     const result = runCli(fixture, [
       'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'failure',
@@ -429,7 +447,10 @@ describe('CLI adapter behavior', () => {
     expect(output).toContain('Failure reason:');
     expect(output).toContain('Failed stage work:');
     // The brief lives in the run directory; a launch writes nothing of its own into the project.
-    expect(existsSync(join(fixture.project, 'docs', 'task_brief.md'))).toBe(false);
+    expect(projectSnapshot(fixture.project)).toEqual(before);
+    const runs = readdirSync(join(fixture.fcHome, 'runs'));
+    expect(runs).toHaveLength(1);
+    expect(readFileSync(join(fixture.fcHome, 'runs', runs[0], 'task_brief.md'), 'utf8')).toBe(brief);
   });
 
   it('makes malformed Reality-check YAML fail rehearsal while no heading remains admissible', () => {

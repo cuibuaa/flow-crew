@@ -2,7 +2,6 @@ import { publishRunCompletion } from './iteration-outcome.js';
 // Boundary: Settle policy-owned budget exhaustion and rejected research rounds through their admitted terminal owners or precise operator parks.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
-import { resolveResearchPaths } from '../../research-paths.js';
 import { ResearchRound } from '../../research-policy.js';
 import { recordRunEvent } from '../../run-events.js';
 import { generateRunSummary } from '../../run-summary.js';
@@ -148,14 +147,9 @@ export function createResearchBudgetFinalizer(
     // Every budget-exhaustion terminal honors skipped stages and the declared artifact.
     markLeftoverStagesSkipped(state, `research terminal '${state.status}' committed (budget exhausted) before this stage ran`);
     if (declaredPathBE) state.terminalArtifact = declaredPathBE.split('/').pop();
-    let reportAbs: string | undefined;
     let declaredAbs: string | undefined;
-    let wroteReportCandidate = false;
     let wroteDeclaredCandidate = false;
     try {
-      const rc2 = state.research;
-      const reportDir = join(projectDir, resolveResearchPaths(rc2).reportDir);
-      mkdirSync(reportDir, { recursive: true });
       let roundsMd = '';
       try {
         const j2 = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: ResearchRound[] };
@@ -167,11 +161,6 @@ export function createResearchBudgetFinalizer(
         + `Decision: budget-exhausted ${state.status}\n`
         + `Reason: ${terminalDetail}\n\n`
         + `## Rounds\n${roundsMd}\n`;
-      reportAbs = join(reportDir, state.status === RUN_STATUS.CEILING_HIT ? 'program_ceiling_report.md' : 'program_incomplete_report.md');
-      if (!existsSync(reportAbs)) {
-        writeFileSync(reportAbs, body, 'utf-8');
-        wroteReportCandidate = true;
-      }
       if (declaredPathBE) {
         declaredAbs = join(projectDir, declaredPathBE);
         if (!existsSync(declaredAbs)) {
@@ -191,7 +180,6 @@ export function createResearchBudgetFinalizer(
         if (!source || !existsSync(source)) return;
         try { renameSync(source, join(runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
-      if (wroteReportCandidate) quarantine(reportAbs, reportAbs?.split('/').pop() ?? 'budget_report');
       if (wroteDeclaredCandidate) quarantine(declaredAbs, declaredPathBE?.split('/').pop() ?? 'terminal_candidate');
       return rg.state;
     }

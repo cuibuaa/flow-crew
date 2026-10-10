@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
-import { readFileSync,readdirSync,writeFileSync,existsSync,statSync,mkdirSync,unlinkSync,renameSync,openSync,readSync,closeSync } from "node:fs";
+import { readFileSync,readdirSync,writeFileSync,existsSync,statSync,mkdirSync,unlinkSync,openSync,readSync,closeSync } from "node:fs";
 import { join,extname,dirname,resolve } from "node:path";
 import { createHmac,randomBytes,timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from 'node:http';
@@ -1576,13 +1576,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   };
   const configDir = join(projectDir, 'config');
   const agentsDir = join(configDir, 'agents');
-
-  // Migration: rename .omx to .fc if needed
-  const oldDir = join(projectDir, '.omx');
-  const newDir = join(projectDir, '.fc');
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    renameSync(oldDir, newDir);
-  }
 
   // One Fastify router owns all listeners and hooks. Separate server instances
   // are necessary to bind explicit addresses without a wildcard socket.

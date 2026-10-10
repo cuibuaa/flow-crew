@@ -124,10 +124,8 @@ const {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   lstatSync,
   statSync,
-  renameSync: fsRenameSync,
 } = fsModule;
 const { join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
@@ -362,38 +360,6 @@ async function cmdInit() {
   const globalFcDir = runsRoot(projectDir);
   mkdirSync(globalFcDir, { recursive: true });
   console.log(`✅ Global runs directory: ${globalFcDir}`);
-
-  // Create project-local .fc/runs symlink pointing to global dir (for backward compat)
-  const localFcRuns = join(projectDir, '.fc', 'runs');
-  const localFcDir = join(projectDir, '.fc');
-  mkdirSync(localFcDir, { recursive: true });
-  if (resolve(localFcRuns) !== resolve(globalFcDir)) {
-    try {
-      const stat = lstatSync(localFcRuns);
-      if (!stat.isSymbolicLink()) {
-        // Existing real directory — migrate contents to global, replace with symlink
-        for (const f of readdirSync(localFcRuns)) {
-          try { fsRenameSync(join(localFcRuns, f), join(globalFcDir, f)); } catch { /* skip conflicts */ }
-        }
-        rmSync(localFcRuns, { recursive: true, force: true });
-        symlinkSync(globalFcDir, localFcRuns);
-      }
-    } catch { /* expected - optional resource */
-      // No existing dir — create symlink
-      try { symlinkSync(globalFcDir, localFcRuns); } catch { /* non-critical */ }
-    }
-  }
-
-  // Add .fc/ to .gitignore if not already present
-  const gitignorePath = join(projectDir, '.gitignore');
-  try {
-    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
-    if (!existing.split('\n').some(line => line.trim() === '.fc/' || line.trim() === '.fc')) {
-      const entry = existing.endsWith('\n') || !existing ? '.fc/\n' : '\n.fc/\n';
-      writeFileSync(gitignorePath, existing + entry, 'utf-8');
-      console.log(`✅ Added .fc/ to ${gitignorePath}`);
-    }
-  } catch { /* best effort */ }
 
   // `start` refuses without an adapter CLI, so pointing an agentless newcomer at it
   // would dead-end them one command later. Send them to what actually works instead:

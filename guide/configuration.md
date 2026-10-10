@@ -131,6 +131,21 @@ flowcrew quick "task" --no-campaign             -> untagged run
 
 Campaign metrics are written under `~/.fc/campaigns/`.
 
+FlowCrew keeps its brief, run state, stage records, summaries, and campaign
+telemetry under `FC_HOME` (default `~/.fc`). Reading project defaults uses an
+existing `config/defaults.yaml` or the packaged template without creating files.
+Dashboard startup leaves project-local state directories in place.
+
+Explicit `init`, `adapter`, and skill-install commands author consumed project
+configuration or integrations. `init` creates no `.fc/runs` link and does not
+edit `.gitignore`. Research retains its project round slot and manifest because
+confirmation and reality checks consume them; terminal reports use the
+brief's declared paths without extra `program_*_report.md` copies. A configured
+program ledger remains a project output read by subsequent safeguards.
+Setup copies declared inputs into the target, agents produce assigned outputs,
+and rollback restores project changes; these writes serve the requested work.
+CLI export and race records remain explicit operator outputs.
+
 Campaign context is independent of that ownership decision:
 
 ```text

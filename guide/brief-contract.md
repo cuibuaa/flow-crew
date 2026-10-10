@@ -256,7 +256,7 @@ research` explicitly when using the `objective:` alias for a metric loop.
 | `policy` | `greedy_stack`, `best_of_n`, or `replace_if_better`. |
 | `higher_is_better` | Direction of improvement; defaults to true. Boolean strings `"true"` and `"false"` are coerced. |
 | `result_file` | Project-relative latest-round JSON. Default: `docs/research_round_result.json`. |
-| `report_dir` | Optional project-relative override for framework-owned reports and `run_manifest.json`. When omitted, the directory containing `result_file` is used; the default result file therefore resolves to `docs`. |
+| `report_dir` | Optional project-relative directory for research evidence discovery and the framework-owned `run_manifest.json`. When omitted, the directory containing `result_file` is used; the default result file therefore resolves to `docs`. |
 | `result_schema` | JSON Schema subset used both in planner context and at round ingestion. |
 | `context_roots` | Project-relative roots inventoried for a dynamic planner. Default: `data`. |
 | `directions` | Opaque portfolio labels an outer campaign should cover before accepting a frontier. |
@@ -381,7 +381,7 @@ program:
 
 At startup, safeguards check the stop file, phase count, cumulative ledger wall
 time, and consecutive non-breakthrough rows. A violation fails the run before
-work begins and writes `program_aborted.md` beside the ledger. A declared
+work begins and records the reason in the run state. A declared
 `phase_complete` terminal appends a phase row to the configured ledger. There
 is no implicit next-phase launcher; use an explicit `post_terminate_hook` if
 automation is required.

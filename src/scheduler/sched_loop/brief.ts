@@ -7,7 +7,7 @@ import { WorkflowConfig, loadDefaults } from '../sched_admission/configuration.j
 import { log } from '../sched_admission/shared.js';
 import { StoreState, readRunState, writeRunState } from '../../store.js';
 import { writeCampaignEntry } from './services.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function configureWorkflowBrief(
@@ -20,10 +20,7 @@ export function configureWorkflowBrief(
     const initState = readRunState(projectDir, runId);
     if (taskDescription && !resumingFromPark) {
       initState.taskDescription = taskDescription;
-      // Persist the brief into the run dir so CLI-spawned tasks (which only
-      // write task_brief.md to <project>/docs/) carry their own task_brief.md.
-      // Without this, POST /api/tasks/:id/rerun's existsSync(task_brief.md)
-      // check fails and rerun cannot re-plan.
+      // The run owns the brief consumed by workers and reruns.
       try {
         const briefDest = join(runDirPath, 'task_brief.md');
         if (!existsSync(briefDest)) {
@@ -116,17 +113,10 @@ export function configureWorkflowBrief(
         return { kind: 'settled', state: s };
       }
       // Program safeguard pre-check at run start. If violated, refuse to start
-      // and write a program-level abort artifact for the orchestrator's next
-      // poll to detect. Run state is set to failed so dashboard reflects it.
+      // and record the failure in run state for the orchestrator and dashboard.
       if (program) {
         const violation = checkProgramSafeguards(projectDir, program);
         if (violation) {
-          const abortDoc = `# Program safeguard violation\n\nProgram: ${program.name}\nPhase: ${program.phase}\nViolation: ${violation}\n\nRun was refused at start. To resume, address the violation (e.g. remove STOP file, prune ledger) and relaunch.\n`;
-          try {
-            const dir = program.ledger ? program.ledger.substring(0, program.ledger.lastIndexOf('/')) || '.' : '.';
-            mkdirSync(join(projectDir, dir), { recursive: true });
-            writeFileSync(join(projectDir, dir, 'program_aborted.md'), abortDoc, 'utf-8');
-          } catch { /* non-critical */ }
           const s2 = readRunState(projectDir, runId);
           s2.status = 'failed';
           s2.failureReason = `Program safeguard: ${violation}`;

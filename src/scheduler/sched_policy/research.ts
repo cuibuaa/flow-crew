@@ -714,9 +714,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       if (!existsSync(resultAbs) && existsSync(lastConsumed)) copyFileSync(lastConsumed, resultAbs);
     } catch { /* non-critical */ }
 
-    const reportDir = join(ctx.projectDir, researchPaths.reportDir);
-    const reportName = terminalDecision === 'ship' ? 'program_ship_report.md' : 'program_ceiling_report.md';
-    const reportAbs = join(reportDir, reportName);
     const reportBody = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
       + `Decision: ${terminalDecision}\n`
       + `Running-best: ${finalEval.runningBest}\n`
@@ -726,14 +723,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       + `## Rounds\n` + journal.rounds.map((r) => r.outcome === 'no_candidate'
         ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
         : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n') + '\n';
-    let wroteReportCandidate = false;
     let wroteDeclaredCandidate = false;
     try {
-      mkdirSync(reportDir, { recursive: true });
-      if (!existsSync(reportAbs)) {
-        writeFileSync(reportAbs, reportBody, 'utf-8');
-        wroteReportCandidate = true;
-      }
       if (declaredPath) {
         const declaredAbs = join(ctx.projectDir, declaredPath);
         if (!existsSync(declaredAbs)) {
@@ -753,7 +744,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         if (!existsSync(source)) return;
         try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
-      if (wroteReportCandidate) quarantine(reportAbs, reportName);
       if (wroteDeclaredCandidate && declaredPath) quarantine(join(ctx.projectDir, declaredPath), declaredPath.split('/').pop() ?? 'terminal_candidate');
       writeCampaignEntry(ctx.projectDir, gate.state);
       return gate.state;

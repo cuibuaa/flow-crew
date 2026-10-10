@@ -155,25 +155,18 @@ export function ensureProjectDefaultsFile(projectDir?: string): string {
   if (existsSync(target)) return target;
 
   const source = flowCrewDefaultsPath();
-  try {
-    mkdirSync(dirname(target), { recursive: true });
-    if (resolve(source) !== resolve(target)) {
-      // The repository may carry a local default campaign while it is being
-      // developed. That operator-specific choice is not part of the package
-      // template: a new project should derive its campaign from its own
-      // directory unless the user explicitly configures one.
-      const publicDefaults = readYamlFile(source);
-      delete publicDefaults.campaign;
-      delete publicDefaults.planner_policies;
-      writeFileSync(target, stringifyYaml(publicDefaults), 'utf-8');
-    }
-    return target;
-  } catch {
-    // Unwritable project dir (read-only / sandboxed). This is a READ path
-    // (getDefaultTimeout → buildStagePrompt) — fall back to the packaged defaults
-    // rather than crashing prompt assembly.
-    return source;
+  mkdirSync(dirname(target), { recursive: true });
+  if (resolve(source) !== resolve(target)) {
+    // The repository may carry a local default campaign while it is being
+    // developed. That operator-specific choice is not part of the package
+    // template: a new project should derive its campaign from its own
+    // directory unless the user explicitly configures one.
+    const publicDefaults = readYamlFile(source);
+    delete publicDefaults.campaign;
+    delete publicDefaults.planner_policies;
+    writeFileSync(target, stringifyYaml(publicDefaults), 'utf-8');
   }
+  return target;
 }
 
 /** The project's defaults when it has its own file, else the packaged template; reading never writes a project file. */

@@ -111,6 +111,9 @@ beforeEach(async () => {
       ...(campaign.staleRunId ? { staleRunId: campaign.staleRunId } : {}),
     })));
 
+  mkdirSync(join(projectDir, '.omx'));
+  writeFileSync(join(projectDir, '.omx', 'user.txt'), 'User state');
+
   app = await startDashboard(projectDir, 0, {
     isProjectBusy: busyProbe,
     registerTask,
@@ -216,6 +219,11 @@ function snapshotTree(root: string): Record<string, string> {
 }
 
 describe('dashboard project admission is pre-mutation', () => {
+  it('starts without migrating project-local engine state', () => {
+    expect(readFileSync(join(projectDir, '.omx', 'user.txt'), 'utf8')).toBe('User state');
+    expect(existsSync(join(projectDir, '.fc'))).toBe(false);
+  });
+
   const cases = [
     {
       name: 'durable approval resume',
