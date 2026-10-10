@@ -103,6 +103,65 @@ function baseState(): StoreState {
 }
 
 describe('supervisor routine/anomaly scheduling', () => {
+  it.each(['wrong_action', 'inspection', 'correct_action'] as const)(
+    'reviews active output while distinguishing %s evidence before intervention', async kind => {
+      const root = mkdtempSync(join(tmpdir(), 'flowcrew-direction-trigger-'));
+      const priorFcHome = fcGlobalDir();
+      setFcGlobalDir(join(root, 'store'));
+      let supervisor: Supervisor | undefined;
+      try {
+        const project = join(root, 'project');
+        mkdirSync(project);
+        const created = createRun(project, 'direction', 'name: direction\nstages:\n  - id: work\n    role: coder\n', ['work']);
+        const startedAt = new Date().toISOString();
+        const dir = join(created.runDirPath, 'stages', 'work');
+        writeFileSync(join(dir, 'attempt_generation.json'), JSON.stringify({
+          version: 1, stageId: 'work', attemptIndex: 1, attemptStartedAt: startedAt, segmentStart: 0,
+        }));
+        writeFileSync(join(dir, 'live.log'), '');
+        const state = readRunState(project, created.runId);
+        state.status = 'running';
+        state.stages.work = { status: 'running', retries: 0, startedAt,
+          attempts: [{ index: 1, startedAt, status: 'running' }] };
+        writeRunState(project, created.runId, state);
+        const prompts: string[] = [];
+        const adapter: Adapter = { async run(prompt) {
+          prompts.push(prompt);
+          const row = prompt.match(/\[(ev_[a-f0-9]+)\] \[ACTION:agent_statement\] [^\n]*REPLACING_REQUIRED_SOURCE/);
+          return { exitCode: 0, duration_ms: 1, output: JSON.stringify(row ? {
+            verdict: 'GUIDE', target_stage: 'work',
+            reason: 'REPLACING_REQUIRED_SOURCE violates the required source',
+            guidance: 'Preserve the required source', direction_key: 'replacing_required_source',
+            evidence_ids: [row[1]],
+          } : { verdict: 'WAIT', target_stage: null, reason: 'No evidenced wrong action', guidance: null }) };
+        } };
+        supervisor = new Supervisor(project, created.runId, adapter, {
+          enabled: true, adapter: 'mock', model: 'default', reasoningEffort: 'low',
+          pollIntervalMs: 30_000, routineAssessmentIntervalMs: 180_000,
+          cooldownAfterActionMs: 0, maxAssessmentsPerIteration: 20, tailBytes: 16_384,
+          minDeltaBytes: 4096, stuckThresholdMs: 600_000,
+        }, 'Preserve the required source');
+        supervisor.start();
+        const tick = () => (supervisor as unknown as { tick(): Promise<void> }).tick();
+        await tick();
+        const marker = kind === 'correct_action' ? 'PRESERVING_REQUIRED_SOURCE' : 'REPLACING_REQUIRED_SOURCE';
+        const item = kind === 'inspection'
+          ? { type: 'command_execution', command: 'cat corpus.txt', aggregated_output: marker.padEnd(6000, 'x') }
+          : { type: 'agent_message', text: marker.padEnd(6000, 'x') };
+        appendFileSync(join(dir, 'live.log'), JSON.stringify({ type: 'item.completed', item }) + '\n');
+        await tick();
+        expect(prompts).toHaveLength(2);
+        const attempts = readRunState(project, created.runId).supervisor!.attempts;
+        expect(attempts.at(-1)?.trigger?.type).toBe('artifact_change');
+        expect(attempts.filter(attempt => attempt.verdict === 'GUIDE')).toHaveLength(kind === 'wrong_action' ? 1 : 0);
+      } finally {
+        supervisor?.stop();
+        setFcGlobalDir(priorFcHome);
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps every intervention verdict available', () => {
     expect(SUPERVISOR_VERDICTS.map((verdict) => verdict.id)).toEqual([
       'WAIT', 'GUIDE', 'ABORT',
@@ -194,10 +253,10 @@ describe('supervisor routine/anomaly scheduling', () => {
     const historicalWindowMs = timestamps.at(-1)! - timestamps[0];
     const requiredAssessments = historical.length;
     const supervisor = loadSupervisorConfig();
-    const conservativeCycleMs = supervisor.pollIntervalMs + productionAssessmentTimeoutMs();
+    const conservativeCycleMs = supervisor.routineAssessmentIntervalMs + productionAssessmentTimeoutMs();
     const opportunities = Math.floor(historicalWindowMs / conservativeCycleMs);
     expect(opportunities).toBeGreaterThanOrEqual(requiredAssessments);
-    // Per-iteration counts are telemetry; they do not cap guided feedback.
+    expect(supervisor.maxAssessmentsPerIteration).toBeGreaterThanOrEqual(opportunities);
   });
 
   it('detects every enumerated immediate signal class', () => {
@@ -232,7 +291,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     }
   });
 
-  it('requires actual guidance before output-only feedback and leaves explicit events immediate', () => {
+  it('defers only repeated concurrent artifact events and leaves urgent or guided work immediate', () => {
     const quantities = { ...eventQuantities, runningStageCount: 2, changedPathCount: 2, changedBytes: 8192 };
     const artifact = createSupervisorEvent({
       type: 'artifact_change', observedAt: '2026-09-25T00:01:00.000Z', source: 'test',
@@ -246,15 +305,15 @@ describe('supervisor routine/anomaly scheduling', () => {
       routineAssessmentIntervalMs: 180_000, routineAssessmentsThisIteration: 20,
       maxRoutineAssessmentsPerIteration: 20 };
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
-      ...clock, lastRoutineAssessmentAt: undefined })).toBe('none');
+      ...clock, lastRoutineAssessmentAt: undefined })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact], ...clock })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
-      ...clock, now: 210_000 })).toBe('none');
+      ...clock, now: 210_000 })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
       ...clock, hasGuidedActiveAttempt: true })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [{
       ...artifact, quantities: { ...quantities, runningStageCount: 1, changedPathCount: 1 },
-    }], ...clock })).toBe('none');
+    }], ...clock })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [gate], ...clock })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [], ...clock })).toBe('none');
 
@@ -277,7 +336,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     expect(cursor.pendingCount).toBe(0);
   });
 
-  it('retains output as context for an explicit event without assessing volume alone', async () => {
+  it('retains deferred evidence and reviews it after the interval', async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-concurrent-cadence-'));
     const priorFcHome = fcGlobalDir();
     vi.useFakeTimers();
@@ -308,7 +367,7 @@ describe('supervisor routine/anomaly scheduling', () => {
           exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
       } };
       const config: SupervisorConfig = { enabled: true, adapter: 'mock', model: 'default',
-        reasoningEffort: 'low', pollIntervalMs: 30_000,
+        reasoningEffort: 'low', pollIntervalMs: 30_000, routineAssessmentIntervalMs: 180_000,
         cooldownAfterActionMs: 0, maxAssessmentsPerIteration: 1, tailBytes: 16_384,
         minDeltaBytes: 4096, stuckThresholdMs: 600_000 };
       supervisor = new Supervisor(project, created.runId, adapter, config, 'observe work');
@@ -325,20 +384,29 @@ describe('supervisor routine/anomaly scheduling', () => {
       vi.setSystemTime(new Date('2026-09-25T00:00:30.000Z'));
       append('first review');
       await tick();
-      expect(prompts).toHaveLength(1);
+      expect(prompts).toHaveLength(2);
       vi.setSystemTime(new Date('2026-09-25T00:01:00.000Z'));
       append('DEFERRED_ACTION_SENTINEL');
       await tick();
-      expect(prompts).toHaveLength(1);
+      expect(prompts).toHaveLength(2);
+      const pending = JSON.parse(readFileSync(join(runDir(project, created.runId),
+        'supervisor_state.json'), 'utf8')) as { eventCursor: { pendingEvents: unknown[] } };
+      expect(pending.eventCursor.pendingEvents).toHaveLength(1);
       vi.setSystemTime(new Date('2026-09-25T00:03:31.000Z'));
       await tick();
-      expect(prompts).toHaveLength(1);
-      writeFileSync(join(runDir(project, created.runId), 'user_input.md'), 'Review this work now');
+      expect(prompts).toHaveLength(3);
+      expect(prompts[2]).toContain('DEFERRED_ACTION_SENTINEL');
+      const nextIteration = readRunState(project, created.runId);
+      nextIteration.currentIteration = 2;
+      writeRunState(project, created.runId, nextIteration);
+      vi.setSystemTime(new Date('2026-09-25T00:04:01.000Z'));
+      append('new iteration');
       await tick();
-      expect(prompts).toHaveLength(2);
-      expect(prompts[1]).toContain('DEFERRED_ACTION_SENTINEL');
+      expect(prompts).toHaveLength(4);
       expect(readRunState(project, created.runId).supervisor?.attempts.map((attempt) =>
-        attempt.trigger?.type)).toEqual(['stage_transition', 'guidance_arrival']);
+        attempt.trigger?.type)).toEqual([
+        'stage_transition', 'artifact_change', 'artifact_change', 'artifact_change',
+      ]);
     } finally {
       supervisor?.stop();
       setFcGlobalDir(priorFcHome);

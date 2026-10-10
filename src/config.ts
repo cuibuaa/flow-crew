@@ -62,6 +62,9 @@ export interface SupervisorConfig {
   reasoningEffort: string;
   /** Cheap state/output heartbeat cadence. */
   pollIntervalMs: number;
+  /** Minimum gap after a successful WAIT on a concurrent-stage artifact event;
+   * all other deterministic events remain immediate. */
+  routineAssessmentIntervalMs: number;
   cooldownAfterActionMs: number;
   /** Per-iteration assessment count shown in telemetry; not a call limit. */
   maxAssessmentsPerIteration: number;
@@ -96,14 +99,17 @@ const DEFAULT_SUPERVISOR: SupervisorConfig = {
   // supervisor.reasoning_effort in defaults.yaml if you want a smarter judge.
   reasoningEffort: 'low',
   pollIntervalMs: 30000,
+  // Bound repeated concurrent artifact reviews after WAIT. First reviews,
+  // single-stage evidence and feedback after GUIDE remain immediate.
+  routineAssessmentIntervalMs: 180000,
   cooldownAfterActionMs: 60000,
   // Budget: refills each time the campaign advances to a new iteration.
   // Sized so a typical iteration (plan→implement→qa→fix loop, often 1-3h)
   // gets steady-state coverage; adaptive backoff handles quiet phases.
   maxAssessmentsPerIteration: 20,
   tailBytes: 16384,
-  // Accumulated output threshold for feedback to an actually guided attempt.
-  // Volume alone never authorizes a semantic assessment.
+  // Accumulated evidence threshold for semantic review. Volume authorizes
+  // inspection, while action-bearing evidence is required for intervention.
   minDeltaBytes: 98304,
   // 10-min idle threshold before supervisor is allowed to ABORT. Codex agents
   // often spend several minutes silently editing files via tool calls; the
@@ -423,9 +429,6 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
   const raw = readRaw(projectDir);
   const sup = (raw.supervisor as Record<string, unknown> | undefined) ?? {};
   const projectDefaults = loadProjectDefaults(projectDir);
-  if (Object.hasOwn(sup, 'routine_assessment_interval_ms')) {
-    process.stderr.write(`${projectDefaultsSource(projectDir)}: supervisor.routine_assessment_interval_ms is retired and ignored; assessments require explicit events or feedback for a guided active attempt.\n`);
-  }
   const fallbackString = (v: unknown, fb: string) => (typeof v === 'string' && v ? v : fb);
   return {
     enabled: sup.enabled === true,
@@ -438,6 +441,7 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
     model: fallbackString(sup.model, projectDefaults.model),
     reasoningEffort: fallbackString(sup.reasoning_effort, DEFAULT_SUPERVISOR.reasoningEffort),
     pollIntervalMs: (sup.poll_interval_ms as number) ?? DEFAULT_SUPERVISOR.pollIntervalMs,
+    routineAssessmentIntervalMs: (sup.routine_assessment_interval_ms as number) ?? DEFAULT_SUPERVISOR.routineAssessmentIntervalMs,
     cooldownAfterActionMs: (sup.cooldown_after_action_ms as number) ?? DEFAULT_SUPERVISOR.cooldownAfterActionMs,
     maxAssessmentsPerIteration: (sup.max_assessments_per_iteration as number) ?? DEFAULT_SUPERVISOR.maxAssessmentsPerIteration,
     tailBytes: (sup.tail_bytes as number) ?? DEFAULT_SUPERVISOR.tailBytes,

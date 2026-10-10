@@ -708,6 +708,7 @@ const supervisorConfig: SupervisorConfig = {
   model: 'test',
   reasoningEffort: 'low',
   pollIntervalMs: 30_000,
+  routineAssessmentIntervalMs: 180_000,
   cooldownAfterActionMs: 0,
   maxAssessmentsPerIteration: 20,
   tailBytes: 16_384,

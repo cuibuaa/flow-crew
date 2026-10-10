@@ -10,7 +10,6 @@ import { providerFailureFromEvent, type ProviderFailure } from '../provider-resu
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
 import { CommandActivityTracker } from '../command-activity.js';
-import { engineChildAdapterHome } from '../write-boundary.js';
 import { prepareAdapterHome } from '../adapter-home.js';
 import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
 import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';

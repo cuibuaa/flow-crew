@@ -142,6 +142,35 @@ afterEach(() => {
 });
 
 describe('adapter resolution matrix', () => {
+  it.skipIf(process.platform === 'win32')('matches execvp for a literal backslash in a Unix executable name', () => {
+    const fixture = cliFixture();
+    const command = 'cod\\ex';
+    const executable = join(fixture.bin, command);
+    writeFileSync(executable, '#!/bin/sh\nprintf selected\n', { mode: 0o755 });
+    // Run native PATH lookup inside an isolated project-local Node probe.
+    // Its only executable candidate and state directories belong to this fixture.
+    const probe = join(fixture.project, 'lookup.cjs');
+    writeFileSync(probe, `
+      const { spawnSync } = require('node:child_process');
+      const actual = spawnSync(process.argv[2], [], {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, FC_HOME: process.env.FC_HOME },
+        encoding: 'utf8', timeout: 5_000,
+      });
+      console.log(JSON.stringify({ status: actual.status, stdout: actual.stdout, stderr: actual.stderr }));
+    `);
+    const result = spawnSync(process.execPath, [probe, command], {
+      cwd: fixture.project,
+      env: { PATH: fixture.bin, HOME: fixture.home, FC_HOME: fixture.fcHome },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const actual = JSON.parse(result.stdout);
+    expect(actual.status, actual.stderr).toBe(0);
+    expect(actual.stdout).toBe('selected');
+    expect(findExecutableOnPath(command, fixture.bin, fixture.project)).toBe(executable);
+  });
+
   it('finds executable PATH entries without an external which command', () => {
     const fixture = cliFixture();
     const codex = installCommand(fixture, 'codex');

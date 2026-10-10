@@ -117,8 +117,8 @@ constraints it derives from the goal. Nothing in the crew can lower it.`,
     expect(readme).toContain('- ⚠️ `npm link` silently repoints an existing global `flowcrew` at this clone, with no warning — check with `which flowcrew`.');
   });
 
-  it('preserves the opt-in session policy without attributing the no-op pilot to reuse', () => {
-    expect(readme).toContain('session_reuse: false                   # opt-in; the cited pilot did not inherit a session');
+  it('preserves the opt-in session policy and compatible predecessor requirement', () => {
+    expect(readme).toContain('session_reuse: false                   # opt-in; requires a compatible predecessor session');
   });
 
   it('preserves the outcome vocabulary verbatim', () => {

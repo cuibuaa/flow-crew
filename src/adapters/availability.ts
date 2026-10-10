@@ -39,7 +39,7 @@ export function findExecutableOnPath(
   if (!command) return undefined;
   const absoluteCwd = isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd}`;
   const fromCwd = (path: string) => isAbsolute(path) ? path : `${absoluteCwd}/${path}`;
-  const candidates = command.includes('/') || command.includes('\\')
+  const candidates = command.includes('/') || (process.platform === 'win32' && command.includes('\\'))
     ? [fromCwd(command)]
     : (pathValue ?? '/bin:/usr/bin').split(delimiter).map((entry) => `${fromCwd(entry)}/${command}`);
   return candidates.find(isExecutableFile);

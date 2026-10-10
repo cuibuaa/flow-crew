@@ -12,7 +12,7 @@ default_stage_technical_retries: 1     # adapter/transport retry, separate from 
 default_plan_stage_retries: 2          # a plan stage that emits zero valid stages gets this many re-prompts before escalating
 
 adapter: auto
-session_reuse: false                   # resuming a session measured ~9% lower wall time but 29% more output tokens; opt in with FC_SESSION_REUSE=1
+session_reuse: false                   # opt-in; requires a compatible predecessor session
 model: default
 reasoning_effort: default
 
@@ -29,6 +29,7 @@ campaign_triggers:
 
 supervisor:
   poll_interval_ms: 30000              # cheap heartbeat: detect transitions/anomalies
+  routine_assessment_interval_ms: 180000  # repeated concurrent WAIT reviews; other events remain immediate
   stuck_threshold_ms: 600000
 ```
 

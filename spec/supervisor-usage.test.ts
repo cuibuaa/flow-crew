@@ -52,6 +52,7 @@ describe('supervisor cost visibility', () => {
       model: 'default',
       reasoningEffort: 'low',
       pollIntervalMs: 100_000,
+      routineAssessmentIntervalMs: 180_000,
       cooldownAfterActionMs: 0,
       maxAssessmentsPerIteration: 20,
       tailBytes: 16_384,

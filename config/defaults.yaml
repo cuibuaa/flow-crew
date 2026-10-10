@@ -53,8 +53,8 @@ default_plan_stage_retries: 2
 # Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
 adapter: auto
 # Resume only an explicitly captured per-stage UUID along one proven dependency
-# edge. Reuse is opt-in; the cited pilot comparison was A/A because its topology
-# never inherited a predecessor session, so it supplies no enablement evidence.
+# edge. Reuse is opt-in. This settlement establishes compatible routing, not
+# a measured wall-clock benefit that would justify enabling it by default.
 session_reuse: false
 # model/reasoning_effort resolution (adapter, since 7aa5818): explicit value
 # here > user's global ~/.codex/config.toml > CLI built-in default. 'default'
@@ -78,11 +78,17 @@ campaign_triggers:
   repeated_failure_after: 3
 
 supervisor:
-  # The heartbeat observes explicit events and no-progress facts. Output volume
-  # alone does not authorize a semantic call; min_delta_bytes triggers feedback
-  # only for an actually guided active attempt. The per-iteration count is
-  # telemetry, not a call limit. Recent output is bounded by tail_bytes.
+  # The nominal 30s heartbeat collects deterministic events. Stage output
+  # reaches a semantic review at min_delta_bytes changed bytes. After a
+  # successful WAIT on an artifact event involving at least two running stages
+  # and two changed paths, routine_assessment_interval_ms defers further such
+  # events; the pending event is reviewed when the interval expires. A first
+  # artifact review, single-stage output, previously guided active attempts,
+  # and non-artifact events remain immediate. Several stages or artifact files
+  # can reach 98304 bytes in less than three minutes. The per-iteration maximum
+  # is telemetry only and does not suppress supervisor calls.
   poll_interval_ms: 30000
+  routine_assessment_interval_ms: 180000
   min_delta_bytes: 98304
   max_assessments_per_iteration: 20
   # Minimum idle duration (ms) before the supervisor may abort a stage as stuck.
