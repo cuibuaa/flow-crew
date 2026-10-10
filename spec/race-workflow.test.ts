@@ -25,7 +25,7 @@ function correct(source: string): boolean {
 
 async function raceFixture(options: {
   authored: string[]; repairs: string[]; answers?: Array<'A' | 'B' | undefined>;
-  scores?: number[]; omitCriterion?: boolean; approval?: boolean; peers?: boolean; staged?: boolean; finished?: string[]; gateBudget?: number; failedPeer?: boolean;
+  scores?: number[]; omitCriterion?: boolean; approval?: boolean; peers?: boolean; staged?: boolean; finished?: string[]; gateBudget?: number; failedPeer?: boolean; endAfterFinish?: boolean;
 }) {
   const task = ['---', 'outputs: [report.md]', '---', '# Double integers', '', '## What the report must show',
     '1. twice doubles every integer from -2 to 2.', '2. report.md describes the change.', ''].join('\n');
@@ -85,6 +85,8 @@ async function raceFixture(options: {
         { id: 'review_final', role: 'qa', depends_on: ['finish'], is_gate: true, scope: [] },
         { id: 'repair', role: 'coder', depends_on: ['review', 'review_final'], retry_to: ['review', 'review_final'], scope: ['twice.js', 'report.md'] },
       ];
+      if (options.endAfterFinish) config.dispatch = config.dispatch!.filter(stage => stage.id !== 'review_final').map(stage =>
+        stage.id === 'repair' ? { ...stage, depends_on: ['review'], retry_to: ['review'] } : stage);
       const existing = args.includes('--existing-run-id') ? args[args.indexOf('--existing-run-id') + 1] : undefined;
       const state = await runWorkflow(config, raw, target, adapters.get(target)!, new Map(), undefined, agentsDir, existing,
         stdin ?? task, true, false, undefined, false, undefined, undefined, args.includes('--defer-gates'));
@@ -152,6 +154,19 @@ describe('race through admitted scheduler workflows', () => {
     const winner = states.get(record.chosenTarget)!;
     expect(winner.stages['review_final'].attempts).toHaveLength(1);
     expect(winner.stages.finish.attempts).toHaveLength(1);
+  });
+
+  it('compares and delivers already gated workflows whose last ordinary stage follows the gate', async () => {
+    const { code, record, callsAtComparison, calls, comparedSources } = await raceFixture({
+      authored: [good, good], repairs: [good, good], staged: true, endAfterFinish: true,
+      finished: [good, 'exports.twice = n => n + n;\n'], answers: ['B', 'A'],
+    });
+    expect(code).toBe(0); expect(record.decision).toMatchObject({ choice: 'B', basis: 'comparison' });
+    expect(callsAtComparison.filter(c => c.stage === 'finish')).toHaveLength(2);
+    expect([...comparedSources.values()]).toEqual([good, 'exports.twice = n => n + n;\n']);
+    expect(record.gateAttempts).toEqual([expect.objectContaining({ label: 'B', pass: true })]);
+    expect(calls.filter(c => c.stage === 'review')).toHaveLength(2);
+    expect(calls.filter(c => c.stage === 'finish')).toHaveLength(2);
   });
 
   it('repairs a rejected intermediate prerequisite before comparing both finished candidates', async () => {

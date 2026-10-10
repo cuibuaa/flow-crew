@@ -16,6 +16,8 @@ export interface RaceCandidate {
   status: string;
   /** True only at the scheduler's parked gate frontier, without an approval request. */
   gatesDeferred?: boolean;
+  /** Completed workflows remain eligible only with effective independent gate facts. */
+  gatePassed?: boolean;
   /** Executed repairs remain telemetry; they do not determine pre-gate preference. */
   repairs?: number;
 }
@@ -33,12 +35,17 @@ export interface RaceDecision {
   reason: string;
 }
 
+function candidateReady(candidate: RaceCandidate): boolean {
+  return (candidate.status === RUN_STATUS.PARKED && candidate.gatesDeferred === true)
+    || (candidate.status === RUN_STATUS.COMPLETE && candidate.gatePassed === true);
+}
+
 /** Both orders must agree on the same authored candidate. A missing/position-driven answer
  * has no reliable preference; use stable author order, then let the independent gate decide eligibility. */
 export function decideRace(candidates: readonly RaceCandidate[], judgments: readonly RaceJudgment[]): RaceDecision {
-  const ready = candidates.filter(c => c.status === RUN_STATUS.PARKED && c.gatesDeferred);
-  if (ready.length === 0) return { basis: 'none-ready', reason: `no candidate reached its gate frontier (${candidates.map(c => `${c.label}=${c.status}`).join(', ')})` };
-  if (ready.length === 1) return { choice: ready[0].label, basis: 'only-ready', reason: `only ${ready[0].label} reached its gate frontier` };
+  const ready = candidates.filter(candidateReady);
+  if (ready.length === 0) return { basis: 'none-ready', reason: `no candidate finished authoring with a gate hold or passing gates (${candidates.map(c => `${c.label}=${c.status}`).join(', ')})` };
+  if (ready.length === 1) return { choice: ready[0].label, basis: 'only-ready', reason: `only ${ready[0].label} finished authoring with a gate hold or passing gates` };
   const preferred = judgments.map(j => j.choice !== 'A' && j.choice !== 'B' ? undefined
     : j.first === 'A' ? j.choice : (j.choice === 'A' ? 'B' : 'A'));
   if (judgments.length === 2 && judgments[0].first !== judgments[1].first && preferred[0] && preferred[0] === preferred[1]) {
@@ -121,10 +128,10 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
   }
   const runs = targets.map((t) => deps.readRun(t));
   const candidates: RaceCandidate[] = labels.map((label, i) => ({
-    label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, gatesDeferred: runs[i]?.gatesDeferred, repairs: runs[i]?.repairs ?? 0,
+    label, target: targets[i], status: runs[i]?.status ?? `no run (exit ${launches[i].code})`, gatesDeferred: runs[i]?.gatesDeferred, gatePassed: runs[i]?.gatePassed, repairs: runs[i]?.repairs ?? 0,
   }));
   const judgments: RaceJudgment[] = [];
-  if (candidates.every((c) => c.status === RUN_STATUS.PARKED && c.gatesDeferred)) {
+  if (candidates.every(candidateReady)) {
     const exclude = [...new Set(runs.flatMap((r) => r?.declaredOutputs ?? []))];
     const diffs = targets.map((t) => {
       const d = deps.diff(t, base, exclude);
@@ -150,8 +157,8 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
   const order = selection.choice ? [selection.choice, ...labels.filter(l => l !== selection.choice)] : [];
   for (const label of order) {
     const i = labels.indexOf(label), run = runs[i];
-    if (!run?.gatesDeferred || run.status !== RUN_STATUS.PARKED) continue;
-    const gated = await deps.runCli(['quick', '--project', targets[i], '--existing-run-id', run.runId,
+    if (!run || !candidateReady(candidates[i])) continue;
+    const gated = run.status === RUN_STATUS.COMPLETE ? launches[i] : await deps.runCli(['quick', '--project', targets[i], '--existing-run-id', run.runId,
       ...(args.includes('--no-supervise') ? ['--no-supervise'] : ['--supervise']),
       ...(workflow ? ['--workflow', workflow] : []), ...(acknowledgements[i] ? [`--acknowledge-brief-warnings=${acknowledgements[i]}`] : []),
     ]);
@@ -161,6 +168,7 @@ export async function runRace(args: readonly string[], deps: RaceDeps): Promise<
       reason: final?.failureReason ?? (pass ? 'all independent gates passed' : 'run did not complete with passing independent gates') });
     candidates[i].status = final?.status ?? 'no bound run';
     candidates[i].gatesDeferred = final?.gatesDeferred;
+    candidates[i].gatePassed = final?.gatePassed;
     candidates[i].repairs = final?.repairs ?? 0;
     if (pass) {
       decision = label === selection.choice ? selection : { choice: label, basis: 'gated-fallback', reason: `${selection.choice} could not pass; ${label} completed with all independent gates passing` };
