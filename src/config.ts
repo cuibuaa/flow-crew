@@ -362,7 +362,7 @@ function compatibleCandidateDefaults(value: unknown): value is ProjectDefaults {
   ];
   const nonnegativeNumbers = [
     item.max_iterations, item.gate_retry_loops, item.stage_technical_retries,
-    item.plan_stage_retries, item.supervisor_max_rejects,
+    item.plan_stage_retries,
   ];
   return positiveNumbers.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry > 0)
     && nonnegativeNumbers.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 0)
