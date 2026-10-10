@@ -399,6 +399,8 @@ describe('CLI adapter behavior', () => {
     expect(output, output).toContain('work: failed');
     expect(output).toContain('Failure reason:');
     expect(output).toContain('Failed stage work:');
+    // The brief lives in the run directory; a launch writes nothing of its own into the project.
+    expect(existsSync(join(fixture.project, 'docs', 'task_brief.md'))).toBe(false);
   });
 
   it('makes malformed Reality-check YAML fail rehearsal while no heading remains admissible', () => {

@@ -1281,19 +1281,6 @@ async function cmdQuick() {
 
   const adapterInstance = await loadAdapterByName(adapter);
 
-  // Only write docs/task_brief.md on a fresh ship. For --existing-run-id path
-  // the brief already lives in <run_dir>/task_brief.md; rewriting docs/ would
-  // also stomp a sibling project's brief if multiple are reusing the same docs.
-  if (!existingRunId) {
-    const docsDir = join(projectDir, 'docs');
-    mkdirSync(docsDir, { recursive: true });
-    const taskBriefPath = join(docsDir, 'task_brief.md');
-    if (existsSync(taskBriefPath) && readFileSync(taskBriefPath, 'utf-8') !== task) {
-      console.warn(`⚠️  Overwriting existing brief with different content: ${taskBriefPath}`);
-    }
-    writeFileSync(taskBriefPath, task, 'utf-8');
-  }
-
   console.log(`FlowCrew: shipping task with workflow "${config.name}"...`);
   console.log(`Task: ${task.slice(0, 100)}${task.length > 100 ? '...' : ''}`);
   console.log(`Project: ${projectDir}`);

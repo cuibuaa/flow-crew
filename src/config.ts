@@ -182,8 +182,21 @@ export function ensureProjectDefaultsFile(projectDir?: string): string {
   }
 }
 
+/** The project's defaults when it has its own file, else the packaged template; reading never writes a project file. */
+function projectDefaultsSource(projectDir?: string): string {
+  const own = defaultsPath(projectDir);
+  return existsSync(own) ? own : flowCrewDefaultsPath();
+}
+
 function readRaw(projectDir?: string): Record<string, unknown> {
-  return readYamlFile(ensureProjectDefaultsFile(projectDir));
+  const source = projectDefaultsSource(projectDir);
+  const raw = readYamlFile(source);
+  if (resolve(source) !== resolve(defaultsPath(projectDir))) {
+    // This repository's own campaign and planner choices are not part of the template a stranger project reads.
+    delete raw.campaign;
+    delete raw.planner_policies;
+  }
+  return raw;
 }
 
 function numberValue(raw: Record<string, unknown>, template: Record<string, unknown>, key: string): number {
@@ -295,7 +308,7 @@ export function campaignBaseDirectory(
 /** Validate with this module's schema/template without delegating to a
  * candidate worktree. Exported for the isolated candidate-validator process. */
 export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults {
-  const p = ensureProjectDefaultsFile(projectDir);
+  const p = projectDefaultsSource(projectDir);
   const mtime = statSync(p).mtimeMs;
   if (_cache && mtime === _cacheMtime && p === _cachePath) return _cache;
 
