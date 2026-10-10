@@ -1,9 +1,9 @@
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadProjectDefaultsLocally, resetConfigCache } from '../src/config.js';
+import { ensureProjectDefaultsFile, loadProjectDefaultsLocally, resetConfigCache } from '../src/config.js';
 import { parsePlannerPolicySelection, renderPlannerPolicies } from '../src/planner-policies.js';
 import { inspectDispatchAdmission, StageConfigSchema } from '../src/scheduler.js';
 import { readRunStateView } from '../src/run-state-view.js';
@@ -21,7 +21,8 @@ function defaults(value: unknown) { mkdirSync(join(project, 'config'), { recursi
 describe('project policy selection is explicit and does not replace core admission', () => {
   it('does not inherit this engine project\'s statistical policy when initializing a new project', () => {
     expect(loadProjectDefaultsLocally(project).planner_policies).toEqual([]);
-    expect(readFileSync(join(project, 'config/defaults.yaml'), 'utf8')).not.toContain('planner_policies');
+    expect(existsSync(join(project, 'config/defaults.yaml'))).toBe(false);
+    expect(readFileSync(ensureProjectDefaultsFile(project), 'utf8')).not.toContain('planner_policies');
     expect(renderPlannerPolicies([])).toBe('');
   });
 
