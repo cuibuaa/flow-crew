@@ -1259,6 +1259,31 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(noReadyRecord()).toBe(false);
   });
 
+  it('records a tox.ini-inferred runner that is not installed here as a gap, and reaches READY', async () => {
+    // A project whose only validation is inferred from tox.ini had no inferred command before INI inference and was set
+    // up unconfigured; a missing tox must stay an environment gap (SWE-bench django checkouts carry tox.ini, the host has
+    // no tox). A project whose declared scripts none launch is still refused (previous case).
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
+    writeFileSync(join(fixture.project, 'tox.ini'), '[testenv]\ncommands = python tests/runtests.py\n', 'utf-8');
+    writeBrief(['# Goal', 'Change the project.']);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      copyFileSync(join(request.projectDir, 'tox.ini'), join(request.targetDir, 'tox.ini'));
+      return { exitCode: 0 };
+    });
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: null, error: 'spawn tox ENOENT' }));
+
+    const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: runner });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      blockers: [],
+      validationBaseline: { results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'launch_error' })]) },
+    });
+    expect(noReadyRecord()).toBe(false);
+  });
+
   it('materializes a bare directory named in the explicit inputs list', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     writeFileSync(join(fixture.project, 'dependency_cache', 'tool.js'), 'export {};\n', 'utf-8');

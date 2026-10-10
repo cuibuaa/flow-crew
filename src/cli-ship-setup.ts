@@ -2373,11 +2373,18 @@ export async function runShipSetup(
     : [];
   // A project command that cannot run here while others do is an environment gap the baseline records, and it cannot
   // show a regression; a declared command that cannot launch, or a project none of whose commands launch, is the
-  // operator's to correct.
-  const noneLaunched = validationBaseline.results.every((result) => result.state !== 'passed' && result.state !== 'failed');
+  // operator's to correct. A runner only inferred from a legacy INI file (tox.ini, pytest.ini) that cannot launch is an
+  // environment gap even when nothing else runs: before INI inference such a project inferred no command and was set up
+  // unconfigured, so inferring one must not turn a missing tool into a refusal.
+  type BaselineResult = (typeof validationBaseline.results)[number];
+  const commandOf = (result: BaselineResult) => validationBaseline.discovery.commands
+    .find(candidate => candidate.role === result.role && candidate.display === result.display);
+  const iniGap = (result: BaselineResult): boolean => result.state === 'launch_error'
+    && commandOf(result)?.provenance?.source !== 'brief' && /(?:^|[\\/])(?:tox|pytest)\.ini$/.test(commandOf(result)?.evidencePath ?? '');
+  const noneLaunched = validationBaseline.results.every((result) => iniGap(result) || (result.state !== 'passed' && result.state !== 'failed'));
   validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
-    const command = validationBaseline.discovery.commands.find(candidate => candidate.role === result.role && candidate.display === result.display);
-    if (result.state !== 'launch_error' || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
+    const command = commandOf(result);
+    if (result.state !== 'launch_error' || iniGap(result) || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
     return [{
       phase: 'validation',
       reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${command?.provenance?.source === 'brief' ? ` declared at ${command.provenance.evidencePath}` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
