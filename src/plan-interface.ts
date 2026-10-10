@@ -1,4 +1,5 @@
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
+import { fileURLToPath } from 'node:url';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
 
 const strings: Schema = { type: 'array', items: { type: 'string' } };
@@ -37,64 +38,79 @@ export function renderPlanInterface(): string {
     + 'A sibling reality_checks.md is checked when present. Timeout/resource overrides remain retired.';
 }
 
+/** Point the planner at the installed engine and the exact current admission context. */
+export function renderPlannerAdmissionCheck(projectDir: string, runDir: string): string {
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  return '# Check draft admission before finishing\n'
+    + 'Save your complete candidate as "$TMPDIR/dispatch.json" in your writable scratch directory. Before returning it, run:\n'
+    + `${quote(process.execPath)} ${quote(cli)} plan-check --project ${quote(projectDir)} --run ${quote(runDir)} "$TMPDIR/dispatch.json"\n`
+    + 'This read-only command runs the same admission code as the scheduler, using this run’s workflow, brief, criteria, prior discharges, inputs and reality_checks.md. '
+    + 'It prints every diagnosable error together. Repair the candidate and check again within this planner attempt until pass is true (exit 0), then return that checked candidate as your final JSON. '
+    + 'Keep the candidate in scratch space; do not write project deliverables while planning.';
+}
+
 /** Read-only CLI route: no scheduler launch, reconciliation, adapter or service-manager calls. */
 export async function cmdPlanCheck(args: string[]): Promise<number> {
-  const { readFileSync, existsSync } = await import('node:fs');
-  const { resolve, dirname } = await import('node:path');
+  const { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, copyFileSync } = await import('node:fs');
+  const { resolve, dirname, join } = await import('node:path');
   const { tmpdir } = await import('node:os');
-    const { buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
-  const { parseDispatchedStageConfig } = await import('./scheduler/sched_admission/configuration.js');
+  const { buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
   const { firstDeclaredInputScopeConflict, resolveDeclaredInputWriteBindings } = await import('./scheduler/sched_scope/path-capabilities.js');
-  const { readDispatchDocument } = await import('./dispatch-document.js');
   const { parseBriefFrontmatter } = await import('./scheduler/sched_admission/brief-contract.js');
   const { extractBriefCriteria } = await import('./brief-criteria.js');
-  const { inspectRealityCheckReachability } = await import('./scheduler/sched_admission/reality-reads.js');
-  const { inspectRealityChecks } = await import('./reality-check-preflight.js');
-  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { inspectDispatchProposal } = await import('./scheduler/sched_policy/dispatch-injection.js');
+  const { loadProjectDefaults } = await import('./config.js');
   let scratch: string | undefined;
   try {
     const options = new Map<string, string>();
     const files: string[] = [];
     for (let i = 1; i < args.length; i++) {
       const arg = args[i];
-      if (['--project', '--brief'].includes(arg)) {
+      if (['--project', '--brief', '--run'].includes(arg)) {
         if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`${arg} requires a value`);
         options.set(arg, args[++i]);
       } else if (arg.startsWith('-')) throw new Error(`unknown option ${arg}`);
       else files.push(arg);
     }
-    if (!options.has('--brief') || files.length !== 1) throw new Error('Usage: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>');
+    if (options.has('--brief') === options.has('--run') || files.length !== 1) throw new Error('Usage: flowcrew plan-check --project <project> (--brief <brief-file> | --run <run-dir>) <dispatch-file>');
     const projectDir = resolve(options.get('--project') ?? process.cwd());
-    const brief = readFileSync(resolve(options.get('--brief')!), 'utf8');
-    const parsedBrief = parseBriefFrontmatter(brief);
-    const workflowName = parsedBrief.research ? 'research' : 'default';
-    const localAgents = resolve(projectDir, 'config', 'agents');
+    const defaults = loadProjectDefaults(projectDir);
+    const localAgents = resolve(projectDir, defaults.paths.agents);
     const roles = buildRoleRegistry(existsSync(localAgents) ? localAgents : resolve(import.meta.dirname, '..', 'config', 'agents'));
-    const localWorkflow = resolve(projectDir, 'config', 'workflows', `${workflowName}.yaml`);
-    const baseStages = loadWorkflow(existsSync(localWorkflow) ? localWorkflow : resolve(import.meta.dirname, '..', 'config', 'workflows', `${workflowName}.yaml`)).config.stages;
-    const items = readDispatchDocument(readFileSync(resolve(files[0]), 'utf8')).stages;
-    if (items.length === 0) throw new Error('dispatch contains no stages');
-    const dispatched = items.map(parseDispatchedStageConfig);
+    let runDirPath: string;
+    let state: import('./store.js').StoreState;
+    let baseStages: import('./scheduler/sched_admission/configuration.js').StageConfig[];
     const errors: string[] = [];
-    const seen = new Set(baseStages.map(stage => stage.id));
-    for (const stage of dispatched) {
-      if (seen.has(stage.id)) errors.push(`${stage.id}: duplicate stage ID`);
-      seen.add(stage.id);
-      if (!roles.has(stage.role)) errors.push(`${stage.id}: unknown role ${JSON.stringify(stage.role)}`);
+    if (options.has('--run')) {
+      runDirPath = resolve(options.get('--run')!);
+      const { readArchivedRunStateFromDirectory } = await import('./store.js');
+      state = readArchivedRunStateFromDirectory(runDirPath).state as import('./store.js').StoreState;
+      baseStages = loadWorkflow(join(runDirPath, 'workflow.yaml')).config.stages;
+    } else {
+      const brief = readFileSync(resolve(options.get('--brief')!), 'utf8');
+      const parsedBrief = parseBriefFrontmatter(brief);
+      const workflowName = parsedBrief.research ? 'research' : 'default';
+      const localWorkflow = resolve(projectDir, defaults.paths.workflows, `${workflowName}.yaml`);
+      baseStages = loadWorkflow(existsSync(localWorkflow) ? localWorkflow : resolve(import.meta.dirname, '..', 'config', 'workflows', `${workflowName}.yaml`)).config.stages;
+      scratch = mkdtempSync(resolve(tmpdir(), 'fc-plan-check-'));
+      runDirPath = scratch;
+      writeFileSync(join(scratch, 'task_brief.md'), brief);
+      writeFileSync(join(scratch, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
+      const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
+      if (existsSync(checksPath)) copyFileSync(checksPath, join(scratch, 'reality_checks.md'));
+      state = { stages: {}, terminalStates: parsedBrief.terminalStates, research: parsedBrief.research } as import('./store.js').StoreState;
+      for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(error);
     }
-    for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(error);
-    scratch = mkdtempSync(resolve(tmpdir(), 'fc-plan-check-'));
-    const report = createDispatchAdmission(firstDeclaredInputScopeConflict)({
-      dispatched, baseStages, dispatchStageId: baseStages.find(stage => stage.dynamic_dispatch)?.id ?? 'plan',
-      criteria: extractBriefCriteria(brief), declaredInputs: resolveDeclaredInputWriteBindings(projectDir, brief),
-      terminalStates: parsedBrief.terminalStates, research: parsedBrief.research, projectDir, runDir: scratch,
+    const { report } = inspectDispatchProposal({
+      inspectDispatchAdmission: createDispatchAdmission(firstDeclaredInputScopeConflict), resolveDeclaredInputWriteBindings,
+    }, {
+      rawDispatchText: readFileSync(resolve(files[0]), 'utf8'),
+      dispatchStageId: baseStages.find(stage => stage.dynamic_dispatch)?.id ?? 'plan',
+      roleRegistry: roles, sorted: baseStages, state, projectDir, runDirPath,
     });
-    const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
-    const checks = existsSync(checksPath) ? readFileSync(checksPath, 'utf8') : '';
-    errors.push(...report.errors, ...inspectRealityCheckReachability({ markdown: checks, projectDir, runDir: scratch, stages: [...baseStages, ...dispatched], terminalStates: parsedBrief.terminalStates, research: parsedBrief.research }));
-    const preflight = inspectRealityChecks(brief, checks, { projectDir, artifactContracts: dispatched.flatMap(stage => stage.artifact_contract ? [stage.artifact_contract] : []) });
-    errors.push(...preflight.refusingFindings.map(finding => finding.message));
-    process.stdout.write(`${JSON.stringify({ ...report, errors, pass: errors.length === 0, stages: dispatched }, null, 2)}\n`);
+    errors.push(...report.errors);
+    process.stdout.write(`${JSON.stringify({ ...report, errors, pass: errors.length === 0 }, null, 2)}\n`);
     return errors.length ? 1 : 0;
   } catch (error) {
     process.stdout.write(`${JSON.stringify({ pass: false, errors: [error instanceof Error ? error.message : String(error)] })}\n`);

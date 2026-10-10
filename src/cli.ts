@@ -39,7 +39,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     watch: 'Usage: flowcrew watch [--once]',
     events: 'Usage: flowcrew events [--run <run-id>] [--follow]',
     doctor: 'Usage: flowcrew doctor [--repair-registry|--compact-registry] [--apply]',
-    'plan-check': 'Usage: flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>',
+    'plan-check': 'Usage: flowcrew plan-check --project <project> (--brief <brief-file> | --run <run-dir>) <dispatch-file>',
     version: 'Usage: flowcrew version',
   };
   return usage[command];

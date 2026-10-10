@@ -120,14 +120,13 @@ export function shadowStageWithoutInvalidFields(item: Record<string, unknown>, e
   }
 }
 
-/** Preserve bounded Zod paths and a repair action in planner-facing schema refusals. */
+/** Preserve all Zod paths and a repair action in planner-facing schema refusals. */
 export function formatDispatchStageSchemaFailure(error: unknown): string {
   const issues = error instanceof z.ZodError
-    ? error.issues.slice(0, 8).map((issue) =>
+    ? error.issues.map((issue) =>
         `${issue.path.length > 0 ? issue.path.join('.') : '(stage root)'}: ${issue.message}`)
     : [error instanceof Error ? error.message : String(error)];
-  const omitted = error instanceof z.ZodError ? error.issues.length - issues.length : 0;
-  return `invalid schema at ${issues.join('; ')}${omitted > 0 ? ` (+${omitted} more)` : ''}; fix the named fields and regenerate dispatch.yaml`;
+  return `invalid schema at ${issues.join('; ')}; fix the named fields and regenerate dispatch.yaml`;
 }
 
 export interface DispatchAdmissionReport {

@@ -7,7 +7,7 @@ import { finalizeCodexHome, isCodexSessionUuid, readCodexSession, stageCodexHome
 import { runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { sumInvocationUsage } from './invocation-usage.js';
-import { renderPlanInterface } from './plan-interface.js';
+import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
@@ -532,7 +532,7 @@ async function runStageWithWriterLease(
 
   // Planner-only history remains target-filtered. An archived instruction for
   // an implementation or gate stage must not become a planner instruction.
-  if (opts.role.name === 'planner') {
+  if (opts.dynamicDispatch || opts.role.name === 'planner') {
     try {
       const historyDir = join(opts.runDir, 'guidance_history');
       if (existsSync(historyDir)) {
@@ -555,7 +555,7 @@ async function runStageWithWriterLease(
     } catch { /* non-critical */ }
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
-    resolvedSystemPrompt += `\n\n${renderPlanInterface()}`;
+    resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
     const policies = renderPlannerPolicies(loadProjectDefaults(opts.projectDir).planner_policies ?? []);
     if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }

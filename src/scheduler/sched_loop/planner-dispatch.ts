@@ -1,19 +1,17 @@
 // Boundary: Admit complete planner proposals through one refusal path with exact preflight and bounded retry evidence.
 import { PreparedPlanRetryCandidate, planRetryPairDigest, planRetryPreflightRequirement, planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRefusal } from '../../plan-retry-monotone.js';
-import { demoteRealityCheckAdvisories, formatRealityCheckPreflightFindings, inspectRealityChecks, type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
+import { demoteRealityCheckAdvisories, formatRealityCheckPreflightFindings, type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
 import { recordRunEvent } from '../../run-events.js';
-import { StageConfig, StageConfigSchema, loadDefaults } from '../sched_admission/configuration.js';
+import { StageConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { archiveDispatchAdmissionRefusal, concludePlanRetryFailure, currentDispatchAdmissionReport, decideEmptyDispatchAction, decideRealityCheckPreflightAction, diagnoseEmptyDispatch, planRetryRequirementsFromAdmission, restoreAdmittedRealityChecks, writeRealityCheckPreflightArtifact } from '../sched_admission/dispatch-retry.js';
 import { log } from '../sched_admission/shared.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
-import { readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
-import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
+import { inspectProposalRealityChecks } from '../sched_policy/dispatch-injection.js';
 import { STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, readRunState, runDir, writeRunState, writeStageStatus } from '../../store.js';
 import { concludeRepeatedBlockage, injectDispatchedStages } from './services.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readDispatchDocument } from '../../dispatch-document.js';
 
 export function admitPlannerDispatches(
   sorted: StageConfig[], state: StoreState, projectDir: string, runId: string, runDirPath: string,
@@ -50,21 +48,7 @@ export function admitPlannerDispatches(
           const plannerChecks = existsSync(plannerChecksPath)
             ? readFileSync(plannerChecksPath, 'utf-8')
             : '';
-          const validationBaseline = readRunValidationBaseline(runDirPath)?.baseline
-            ?? readShipSetupReadyValidationBaseline(projectDir, exactTaskBrief);
-          const artifactContracts: NonNullable<StageConfig['artifact_contract']>[] = [];
-          try {
-            const items = readDispatchDocument(preparedPlanRetry.effective.dispatch).stages;
-            if (Array.isArray(items)) for (const item of items) {
-              const parsed = StageConfigSchema.safeParse(item);
-              if (parsed.success && parsed.data.artifact_contract && !parsed.data.condition && !parsed.data.retry_to?.length) artifactContracts.push(parsed.data.artifact_contract);
-            }
-          } catch { /* Whole-plan admission owns malformed dispatch diagnostics. */ }
-          preflight = inspectRealityChecks(exactTaskBrief, plannerChecks, {
-            validationBaseline,
-            projectDir,
-            artifactContracts,
-          });
+          preflight = inspectProposalRealityChecks(projectDir, runDirPath, preparedPlanRetry.effective.dispatch, exactTaskBrief);
           if (preflight.advisoryFindings.length > 0) {
             const rewrite = demoteRealityCheckAdvisories(plannerChecks, preflight.advisoryFindings);
             if (rewrite.markdown !== plannerChecks) {

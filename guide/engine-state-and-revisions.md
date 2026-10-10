@@ -16,7 +16,7 @@ audits can use read-only gates and separate `retry_to` repairs; gates in that pl
 empty project scope. Scope amendments re-run whole-plan admission before granting writes.
 Dependency prose is optional historical metadata.
 
-`flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>`
+`flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>` (or `--run <run-dir>` for the exact current run context)
 checks a draft with the live parser and whole-plan admission without launching work.
 It uses a synthetic empty run root, so run inputs from earlier work require the actual
 admission boundary. Historical readers remain tolerant; new unknown fields are refused.

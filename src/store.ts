@@ -1725,7 +1725,11 @@ function persistRunStateUnlocked(
 }
 
 export function readArchivedRunState(projectDir: string, runId: string): ArchivedRunStateRead {
-  const path = runDir(projectDir, runId);
+  return readArchivedRunStateFromDirectory(runDir(projectDir, runId));
+}
+
+/** Read the exact run context without selecting or changing a global store. */
+export function readArchivedRunStateFromDirectory(path: string): ArchivedRunStateRead {
   const parsed = hydrateRunProjection(path, JSON.parse(
     readFileSync(join(path, 'run.json'), 'utf-8'),
   ) as ArchivedStoreState);

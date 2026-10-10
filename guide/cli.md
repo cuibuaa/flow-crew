@@ -354,13 +354,23 @@ See [Zero-token rehearsal](rehearse.md) for the complete boundary.
 
 ```bash
 flowcrew plan-check --project <project> --brief <brief-file> <dispatch-file>
+flowcrew plan-check --project <project> --run <run-dir> <dispatch-file>
 ```
 
 Runs a draft plan through the admission a planner's plan has to pass, without a scheduler, an adapter, the daemon or a
-model. It prints one JSON document (`pass`, `errors`, the parsed `stages`) and exits 0 when the draft is admissible and 1
-when it is not or cannot be read. A `reality_checks.md` next to the draft is checked as well. Roles and the workflow come
+model. It prints one JSON document (`pass`, `errors`, warnings and derived ownership/criterion facts), exits 0 when
+the draft is admissible and 1 when it is not or cannot be read. A `reality_checks.md` next to the draft is checked as well. Roles and the workflow come
 from the project's `config/` when it has one, otherwise from the engine's. The plan's schema is the one in
 `src/plan-interface.ts`, which a planner's input also carries.
+
+The planner receives the absolute engine command with `--run` and checks a candidate in its existing writable scratch
+directory (`$TMPDIR`) before returning its final JSON. This mode reads the exact persisted workflow, brief, criteria, prior discharges, validation
+baseline and optional `reality_checks.md` of the current run. It uses the same proposal inspector as scheduler
+injection, so schema, artifact, condition, scope, topology, criterion and reality-check rules cannot drift into a
+separate planner rule list. Errors on parseable stages are collected even when another stage has malformed fields.
+The response reports admission facts without echoing the candidate stages, keeping repeated planner checks small.
+The command never publishes admission, injects stages or changes run state. Checks can be repeated within a single
+planner attempt; scheduler retries still carry the full admission report if the final proposal is rejected.
 
 ## `flowcrew adapter`
 
