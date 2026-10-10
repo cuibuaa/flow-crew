@@ -43,6 +43,16 @@ function digestMembers(members: readonly ArchivedMember[]): string {
   return hash.digest('hex');
 }
 
+function walkDeclaredOutput(source: string, path: string, visit: (source: string, path: string, directory: boolean) => void): void {
+  const current = lstatSync(source);
+  if (current.isSymbolicLink()) throw new Error(`declared output contains symlink ${path}`);
+  if (!current.isDirectory() && !current.isFile()) throw new Error(`declared output contains unsupported entry ${path}`);
+  visit(source, path, current.isDirectory());
+  if (current.isDirectory()) {
+    for (const name of readdirSync(source).sort()) walkDeclaredOutput(join(source, name), path ? `${path}/${name}` : name, visit);
+  }
+}
+
 /** The same physical path/type precondition governs gate acceptance and archival. */
 export function declaredOutputSource(projectDir: string, declaration: BriefOutputDeclaration): string {
   const path = normalized(declaration.path);
@@ -61,6 +71,7 @@ export function declaredOutputSource(projectDir: string, declaration: BriefOutpu
   if (actualType !== declaration.expectedType) {
     throw new Error(`declared output ${path} expected ${declaration.expectedType}, found ${actualType}`);
   }
+  walkDeclaredOutput(source, path, () => {});
   return source;
 }
 
@@ -70,23 +81,17 @@ function archiveOne(projectDir: string, archiveBase: string, declaration: BriefO
   const archiveRoot = `declared_outputs/${path}`;
   const destination = join(archiveBase, path);
   const members: ArchivedMember[] = [];
-  const visit = (sourcePath: string, destinationPath: string, memberPath: string): void => {
-    const current = lstatSync(sourcePath);
-    if (current.isSymbolicLink()) throw new Error(`declared output ${path} contains symlink ${memberPath}`);
-    if (current.isDirectory()) {
+  walkDeclaredOutput(source, declaration.expectedType === 'file' ? posix.basename(path) : '', (sourcePath, memberPath, directory) => {
+    const destinationPath = declaration.expectedType === 'file' ? destination : join(destination, memberPath);
+    if (directory) {
       mkdirSync(destinationPath, { recursive: true });
-      for (const name of readdirSync(sourcePath).sort()) visit(
-        join(sourcePath, name), join(destinationPath, name), memberPath ? `${memberPath}/${name}` : name,
-      );
       return;
     }
-    if (!current.isFile()) throw new Error(`declared output ${path} contains unsupported entry ${memberPath}`);
     const bytes = readFileSync(sourcePath);
     mkdirSync(dirname(destinationPath), { recursive: true });
     copyFileSync(sourcePath, destinationPath);
     members.push(memberRecord(memberPath, bytes));
-  };
-  visit(source, destination, declaration.expectedType === 'file' ? posix.basename(path) : '');
+  });
   members.sort((left, right) => left.path.localeCompare(right.path));
   return { path, expectedType: declaration.expectedType, archiveRoot, members, digest: digestMembers(members) };
 }

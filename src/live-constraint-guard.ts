@@ -55,9 +55,11 @@ function scopeDecisionWaitInstruction(attemptIndex: ScopeRevisionContractInput['
 /** One byte-stable source for the ordinary prompt and live/post-audit guidance. */
 export function scopeRevisionContract(input: ScopeRevisionContractInput): string {
   const gateIsolation = input.gate
-    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or an OS temporary probe lane.'
+    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or the private temporary directory.'
     : '';
   return `Declared project-write scope: ${JSON.stringify(input.scope)} (declaration ${input.scopePresence}). `
+    + `Every invocation, including a read-only stage, has writable private scratch at $TMPDIR (also $TMP and $TEMP), separate from project and run storage and removed when the invocation closes. `
+    + `Use mktemp -d "$TMPDIR/probe-XXXXXX" for temporary copies and probes; shared /tmp is outside this grant. Check creation succeeded before copying. `
     + `A missing declaration is closed, never allow-all. Before any project write outside this initial capability, produce `
     + `exactly one JSON request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`

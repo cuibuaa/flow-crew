@@ -1,4 +1,8 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { readRunState, runDir } from './store.js';
+import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
+import { declaredOutputSource } from './declared-output-archive.js';
 import { readRunStateView, type RunStateView } from './run-state-view.js';
 
 /** A bounded projection of the same read view; omissions are explicit. */
@@ -18,14 +22,33 @@ export function summarizeRunStateView(view: RunStateView): object {
   };
 }
 
+/** Required products are engine facts, independent of a role's task excerpt or GUIDE. */
+export function declaredOutputFacts(projectDir: string, runId: string, state = readRunState(projectDir, runId)) {
+  const briefPath = join(runDir(projectDir, runId), 'task_brief.md');
+  const outputs = state.declaredOutputs ?? (existsSync(briefPath) ? parseBriefFrontmatter(readFileSync(briefPath, 'utf8')).outputs : undefined);
+  return (outputs ?? []).map(output => {
+    try {
+      declaredOutputSource(projectDir, output);
+      return { ...output, available: true as const };
+    } catch (error) {
+      return { ...output, available: false as const, reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
+}
+
 export function runStateContext(projectDir: string, runId: string, revision?: { revision: number; digest: string }): string {
   const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   // Prompt construction needs a locator and admission binding, not a scan of
   // every artifact and immutable invocation. The explicit CLI retains that view.
+  const outputs = existsSync(join(runDir(projectDir, runId), 'run.json')) ? declaredOutputFacts(projectDir, runId) : [];
   return `# Engine state query\nRun binding: ${JSON.stringify({ runId })}.\n${revision ? `Admitted plan revision ${revision.revision}, digest ${revision.digest}.\n` : ''}`
     + `Read current state with flowcrew state --project ${shellQuote(projectDir)} --run ${shellQuote(runId)}. `
     + 'Use --summary for a bounded view or --prompts for immutable invocation bytes. '
-    + 'An observation grants no permission and is not a successful verdict.';
+    + 'An observation grants no permission and is not a successful verdict.'
+    + (outputs.length ? `\n\n# Required declared outputs (current engine facts)\n${JSON.stringify(outputs)}\n`
+      + 'These products must remain available with the declared type. GUIDE cannot remove these obligations. '
+      + 'Report conflicts with other brief constraints instead of deleting a required product. '
+      + 'A gate must check its required products before PASS; unavailable products need repair, except products assigned to later ordinary work.' : '');
 }
 
 export function cmdState(args: string[], output: Pick<NodeJS.WriteStream, 'write'> = process.stdout, errors: Pick<NodeJS.WriteStream, 'write'> = process.stderr): number {

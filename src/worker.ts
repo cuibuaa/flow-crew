@@ -564,7 +564,6 @@ async function runStageWithWriterLease(
   if (opts.outputSchema) {
     prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.dynamicDispatch ? ' and dispatch.yaml' : opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff or verdict-file instructions. Put human-readable documents only at paths the task asks people to read. Evidence references name reproducible files or commands.`;
   }
-  prompt += `\n\n${runStateContext(opts.projectDir, opts.runId, opts.planRevision)}`;
   if (opts.artifactContract) prompt += `\n\n# Output and input locations (capability metadata)\n${JSON.stringify(opts.artifactContract)}`;
 
   const projectWriteScope = opts.projectWriteScope ?? [];
@@ -842,9 +841,10 @@ async function runStageWithWriterLease(
     // A fresh child (including a failed-resume fallback) needs both its duties
     // and the current local correction; the thread only carries the former.
     const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
-    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}`;
+    const stateContext = runStateContext(opts.projectDir, opts.runId, opts.planRevision);
+    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`;
     const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
-      ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}`
+      ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`
       : fullPrompt;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
