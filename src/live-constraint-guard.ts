@@ -505,7 +505,7 @@ export interface LiveConstraintGuardOptions {
   watchProject?: (
     listener: (path: string | undefined) => void,
     onError: (error: Error) => void,
-  ) => FSWatcher | undefined;
+  ) => Pick<FSWatcher, 'close'> | undefined;
 }
 
 export interface LiveConstraintGuardAttemptContext {
@@ -537,7 +537,7 @@ interface ActiveInvocation {
   pendingPaths: Set<string>;
   pendingTrigger?: LiveConstraintScanTrigger;
   scanPromise?: Promise<void>;
-  watcher?: FSWatcher;
+  watcher?: Pick<FSWatcher, 'close'>;
   fallbackTimer?: ReturnType<typeof setInterval>;
   livenessTimer?: ReturnType<typeof setInterval>;
   lastSuccessfulScanAt: number;

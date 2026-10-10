@@ -52,7 +52,6 @@ const config: SupervisorConfig = {
   model: 'default',
   reasoningEffort: 'low',
   pollIntervalMs: 30_000,
-  routineAssessmentIntervalMs: 180_000,
   cooldownAfterActionMs: 60_000,
   maxAssessmentsPerIteration: 20,
   tailBytes: 16_384,
@@ -76,7 +75,7 @@ describe('supervisor cost audit constructions', () => {
     })).toBe('none');
   });
 
-  it('still calls on busy output with exhausted routine budget and active work', () => {
+  it('does not assess busy output alone regardless of budget or cooldown', () => {
     const event = createSupervisorEvent(candidate('artifact_change', 'busy-output'));
     expect(selectSupervisorAssessmentTrigger({
       deterministicEvents: [event],
@@ -88,7 +87,8 @@ describe('supervisor cost audit constructions', () => {
       routineAssessmentsThisIteration: 20,
       maxRoutineAssessmentsPerIteration: 20,
       cooldownUntil: 120_000,
-    })).toBe('event');
+    })).toBe('none');
+    expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [event], hasGuidedActiveAttempt: true })).toBe('event');
   });
 
   it('still calls for a failed gate at the same exhausted budget and cooldown', () => {
@@ -124,7 +124,7 @@ describe('supervisor cost audit constructions', () => {
     expect(cursor.pendingCount).toBe(0);
   });
 
-  it('defers concurrent output only before the exact interval boundary', () => {
+  it('requires guided work at either side of the old interval boundary', () => {
     const event = createSupervisorEvent({
       ...candidate('artifact_change', 'two-active-stages'),
       quantities: { ...quantities, runningStageCount: 2, changedPathCount: 2 },
@@ -137,7 +137,7 @@ describe('supervisor cost audit constructions', () => {
       maxRoutineAssessmentsPerIteration: 20,
     };
     expect(selectSupervisorAssessmentTrigger({ ...common, now: 180_999 })).toBe('none');
-    expect(selectSupervisorAssessmentTrigger({ ...common, now: 181_000 })).toBe('event');
+    expect(selectSupervisorAssessmentTrigger({ ...common, now: 181_000 })).toBe('none');
   });
 
   it('restores a pending artifact with its first observed time and latest quantities', () => {
@@ -157,7 +157,7 @@ describe('supervisor cost audit constructions', () => {
     expect(restored.pendingCount).toBe(1);
   });
 
-  it('fails open when a concurrent artifact clock is invalid', () => {
+  it('does not authorize output-only assessment from an invalid clock', () => {
     const event = createSupervisorEvent({
       ...candidate('artifact_change', 'invalid-clock'),
       quantities: { ...quantities, runningStageCount: 2, changedPathCount: 2 },
@@ -166,12 +166,12 @@ describe('supervisor cost audit constructions', () => {
       deterministicEvents: [event], now: 50_000,
       lastRoutineAssessmentAt: 60_000,
       routineAssessmentIntervalMs: 180_000,
-    })).toBe('event');
+    })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({
       deterministicEvents: [event], now: 60_000,
       lastRoutineAssessmentAt: 59_000,
       routineAssessmentIntervalMs: Number.NaN,
-    })).toBe('event');
+    })).toBe('none');
   });
 
   it('does not mistake productive high-output work for an idle stall', () => {
@@ -258,9 +258,20 @@ describe('supervisor cost audit constructions', () => {
     }
   });
 
+  it('warns and ignores a retired routine interval without requiring a numeric value', () => {
+    const project = mkdtempSync(join(tmpdir(), 'flowcrew-retired-cadence-'));
+    const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      mkdirSync(join(project, 'config'));
+      writeFileSync(join(project, 'config', 'defaults.yaml'), 'supervisor:\n  routine_assessment_interval_ms: retired\n');
+      resetConfigCache();
+      expect(loadSupervisorConfig(project)).not.toHaveProperty('routineAssessmentIntervalMs');
+      expect(warning.mock.calls.map(([line]) => String(line)).join('')).toContain('routine_assessment_interval_ms is retired and ignored');
+    } finally { warning.mockRestore(); rmSync(project, { recursive: true, force: true }); }
+  });
+
   it.each([
     ['poll_interval_ms', 'pollIntervalMs', 10_000],
-    ['routine_assessment_interval_ms', 'routineAssessmentIntervalMs', 60_000],
     ['min_delta_bytes', 'minDeltaBytes', 8_192],
     ['max_assessments_per_iteration', 'maxAssessmentsPerIteration', 1],
     ['stuck_threshold_ms', 'stuckThresholdMs', 120_000],

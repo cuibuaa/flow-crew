@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendTextRecord } from './append-boundary.js';
-import { readJsonlFile } from './jsonl.js';
+import { readJsonlFile, type JsonlReadCursor } from './jsonl.js';
 import type { StageStatus, StoreState } from './store.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
@@ -152,9 +152,9 @@ export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): v
   appendTextRecord(join(runDirectory, 'events.jsonl'), JSON.stringify(event));
 }
 
-export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
+export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlReadCursor): RunEvent[] {
   try {
-    return readJsonlFile<RunEvent>(eventsPath(projectDir, runId));
+    return readJsonlFile<RunEvent>(eventsPath(projectDir, runId), cursor);
   } catch { /* no events file yet */
     return [];
   }

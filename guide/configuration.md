@@ -10,7 +10,6 @@ default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1     # adapter/transport retry, separate from gate loops
 default_plan_stage_retries: 2          # a plan stage that emits zero valid stages gets this many re-prompts before escalating
-default_supervisor_max_rejects: 2      # bounds how many times the supervisor can send one deliverable back for rework
 
 adapter: auto
 session_reuse: false                   # resuming a session measured ~9% lower wall time but 29% more output tokens; opt in with FC_SESSION_REUSE=1
@@ -30,7 +29,6 @@ campaign_triggers:
 
 supervisor:
   poll_interval_ms: 30000              # cheap heartbeat: detect transitions/anomalies
-  routine_assessment_interval_ms: 180000  # throttled semantic LLM review; anomalies bypass both intervals
   stuck_threshold_ms: 600000
 ```
 

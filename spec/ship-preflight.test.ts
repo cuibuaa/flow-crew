@@ -1,3 +1,4 @@
+import { canonicalValidationProbe, withCanonicalValidationBoundary } from './test-support/canonical-validation-boundary.js';
 import { createHash } from 'node:crypto';
 import {
   mkdirSync,
@@ -20,7 +21,6 @@ import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
   extractBriefInputPaths,
-  prepareValidationWriteGuard,
   type DaemonLoadedBuildProbe,
   type ShipPreflightDependencies,
 } from '../src/cli-ship-preflight.js';
@@ -98,9 +98,6 @@ function commonDeps(overrides: ShipPreflightDependencies = {}): ShipPreflightDep
     packageRoot: fixture.packageRoot,
     readGitCommonDir: () => '.git',
     readCampaignEntries: () => [],
-    // These fact/dispatch tests use mock runners. Enforcement cases below use
-    // the production guard and real descendants instead of this test seam.
-    prepareValidationWriteGuard: () => ({ wrap: (request) => request, cleanup: () => {} }),
     probeDaemon: async (): Promise<DaemonLoadedBuildProbe> => ({
       state: 'fresh', loadedBuild: 'same', diskBuild: 'same',
     }),
@@ -248,32 +245,32 @@ describe('live engine distribution validation boundary', () => {
   it('does not prepare command confinement when collecting facts', async () => {
     configureValidation(fixture.project);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
-    const prepare = vi.fn(() => { throw new Error('confinement unavailable'); });
     const stderr = new Capture();
     const deps = commonDeps({
       findDistConsumers: () => consumers, runValidationCommand: runner,
-      prepareValidationWriteGuard: prepare, stdout: new Capture().writer, stderr: stderr.writer,
+      stdout: new Capture().writer, stderr: stderr.writer,
     });
     expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
-    expect(prepare).not.toHaveBeenCalled();
     expect(stderr.value).toContain('No project command was launched');
     expect(runner).not.toHaveBeenCalled();
-    prepare.mockClear();
     expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
-    expect(prepare).not.toHaveBeenCalled();
     expect(runner).not.toHaveBeenCalled();
   });
 
   // Unsupported hosts exercise the fail-closed case above. Only an available
   // kernel guard can exercise the real syscall/descendant controls below.
-  function requireKernelGuard(context: { skip(note?: string): void }): void {
-    try { prepareValidationWriteGuard(fixture.project, fixture.packageRoot).cleanup(); }
-    catch { context.skip('Linux Landlock/Python 3 write confinement unavailable'); }
+  async function requireKernelGuard(context: { skip(note?: string): void }): Promise<void> {
+    const result = await canonicalValidationProbe(fixture.project, fixture.packageRoot);
+    if (result.exitCode !== 0) {
+      const detail = `${result.stdout ?? ''}${result.stderr ?? ''}${result.error ?? ''}`;
+      if (/Landlock.*(?:unavailable|required)|Python 3 interpreter/.test(detail)) context.skip(detail);
+      else throw new Error(detail);
+    }
   }
 
   it.each(['imported-script', 'environment', 'make-script', 'shell-script'])(
     'denies a consumed-dist write hidden in %s without classifying the command', async (form, context) => {
-      requireKernelGuard(context);
+      await requireKernelGuard(context);
       const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
       const before = readFileSync(runtime, 'utf-8');
       writeFileSync(join(fixture.project, 'target.json'), JSON.stringify({ runtime }));
@@ -303,12 +300,8 @@ describe('live engine distribution validation boundary', () => {
         } }));
         writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
       }
-      const stderr = new Capture();
-      const guard = prepareValidationWriteGuard(fixture.project, fixture.packageRoot);
-      let baseline;
-      try {
-        baseline = await runProjectValidationBaseline(fixture.project, { runCommand: request => runValidationCommand(guard.wrap(request)) });
-      } finally { guard.cleanup(); }
+      const baseline = await withCanonicalValidationBoundary(fixture.project, fixture.packageRoot,
+        () => runProjectValidationBaseline(fixture.project));
       expect(baseline.results[0]).toMatchObject({ role: 'build', state: 'failed' });
       expect(baseline.results[0].output).toContain('EACCES');
       expect(baseline.results.slice(1).map(({ state }) => state)).toEqual(['passed', 'passed']);
@@ -317,7 +310,7 @@ describe('live engine distribution validation boundary', () => {
   );
 
   it('allows independent project/home/temp writes while denying protected file mutations and symlink traversal', async (context) => {
-    requireKernelGuard(context);
+    await requireKernelGuard(context);
     const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
     const before = readFileSync(runtime, 'utf-8');
     symlinkSync(runtime, join(fixture.project, 'output-alias'));
@@ -335,41 +328,33 @@ describe('live engine distribution validation boundary', () => {
       'create: () => fs.writeFileSync(path.join(path.dirname(runtime), "new.js"), "changed"), alias: () => fs.writeFileSync("output-alias", "changed") };',
       'const results = {}; for (const [name, operation] of Object.entries(operations)) { try { operation(); results[name] = "ALLOWED"; } catch (error) { results[name] = error.code; } }',
       'fs.writeFileSync("denied.json", JSON.stringify(results));',
-      'fs.writeFileSync(path.join(process.argv[2], "cache-write"), "ok"); fs.writeFileSync(path.join(os.tmpdir(), "temp-write"), "ok");',
+      'fs.writeFileSync(path.join(process.env.HOME, "cache-write"), "ok"); fs.writeFileSync(path.join(os.tmpdir(), "temp-write"), "ok");',
+      'fs.writeFileSync("boundary-paths.json", JSON.stringify({home:process.env.HOME,temporary:os.tmpdir()}));',
       'fs.writeFileSync("independent-output", fs.readFileSync(runtime));',
     ].join('\n'));
-    const runner = vi.fn<ValidationCommandRunner>((request) => {
-      if (request.role !== 'build') return runValidationCommand(request);
-      // Give the fixture its guard-owned home explicitly; no ambient user-home
-      // lookup is needed to verify that temporary cache writes remain allowed.
-      const { scratch } = JSON.parse(request.args[5]) as { scratch: string };
-      return runValidationCommand({ ...request, args: [...request.args, '--', join(scratch, 'home')] });
-    });
-    const guard = prepareValidationWriteGuard(fixture.project, fixture.packageRoot);
-    let baseline;
-    try {
-      baseline = await runProjectValidationBaseline(fixture.project, { runCommand: request => runner(guard.wrap(request)) });
-    } finally { guard.cleanup(); }
+    const baseline = await withCanonicalValidationBoundary(fixture.project, fixture.packageRoot,
+      () => runProjectValidationBaseline(fixture.project));
     expect(baseline.results.map(({ state }) => state)).toEqual(['passed', 'passed', 'passed']);
     const denied = JSON.parse(readFileSync(join(fixture.project, 'denied.json'), 'utf-8')) as Record<string, string>;
     expect(Object.keys(denied)).toEqual(['write', 'truncate', 'readonlyTruncate', 'unlink', 'rename', 'link', 'create', 'alias']);
     for (const code of Object.values(denied)) expect(['EACCES', 'EPERM', 'EXDEV']).toContain(code);
     expect(readFileSync(runtime, 'utf-8')).toBe(before);
     expect(readFileSync(join(fixture.project, 'independent-output'), 'utf-8')).toBe(before);
-    const payload = JSON.parse(runner.mock.calls[0][0].args[5]) as { scratch: string };
+    const paths = JSON.parse(readFileSync(join(fixture.project, 'boundary-paths.json'), 'utf-8'));
     expect(readdirSync(fixture.project)).toContain('denied.json');
-    expect(() => statSync(payload.scratch)).toThrow();
+    expect(() => statSync(paths.home)).toThrow();
+    expect(() => statSync(paths.temporary)).toThrow();
   });
 
   it('refuses pre-existing consumed-file hard links before launching a guarded command', async (context) => {
-    requireKernelGuard(context);
+    await requireKernelGuard(context);
     configureValidation(fixture.project);
     const runtime = join(fixture.packageRoot, 'dist', 'probe.js');
     const before = readFileSync(runtime, 'utf-8');
     linkSync(runtime, join(fixture.project, 'existing-alias'));
-    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
-    expect(() => prepareValidationWriteGuard(fixture.project, fixture.packageRoot)).toThrow('unaccounted hard links');
-    expect(runner).not.toHaveBeenCalled();
+    const result = await canonicalValidationProbe(fixture.project, fixture.packageRoot);
+    expect(result.exitCode).not.toBe(0);
+    expect(`${result.error ?? ''}${result.stderr ?? ''}`).toContain('writable member aliases an engine carrier');
     expect(readFileSync(runtime, 'utf-8')).toBe(before);
   });
 });

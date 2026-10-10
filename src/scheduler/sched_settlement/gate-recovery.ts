@@ -6,7 +6,6 @@ import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admissio
 import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
-import { CAMPAIGN_PHASE_COMPLETE_SENTINEL, findCampaignPhaseMetadata } from '../sched_policy/campaign.js';
 import { appendSchedulerGuidanceOnce } from '../sched_policy/guidance.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -363,15 +362,6 @@ export function checkGates(allStages: StageConfig[], state: StoreState, projectD
   return { allPass, failedGateIds };
 }
 
-/** Find the retry_to stage that references any of the failed gate IDs */
-export function findRetryToStage(allStages: StageConfig[], failedGateIds: string[]): StageConfig | null {
-  const failedSet = new Set(failedGateIds);
-  for (const s of allStages) {
-    if (referencesFailedGate(s, id => failedSet.has(id))) return s;
-  }
-  return null;
-}
-
 /** Find ALL retry_to stages that reference any of the failed gate IDs */
 export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: string[]): StageConfig[] {
   const failedSet = new Set(failedGateIds);
@@ -533,14 +523,6 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
     if (ss.status === STAGE_STATUS.SKIPPED) return true;
     return ss.status === STAGE_STATUS.COMPLETE && (ss.exitCode === undefined || ss.exitCode === 0);
   });
-}
-
-export function shouldContinuePhaseAfterGatePass(projectDir: string, state: StoreState): boolean {
-  const phase = findCampaignPhaseMetadata(projectDir, state);
-  if (!phase) return false;
-  if (phase.phaseComplete === false) return true;
-  const nextPhase = phase.nextPhase?.trim().toLowerCase();
-  return phase.phaseComplete === true && Boolean(nextPhase && nextPhase !== CAMPAIGN_PHASE_COMPLETE_SENTINEL);
 }
 
 export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir: string, state: StoreState) => void) {

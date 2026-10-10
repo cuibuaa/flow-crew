@@ -345,10 +345,9 @@ default_max_iterations: 5
 default_gate_retry_loops: 3
 default_stage_technical_retries: 1     # adapter/transport retry, separate from gate loops
 default_plan_stage_retries: 2          # transient empty/invalid plan → bounded retry, not fatal
-default_supervisor_max_rejects: 2      # supervisor can send a deliverable back, bounded
 
 adapter: auto
-session_reuse: false                   # measured benefit was ~9% wall clock; off by default
+session_reuse: false                   # opt-in; the cited pilot did not inherit a session
 model: default                         # inherit the adapter's own config unless set here
 reasoning_effort: default
 
@@ -361,7 +360,6 @@ campaign_triggers:
 
 supervisor:
   poll_interval_ms: 30000
-  routine_assessment_interval_ms: 180000
   stuck_threshold_ms: 600000           # no-progress stage watchdog
 ```
 

@@ -1,10 +1,11 @@
+import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { buildRetryPreamble, captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively, closeRepairRoundSnapshot, parseDispatchedStageConfig, restoreProjectPath } from '../src/scheduler.js';
+import { buildRetryPreamble, captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively, parseDispatchedStageConfig, restoreProjectPath } from '../src/scheduler.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 

@@ -1,3 +1,4 @@
+import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -91,7 +92,7 @@ describe('path-wise scope admission', () => {
       expect(snapshot.files.has('safe.txt')).toBe(true);
       expect(snapshot.files.has('changed.txt')).toBe(false);
       expect(readFileSync(join(project, 'input.txt'), 'utf8')).toBe('read-only evidence');
-    } finally { scheduler.closeRepairRoundSnapshot(snapshot); }
+    } finally { closeRepairRoundSnapshot(snapshot); }
   });
   it.each(['run', 'stage', 'attempt', 'digest', 'malformed'] as const)('never partially accepts an invalid %s binding', (kind) => {
     const { input, request } = setup(['safe.txt', 'blocked.txt']);

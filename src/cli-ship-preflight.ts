@@ -1,23 +1,18 @@
 import { errorMessage } from './source_services/cli-inputs.js';
-import { bindEngineCommandDirectory } from './write-boundary.js';
 import {
   accessSync,
   constants,
   existsSync,
   lstatSync,
-  mkdirSync,
-  mkdtempSync,
   readFileSync,
   readlinkSync,
   readdirSync,
   realpathSync,
-  rmSync,
   statSync,
   type Stats,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   canonicalCampaignStorageKey,
@@ -41,7 +36,6 @@ import {
   runProjectValidationBaseline,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
-  type ValidationRunRequest,
 } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import {
@@ -102,7 +96,6 @@ export interface ShipPreflightDependencies {
   readCampaignEntries?: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
-  prepareValidationWriteGuard?: (projectDir: string, packageRoot: string) => ValidationWriteGuard;
   inspectLiveRun?: (runId: string, runPath: string) => boolean;
   findDistConsumers?: (distDir: string) => DeployedDistConsumer[];
 }
@@ -353,197 +346,6 @@ function canonicalize(path: string, deps: ResolvedDependencies): { path: string;
     return { path: deps.realpath(absolute), fallback: false };
   } catch {
     return { path: absolute, fallback: true };
-  }
-}
-
-function containsPath(root: string, target: string): boolean {
-  const path = relative(root, target);
-  return path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path));
-}
-
-export interface ValidationWriteGuard {
-  wrap(request: ValidationRunRequest): ValidationRunRequest;
-  cleanup(): void;
-  description?: string;
-}
-
-// Python's standard-library ctypes supplies the Linux syscall bridge without
-// installing a native Node addon. No project code executes before restrict_self.
-// ABI 3 is mandatory: ABI 1/2 cannot deny truncation. Reads remain unrestricted.
-const LINUX_VALIDATION_WRITE_GUARD = String.raw`
-import ctypes, json, os, platform, re, stat, sys
-
-def checked(value, operation):
-    if value < 0:
-        raise OSError(ctypes.get_errno(), operation)
-    return value
-
-def overlaps(first, second):
-    shared = os.path.commonpath([first, second])
-    return shared == first or shared == second
-
-def fail_scan(error):
-    raise error
-
-try:
-    config = json.loads(sys.argv[1])
-    if platform.machine() not in ('x86_64', 'aarch64', 'riscv64'):
-        raise RuntimeError('unsupported Linux syscall architecture')
-    project = os.path.realpath(config['project'])
-    engine = os.path.realpath(config['engine'])
-    scratch = os.path.realpath(config['scratch'])
-    if overlaps(project, engine) or overlaps(scratch, engine):
-        raise RuntimeError('writable roots overlap the consumed engine')
-    # Builds archive unchanged output with hard links. Count actual directory
-    # entries in both protected trees, never symlink/bind views of an entry.
-    roots = [os.path.join(engine, 'dist'), os.path.join(engine, '.cache', 'build-generations')]
-    aliases = {}
-    snapshots = {}
-    alias_directories = set()
-    pending = roots.copy()
-    while pending:
-        path = pending.pop()
-        if path in roots and not os.path.lexists(path):
-            continue
-        physical = os.path.realpath(path)
-        if os.path.commonpath([physical, engine]) != engine or overlaps(physical, project) or overlaps(physical, scratch):
-            raise RuntimeError('protected output aliases an unprotected root: ' + path)
-        info = os.lstat(path)
-        identity = (info.st_dev, info.st_ino)
-        snapshots[path] = (identity, info.st_mode, info.st_nlink, info.st_ctime_ns, info.st_mtime_ns)
-        if stat.S_ISDIR(info.st_mode) and identity not in alias_directories:
-            alias_directories.add(identity)
-            with os.scandir(path) as entries:
-                pending.extend(entry.path for entry in entries)
-        elif stat.S_ISREG(info.st_mode):
-            aliases[identity] = aliases.get(identity, 0) + 1
-    # A writable or unknown hard-link alias can defeat path separation.
-    # Protect generations too: a consumer may still execute an older build.
-    pending = roots.copy()
-    visited = set()
-    protected = set()
-    for root in roots:
-        ancestor = os.path.realpath(root)
-        while True:
-            if os.path.exists(ancestor):
-                info = os.stat(ancestor)
-                protected.add((info.st_dev, info.st_ino))
-            parent = os.path.dirname(ancestor)
-            if parent == ancestor:
-                break
-            ancestor = parent
-    while pending:
-        path = pending.pop()
-        if path in roots and not os.path.lexists(path):
-            continue
-        physical = os.path.realpath(path)
-        if overlaps(physical, project) or overlaps(physical, scratch):
-            raise RuntimeError('consumed output aliases a writable root: ' + path)
-        info = os.stat(path)
-        protected.add((info.st_dev, info.st_ino))
-        if stat.S_ISDIR(info.st_mode):
-            identity = (info.st_dev, info.st_ino)
-            if identity not in visited:
-                visited.add(identity)
-                with os.scandir(path) as entries:
-                    pending.extend(entry.path for entry in entries)
-        elif stat.S_ISREG(info.st_mode) and info.st_nlink != aliases.get((info.st_dev, info.st_ino), 0):
-            raise RuntimeError('consumed output has unaccounted hard links: ' + path)
-    # realpath does not reveal bind mounts. A writable root or nested mount
-    # that aliases a protected object/ancestor cannot be admitted either.
-    for writable in (project, scratch):
-        root_info = os.stat(writable)
-        if (root_info.st_dev, root_info.st_ino) in protected:
-            raise RuntimeError('writable root identity aliases consumed output or an ancestor')
-        for base, dirs, names in os.walk(writable, followlinks=False, onerror=fail_scan):
-            for name in dirs + names:
-                path = os.path.join(base, name)
-                info = os.lstat(path)
-                if not stat.S_ISLNK(info.st_mode) and (info.st_dev, info.st_ino) in protected:
-                    raise RuntimeError('writable tree aliases consumed output: ' + path)
-    with open('/proc/self/mountinfo') as mounts:
-        for line in mounts:
-            mountpoint = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split()[4])
-            if any(os.path.commonpath([writable, mountpoint]) == writable for writable in (project, scratch)):
-                info = os.stat(mountpoint)
-                if (info.st_dev, info.st_ino) in protected:
-                    raise RuntimeError('project mount aliases consumed output or an ancestor: ' + mountpoint)
-    libc = ctypes.CDLL(None, use_errno=True)
-    abi = checked(libc.syscall(444, 0, 0, 1), 'landlock_create_ruleset ABI')
-    if abi < 3:
-        raise RuntimeError('Landlock ABI 3 or newer is required, found ' + str(abi))
-    # WRITE_FILE, REMOVE_DIR/FILE, all MAKE_* rights, REFER and TRUNCATE.
-    writes = (1 << 1) | sum(1 << bit for bit in range(4, 15))
-    class Ruleset(ctypes.Structure):
-        _fields_ = [('handled_access_fs', ctypes.c_uint64)]
-    class PathRule(ctypes.Structure):
-        _pack_ = 1
-        _fields_ = [('allowed_access', ctypes.c_uint64), ('parent_fd', ctypes.c_int32)]
-    attr = Ruleset(writes)
-    ruleset = checked(libc.syscall(444, ctypes.byref(attr), ctypes.sizeof(attr), 0), 'landlock_create_ruleset')
-    for path, rights in ((project, writes), (scratch, writes), (os.devnull, (1 << 1) | (1 << 14))):
-        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
-        try:
-            rule = PathRule(rights, fd)
-            checked(libc.syscall(445, ruleset, 1, ctypes.byref(rule), 0), 'landlock_add_rule')
-        finally:
-            os.close(fd)
-    checked(libc.prctl(38, 1, 0, 0, 0), 'PR_SET_NO_NEW_PRIVS')
-    checked(libc.syscall(446, ruleset, 0), 'landlock_restrict_self')
-    os.close(ruleset)
-    # Refuse if a concurrent build changed the alias/identity snapshot while
-    # confinement was being installed. Descendants cannot create new outside
-    # aliases after this point (REFER and all write rights are handled).
-    for path, previous in snapshots.items():
-        info = os.lstat(path)
-        current = ((info.st_dev, info.st_ino), info.st_mode, info.st_nlink, info.st_ctime_ns, info.st_mtime_ns)
-        if current != previous:
-            raise RuntimeError('protected output changed during confinement preparation: ' + path)
-    if sys.argv[2:] == ['--probe']:
-        print(json.dumps({'abi': abi}))
-        sys.exit(0)
-    home = os.path.join(scratch, 'home')
-    os.environ.update(HOME=os.environ.get('HOME', home), USERPROFILE=os.environ.get('USERPROFILE', os.environ.get('HOME', home)), TMPDIR=os.path.join(scratch, 'tmp'),
-        TMP=os.path.join(scratch, 'tmp'), TEMP=os.path.join(scratch, 'tmp'),
-        XDG_CACHE_HOME=os.path.join(home, '.cache'), XDG_CONFIG_HOME=os.environ.get('XDG_CONFIG_HOME', os.path.join(os.environ.get('HOME', home), '.config')),
-        XDG_STATE_HOME=os.path.join(home, '.local', 'state'),
-        FC_HOME=os.path.join(home, '.fc'), FLOWCREW_DAEMON_SOCKET=os.path.join(scratch, 'unavailable.sock'),
-        npm_config_cache=os.path.join(home, '.npm'), NPM_CONFIG_CACHE=os.path.join(home, '.npm'))
-    os.environ.pop('FLOWCREW_LAUNCH_RESULT_PATH', None)
-except Exception as error:
-    print('FlowCrew validation write confinement unavailable: ' + str(error), file=sys.stderr)
-    sys.exit(125)
-
-# exec preserves the policy through shells, package hooks and arbitrary scripts.
-# The launcher has no pre-opened writable project/engine descriptors to inherit.
-os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
-`;
-
-export function prepareValidationWriteGuard(projectDir: string, packageRoot: string): ValidationWriteGuard {
-  if (process.platform !== 'linux') throw new Error('Linux Landlock write confinement is unavailable on this platform');
-  const engine = realpathSync.native(packageRoot);
-  const temporaryRoot = realpathSync.native(tmpdir());
-  if (containsPath(engine, temporaryRoot)) throw new Error('Temporary directory is inside the consumed engine');
-  const scratch = mkdtempSync(join(temporaryRoot, 'flowcrew-validation-'));
-  try {
-    mkdirSync(join(scratch, 'home', '.fc'), { recursive: true });
-    mkdirSync(join(scratch, 'tmp'));
-    const payload = JSON.stringify({ project: realpathSync.native(projectDir), engine, scratch });
-    const args = ['-I', '-S', '-B', '-c', LINUX_VALIDATION_WRITE_GUARD, payload];
-    const { abi } = JSON.parse(execFileSync('python3', [...args, '--probe'], {
-      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000,
-    })) as { abi: number };
-    return {
-      wrap: (request) => bindEngineCommandDirectory({ ...request, command: 'python3', args: [...args, request.command, ...request.args] }, scratch),
-      cleanup: () => rmSync(scratch, { recursive: true, force: true }),
-      description: `Linux Landlock ABI ${abi}; writes confined to ${projectDir} and isolated temporary cache/state ${scratch}; HOME/configuration reads preserved`,
-    };
-  } catch (error) {
-    rmSync(scratch, { recursive: true, force: true });
-    const detail = error instanceof Error && 'stderr' in error
-      ? String((error as Error & { stderr: unknown }).stderr).trim()
-      : errorMessage(error);
-    throw new Error(detail || errorMessage(error), { cause: error });
   }
 }
 

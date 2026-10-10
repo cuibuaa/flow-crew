@@ -84,7 +84,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await orchestrator.stop();
   invalidateRunLockCache();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -890,6 +891,30 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(systemd.runs.length).toBe(0);                       // no second spawn
     expect(registry.get(task.id)?.status).toBe('running');
     expect(registry.readRecentTicks(task.id).some((l) => l.includes('adopted live unit'))).toBe(true);
+  });
+
+  it('joins an owned backend sweep before stop resolves, so teardown has no late writer', async () => {
+    const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
+    let entered!: () => void, release!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    systemd.isActive = async () => {
+      if (first) { first = false; entered(); await gate; }
+      return ACTIVE_UNIT;
+    };
+    const tick = orchestrator.tickOnce();
+    await entering;
+    let stopped = false;
+    const stopping = orchestrator.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await Promise.all([tick, stopping]);
+    expect(registry.get(task.id)?.status).toBe('running');
+    const settled = readFileSync(registry.registryPath);
+    await Promise.resolve();
+    expect(readFileSync(registry.registryPath)).toEqual(settled);
   });
 
   it('is reentrancy-guarded: an overlapping sweep cannot double-launch', async () => {

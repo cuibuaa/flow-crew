@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
@@ -107,12 +108,12 @@ function leadingFrontmatter(brief: string): {
   bodyLineOffset: number;
   declarationsComplete: boolean;
 } {
-  const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(brief);
-  if (!match) return { body: brief, bodyLineOffset: 0, declarationsComplete: true };
+  const frontmatter = splitBriefFrontmatter(brief);
+  if (!frontmatter) return { body: brief, bodyLineOffset: 0, declarationsComplete: true };
   let parsed: Record<string, unknown> | undefined;
   let declarationsComplete = false;
   try {
-    const document = parseDocument(match[1]);
+    const document = parseDocument(frontmatter.yaml);
     parsed = record(document.toJS());
     declarationsComplete = document.errors.length === 0 && parsed !== undefined;
   } catch {
@@ -122,8 +123,8 @@ function leadingFrontmatter(brief: string): {
   }
   return {
     parsed,
-    body: brief.slice(match[0].length),
-    bodyLineOffset: match[0].split(/\r?\n/).length - 1,
+    body: frontmatter.body,
+    bodyLineOffset: frontmatter.bodyLineOffset,
     declarationsComplete,
   };
 }

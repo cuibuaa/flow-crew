@@ -143,7 +143,7 @@ export class Orchestrator {
    *  as inactive and launch or reconcile them a second time. */
   private launchingTaskIds = new Set<number>();
   private timer?: NodeJS.Timeout;
-  private ticking = false;
+  private activeTick?: Promise<void>;
   private startedAt = Date.now();
   private lastRegistryCompactionAttempt?: string;
 
@@ -234,9 +234,12 @@ export class Orchestrator {
     this.timer = setInterval(() => void this.tickOnce(), this.intervalMs);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // Clearing the producer timer does not close a sweep already awaiting a
+    // backend. Its owner must join that sweep before removing durable state.
+    await this.activeTick;
   }
 
   /** Persist admission before launch work. The daemon queue resumes after a restart. */
@@ -383,15 +386,11 @@ export class Orchestrator {
     };
   }
 
-  async tickOnce(): Promise<void> {
-    // Reentrancy guard: setInterval does not wait for the previous sweep. Once
-    // per-task work (systemctl, git, project probes) pushes a sweep past the
-    // interval, overlapping sweeps would relaunch the same task twice under the
-    // same unit name — and the second systemd-run failure silently degrades to
-    // a detached bash child, i.e. two live agent processes for one task.
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
+  tickOnce(): Promise<void> {
+    if (this.activeTick) return this.activeTick;
+    // Publish ownership before the sweep executes, including reentrant calls
+    // from injected backends. Concurrent callers join the same owned work.
+    this.activeTick = Promise.resolve().then(async () => {
       this.reconcileOrphanRuns?.();
       this.compactRegistryIfNeeded();
       const tasks = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE });
@@ -412,9 +411,8 @@ export class Orchestrator {
           ? this.cancellations.cancelTask(task.id)
           : this.tickTask(task)
       )));
-    } finally {
-      this.ticking = false;
-    }
+    }).finally(() => { this.activeTick = undefined; });
+    return this.activeTick;
   }
 
   private compactRegistryIfNeeded(): void {

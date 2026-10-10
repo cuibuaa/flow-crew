@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,13 +33,6 @@ function slug(value: string): string {
   return (normalized || 'criteria').slice(0, 24);
 }
 
-function bodyStartLine(brief: string): number {
-  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return 1;
-  const close = /\r?\n---(?:\r?\n|$)/g;
-  close.lastIndex = brief.indexOf('\n') + 1;
-  const match = close.exec(brief);
-  return match ? brief.slice(0, (match.index ?? 0) + match[0].length).split(/\r?\n/).length : 1;
-}
 
 /**
  * Extract only structurally numbered/named criteria under an explicit contract
@@ -46,7 +40,7 @@ function bodyStartLine(brief: string): number {
  */
 export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
   const lines = brief.split(/\r?\n/);
-  const firstBodyLine = bodyStartLine(brief);
+  const firstBodyLine = (splitBriefFrontmatter(brief)?.bodyLineOffset ?? 0) + 1;
   const criteria: BriefCriterion[] = [];
   const excluded: NonNullable<BriefCriteriaArtifact['excluded']> = [];
   let section: { title: string; level: number } | undefined;

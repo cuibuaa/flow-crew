@@ -11,7 +11,7 @@ export { buildRetryPreamble, decideEmptyDispatchAction, decideRealityCheckPrefli
 export { StageConfigSchema, WorkflowConfigSchema, normalizeRetryGateRelationships, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';
 export { detectParallelWriteConflicts, findScopeConflict, selectRunnableBatch } from './scheduler/sched_admission/frontier.js';
 export { GATE_VERDICT_CORRECTION_VERSION, canResumeOwnGateSession, canReuseCodexSession, gateVerdictCorrectionPath, isValidationStage } from './scheduler/sched_admission/sessions.js';
-export { applyBasePrompt, applyFrameworkScopeReservations, buildRoleRegistry, collectTransitiveDependents, findDownstream, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, parseDispatchBlock, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
+export { applyBasePrompt, applyFrameworkScopeReservations, buildRoleRegistry, collectTransitiveDependents, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
 export { configuredValidationCommandRole, discoverConfiguredCommandScopes } from './scheduler/sched_admission/project-capabilities.js';
 export { assessTerminalConditionCoverage } from './scheduler/sched_admission/condition-coverage.js';
 export { inspectRealityCheckReachability } from './scheduler/sched_admission/reality-reads.js';
@@ -23,7 +23,7 @@ export type { GateVerdictCorrection } from './scheduler/sched_admission/sessions
 export type { TerminalConditionCoverageAssessment } from './scheduler/sched_admission/condition-coverage.js';
 export { appendIterationLog, ensureTerminalArtifactValidation, inspectApprovalRequests, monitorApprovalRequests, scopeRevisionValidationConsequence, tryTerminateOnTerminalState, writeCampaignEntry } from './scheduler/sched_loop/services.js';
 export { declaredInputScopeConflict, resolveDeclaredInputWriteBindings, scopeContainsPath } from './scheduler/sched_scope/path-capabilities.js';
-export { captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively, closeRepairRoundSnapshot } from './scheduler/sched_scope/snapshots.js';
+export { captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively } from './scheduler/sched_scope/snapshots.js';
 export { restoreProjectPath } from './scheduler/sched_scope/restore.js';
 export { decideScopeRevision, stageWithInheritedScope } from './scheduler/sched_scope/scope-revisions.js';
 export type { DeclaredInputScopeConflict, DeclaredInputWriteBinding } from './scheduler/sched_scope/path-capabilities.js';
@@ -33,9 +33,9 @@ export { loadGateContract, validateVerdictAgainstMetricFile } from './scheduler/
 export { recordGateValidationDelta, snapshotShipSetupValidationBaseline } from './scheduler/sched_settlement/gate-validation.js';
 export { deriveCriterionDischarges, readGateVerdict } from './scheduler/sched_settlement/gate-verdict.js';
 export type { GateRecoveryFact, ResearchSettlementProjection } from './scheduler/sched_settlement/gate-recovery.js';
-export { checkGates, findAllRetryToStages, findGateRecoveryStages, findRetryToStage, isResearchOutcomeGate, lastGatePassed, recoverVerifiedResearchSettlement, researchAdvanceEligible, shouldContinuePhaseAfterGatePass } from './scheduler/sched_settlement/gate-recovery.js';
+export { checkGates, findAllRetryToStages, findGateRecoveryStages, isResearchOutcomeGate, lastGatePassed, recoverVerifiedResearchSettlement, researchAdvanceEligible } from './scheduler/sched_settlement/gate-recovery.js';
 export { recoverTerminalStudyCompletion } from './scheduler/sched_settlement/completion.js';
-export { archivedGateRejections, buildGateDispatchPreamble, buildGateReevaluationPreamble } from './scheduler/sched_settlement/gate-archives.js';
+export { archivedGateRejections, buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 export { recordSchedulerTechnicalAttemptResult } from './scheduler/sched_settlement/stage-execution.js';
 export { findAllReady, inspectDispatchAdmission, tryAdvanceResearch, writeRepairRoundDiffArtifact } from './scheduler/sched_loop/services.js';
 export { runWorkflow } from './scheduler/sched_loop/run-workflow.js';

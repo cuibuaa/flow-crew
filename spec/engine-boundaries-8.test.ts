@@ -6,7 +6,7 @@ import { stringify } from 'yaml';
 import { afterEach, describe, expect, it, vi, type TestContext } from 'vitest';
 import { execWithStdin } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
-import { prepareValidationWriteGuard, type ValidationWriteGuard } from '../src/cli-ship-preflight.js';
+import { canonicalValidationProbe, withCanonicalValidationBoundary } from './test-support/canonical-validation-boundary.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { inspectRealityCheckReachability } from '../src/scheduler.js';
 import { runValidationCommand } from '../src/project-validation.js';
@@ -274,17 +274,19 @@ function guardFixture() {
   writeFileSync(runtime, 'protected generation\n');
   return { root, engine, project, runtime };
 }
-function guardOrSkip(context: TestContext, f: ReturnType<typeof guardFixture>): ValidationWriteGuard {
-  try { return prepareValidationWriteGuard(f.project, f.engine); }
-  catch (error) {
-    if (/Landlock|unsupported Linux syscall architecture|spawnSync python3 ENOENT/.test(String(error))) context.skip();
-    throw error;
+async function guardOrSkip(context: TestContext, f: ReturnType<typeof guardFixture>): Promise<void> {
+  const result = await canonicalValidationProbe(f.project, f.engine);
+  if (result.exitCode !== 0) {
+    const detail = `${result.error ?? ''}${result.stderr ?? ''}`;
+    if (/Landlock.*(?:unavailable|required)|Python 3 interpreter/.test(detail)) context.skip();
+    throw new Error(detail);
   }
 }
-function guarded(guard: ValidationWriteGuard, project: string, script: string, env = process.env) {
-  const request = guard.wrap({ role: 'test', command: process.execPath, args: ['-e', script], cwd: project,
-    display: 'controlled node fixture', env: { ...env, HOME: env.HOME ?? project, FC_HOME: join(project, 'state') } });
-  return runValidationCommand(request);
+function guarded(f: ReturnType<typeof guardFixture>, script: string, env = process.env) {
+  return withCanonicalValidationBoundary(f.project, f.engine, () => runValidationCommand({
+    role: 'test', command: process.execPath, args: ['-e', script], cwd: f.project,
+    display: 'controlled node fixture', env: { ...env, HOME: env.HOME ?? f.project, FC_HOME: join(f.project, 'state') },
+  }));
 }
 describe.skipIf(process.platform !== 'linux')('boundary 57: protected generation aliases and HOME', () => {
   it('admits closed generation links while denying descendant writes through protected paths and symlinks', async context => {
@@ -293,13 +295,13 @@ describe.skipIf(process.platform !== 'linux')('boundary 57: protected generation
     mkdirSync(generation, { recursive: true });
     linkSync(f.runtime, join(generation, 'runtime.js'));
     symlinkSync(f.runtime, join(f.project, 'alias'));
-    const guard = guardOrSkip(context, f);
-    try {
+    await guardOrSkip(context, f);
+    {
       const script = `const fs=require('fs'); const cp=require('child_process');
         const child=cp.spawnSync(process.execPath,['-e',${JSON.stringify(`require('fs').writeFileSync(${JSON.stringify(f.runtime)},'bad')`)}],{encoding:'utf8'});
         let alias;try{fs.writeFileSync('alias','bad');alias='ALLOWED'}catch(e){alias=e.code}
         fs.writeFileSync('owned-output','ok');console.log(JSON.stringify({child:child.status,error:child.stderr,alias}));`;
-      const result = await guarded(guard, f.project, script);
+      const result = await guarded(f, script);
       expect(result.exitCode, result.stderr).toBe(0);
       const observation = JSON.parse(result.stdout ?? '');
       expect(observation.child).toBe(1);
@@ -307,15 +309,27 @@ describe.skipIf(process.platform !== 'linux')('boundary 57: protected generation
       expect(observation.alias).toBe('EACCES');
       expect(readFileSync(f.runtime, 'utf8')).toBe('protected generation\n');
       expect(readFileSync(join(generation, 'runtime.js'), 'utf8')).toBe('protected generation\n');
-    } finally { guard.cleanup(); }
+    }
   });
 
-  it.each(['project', 'unknown'])('refuses an existing %s hard-link alias before command execution', (where, context) => {
+  it.each(['project', 'unknown'])('protects an existing %s hard-link alias through the canonical boundary', async (where, context) => {
     const f = guardFixture();
-    const capability = guardOrSkip(context, f); capability.cleanup();
-    linkSync(f.runtime, join(where === 'project' ? f.project : f.root, 'alias'));
-    expect(() => prepareValidationWriteGuard(f.project, f.engine)).toThrow('unaccounted hard links');
+    await guardOrSkip(context, f);
+    const alias = join(where === 'project' ? f.project : f.root, 'alias');
+    linkSync(f.runtime, alias);
+    if (where === 'project') {
+      const result = await canonicalValidationProbe(f.project, f.engine);
+      expect(result.exitCode).not.toBe(0);
+      expect(`${result.error ?? ''}${result.stderr ?? ''}`).toContain('writable member aliases an engine carrier');
+    } else {
+      // This alias has no write grant. The kernel denies the attempted write,
+      // without the legacy guard refusing an otherwise safe launch.
+      const result = await guarded(f, `require('node:fs').writeFileSync(${JSON.stringify(alias)}, 'bad')`);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('EACCES');
+    }
     expect(readFileSync(f.runtime, 'utf8')).toBe('protected generation\n');
+    expect(readFileSync(alias, 'utf8')).toBe('protected generation\n');
   });
 
   it('preserves home and config reads, denies ambient home writes, and supplies a writable private cache', async context => {
@@ -324,9 +338,9 @@ describe.skipIf(process.platform !== 'linux')('boundary 57: protected generation
     const config = join(home, 'config'); mkdirSync(config, { recursive: true });
     writeFileSync(join(home, 'marker'), 'home marker');
     writeFileSync(join(config, 'marker'), 'config marker');
-    const guard = guardOrSkip(context, f);
-    try {
-      const result = await guarded(guard, f.project, String.raw`
+    await guardOrSkip(context, f);
+    {
+      const result = await guarded(f, String.raw`
         const fs=require('fs'),path=require('path');
         const home=fs.readFileSync(path.join(process.env.HOME,'marker'),'utf8');
         const config=fs.readFileSync(path.join(process.env.XDG_CONFIG_HOME,'marker'),'utf8');
@@ -337,6 +351,6 @@ describe.skipIf(process.platform !== 'linux')('boundary 57: protected generation
       expect(result.exitCode, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout ?? '')).toEqual({ home: 'home marker', config: 'config marker', write: 'EACCES' });
       expect(existsSync(join(home, 'forbidden'))).toBe(false);
-    } finally { guard.cleanup(); }
+    }
   });
 });

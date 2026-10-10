@@ -6,7 +6,6 @@ import { join, posix } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
-import { readDispatchDocument } from '../../dispatch-document.js';
 import type { RealityCheckPreflightReport } from '../../reality-check-preflight.js';
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
@@ -15,7 +14,6 @@ import { resolveResearchPaths } from '../../research-paths.js';
 import { discoverProjectValidation } from '../../project-validation.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeRetryGateRelationships, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS } from './configuration.js';
 import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
-import { log } from './shared.js';
 import { normalizedProjectPath, scopeMatchesProjectPath } from './scope-services.js';
 import { parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { discoverConfiguredCommandScopes, configuredCommandRolesForStage } from './project-capabilities.js';
@@ -84,47 +82,6 @@ export function listAvailableSkills(projectDir: string): string {
   } catch { return 'none'; }
 }
 
-export function parseDispatchBlock(
-  output: string,
-  roleRegistry: Map<string, { name: string; description: string }>,
-): StageConfig[] {
-  // Strip diff-format line prefixes (e.g. "  123, 150: " or "+      148: " or "- 143     : ")
-  const cleaned = output.replace(/^[-+ ] *\d*[, ]*\d* *: /gm, '');
-  const match = cleaned.match(/## DISPATCH\s*\n```(?:yaml)?\s*\n([\s\S]*?)```/);
-  if (!match) return [];
-  const items = readDispatchDocument(match[1]).stages as Record<string, unknown>[];
-  const stages: StageConfig[] = [];
-  const seenIds = new Set<string>();
-  let refused = false;
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.id !== 'string' || typeof item.role !== 'string') { refused = true; continue; }
-    if (seenIds.has(item.id)) {
-      log.warn({ id: item.id }, 'Duplicate stage ID in DISPATCH block, skipping');
-      refused = true;
-      continue;
-    }
-    if (!roleRegistry.has(item.role)) {
-      log.warn({ role: item.role, id: item.id }, 'Unknown role in DISPATCH block, skipping');
-      refused = true;
-      continue;
-    }
-    try {
-      // Bug 2: map task: to prompt_template: if planner used that format
-      if (item.task && !item.prompt_template) {
-        item.prompt_template = item.task;
-        delete item.task;
-      }
-      stages.push(parseDispatchedStageConfig(item));
-      seenIds.add(item.id);
-    } catch (error) { /* non-critical */
-      refused = true;
-      log.warn({ id: item.id, diagnostic: formatDispatchStageSchemaFailure(error) }, 'Invalid stage in DISPATCH block');
-    }
-  }
-  return refused ? [] : stages;
-}
-
 export function resolveDispatchDependencies(dispatched: StageConfig[], _dispatchStageId: string): void {
   // Compatibility export retained for callers compiled against older builds.
   // Dynamic dependencies are now admitted exactly as authored; the framework
@@ -147,11 +104,6 @@ export function collectTransitiveDependents(stageId: string, stages: StageConfig
     }
   }
   return dependents;
-}
-
-/** BFS: find all stages that transitively depend on stageId (returns array of IDs) */
-export function findDownstream(stageId: string, stages: StageConfig[]): string[] {
-  return [...collectTransitiveDependents(stageId, stages)];
 }
 
 /** A copy of a schema-invalid stage without the top-level fields its issues name, if that parses. */

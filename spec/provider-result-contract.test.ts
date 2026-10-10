@@ -25,7 +25,7 @@ const role: AgentConfig = {
 };
 const supervisorConfig: SupervisorConfig = {
   enabled: true, adapter: 'mock', model: 'default', reasoningEffort: 'low',
-  pollIntervalMs: 30_000, routineAssessmentIntervalMs: 180_000, cooldownAfterActionMs: 0,
+  pollIntervalMs: 30_000, cooldownAfterActionMs: 0,
   maxAssessmentsPerIteration: 20, tailBytes: 16_384, minDeltaBytes: 4096, stuckThresholdMs: 600_000,
 };
 const jsonl = (...events: unknown[]): string => events.map(e => JSON.stringify(e)).join('\n') + '\n';

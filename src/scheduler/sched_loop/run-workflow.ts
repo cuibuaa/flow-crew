@@ -59,6 +59,7 @@ export async function runWorkflow(
     stallThresholdMs: heartbeatDefaults.scheduler_stall_threshold_ms,
     observerPollMs: heartbeatDefaults.scheduler_stall_observer_poll_ms,
   });
+  await schedulerHeartbeat.ready.catch((err) => log.warn({ err }, 'Scheduler observer unavailable'));
   log.info({ runId, workflow: workflow.name }, 'Run started');
   const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, resumingFromPark, taskDescription, autoApprove, supervise, campaignId, inheritCampaignContext, briefAdmission);
   if (configured.kind === 'settled') return configured.state;
@@ -90,7 +91,7 @@ export async function runWorkflow(
   return await runWorkflowIterations(baseStages, workflowYaml, maxIterations, resumeAtIteration, resumingFromPark, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   } finally {
     closeRollbackBaseline(projectDir, runDirPath);
-    schedulerHeartbeat?.stop();
+    await schedulerHeartbeat?.stop();
     if (supervisor) {
       try { supervisor.stop(); } catch (err) { log.warn({ err }, 'Supervisor stop failed'); }
     }

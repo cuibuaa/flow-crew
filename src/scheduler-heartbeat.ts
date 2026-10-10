@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { isMainThread, Worker, workerData } from 'node:worker_threads';
+import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 import { appendRunEventAtRunDir } from './run-events.js';
 import { isLiveFlowcrewSchedulerForRun } from './run-lock.js';
 import { isRunningRunStatus } from './store.js';
@@ -173,7 +173,8 @@ export interface SchedulerHeartbeatHandle {
   readonly generation: string;
   readonly observerThreadId?: number;
   pulse(): void;
-  stop(): void;
+  readonly ready: Promise<void>;
+  stop(): Promise<void>;
 }
 
 export function startSchedulerHeartbeat(input: {
@@ -189,6 +190,8 @@ export function startSchedulerHeartbeat(input: {
   let sequence = 0;
   let stopped = false;
   let observer: Worker | undefined;
+  let ready = Promise.resolve();
+  let stopping: Promise<void> | undefined;
   const publish = (state: SchedulerHeartbeatRecord['state']): void => {
     sequence += 1;
     atomicJson(heartbeatPath(input.runPath), {
@@ -238,23 +241,38 @@ export function startSchedulerHeartbeat(input: {
     // The heartbeat remains useful even when the platform refuses the observer
     // worker. Avoid turning that visibility failure into an unhandled scheduler
     // exception; the absent warning is itself distinguishable from a stall.
+    const ownedObserver = observer;
+    ready = new Promise<void>((resolveReady, rejectReady) => {
+      ownedObserver.once('message', (message) => {
+        if (message === 'ready') resolveReady();
+        else rejectReady(new Error('scheduler observer sent an unknown readiness acknowledgement'));
+      });
+      ownedObserver.once('error', rejectReady);
+      ownedObserver.once('exit', (code) => rejectReady(new Error(`scheduler observer exited ${code} before readiness`)));
+    });
+    // Callers can await the outcome; an early teardown must not create an
+    // unhandled rejection in a caller that uses only the heartbeat publication.
+    void ready.then(() => ownedObserver.unref(), () => ownedObserver.unref());
     observer.on('error', () => {});
-    observer.unref();
   }
 
   return {
     generation,
+    ready,
     get observerThreadId() { return observer?.threadId; },
     pulse: () => {
       if (!stopped) publish('running');
     },
     stop: () => {
-      if (stopped) return;
+      if (stopping) return stopping;
       stopped = true;
       clearInterval(timer);
       try { publish('stopped'); } catch { /* the run directory may already be unavailable */ }
-      try { void observer?.terminate(); } catch { /* observer also exits when identity disappears */ }
-      try { unlinkSync(heartbeatPath(input.runPath)); } catch { /* missing */ }
+      stopping = (async () => {
+        try { if (observer) await observer.terminate(); } catch { /* owned observer already closed */ }
+        try { unlinkSync(heartbeatPath(input.runPath)); } catch { /* missing */ }
+      })();
+      return stopping;
     },
   };
 }
@@ -298,6 +316,7 @@ async function observerMain(args: string[]): Promise<void> {
 if (process.argv[2] === '--observe') {
   void observerMain(process.argv.slice(3)).catch(() => { process.exitCode = 1; });
 } else if (!isMainThread && isSchedulerHeartbeatObserverWorkerData(workerData)) {
+  parentPort?.postMessage('ready');
   void observerMain([
     workerData.runPath,
     workerData.runId,

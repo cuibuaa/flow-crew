@@ -1,5 +1,5 @@
 import { accessSync, constants, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, isAbsolute } from 'node:path';
 
 export type AdapterName = 'codex' | 'claude';
 
@@ -29,22 +29,20 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
-/** Resolve an executable without relying on the optional external `which` utility. */
+/** Match execvp's lexical lookup: relative PATH members use the child's cwd,
+ * empty members mean cwd, and missing/../ hops must reach the filesystem. */
 export function findExecutableOnPath(
   command: string,
   pathValue: string | undefined = process.env.PATH,
+  cwd: string = process.cwd(),
 ): string | undefined {
   if (!command) return undefined;
-  if (isAbsolute(command) || command.includes('/') || command.includes('\\')) {
-    const candidate = resolve(command);
-    return isExecutableFile(candidate) ? candidate : undefined;
-  }
-  if (pathValue === undefined) return undefined;
-  for (const entry of pathValue.split(delimiter)) {
-    const candidate = join(entry || process.cwd(), command);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return undefined;
+  const absoluteCwd = isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd}`;
+  const fromCwd = (path: string) => isAbsolute(path) ? path : `${absoluteCwd}/${path}`;
+  const candidates = command.includes('/') || command.includes('\\')
+    ? [fromCwd(command)]
+    : (pathValue ?? '/bin:/usr/bin').split(delimiter).map((entry) => `${fromCwd(entry)}/${command}`);
+  return candidates.find(isExecutableFile);
 }
 
 function commandExists(command: string): boolean {

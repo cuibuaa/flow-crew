@@ -2,7 +2,7 @@
 import { type ParsedScope, parseDeclaredScope } from "../sched_admission/frontier.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
-import { type RunRollbackBaseline, baselineImage, readRollbackCurrentImage, trackedGitlinkAncestor, readRollbackCurrentImageCooperatively, rollbackBaselines, captureRollbackCurrentImage, ensureRollbackBaseline } from './rollback-baseline.js';
+import { type RunRollbackBaseline, baselineImage, readRollbackCurrentImage, trackedGitlinkAncestor, readRollbackCurrentImageCooperatively, captureRollbackCurrentImage, ensureRollbackBaseline } from './rollback-baseline.js';
 import { type RepairFileFingerprint, type RepairFileImage, compareRepairFileContents, repairFileImageBytes, stageZeroIndexEntry } from './file-images.js';
 import { listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
 
@@ -68,13 +68,6 @@ export async function changedProjectPathsSinceSnapshotCooperatively(
     if (compareRepairFileContents(before, after) === 'different') changed.push(path);
   }
   return changed;
-}
-
-/** Explicit lifecycle hook for standalone repair-snapshot consumers and tests. */
-export function closeRepairRoundSnapshot(snapshot: RepairRoundSnapshot): void {
-  snapshot.rollbackBaseline.watcher?.close();
-  snapshot.rollbackBaseline.contentStore.cleanup();
-  rollbackBaselines.delete(snapshot.rollbackBaseline.key);
 }
 
 export function captureRepairRoundSnapshot(

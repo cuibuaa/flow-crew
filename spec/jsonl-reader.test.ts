@@ -1,9 +1,9 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getItem, recordRequest, resolveRequest } from '../src/inbox.js';
-import { readJsonlFile, readJsonlFileWithDiagnostics } from '../src/jsonl.js';
+import { readJsonlFile, readJsonlFileWithDiagnostics, type JsonlReadCursor } from '../src/jsonl.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import { fcGlobalDir, setFcGlobalDir, reserveRun } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -48,6 +48,26 @@ describe('tolerant shared JSONL reader', () => {
     writeFileSync(emptyPath, '', 'utf-8');
     expect(readJsonlFile(emptyPath)).toEqual([]);
     expect(() => readJsonlFile(join(tempDir, 'missing.jsonl'))).toThrow();
+  });
+
+  it('resumes complete byte records across UTF-8 tails, malformed rows, replacement and truncation', () => {
+    const path = join(tempDir, 'append.jsonl');
+    const cursor: JsonlReadCursor = { offset: 0 };
+    const row = Buffer.from('{"text":"é"}\n');
+    writeFileSync(path, row.subarray(0, 10)); // first byte of the accented character
+    expect(readJsonlFile(path, cursor)).toEqual([]);
+    expect(cursor.offset).toBe(0);
+    appendFileSync(path, row.subarray(10));
+    expect(readJsonlFile(path, cursor)).toEqual([{ text: 'é' }]);
+    const resumed = JSON.parse(JSON.stringify(cursor)) as JsonlReadCursor;
+    appendFileSync(path, 'malformed\n{"id":2}\n');
+    expect(readJsonlFileWithDiagnostics(path, resumed)).toEqual({ rows: [{ id: 2 }], unreadableRecords: 1 });
+    expect(readJsonlFile(path, resumed)).toEqual([]);
+    writeFileSync(path, '{"id":3}\n');
+    expect(readJsonlFile(path, resumed)).toEqual([{ id: 3 }]);
+    renameSync(path, `${path}.old`);
+    writeFileSync(path, '{"id":4}\n');
+    expect(readJsonlFile(path, resumed)).toEqual([{ id: 4 }]);
   });
 
   it('keeps run-event history when a bad row is followed by a later valid append', () => {

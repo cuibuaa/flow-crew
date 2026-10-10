@@ -125,7 +125,7 @@ describe('engine-owned local carrier lifetime', () => {
     const { inspectRunScheduler } = await import('../src/run-lock.js');expect(inspectRunScheduler(f.runId, f.runDir).kind).toBe('corrupt');
   });
 
-  native('never launches the adapter binary to learn its version inside a stage boundary', async () => {
+  native('never launches the adapter binary to learn its version inside or outside a stage boundary', async () => {
     const f = fixture(), history = join(f.runDir, RUN_HISTORY_FILE), before = readFileSync(history, 'utf8'), executable = join(f.projectDir, 'version-probe'), ran = join(f.projectDir, 'ran');
     writeFileSync(executable, `#!${process.execPath}\n${child(`fs.writeFileSync(${JSON.stringify(ran)},'ran');try{fs.writeFileSync(${JSON.stringify(history)},'bad')}catch{};console.log('version')`)}`); chmodSync(executable, 0o755);
     const identity = () => resolveCodexCapabilityIdentity({ model: 'fixture', reasoning_effort: 'low' }, { executable }).version;
@@ -133,8 +133,10 @@ describe('engine-owned local carrier lifetime', () => {
     expect(versions[0]).toMatch(/^fingerprint:/); expect(versions[1]).toBe(versions[0]);
     expect(existsSync(ran)).toBe(false); expect(readFileSync(history, 'utf8')).toBe(before);
     expect(existsSync(join(f.runDir, 'stages', f.stageId, 'write_boundary_attempt_0.jsonl'))).toBe(false);
-    expect(identity()).toBe('version'); rmSync(ran);
-    expect(await withEngineWriteBoundary(f, async () => identity())).toBe('version');
+    expect(identity()).toBe(versions[0]);
+    expect(existsSync(ran)).toBe(false);
+    expect(readFileSync(history, 'utf8')).toBe(before);
+    expect(await withEngineWriteBoundary(f, async () => identity())).toBe(versions[0]);
     expect(existsSync(ran)).toBe(false);
     writeFileSync(executable, `${readFileSync(executable, 'utf8')}\n// replaced binary`);
     const replaced = await withEngineWriteBoundary(f, async () => identity());

@@ -1,3 +1,4 @@
+import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import {
@@ -23,7 +24,6 @@ import {
   appendResearchTemporalPathContract,
   assessResearchIterationBudget,
   buildGateDispatchPreamble,
-  buildGateReevaluationPreamble,
   configuredValidationCommandRole,
   discoverConfiguredCommandScopes,
   inspectRealityCheckReachability,

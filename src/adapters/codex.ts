@@ -1,7 +1,8 @@
-import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { findExecutableOnPath } from './availability.js';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
@@ -9,7 +10,7 @@ import { providerFailureFromEvent, type ProviderFailure } from '../provider-resu
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
 import { CommandActivityTracker } from '../command-activity.js';
-import { engineChildAdapterHome, execEngineChildSync } from '../write-boundary.js';
+import { engineChildAdapterHome } from '../write-boundary.js';
 import { prepareAdapterHome } from '../adapter-home.js';
 import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
 import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
@@ -284,47 +285,16 @@ export interface CodexCapabilityMemory {
   learnedAt: string;
 }
 
-/** Versions learned outside any stage boundary, keyed by the executable's file
- * identity so a replaced binary is never mistaken for the one that was probed. */
-const versionByExecutable = new Map<string, string>();
-
-function executableIdentity(executable: string, cwd: string): { path: string; fingerprint: string } | undefined {
-  // execvpe in the bridge treats empty PATH members as cwd and skips EACCES.
-  // Resolve against the child's cwd, which need not be the scheduler's cwd.
-  // Keep lexical hops until the filesystem checks them: missing/../bin does
-  // not reach bin during exec, even though path.resolve would erase missing.
-  const absoluteCwd = isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd}`;
-  const fromCwd = (path: string) => isAbsolute(path) ? path : `${absoluteCwd}/${path}`;
-  const candidates = executable.includes('/') ? [fromCwd(executable)]
-    : (process.env.PATH ?? '/bin:/usr/bin').split(delimiter).map((dir) => `${fromCwd(dir)}/${executable}`);
-  for (const candidate of candidates) {
-    try {
-      const info = statSync(candidate, { bigint: true });
-      if (!info.isFile()) continue;
-      accessSync(candidate, constants.X_OK);
-      const path = realpathSync(candidate);
-      // ctime and mode also invalidate in-place replacements with restored mtime.
-      return { path, fingerprint: `${path}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}` };
-    } catch { /* not this PATH entry */ }
-  }
-  return undefined;
-}
-
-/** Inside a stage write boundary the adapter binary is never launched just to
- * learn its version: launching it there costs a full boundary installation and
- * can only fail the attempt. The identity falls back to the file fingerprint,
- * which still changes whenever the binary does. */
+/** Capability memory is tied to file identity, without executing the adapter
+ * merely to ask its version. ctime/mode also invalidate restored-mtime edits. */
 function detectedCodexVersion(executable: string, cwd: string): string {
-  const selected = executableIdentity(executable, cwd);
-  const fingerprint = selected?.fingerprint;
-  if (fingerprint && versionByExecutable.has(fingerprint)) return versionByExecutable.get(fingerprint)!;
-  if (engineChildAdapterHome() !== undefined) return fingerprint ? `fingerprint:${fingerprint}` : 'unknown';
-  let version = 'unknown';
-  if (!selected) return version;
-  const result = execEngineChildSync(selected.path, ['--version'], 2_000);
-  if (result.status === 0) version = result.stdout.trim() || 'unknown';
-  if (fingerprint) versionByExecutable.set(fingerprint, version);
-  return version;
+  const selected = findExecutableOnPath(executable, process.env.PATH, cwd);
+  if (!selected) return 'unknown';
+  try {
+    const info = statSync(selected, { bigint: true });
+    const path = realpathSync(selected);
+    return `fingerprint:${path}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}`;
+  } catch { return 'unknown'; }
 }
 
 /** Stable scope for learned adapter capabilities. A changed CLI, provider, or

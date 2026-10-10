@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter as leadingFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -152,16 +153,6 @@ const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_m
 const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
 const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter)$/i;
 
-function leadingFrontmatter(brief: string): { yaml: string; body: string; bodyLineOffset: number } | undefined {
-  const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(brief);
-  if (!match) return undefined;
-  const body = brief.slice(match[0].length);
-  return {
-    yaml: match[1],
-    body,
-    bodyLineOffset: match[0].split(/\r?\n/).length - 1,
-  };
-}
 
 interface NormalizedBriefInputPath {
   path?: string;

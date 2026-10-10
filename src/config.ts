@@ -45,8 +45,6 @@ export interface ProjectDefaults {
   stage_technical_retries: number;
   /** Bounded re-plan budget for a plan (dynamic_dispatch) stage that exits 0 but emits zero valid injected stages. See defaults.yaml. */
   plan_stage_retries: number;
-  /** Retained numeric defaults-validator envelope field; production supervisor rejection is retired. */
-  supervisor_max_rejects: number;
   model: string;
   reasoning_effort: string;
   adapter: string;
@@ -64,9 +62,6 @@ export interface SupervisorConfig {
   reasoningEffort: string;
   /** Cheap state/output heartbeat cadence. */
   pollIntervalMs: number;
-  /** Minimum gap after a successful WAIT on a concurrent-stage artifact event;
-   * all other deterministic events remain immediate. */
-  routineAssessmentIntervalMs: number;
   cooldownAfterActionMs: number;
   /** Per-iteration assessment count shown in telemetry; not a call limit. */
   maxAssessmentsPerIteration: number;
@@ -101,21 +96,14 @@ const DEFAULT_SUPERVISOR: SupervisorConfig = {
   // supervisor.reasoning_effort in defaults.yaml if you want a smarter judge.
   reasoningEffort: 'low',
   pollIntervalMs: 30000,
-  // Historical GUIDE→ABORT case lasted 2789s. Even allowing 30s per call,
-  // 180s routine spacing yields floor(2789/210)=13 opportunities for the
-  // observed 10 GUIDE decisions plus final ABORT.
-  routineAssessmentIntervalMs: 180000,
   cooldownAfterActionMs: 60000,
   // Budget: refills each time the campaign advances to a new iteration.
   // Sized so a typical iteration (plan→implement→qa→fix loop, often 1-3h)
   // gets steady-state coverage; adaptive backoff handles quiet phases.
   maxAssessmentsPerIteration: 20,
   tailBytes: 16384,
-  // Accumulated stage output that triggers a content review. 4096 fired on
-  // nearly every 30 s heartbeat of a busy stage (each reads up to tailBytes);
-  // measured on 2026-09-26, runs at 98304 made about a quarter of the
-  // supervisor calls per hour and a third of the uncached input. Kept equal to
-  // config/defaults.yaml so a project that omits the key gets the same value.
+  // Accumulated output threshold for feedback to an actually guided attempt.
+  // Volume alone never authorizes a semantic assessment.
   minDeltaBytes: 98304,
   // 10-min idle threshold before supervisor is allowed to ABORT. Codex agents
   // often spend several minutes silently editing files via tool calls; the
@@ -334,7 +322,6 @@ export function loadProjectDefaultsLocally(projectDir?: string): ProjectDefaults
     gate_retry_loops: numberValue(raw, template, 'default_gate_retry_loops'),
     stage_technical_retries: numberValue(raw, template, 'default_stage_technical_retries'),
     plan_stage_retries: numberValue(raw, template, 'default_plan_stage_retries'),
-    supervisor_max_rejects: numberValue(raw, template, 'default_supervisor_max_rejects'),
     model: stringValue(raw, template, 'model'),
     reasoning_effort: stringValue(raw, template, 'reasoning_effort'),
     adapter: stringValue(raw, template, 'adapter'),
@@ -436,6 +423,9 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
   const raw = readRaw(projectDir);
   const sup = (raw.supervisor as Record<string, unknown> | undefined) ?? {};
   const projectDefaults = loadProjectDefaults(projectDir);
+  if (Object.hasOwn(sup, 'routine_assessment_interval_ms')) {
+    process.stderr.write(`${projectDefaultsSource(projectDir)}: supervisor.routine_assessment_interval_ms is retired and ignored; assessments require explicit events or feedback for a guided active attempt.\n`);
+  }
   const fallbackString = (v: unknown, fb: string) => (typeof v === 'string' && v ? v : fb);
   return {
     enabled: sup.enabled === true,
@@ -448,7 +438,6 @@ export function loadSupervisorConfig(projectDir?: string): SupervisorConfig {
     model: fallbackString(sup.model, projectDefaults.model),
     reasoningEffort: fallbackString(sup.reasoning_effort, DEFAULT_SUPERVISOR.reasoningEffort),
     pollIntervalMs: (sup.poll_interval_ms as number) ?? DEFAULT_SUPERVISOR.pollIntervalMs,
-    routineAssessmentIntervalMs: (sup.routine_assessment_interval_ms as number) ?? DEFAULT_SUPERVISOR.routineAssessmentIntervalMs,
     cooldownAfterActionMs: (sup.cooldown_after_action_ms as number) ?? DEFAULT_SUPERVISOR.cooldownAfterActionMs,
     maxAssessmentsPerIteration: (sup.max_assessments_per_iteration as number) ?? DEFAULT_SUPERVISOR.maxAssessmentsPerIteration,
     tailBytes: (sup.tail_bytes as number) ?? DEFAULT_SUPERVISOR.tailBytes,

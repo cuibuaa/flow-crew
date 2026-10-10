@@ -307,7 +307,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     if (req.cmd === 'status') return { ...orchestrator.status(), ...rpcIdentity(identity) };
     if (req.cmd === 'stop') {
-      orchestrator.stop();
+      await orchestrator.stop();
       setTimeout(() => {
         server.close(() => {
           rmSync(socketPath, { force: true });

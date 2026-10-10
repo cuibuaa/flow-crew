@@ -79,22 +79,24 @@ describe('independent scheduler-loop heartbeat', () => {
       `writeFileSync(runPath + '/scheduler.pid', String(process.pid));`,
       `writeSchedulerProcessIdentity(runPath, runId);`,
       `const heartbeat=startSchedulerHeartbeat({runPath,runId,intervalMs:20,stallThresholdMs:100,observerPollMs:10});`,
-      `writeFileSync(${JSON.stringify(readyPath)}, 'ready');`,
+      `await heartbeat.ready; writeFileSync(${JSON.stringify(readyPath)}, 'ready');`,
       `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);`,
-      `heartbeat.stop(); removeSchedulerProcessIdentity(runPath, process.pid);`,
+      `await heartbeat.stop(); removeSchedulerProcessIdentity(runPath, process.pid);`,
     ].join('\n');
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
     const completion = new Promise<void>((resolvePromise, rejectPromise) => {
       child.once('error', rejectPromise);
-      child.once('close', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}`)));
+      child.once('close', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}: ${stderr}`)));
     });
     void completion.catch(() => undefined);
     try {
-      await waitFor(readyPath, 2_000);
+      await Promise.race([waitFor(readyPath, 2_000), completion.then(() => { throw new Error('fixture exited before readiness'); })]);
       await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
       // The warning is published before its event. Wait for that separate fact,
       // including its content when earlier events already created the file.

@@ -1,3 +1,4 @@
+import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,7 +9,6 @@ import { assessCampaignHygiene } from '../src/campaign-hygiene.js';
 import type { SupervisorConfig } from '../src/config.js';
 import type { RunEvent } from '../src/run-events.js';
 import {
-  buildGateReevaluationPreamble,
   inspectRealityCheckReachability,
   type StageConfig,
 } from '../src/scheduler.js';

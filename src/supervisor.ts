@@ -34,6 +34,7 @@ import {
   RUN_WIDE_GUIDANCE_TARGET,
 } from './guidance.js';
 import { readRunEvents, recordRunEvent, type RunEvent } from './run-events.js';
+import type { JsonlReadCursor } from './jsonl.js';
 import {
   SupervisorEventCursor,
   resolveSupervisorDeadlineMarginMs,
@@ -1224,7 +1225,7 @@ export type SupervisorAssessmentTrigger = 'event' | 'none';
 
 export function selectSupervisorAssessmentTrigger(input: {
   deterministicEvents?: readonly SupervisorEvent[];
-  /** Only repeated, concurrent-stage artifact events use the routine clock. */
+  /** Historical clock/cap inputs remain inert; only events authorize calls. */
   anomalySignals?: string[];
   runningStageCount?: number;
   accumulatedOutputBytes?: number;
@@ -1240,16 +1241,9 @@ export function selectSupervisorAssessmentTrigger(input: {
   const events = input.deterministicEvents ?? [];
   if (events.length === 0) return 'none';
   if (events.some((event) => event.type !== 'artifact_change')) return 'event';
-  if (input.hasGuidedActiveAttempt) return 'event';
-  if (events.some((event) => event.quantities.runningStageCount < 2
-    || event.quantities.changedPathCount < 2)) return 'event';
-  const now = input.now;
-  const last = input.lastRoutineAssessmentAt;
-  const interval = input.routineAssessmentIntervalMs;
-  if (now === undefined || last === undefined || interval === undefined
-    || !Number.isFinite(now) || !Number.isFinite(last) || !Number.isFinite(interval)
-    || interval <= 0 || now < last || now - last >= interval) return 'event';
-  return 'none';
+  // Output volume alone bought no intervention in the recorded comparison.
+  // Keep feedback for an actual GUIDE and semantic checks of explicit events.
+  return input.hasGuidedActiveAttempt ? 'event' : 'none';
 }
 
 function artifactShowsFailedGate(artifact: { path: string; content: string }): boolean {
@@ -1322,7 +1316,7 @@ export class Supervisor {
   private lastState: StoreState | null = null;
   private usage: SupervisorUsage | null = null;
   private eventCursor = new SupervisorEventCursor();
-  private runEventCursor = 0;
+  private runEventCursor: JsonlReadCursor = { offset: 0 };
 
   constructor(
     private projectDir: string,
@@ -1343,7 +1337,6 @@ export class Supervisor {
   // Per-iteration count remains visible as a quantity, but never authorizes a call.
   private lastSeenIteration = 0;
   private iterationAssessmentCount = 0;
-  private lastRoutineAssessmentAt?: number;
   // GAP-2 watchdog: last-progress timestamp per running stage (carried across ticks).
   private stageLastProgressMs: Record<string, number> = {};
   // Idempotency is attempt-scoped, so an immediate same-name rerun remains supervisable.
@@ -1391,7 +1384,7 @@ export class Supervisor {
     } catch { /* run state may not be initialized yet */ }
     const logPath = this.logPath();
     mkdirSync(join(this.runDir(), 'signals'), { recursive: true });
-    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${startedAt}\nConfig: heartbeat=${this.config.pollIntervalMs}ms, assessment-mode=deterministic-events, model=${this.config.model}, concurrent-artifact-interval=${this.config.routineAssessmentIntervalMs}ms, max/iter-telemetry=${this.config.maxAssessmentsPerIteration}\n\n`);
+    appendFileSync(logPath, `# Supervisor Log\n\nGoal: ${this.taskDescription.slice(0, 200)}\nStarted: ${startedAt}\nConfig: heartbeat=${this.config.pollIntervalMs}ms, assessment-mode=explicit-events-and-guided-feedback, model=${this.config.model}, max/iter-telemetry=${this.config.maxAssessmentsPerIteration}\n\n`);
     log.info({ runId: this.runId }, 'Supervisor started');
     this.scheduleNextTick();
   }
@@ -1655,8 +1648,6 @@ export class Supervisor {
       maxAssessmentsPerIteration: this.config.maxAssessmentsPerIteration,
       currentIteration: this.lastSeenIteration,
       basePollIntervalMs: this.config.pollIntervalMs,
-      routineAssessmentIntervalMs: this.config.routineAssessmentIntervalMs,
-      lastRoutineAssessmentAt: this.lastRoutineAssessmentAt ?? null,
       effectivePollIntervalMs: this.effectivePollIntervalMs,
       consecutiveWaits: this.consecutiveWaits,
       tickCount: this.tickCount,
@@ -1695,22 +1686,18 @@ export class Supervisor {
         runEventCursor?: unknown;
         eventCursor?: Partial<SupervisorEventCursorSnapshot>;
         stageStatusSnapshot?: unknown;
-        lastRoutineAssessmentAt?: unknown;
         currentIteration?: unknown;
       };
-      if (Number.isSafeInteger(parsed.runEventCursor) && Number(parsed.runEventCursor) >= 0) {
-        this.runEventCursor = Number(parsed.runEventCursor);
+      if (parsed.runEventCursor && typeof parsed.runEventCursor === 'object') {
+        const cursor = parsed.runEventCursor as Partial<JsonlReadCursor>;
+        if (Number.isSafeInteger(cursor.offset) && Number(cursor.offset) >= 0
+          && typeof cursor.identity === 'string' && /^\d+:\d+$/.test(cursor.identity)) {
+          this.runEventCursor = { offset: Number(cursor.offset), identity: cursor.identity };
+        }
       }
       if (parsed.eventCursor) this.eventCursor = new SupervisorEventCursor(parsed.eventCursor);
       if (Number.isSafeInteger(parsed.currentIteration) && Number(parsed.currentIteration) > 0) {
         this.lastSeenIteration = Number(parsed.currentIteration);
-      }
-      // On a restart, call promptly if an artifact was deferred: its in-memory
-      // evidence buffer did not survive, and another cooldown would compound that loss.
-      if (this.eventCursor.pendingCount === 0
-        && typeof parsed.lastRoutineAssessmentAt === 'number'
-        && Number.isFinite(parsed.lastRoutineAssessmentAt)) {
-        this.lastRoutineAssessmentAt = parsed.lastRoutineAssessmentAt;
       }
       if (parsed.stageStatusSnapshot && typeof parsed.stageStatusSnapshot === 'object') {
         this.prevStageStatusSnapshot = Object.fromEntries(
@@ -1937,11 +1924,7 @@ export class Supervisor {
   }
 
   private readNewRunEvents(): RunEvent[] {
-    const events = readRunEvents(this.projectDir, this.runId);
-    if (this.runEventCursor > events.length) this.runEventCursor = 0;
-    const next = events.slice(this.runEventCursor);
-    this.runEventCursor = events.length;
-    return next;
+    return readRunEvents(this.projectDir, this.runId, this.runEventCursor);
   }
 
   private eventCandidates(input: {
@@ -2157,7 +2140,6 @@ export class Supervisor {
       }
       this.lastSeenIteration = currentIter;
       this.iterationAssessmentCount = 0;
-      this.lastRoutineAssessmentAt = undefined;
     }
 
     // Stop if run is no longer active (any terminal state, not just complete/failed)
@@ -2196,22 +2178,13 @@ export class Supervisor {
       .filter(([, s]) => isRunningStageStatus(s.status))
       .map(([id]) => id);
 
-    // Read and ACCUMULATE live.log tails across cheap heartbeats. The previous
-    // implementation advanced byte offsets every 30s, so a 180s LLM cadence
-    // would otherwise see only the final 30s and miss the wrong-direction arc.
+    // Retain bounded recent output as context for explicit events and guidance.
     const tails = this.readStageTails(runningStages, state);
     const totalDelta = [...tails.values()].reduce((sum, text) => sum + Buffer.byteLength(text), 0);
     this.accumulatedOutputBytes += totalDelta;
-    // Keep every byte read during one deferred interval (subject to a 1 MiB
-    // safety ceiling) so the later semantic review can see the direction arc.
-    const deferredTailLimit = this.lastRoutineAssessmentAt === undefined
-      ? this.config.tailBytes
-      : Math.max(this.config.tailBytes, Math.min(1_048_576,
-        this.config.tailBytes * (Math.ceil(this.config.routineAssessmentIntervalMs
-          / Math.max(1, this.config.pollIntervalMs)) + 1)));
     for (const [stageId, text] of tails) {
       const accumulated = (this.pendingTails.get(stageId) ?? '') + text;
-      this.pendingTails.set(stageId, accumulated.slice(-deferredTailLimit));
+      this.pendingTails.set(stageId, accumulated.slice(-this.config.tailBytes));
     }
 
     // Stage transitions are anomaly signals and therefore bypass routine cadence.
@@ -2338,9 +2311,6 @@ export class Supervisor {
     )) ?? false;
     if (selectSupervisorAssessmentTrigger({
       deterministicEvents: proposedEvent ? [proposedEvent] : [],
-      now,
-      lastRoutineAssessmentAt: this.lastRoutineAssessmentAt,
-      routineAssessmentIntervalMs: this.config.routineAssessmentIntervalMs,
       hasGuidedActiveAttempt,
     }) === 'none' || !proposedEvent) {
       this.writeProgress();
@@ -2445,13 +2415,6 @@ export class Supervisor {
       comparisonStageEvidence,
     );
     this.recordEffectiveAssessment(effectiveAssessment);
-    this.lastRoutineAssessmentAt = triggeringEvent.type === 'artifact_change'
-      && triggeringEvent.quantities.runningStageCount > 1
-      && triggeringEvent.quantities.changedPathCount > 1
-      && effectiveAssessment.verdict === 'WAIT'
-      ? Date.now()
-      : undefined;
-
     // Keep WAIT streak telemetry, but do not let it slow the 30s anomaly heartbeat.
     if (effectiveAssessment.verdict === 'WAIT') {
       this.consecutiveWaits++;

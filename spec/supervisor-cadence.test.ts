@@ -194,10 +194,10 @@ describe('supervisor routine/anomaly scheduling', () => {
     const historicalWindowMs = timestamps.at(-1)! - timestamps[0];
     const requiredAssessments = historical.length;
     const supervisor = loadSupervisorConfig();
-    const conservativeCycleMs = supervisor.routineAssessmentIntervalMs + productionAssessmentTimeoutMs();
+    const conservativeCycleMs = supervisor.pollIntervalMs + productionAssessmentTimeoutMs();
     const opportunities = Math.floor(historicalWindowMs / conservativeCycleMs);
     expect(opportunities).toBeGreaterThanOrEqual(requiredAssessments);
-    expect(supervisor.maxAssessmentsPerIteration).toBeGreaterThanOrEqual(opportunities);
+    // Per-iteration counts are telemetry; they do not cap guided feedback.
   });
 
   it('detects every enumerated immediate signal class', () => {
@@ -232,7 +232,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     }
   });
 
-  it('defers only repeated concurrent artifact events and leaves urgent or guided work immediate', () => {
+  it('requires actual guidance before output-only feedback and leaves explicit events immediate', () => {
     const quantities = { ...eventQuantities, runningStageCount: 2, changedPathCount: 2, changedBytes: 8192 };
     const artifact = createSupervisorEvent({
       type: 'artifact_change', observedAt: '2026-09-25T00:01:00.000Z', source: 'test',
@@ -246,15 +246,15 @@ describe('supervisor routine/anomaly scheduling', () => {
       routineAssessmentIntervalMs: 180_000, routineAssessmentsThisIteration: 20,
       maxRoutineAssessmentsPerIteration: 20 };
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
-      ...clock, lastRoutineAssessmentAt: undefined })).toBe('event');
+      ...clock, lastRoutineAssessmentAt: undefined })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact], ...clock })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
-      ...clock, now: 210_000 })).toBe('event');
+      ...clock, now: 210_000 })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [artifact],
       ...clock, hasGuidedActiveAttempt: true })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [{
       ...artifact, quantities: { ...quantities, runningStageCount: 1, changedPathCount: 1 },
-    }], ...clock })).toBe('event');
+    }], ...clock })).toBe('none');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [gate], ...clock })).toBe('event');
     expect(selectSupervisorAssessmentTrigger({ deterministicEvents: [], ...clock })).toBe('none');
 
@@ -277,7 +277,7 @@ describe('supervisor routine/anomaly scheduling', () => {
     expect(cursor.pendingCount).toBe(0);
   });
 
-  it('retains deferred evidence and reviews it after the interval', async () => {
+  it('retains output as context for an explicit event without assessing volume alone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-concurrent-cadence-'));
     const priorFcHome = fcGlobalDir();
     vi.useFakeTimers();
@@ -308,7 +308,7 @@ describe('supervisor routine/anomaly scheduling', () => {
           exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
       } };
       const config: SupervisorConfig = { enabled: true, adapter: 'mock', model: 'default',
-        reasoningEffort: 'low', pollIntervalMs: 30_000, routineAssessmentIntervalMs: 180_000,
+        reasoningEffort: 'low', pollIntervalMs: 30_000,
         cooldownAfterActionMs: 0, maxAssessmentsPerIteration: 1, tailBytes: 16_384,
         minDeltaBytes: 4096, stuckThresholdMs: 600_000 };
       supervisor = new Supervisor(project, created.runId, adapter, config, 'observe work');
@@ -325,29 +325,20 @@ describe('supervisor routine/anomaly scheduling', () => {
       vi.setSystemTime(new Date('2026-09-25T00:00:30.000Z'));
       append('first review');
       await tick();
-      expect(prompts).toHaveLength(2);
+      expect(prompts).toHaveLength(1);
       vi.setSystemTime(new Date('2026-09-25T00:01:00.000Z'));
       append('DEFERRED_ACTION_SENTINEL');
       await tick();
-      expect(prompts).toHaveLength(2);
-      const pending = JSON.parse(readFileSync(join(runDir(project, created.runId),
-        'supervisor_state.json'), 'utf8')) as { eventCursor: { pendingEvents: unknown[] } };
-      expect(pending.eventCursor.pendingEvents).toHaveLength(1);
+      expect(prompts).toHaveLength(1);
       vi.setSystemTime(new Date('2026-09-25T00:03:31.000Z'));
       await tick();
-      expect(prompts).toHaveLength(3);
-      expect(prompts[2]).toContain('DEFERRED_ACTION_SENTINEL');
-      const nextIteration = readRunState(project, created.runId);
-      nextIteration.currentIteration = 2;
-      writeRunState(project, created.runId, nextIteration);
-      vi.setSystemTime(new Date('2026-09-25T00:04:01.000Z'));
-      append('new iteration');
+      expect(prompts).toHaveLength(1);
+      writeFileSync(join(runDir(project, created.runId), 'user_input.md'), 'Review this work now');
       await tick();
-      expect(prompts).toHaveLength(4);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain('DEFERRED_ACTION_SENTINEL');
       expect(readRunState(project, created.runId).supervisor?.attempts.map((attempt) =>
-        attempt.trigger?.type)).toEqual([
-        'stage_transition', 'artifact_change', 'artifact_change', 'artifact_change',
-      ]);
+        attempt.trigger?.type)).toEqual(['stage_transition', 'guidance_arrival']);
     } finally {
       supervisor?.stop();
       setFcGlobalDir(priorFcHome);

@@ -1,3 +1,4 @@
+import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,7 +8,6 @@ import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { buildCodexExecArgs } from '../src/adapters/codex.js';
 import {
-  buildGateReevaluationPreamble,
   canResumeOwnGateSession,
   gateVerdictCorrectionPath,
   GATE_VERDICT_CORRECTION_VERSION,

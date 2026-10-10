@@ -1,9 +1,10 @@
+import { readDispatchDocument } from '../src/dispatch-document.js';
 import { fixtureArtifactContract, declaredDispatch } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { findAllReady, parseDispatchBlock, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
+import { findAllReady, parseDispatchedStageConfig, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
 import { summarizeCampaignPhaseProgress, readCampaignEntries, collapseEntriesForHealth } from '../src/campaigns.js';
 import type { StoreState, StageStatus } from '../src/store.js';
 
@@ -58,10 +59,11 @@ function makeRegistry(roles: string[]): Map<string, { name: string; description:
 }
 
 function declaredPlannerOutput(output: string, phaseOneReport = false): string {
-  return output.replace(/```yaml\n([\s\S]*?)```/, (_block, yaml: string) => '```yaml\n'
-    + declaredDispatch(yaml, phaseOneReport ? {
-      research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [], replays: [] },
-    } : {}) + '```');
+  const yaml = /```yaml\n([\s\S]*?)```/.exec(output)?.[1];
+  if (!yaml) throw new Error('fixture has no authored dispatch');
+  return declaredDispatch(yaml, phaseOneReport ? {
+    research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [], replays: [] },
+  } : {});
 }
 
 const TASK_DESCRIPTION = `Foundation Model for Anomaly Detection (inspired by Chronos for forecasting)
@@ -134,7 +136,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutput, true), registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutput, true)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[2].is_gate).toBe(true);
@@ -246,7 +249,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutput, true), registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutput, true)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].id).toBe('implement_fm');
       // No research stages
@@ -328,7 +332,8 @@ Injecting research to explore alternative approaches.
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(declaredPlannerOutput(plannerOutputAfterPivot), registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutputAfterPivot)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[0].id).toBe('pivot_research');

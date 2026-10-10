@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts and program lifecycle evidence; no dispatch admission or execution. */
 import { type ResearchConfirmConfig, type TerminalStatesConfig, type ProgramConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState, isPendingStageStatus, STAGE_STATUS } from '../../store.js';
 import { join } from 'node:path';
@@ -139,17 +140,12 @@ export function autoSelectedWorkflow(
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
-  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return { stripped: brief };
-  const open = brief.indexOf('\n', 3) + 1;
-  const closeIdx = brief.indexOf('\n---', open);
-  // GAP-3: a brief that OPENED a frontmatter fence but never closed it is
-  // malformed — surface that instead of silently passing the whole brief through
-  // (which would hide a research: block the author intended to declare).
-  if (closeIdx < 0) return { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' };
-  const fm = brief.slice(open, closeIdx);
-  // Find the newline that ends the closing fence so we can slice past it
-  const afterFence = brief.indexOf('\n', closeIdx + 4);
-  const stripped = afterFence < 0 ? '' : brief.slice(afterFence + 1);
+  const frontmatter = splitBriefFrontmatter(brief);
+  if (!frontmatter) return /^(?:\uFEFF)?---\r?\n/.test(brief)
+    ? { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' }
+    : { stripped: brief };
+  const fm = frontmatter.yaml;
+  const stripped = frontmatter.body;
   let parsed: unknown;
   // GAP-3: RETURN the YAML parse error instead of swallowing it — the caller can
   // then fail loud / record an event rather than silently falling back to plain dispatch.

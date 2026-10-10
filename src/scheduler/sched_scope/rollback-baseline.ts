@@ -1,10 +1,10 @@
 // Boundary: Own one run-scoped lazy Git/disk preimage cache, watcher journal, current-image nomination, committed writes and lifecycle cleanup.
 import { type LiveConstraintGitIndexEntry, parseLiveConstraintGitIndexEntries } from "../../live-constraint-guard.js";
-import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual, hashRollbackFileCooperatively } from "../../rollback-content-store.js";
+import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual, hashRollbackFileCooperatively, hashRollbackFileSync } from "../../rollback-content-store.js";
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { appendFileSync, lstatSync, watch } from "node:fs";
+import { lstatSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { type RepairFileFingerprint, type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileFingerprint, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
 import { REPAIR_DIFF_SKIP_DIRS, listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
@@ -84,13 +84,7 @@ function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void 
   const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
   baseline.journalSequence++;
   baseline.journal.set(path, baseline.journalSequence);
-  if (baseline.runDirPath) {
-    try {
-      appendFileSync(join(baseline.runDirPath, 'rollback_change_journal.jsonl'), `${JSON.stringify({
-        version: 1, sequence: baseline.journalSequence, path, observedAt: new Date().toISOString(),
-      })}\n`, 'utf-8');
-    } catch { /* in-memory journal remains authoritative for this scheduler */ }
-  }
+
 }
 
 function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRollbackBaseline {
@@ -404,6 +398,18 @@ export function captureRollbackCurrentImage(
 ): RepairFileImage {
   const identity = rollbackStatIdentity(join(projectDir, path));
   if (before && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
+  if (before?.type === 'file' && before.backingPath && identity?.type === 'file') {
+    // Metadata churn nominates a check, not another immutable copy. Reuse the
+    // owned preimage only after hashing proves the live content is identical;
+    // retain the old image for rollback and give this snapshot its current mode.
+    try {
+      const hashed = hashRollbackFileSync(join(projectDir, path));
+      if (hashed.sha256 === before.sha256 && hashed.byteLength === before.byteLength) {
+        return { ...before, statIdentity: hashed.statIdentity, verifiedStatIdentity: undefined,
+          mode: Number(BigInt(hashed.statIdentity.mode) & 0o7777n) };
+      }
+    } catch { /* the normal capture below retains its fail-closed diagnostics */ }
+  }
   return readRepairFileImage(
     projectDir,
     path,
@@ -428,7 +434,7 @@ export function settleFrameworkRollbackPath(projectDir: string, runDirPath: stri
   if (baseline) settleRollbackBaselinePath(baseline, projectDir, path);
 }
 
-export function closeRollbackBaseline(projectDir: string, runDirPath: string): void {
+export function closeRollbackBaseline(projectDir: string, runDirPath?: string): void {
   const key = rollbackBaselineKey(projectDir, runDirPath);
   const baseline = rollbackBaselines.get(key);
   baseline?.watcher?.close();

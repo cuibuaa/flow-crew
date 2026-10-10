@@ -703,7 +703,6 @@ describe('engine self-collision after-state replays and controls', () => {
       inspectLiveRun: () => true,
       findDistConsumers: () => consumers,
       runValidationCommand: runner,
-      prepareValidationWriteGuard: () => ({ wrap: (request) => request, cleanup: () => {} }),
       stdout: new Capture().writer,
       stderr: stderr.writer,
     };

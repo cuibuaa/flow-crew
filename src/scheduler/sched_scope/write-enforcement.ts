@@ -212,6 +212,17 @@ export function createLiveGuardFactory(services: ScopeValidationOutputs) {
         fallbackScanMs: projectDefaults.live_constraint_fallback_scan_ms,
         monitorDeadlineMs: projectDefaults.live_constraint_monitor_deadline_ms,
         effectiveScope: () => attemptContext.effectiveScope,
+        watchProject: (listener, onError) => {
+          // The run baseline owns the recursive observer and its journal.
+          // Invocation closure removes only this subscriber; the run closes
+          // the native watcher after every writer and reconciliation settles.
+          const watcher = input.context.snapshot.rollbackBaseline.watcher;
+          if (!watcher) return undefined;
+          const onChange = (_event: string, name: string | Buffer | null) => listener(name?.toString());
+          watcher.on('change', onChange);
+          watcher.on('error', onError);
+          return { close: () => { watcher.off('change', onChange); watcher.off('error', onError); } };
+        },
         isValidationCommand: (command) => configuredValidationCommandRole(
           command,
           configuredCommands,

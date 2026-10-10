@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
 import { RUN_STATUS } from './store.js';
@@ -315,9 +316,7 @@ function bodyLineOffset(brief: string): number {
 
 /** The brief minus a leading YAML frontmatter block, if present. */
 function briefBody(brief: string): string {
-  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return brief;
-  const end = brief.indexOf('\n---', brief.indexOf('\n') + 1);
-  return end === -1 ? brief : brief.slice(brief.indexOf('\n', end + 1) + 1);
+  return splitBriefFrontmatter(brief)?.body ?? brief;
 }
 
 const HEADLINE_USAGE = /\b(?:headline|quoted?|quotable)\b/i;
