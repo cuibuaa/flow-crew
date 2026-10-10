@@ -156,15 +156,52 @@ describe('engine-owned local carrier lifetime', () => {
 
   native('refuses a timed-out synchronous probe and stops its owned descendant group', async () => {
     const f = fixture(), delayed = join(f.projectDir, 'delayed-write'), started = join(f.projectDir, 'probe-started');
+    const descendantStarted = join(f.projectDir, 'descendant-started'), release = join(f.projectDir, 'release-write');
+    const descendant = `
+      const fs=require('node:fs');
+      const poll=setInterval(()=>{
+        if(!fs.existsSync(${JSON.stringify(release)}))return;
+        clearInterval(poll);fs.writeFileSync(${JSON.stringify(delayed)},'late');
+      },10);
+      fs.writeFileSync(${JSON.stringify(descendantStarted)},String(process.pid));
+    `;
     await withEngineWriteBoundary(f, async () => {
-      expect(() => execEngineChildSync(process.execPath, ['-e', `
-        require('node:fs').writeFileSync(${JSON.stringify(started)},'started');
-        require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(delayed)},'late'),1000)`)}]);
-        setTimeout(()=>{},5000);
-      `], 300)).toThrow('ENGINE_WRITE_BOUNDARY_UNVERIFIED');
-      expect(existsSync(started)).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      expect(existsSync(delayed)).toBe(false);
+      try {
+        // The deadline includes the native bridge and Node startup. Hold both
+        // processes until timeout/release rather than racing their own timers.
+        expect(() => execEngineChildSync(process.execPath, ['-e', `
+          require('node:fs').writeFileSync(${JSON.stringify(started)},String(process.pid));
+          require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});
+          setInterval(()=>{},1000);
+        `], 5_000)).toThrow(/ENGINE_WRITE_BOUNDARY_UNVERIFIED:.*synchronous probe timed out or was signalled/);
+        expect(existsSync(started)).toBe(true);
+        expect(existsSync(descendantStarted)).toBe(true);
+        const pid = Number(readFileSync(descendantStarted, 'utf8'));
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
+        const stopped = () => {
+          try {
+            const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+            // A killed orphan can remain a zombie until its reaper runs.
+            return /^[ZX] /.test(stat.slice(stat.lastIndexOf(')') + 2));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+            throw error;
+          }
+        };
+        writeFileSync(release, 'go');
+        const deadline = Date.now() + 5_000;
+        while (!stopped() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(stopped()).toBe(true);
+        expect(existsSync(delayed)).toBe(false);
+      } finally {
+        // Clean up even if a regression leaves either owned process alive.
+        for (const marker of [started, descendantStarted]) {
+          if (!existsSync(marker)) continue;
+          const pid = Number(readFileSync(marker, 'utf8'));
+          if (!Number.isInteger(pid) || pid <= 0) continue;
+          try { process.kill(marker === started ? -pid : pid, 'SIGKILL'); } catch { /* already stopped */ }
+        }
+      }
     });
   });
 
