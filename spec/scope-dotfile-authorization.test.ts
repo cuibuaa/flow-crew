@@ -142,37 +142,86 @@ describe('path-wise scope admission', () => {
       });
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
-  it('never uses failed-rollback evidence to acquire repository or engine dot-directory authority', () => {
-    const paths = ['.git/config', '.fc/state.json', 'nested/.git/config', 'nested/.fc/state.json'];
+  const changes = ['created', 'modified'] as const;
+  function withholdProtectedRecovery(paths: string[], change: typeof changes[number]): void {
+    for (const path of paths) {
+      mkdirSync(join(project, path, '..'), { recursive: true });
+      rmSync(join(project, path), { force: true });
+      if (change === 'modified') writeFileSync(join(project, path), 'protected preimage');
+    }
     const { input } = setup(paths);
     const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
     try {
-      for (const path of paths) {
-        mkdirSync(join(project, path, '..'), { recursive: true });
-        writeFileSync(join(project, path), 'protected content');
+      for (const path of paths) writeFileSync(join(project, path), 'stage content left by failed rollback');
+      recordFailedRollbacks(input.runId, paths);
+      for (const priorScope of [[], ['**']]) {
+        expect(scheduler.decideScopeRevision({ ...input, priorScope, snapshot }), change).toMatchObject({
+          accepted: false, authorizedPaths: [], rejectedPaths: paths, effectiveScope: priorScope,
+        });
       }
-      recordFailedRollbacks(input.runId, paths);
-      expect(scheduler.decideScopeRevision({ ...input, snapshot })).toMatchObject({
-        accepted: false, authorizedPaths: [], rejectedPaths: paths,
-      });
-      expect(scheduler.scopeContainsPath(['**'], '.git/config')).toBe(false);
-      expect(scheduler.scopeContainsPath(['**'], '.fc/state.json')).toBe(false);
+      const broad = ['**'];
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot, request: {
+        ...input.request, requestedPaths: broad, pathDigest: scopePathDigest(broad),
+      } });
+      for (const path of paths) {
+        expect(scheduler.scopeContainsPath(['**'], path), `${change}: ${path}`).toBe(false);
+        expect(scheduler.scopeContainsPath(decision.effectiveScope as string[], path), path).toBe(false);
+        expect(snapshot.files.has(path), path).toBe(false);
+      }
     } finally { closeRepairRoundSnapshot(snapshot); }
+  }
+  it.each(changes)('withholds recorded failed-rollback recovery for .git/ paths (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.git/config', 'nested/.git/config'], change);
   });
-  it('withholds engine carrier aliases even when their content matches a recorded failed rollback', () => {
-    const paths = ['.carrier-link', '.carrier-inode'].map(name => ['node_modules', name].join('/'));
-    const { created, input } = setup(paths);
-    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
-    try {
+  it.each(changes)('withholds recorded failed-rollback recovery for .env (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.env', 'nested/.env'], change);
+  });
+  it.each(changes)('withholds recorded failed-rollback recovery for .env.local (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.env.local', 'nested/.env.local'], change);
+  });
+  it.each(changes)('withholds recorded failed-rollback recovery for .github/ paths (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.github/workflows/check.yml', 'nested/.github/workflows/check.yml'], change);
+  });
+  it.each(changes)('withholds recorded failed-rollback recovery for .codex/ paths (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.codex/config.toml', 'nested/.codex/config.toml'], change);
+  });
+  it.each(changes)('withholds recorded failed-rollback recovery for .claude/ paths (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.claude/settings.json', 'nested/.claude/settings.json'], change);
+  });
+  it.each(changes)('withholds recorded failed-rollback recovery for engine .fc/ carriers (%s), including under **', (change) => {
+    withholdProtectedRecovery(['.fc/state.json', 'nested/.fc/state.json'], change);
+  });
+  it.each(changes.flatMap(change => (['symlink', 'hardlink'] as const).map(alias => ({ change, alias }))))(
+    'withholds recorded failed-rollback recovery for engine carrier $alias aliases ($change), including under **', ({ alias, change }) => {
+      const path = ['node_modules', '.carrier-alias'].join('/');
+      const paths = [path];
       mkdirSync(join(project, 'node_modules'));
-      const carrier = join(created.runDirPath, 'run.json');
-      symlinkSync(carrier, join(project, paths[0]));
-      linkSync(carrier, join(project, paths[1]));
-      recordFailedRollbacks(input.runId, paths);
-      expect(scheduler.decideScopeRevision({ ...input, snapshot })).toMatchObject({
-        accepted: false, authorizedPaths: [], rejectedPaths: paths,
-      });
-    } finally { closeRepairRoundSnapshot(snapshot); }
+      rmSync(join(project, path), { force: true });
+      const { created, input } = setup(paths);
+      const carrier = join(created.runDirPath, 'events.jsonl');
+      writeFileSync(carrier, 'engine preimage\n');
+      const link = (): void => {
+        (alias === 'symlink' ? symlinkSync : linkSync)(carrier, join(project, path));
+      };
+      if (change === 'modified') link();
+      const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage]);
+      try {
+        if (change === 'created') link();
+        else writeFileSync(join(project, path), 'stage content left by failed rollback\n');
+        recordFailedRollbacks(input.runId, paths);
+        for (const priorScope of [[], ['**']]) {
+          expect(scheduler.decideScopeRevision({ ...input, priorScope, snapshot }), change).toMatchObject({
+            accepted: false, authorizedPaths: [], rejectedPaths: paths, effectiveScope: priorScope,
+          });
+        }
+        const broad = ['**'];
+        const decision = scheduler.decideScopeRevision({ ...input, snapshot, request: {
+          ...input.request, requestedPaths: broad, pathDigest: scopePathDigest(broad),
+        } });
+        expect(scheduler.scopeContainsPath(['**'], path)).toBe(false);
+        expect(scheduler.scopeContainsPath(decision.effectiveScope as string[], path)).toBe(false);
+        expect(snapshot.files.has(path)).toBe(false);
+      } finally { closeRepairRoundSnapshot(snapshot); }
   });
   it.each(['run', 'stage', 'attempt', 'digest', 'malformed'] as const)('never partially accepts an invalid %s binding', (kind) => {
     const { input, request } = setup(['safe.txt', 'blocked.txt']);

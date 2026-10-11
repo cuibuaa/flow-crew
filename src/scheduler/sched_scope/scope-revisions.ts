@@ -208,7 +208,8 @@ export function decideScopeRevision(input: {
         const unrestored = unrestoredWrites.get(member);
         if (scope.kind === 'exact' && path === member && unrestored?.state === 'present'
             && (unrestored.type === 'file' || unrestored.type === 'symlink')
-            && !member.split('/').some(segment => segment === '.git' || segment === '.fc')
+            && !member.split('/').some(segment => ['.git', '.fc', '.github', '.codex', '.claude'].includes(segment)
+              || segment.startsWith('.env'))
             && compareLiveConstraintContentIdentities(unrestored,
               readLiveConstraintContentIdentity(join(projectDir, member))) === 'equal') {
           try {
