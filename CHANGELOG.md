@@ -6,20 +6,46 @@ features in older entries are historical; use the [current CLI](guide/cli.md) an
 and publication claims below were not independently reproduced in this overhaul; they are
 retained as reported release history, not current guarantees or benchmark evidence.
 
-## Current checkout migration
-
-Model stage supervision and its launch flags have been removed; the deterministic idle
-watchdog and immutable attempt deadlines remain. Portable process supervision is separate.
-Stage races are a planner choice (`race: true`) admitted with independent gates; the separate
-race command and gate-hold launch control are removed. See [architecture](guide/architecture.md)
-and [agent protocol](guide/agent-protocol.md). These notes describe source on this checkout,
-not a newly published release.
-
-Engine defaults, roles and workflows now come only from the package's `config/` directory;
-target-project copies no longer override them. Campaign selection uses `--campaign` or the
-repository basename, and task-specific `planner_policies` selection lives in brief frontmatter.
-
 # Changelog
+
+## [0.10.0] - 2026-10-14
+
+This release removes more than it adds: about 26,000 fewer lines across 661 files. The
+engine keeps one owner for each decision and drops restrictions that only refused valid
+work. Several interfaces changed; read the migration notes before upgrading.
+
+### Migration — breaking changes
+
+- **Model stage supervision is removed**, together with its launch flags. `quick --supervise`
+  is now an unknown option. The deterministic idle watchdog and immutable attempt deadlines
+  remain; portable process supervision is separate.
+- **Stage races are a planner choice.** A plan stage may set `race: true`, and the race is
+  admitted under independent gates. The separate race command and the gate-hold launch
+  control are removed.
+- **Engine configuration comes only from the package.** Defaults, roles and workflows are
+  read from the installed package's `config/` directory; a target project's `config/` no
+  longer overrides them. Choose a campaign with `--campaign` (default: the repository
+  basename). Task-specific `planner_policies` belong in brief frontmatter.
+- **Dedicated campaign roles are removed** (`campaign_scout`, `campaign_planner`).
+- **Run history is `run-history.jsonl`.** Records no longer carry a format version; the
+  version lives in the run's reference to the file. Runs written by older releases are still
+  read through that reference.
+- **The `ship` skill installs as a directory.** `install.sh` installs `SKILL.md` and a
+  `references/` bundle of the guides it cites, so an installed skill works offline and stays
+  consistent with the engine it shipped with. Remove an old single-file `ship.md` command if
+  one is left over.
+
+### Changed
+
+- Duplicate admission, settlement and approval checks were consolidated or removed; a single
+  shared decision now covers artifact safety, and unnecessary human-approval parks are gone.
+- Brief validation declarations replace inferred validation commands when present.
+- `ship` briefs for minimal, modular rewrites require production-entrypoint scope, a
+  reachability inventory, base/final behaviour parity (including failure paths and old
+  on-disk records), runtime discovery, and a design account in the report, while leaving
+  the implementation to the run.
+- The test suite fails when a tracked file matches the ignore rules, or when tracked text
+  contains a user-home path or a run identifier.
 
 ## [0.9.2] - 2026-09-26
 
