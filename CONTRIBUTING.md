@@ -69,6 +69,14 @@ private names, personal home paths or actual local run/task identifiers.
 
 ## Review and submission
 
+Release conventions live in [`scripts/release.sh`](scripts/release.sh). Run it with
+`--help` for the workflow: add a dated changelog section, `prepare <version>`, then
+`squash <version> --message-file <file>` to build and prove the two-commit release
+branch. Review it and explicitly push `release-v<version>:tests` (using
+`--force-with-lease` when replacing tests history). Once CI on tests succeeds,
+`publish <version> --commit release-v<version>` fast-forwards main, pushes the
+annotated tag and creates the latest GitHub release from that changelog section.
+
 Add meaningful regression coverage for observable behavior changes. For documentation changes,
 check source truth, recipe syntax and local links. Do not weaken a test to obtain a green result.
 For a dashboard change, exercise actual routes and controls in a rendered browser at realistic

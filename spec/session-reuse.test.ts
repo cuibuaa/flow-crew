@@ -224,8 +224,7 @@ describe('own-stage continuation', () => {
       const state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
       const writeSession = (record: object) => { mkdirSync(join(root, 'stages', 'work'), { recursive: true }); writeFileSync(join(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
-      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
-      mkdirSync(join(root, 'stages', 'work', 'codex_home'), { recursive: true });
+      // Native session storage is CLI-owned; admitted UUID metadata is sufficient.
       expect(sessionResumeForStage(subject, [subject], state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'work' });
       expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });

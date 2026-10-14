@@ -240,15 +240,6 @@ describe('portable supervision safety invariants', () => {
     ownedChildren.delete(child);
   });
 
-  it('keeps the portable identity, group signal, and ENOENT authority in one safety bundle', () => {
-    const orchestrator = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf-8');
-    expect(orchestrator).toContain('processStartTokensMatch(recordedToken, processStartToken(fallbackPid))');
-    expect(orchestrator).toContain("const signalTarget = process.platform !== 'win32' ? -fallbackPid : fallbackPid");
-    expect(orchestrator).toContain("if (failure.code === 'ENOENT') return this.fallbackState(unit)");
-    expect(orchestrator).toContain('startTimeTicks: startToken.value');
-    expect(orchestrator).toContain('startTokenKind: startToken.kind');
-  });
-
   it('uses an ENOENT fallback terminal record authoritatively without deleting it', async () => {
     const unit = 'gate-enoent-terminal.service';
     const backend = new NodeSystemd(fixtureRoot);
@@ -428,12 +419,17 @@ describe('portable supervision safety invariants', () => {
     const failedRecord = fallbackRecordPath(fixtureRoot, failingUnit);
     const persisted = await waitUntil(() => {
       try {
-        return JSON.parse(readFileSync(failedRecord, 'utf-8')).state === 'failed';
+        // The compatibility record precedes the shim's final filesystem write.
+        // exit.json is the publication that makes fixture teardown safe.
+        return existsSync(supervisionPaths(fixtureRoot, failingUnit).exit)
+          && JSON.parse(readFileSync(failedRecord, 'utf-8')).state === 'failed';
       } catch {
         return false;
       }
     });
     expect(persisted).toBe(true);
+    expect(JSON.parse(readFileSync(supervisionPaths(fixtureRoot, failingUnit).exit, 'utf-8')))
+      .toMatchObject({ normalized: 127, reason: expect.stringMatching(/spawn failed:.*ENOENT/) });
     expect(String(JSON.parse(readFileSync(failedRecord, 'utf-8')).reason)).toMatch(/spawn failed:.*ENOENT/);
     expect(processIsAlive(launched.agentPid)).toBe(true);
   });

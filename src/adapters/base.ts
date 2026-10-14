@@ -67,6 +67,7 @@ function spawnRunCommand(command: string, args: string[], options: SpawnOptions)
 }
 
 export type AdapterFailureKind =
+  | 'authentication'
   | 'forbidden'
   | 'connection_refused'
   | 'connection_reset'
@@ -190,6 +191,8 @@ export interface AgentConfig {
 }
 
 export interface Adapter {
+  /** Native session namespace used by shared admission and home cleanup. */
+  readonly sessionKind?: string;
   /** Calls onInvocationInput before every native call, including internal retries.
    * Other adapters are recorded at their public run boundary. */
   readonly capturesInvocationInput?: boolean;
@@ -324,10 +327,11 @@ function createChildTerminator(
 
 /** Every command gets invocation-private scratch; callers retain their own
  * credential/configuration policy and close scratch after retiring the child. */
-function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env) {
+function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv: readonly string[] = []) {
   const scratch = join(tmpdir(), `flowcrew-invocation-${randomUUID()}`);
   mkdirSync(scratch, { mode: 0o700 });
   const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+  for (const name of unsetEnv) delete env[name];
   // Daemon transport belongs to the scheduler/operator, never a command child.
   delete env.FLOWCREW_DAEMON_SOCKET;
   return { env, cleanup: () => rmSync(scratch, { recursive: true, force: true }) };
@@ -342,6 +346,8 @@ export function execWithStdin(
     timeout_ms: number;
     liveLogPath?: string;
     env?: NodeJS.ProcessEnv;
+    /** Remove native nesting markers without suppressing provider authentication. */
+    unsetEnv?: readonly string[];
     onStdout?: (text: string, activity?: CommandActivityTracker) => void;
     /** The executable owner binds and closes command evidence with its child;
      * adapters only translate their native events into lifecycle records. */
@@ -370,7 +376,7 @@ export function execWithStdin(
     let environment: ReturnType<typeof commandEnvironment> | undefined;
     let child: ChildProcess;
     try {
-      environment = commandEnvironment({ ...process.env, ...opts.env });
+      environment = commandEnvironment({ ...process.env, ...opts.env }, opts.unsetEnv);
       child = spawnRunCommand(cmd, args, {
         cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
         detached: process.platform !== 'win32', env: environment.env,

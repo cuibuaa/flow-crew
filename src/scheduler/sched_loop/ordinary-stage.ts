@@ -138,7 +138,7 @@ export async function executeOrdinaryStage(
       const stageAdapter = stage.race ? stageRaceAdapter({ stage, stages: sorted, adapter,
         agentsDir: resolvedAgentsDir, projectDir, runDirPath, state, skills, defaults: workflowDefaults, attemptDeadlineClockFactory }) : agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled();
-      const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled);
+      const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
       if (!technicalRetry) {
         technicalRetry = createSchedulerTechnicalRetryState(
           initialTimeout,

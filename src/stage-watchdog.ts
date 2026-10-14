@@ -1,4 +1,6 @@
 import { mkdirSync } from './engine-fs.js';
+import { isSessionHomeName } from './adapter-session.js';
+import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -128,7 +130,7 @@ export function inspectStageExecutionFacts(input: {
   };
 
   const stageRoot = join(input.runDir, 'stages', input.stageId);
-  const liveLogPath = join(stageRoot, 'live.log');
+  const liveLogPath = stageLiveLogPath(input.runDir, input.stageId);
   const outputPath = join(stageRoot, 'output.md');
   const verdictPath = join(input.runDir, `verdict_${input.stageId}.json`);
   const handoffPath = join(input.runDir, `handoff_${input.stageId}.md`);
@@ -186,14 +188,14 @@ export function inspectStageExecutionFacts(input: {
     } catch { /* missing/malformed activity never grants protection */ }
   }
 
-  const internalName = /^(?:live\.log$|status\.json$|input\.md$|guidance(?:_consumed)?\.md$|command_activity\.json$|attempt_generation\.json$|attempt_deadline_|invocations$|codex_home$|session\.json$|constraint_audit_|write_boundary_|output_attempt_)/;
+  const internalName = /^(?:live(?:_attempt_\d+_[a-f0-9]{24})?\.log$|status\.json$|input\.md$|guidance(?:_consumed)?\.md$|command_activity\.json$|attempt_generation\.json$|attempt_deadline_|invocations$|session\.json$|constraint_audit_|write_boundary_|output_attempt_)/;
   let stageArtifactChanged = false;
   const walk = (dir: string, depth: number): void => {
     if (stageArtifactChanged || depth > 3) return;
     let entries: import('node:fs').Dirent[];
     try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return; }
     for (const entry of entries) {
-      if (internalName.test(entry.name)) continue;
+      if (internalName.test(entry.name) || isSessionHomeName(entry.name)) continue;
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path, depth + 1);
       else if (entry.isFile() && changedThisTick(path)) stageArtifactChanged = true;

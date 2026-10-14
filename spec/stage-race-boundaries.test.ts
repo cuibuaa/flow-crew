@@ -13,6 +13,7 @@ import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/schedule
 import { initializeReservedRun, readRunState, reserveRun, runDir, updateRunState, writeStageOutput, writeStageStatus } from '../src/store.js';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
+import { stageLiveLogPath } from '../src/stage-live-log.js';
 import * as processLiveness from '../src/process-liveness.js';
 
 const workflowMock = vi.hoisted(() => vi.fn());
@@ -30,6 +31,7 @@ afterEach(() => rmSync(directory, { recursive: true, force: true }));
  * executable independent gate are exercised in planner-race and race-workflow specs. */
 async function fixture(options: { fail?: boolean; ignored?: boolean; dependency?: boolean; movingPeer?: boolean; contract?: boolean; firstFail?: boolean;
   visibility?: 'full' | 'minimal' | 'none';
+  attemptStartedAt?: string;
   beforeRace?: () => void;
   onAuthor?: (project: string, parent: ReturnType<typeof reserveRun>, target: string, id: string) => Promise<void> } = {}) {
   const project = join(directory, 'project'); mkdirSync(project);
@@ -101,7 +103,7 @@ async function fixture(options: { fail?: boolean; ignored?: boolean; dependency?
   }
   const adapter: Adapter = { run: vi.fn(async () => { throw new Error('Candidate execution belongs to the workflow runner'); }) };
   const parentOptions: RunOpts = { timeout_ms: 30000, workDir: project, runDir: parent.runDirPath, stageId: 'work', attemptIndex: 1,
-    attemptStartedAt: new Date().toISOString(), abortSignal: new AbortController().signal,
+    attemptStartedAt: options.attemptStartedAt ?? new Date().toISOString(), abortSignal: new AbortController().signal,
     onInvocationInput: vi.fn(), onCommandLifecycle: vi.fn(), resumeSessionId: '00000000-0000-4000-8000-000000000000',
     sessionOwnerStageId: 'prepare', preserveSession: true, freshSessionPrompt: 'Continue the author task.' };
   options.beforeRace?.();
@@ -123,7 +125,7 @@ describe('stage race boundaries', () => {
       startTimeTicks: '1', fingerprint: bytes, readWork: JSON.stringify([['1', bytes]]), ioObserved: true, members: [],
     }));
     let checked = false;
-    await fixture({ onAuthor: async (project, parent, target, id) => {
+    await fixture({ attemptStartedAt: startedAt, onAuthor: async (project, parent, target, id) => {
       if (basename(target) !== 'a') return;
       const running = { status: 'running' as const, retries: 0,
         attempts: [{ index: 1, startedAt, status: 'running' as const }] };
@@ -144,7 +146,7 @@ describe('stage race boundaries', () => {
       now += 600_001;
       if (signal === 'socket') bytes = '200';
       if (signal === 'live' || signal === 'artifact') {
-        const path = join(childRoot, signal === 'live' ? 'live.log' : 'evidence.txt');
+        const path = signal === 'live' ? stageLiveLogPath(runDir(target, id), 'work', 1, startedAt) : join(childRoot, 'evidence.txt');
         writeFileSync(path, 'Verified current-attempt work.\n');
         utimesSync(path, now / 1000, now / 1000);
       }

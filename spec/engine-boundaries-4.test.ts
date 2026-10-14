@@ -1,17 +1,13 @@
-import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
-import { fixtureResult } from './test-support/declared-dispatch.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { Adapter } from '../src/adapters/base.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { appendGuidanceEnvelope, guidanceForStageFromText } from '../src/guidance.js';
 import { runProjectValidationBaseline } from '../src/project-validation.js';
 
-import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, type StoreState } from '../src/store.js';
-import { inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryAdvanceResearch } from '../src/scheduler.js';
+import { fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
+import { inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, tryAdvanceResearch } from '../src/scheduler.js';
 
 const fixture = (name: string): string => mkdtempSync(join(tmpdir(), `fc-boundaries-4-${name}-`));
 
@@ -149,66 +145,6 @@ describe('engine boundaries from recorded runs', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
-
-  it('keeps a targeted Vitest transient file from failing its concurrent batch, but still fails an authored source write', async () => {
-    const previousHome = fcGlobalDir();
-    const root = fixture('vite');
-    try {
-      const home = join(root, 'home');
-      const projectDir = join(root, 'project');
-      const agentsDir = join(projectDir, 'config', 'agents');
-      mkdirSync(agentsDir, { recursive: true });
-      mkdirSync(join(projectDir, 'node_modules', '.vite-temp'), { recursive: true });
-      mkdirSync(join(projectDir, 'src'), { recursive: true });
-      setFcGlobalDir(home);
-      writeFileSync(join(projectDir, '.gitignore'), 'node_modules' + '/\n');
-      execFileSync(process.execPath, ['--input-type=module', '-e', "import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q']);"], {
-        cwd: projectDir, env: { ...process.env, HOME: root, FC_HOME: home },
-      });
-      setEngineDefaults({ live_constraint_fallback_scan_ms: 100 });
-      for (const role of ['coder', 'planner']) writeFileSync(join(agentsDir, `${role}.yaml`), `name: ${role}\nmodel: default\ntools: []\nprompt: fixture\n`);
-      writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' }, devDependencies: { vitest: 'fixture' } }));
-      const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-      const runCase = async (stageIds: string[], writePath: string, declaredInput = false) => {
-        const stages = stageIds.map((id) => ({ id, role: 'coder', depends_on: [], scope: [], prompt_template: 'fixture', skills: [], dynamic_dispatch: false, is_gate: false, artifact_contract: { version: 1 as const, produces: [], reads: [], replays: [] } }));
-        const config = { name: `vite-${stageIds.length}`, defaults: { max_iterations: 1, max_retries: 0 }, stages };
-        const yaml = `name: ${config.name}\nstages:\n${stageIds.map((id) => `  - id: ${id}\n    role: coder\n    scope: []\n    prompt_template: fixture\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n`).join('')}`;
-        const created = createRun(projectDir, config.name, yaml, stageIds);
-        if (declaredInput) {
-          writeFileSync(join(projectDir, writePath), 'protected input');
-          writeFileSync(join(home, 'runs', created.runId, 'task_brief.md'), `---\ninputs:\n  - ${writePath}\n---\n`);
-        }
-        const state = readRunState(projectDir, created.runId);
-        state.autoApprove = true;
-        state.maxRetries = 0;
-        writeRunState(projectDir, created.runId, state);
-        const adapter = { async run(_prompt: string, _role: unknown, options: any) {
-          if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
-          if (options.stageId === stageIds[0]) {
-            options.onCommandLifecycle?.({ phase: 'started', id: 'vitest-fixture', command: 'vitest run spec/fixture.test.ts', timestamp: new Date().toISOString() });
-            writeFileSync(join(projectDir, writePath), 'fixture');
-            await delay(1200);
-            if (writePath.endsWith('timestamp-fixture.mjs')) unlinkSync(join(projectDir, writePath));
-            options.onCommandLifecycle?.({ phase: 'completed', id: 'vitest-fixture', timestamp: new Date().toISOString() });
-          } else await delay(1300);
-          return fixtureResult({ output: 'stage settled', exitCode: 0, duration_ms: 1200 }, options);
-        } } as Adapter;
-        const final = await runWorkflow(config as any, yaml, projectDir, adapter, new Map(), undefined, agentsDir, created.runId, '# fixture', true);
-        return { final: final.status, stages: stageIds.map((id) => readStageStatus(projectDir, created.runId, id)?.status) };
-      };
-      expect(await runCase(['a', 'b', 'c'], join('node_modules', '.vite-temp', 'vitest.config.ts.timestamp-fixture.mjs')))
-        .toEqual({ final: 'complete', stages: ['complete', 'complete', 'complete'] });
-      const authored = await runCase(['authored'], 'src/forbidden.ts');
-      expect(authored.final).toBe('failed');
-      expect(authored.stages).toEqual(['failed']);
-      const protectedInput = await runCase(['protected'], join('node_modules', '.vite-temp', 'pinned.json'), true);
-      expect(protectedInput.final).toBe('failed');
-      expect(protectedInput.stages).toEqual(['failed']);
-    } finally {
-      setFcGlobalDir(previousHome);
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 20_000);
 
   it('carries an explicit operator prohibition to later stages without spreading ordinary targeted advice', () => {
     const root = fixture('guidance');

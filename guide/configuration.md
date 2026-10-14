@@ -61,14 +61,29 @@ writing that runtime resolution back. `mock` is a registered test adapter; `scri
 Role `model` and `reasoning_effort` pins win over engine defaults; missing or `default` role
 values resolve to engine defaults. For Codex, remaining `default` values inherit its global
 configuration, then its CLI defaults. Claude receives an explicit model when configured
-and forwards an explicit effort to its CLI. These are routing facts;
-they do not verify vendor model availability. Session reuse can be overridden per process
+and forwards an explicit effort to its CLI; otherwise its native default is unresolved.
+Both adapters keep model choice an operator policy: they do not force a cheaper model or
+translate another provider's model name. Rejected model/effort parameters can be removed by
+bounded native-error repair; that does not verify the suitability of the resulting model.
+Session reuse can be overridden per process
 by `FC_SESSION_REUSE=0` or `1`. Validation stages do not inherit an author's session.
 
 `--max-iterations` wins over engine/workflow launch defaults. Campaign selection and context
 precedence belong to [operations](operations.md#campaigns). A stage deadline is immutable
 once execution starts; [architecture](architecture.md#deadlines-and-idle-progress) owns
-its watchdog and termination semantics.
+its watchdog and termination semantics. Neither adapter adds an arbitrary native turn or
+spend cap; stage adequacy and those budgets remain shared engine/operator policy.
+
+The worker keeps the brief in the ordinary stage's system prefix; planner prior guidance
+can precede it. Claude retains the native default system prompt and appends the role prefix
+from a file. It does not enable the dynamic system-section cache option without measured
+benefit on the same workload.
+
+Claude disables ambient customizations, user/project/local settings and MCP servers for
+stage execution, and removes nested-CLI launch markers. Authentication, provider variables and
+HOME remain owned by the CLI. CLAUDE_CONFIG_DIR points to the stage's private session
+home; CLAUDE_SECURESTORAGE_CONFIG_DIR retains the operator-selected credential source.
+Claude copies only native conversation state for an admitted resume, never OAuth credentials. Settings isolation is not OS filesystem confinement.
 
 Source: [role parser](../src/scheduler/sched_admission/configuration.ts),
 [availability](../src/adapters/availability.ts), [Codex adapter](../src/adapters/codex.ts),
@@ -79,8 +94,11 @@ Source: [role parser](../src/scheduler/sched_admission/configuration.ts),
 A role YAML accepts `name` and `prompt` (required), `description` (default empty),
 `model` and `reasoning_effort` (default `default`), `tools` (default empty list), optional
 `adapter`, and `handoff_visibility: full|minimal|none`. Visibility selects predecessor
-context. Use `tools: [default]` for normal adapter execution. An empty list disables Claude tools
-and selects Codex's read-only sandbox; individual tool names are not forwarded as an allow-list.
+context. Use `tools: [default]` for normal adapter execution. An empty list selects read-only
+inspection: Codex's native read-only sandbox, or Claude's restricted Read/Glob/Grep tools
+in plan mode with permission prompts denied. These Claude arguments are covered by local
+transport fixtures; no live-provider confinement proof is claimed. Any nonempty list selects
+normal execution for both adapters; individual names are not forwarded as an allow-list.
 The role registry supplies the planner's available role names. Raw role loading and base prompt
 loading both inject the shared review acceptance and run-directory safety contract.
 

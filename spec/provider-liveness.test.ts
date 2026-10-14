@@ -1,3 +1,4 @@
+import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -97,10 +98,11 @@ beforeEach(() => {
   state.stages[stageId] = status;
   writeRunState(project, run.runId, state);
   const stageRoot = join(run.runDirPath, 'stages', stageId);
-  appendFileSync(join(stageRoot, 'live.log'), `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
+  const logPath = stageLiveLogPath(run.runDirPath, stageId, attempt.index, attempt.startedAt);
+  appendFileSync(logPath, `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
   writeFileSync(join(stageRoot, 'attempt_generation.json'), JSON.stringify({
     version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
-    segmentStart: Buffer.byteLength(readFileSync(join(stageRoot, 'live.log'))),
+    segmentStart: Buffer.byteLength(readFileSync(logPath)),
   }));
   activity = new CommandActivityTracker({ runDir: run.runDirPath, stageId,
     attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt });

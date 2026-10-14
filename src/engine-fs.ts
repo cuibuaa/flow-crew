@@ -7,15 +7,16 @@ import { dirname, resolve } from 'node:path';
 export { accessSync, constants, createReadStream, existsSync, fstatSync, fsyncSync, lstatSync,
   opendirSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, statSync, watch,
   type FSWatcher, type Stats } from 'node:fs';
-type PublicationObserver = (paths: string[], tree: boolean) => () => void;
+type PublicationTransfer = readonly [source: string, destination: string];
+type PublicationObserver = (paths: string[], tree: boolean, transfer?: PublicationTransfer) => () => void;
 const observers = new Set<PublicationObserver>();
 /** Integrity supplies policy only while loaded; standalone tools keep this
  * filesystem boundary without importing the scheduler and storage graph. */
 export function observeEnginePublications(observer: PublicationObserver): void {
   observers.add(observer);
 }
-export function publishEngineFiles<T>(paths: string[], action: () => T, tree = false): T {
-  const records = [...observers].map(observer => observer(paths, tree));
+export function publishEngineFiles<T>(paths: string[], action: () => T, tree = false, transfer?: PublicationTransfer): T {
+  const records = [...observers].map(observer => observer(paths, tree, transfer));
   const result = action();
   for (const record of records) record();
   return result;
@@ -42,7 +43,10 @@ export const ftruncateSync = mutation(() => fs.ftruncateSync, [0]);
 export const truncateSync = mutation(() => fs.truncateSync, [0]);
 export const mkdirSync = mutation(() => fs.mkdirSync, [0]);
 export const mkdtempSync = mutation(() => fs.mkdtempSync, args => [dirname(path(args[0]))], true);
-export const renameSync = mutation(() => fs.renameSync, [0, 1], true);
+export const renameSync: typeof fs.renameSync = (source, destination) => {
+  const transfer = [path(source), path(destination)] as const;
+  return publishEngineFiles([...transfer], () => fs.renameSync(source, destination), true, transfer);
+};
 export const rmSync = mutation(() => fs.rmSync, [0], true);
 export const rmdirSync = mutation(() => fs.rmdirSync, [0], true);
 export const unlinkSync = mutation(() => fs.unlinkSync, [0]);

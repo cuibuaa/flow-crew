@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   buildCommand,
@@ -1567,29 +1567,4 @@ describe('fallback stop binds the pid to a process identity', () => {
     }
   });
 
-  it('consumes an asynchronous fallback spawn error and persists the named launch failure', async () => {
-    const previousPath = process.env.PATH;
-    process.env.PATH = base;
-    const failedUnit = 'flowcrew-task-spawn-error.service';
-    const failedRecordPath = join(base, 'systemd-fallback', `${failedUnit}.json`);
-    try {
-      const missingShell = join(base, 'missing-shell');
-      const backend = new NodeSystemd(base, { shellPath: missingShell });
-      await backend.runUnit({ unit: failedUnit, workingDirectory: base, command: "'ignored'" });
-
-      const record = await waitForPathEvent<Record<string, unknown>>(dirname(failedRecordPath), () => {
-        try {
-          const value = JSON.parse(readFileSync(failedRecordPath, 'utf-8')) as Record<string, unknown>;
-          return value.state === 'failed' ? value : undefined;
-        } catch {
-          return undefined;
-        }
-      });
-      expect(record.state).toBe('failed');
-      expect(String(record.reason)).toMatch(/fallback spawn failed:.*ENOENT/);
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-    }
-  });
 });

@@ -106,7 +106,7 @@ export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?
     // their directory identities and the same record slots for every stage;
     // switching stages cannot turn a private build into engine state.
     if (/^stages(?:\/[^/]+)?$/.test(path)) return true;
-    if (/^stages\/[^/]+\/(?:status\.json|input\.md|output_schema\.json|invocations|attempt_generation\.json|(?:plan_revision|scope_revision)_decision_[^/]+\.json|approval_resolution\.json|attempt_deadline_[^/]+\.jsonl|constraint_audit_attempt_\d+\.json|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live\.log|trace\.jsonl)(?:\/|$)/.test(path)) return true;
+    if (/^stages\/[^/]+\/(?:status\.json|input\.md|output_schema\.json|invocations|attempt_generation\.json|(?:plan_revision|scope_revision)_decision_[^/]+\.json|approval_resolution\.json|attempt_deadline_[^/]+\.jsonl|constraint_audit_attempt_\d+\.json|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live(?:_attempt_\d+_[a-f0-9]{24})?\.log|trace\.jsonl)(?:\/|$)/.test(path)) return true;
   }
   return (/^dispatch\.yaml(?:\/|$)/.test(path) && !(stage.dynamic_dispatch && path === 'dispatch.yaml'))
     || (/^verdict_[^/]+\.json(?:\/|$)/.test(path) && !(stage.is_gate && path === `verdict_${stage.id}.json`))

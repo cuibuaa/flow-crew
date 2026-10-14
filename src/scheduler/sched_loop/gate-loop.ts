@@ -251,9 +251,6 @@ export async function settleGateRetries(
             for (const retryStage of activeWorkRecoveryStages) {
               state.stages[retryStage.id] = rependStageStatus(state.stages[retryStage.id], 0);
               mkdirSync(join(runDirPath, 'stages', retryStage.id), { recursive: true });
-              // Clear live.log so the SSE feed shows only the current execution's output
-              const liveLog = join(runDirPath, 'stages', retryStage.id, 'live.log');
-              if (existsSync(liveLog)) unlinkSync(liveLog);
             }
             writeRunState(projectDir, runId, state);
 
@@ -308,9 +305,6 @@ export async function settleGateRetries(
               // cold-starts the re-evaluation when prior reasoning was wrong.
               state.stages[gate.id] = rependStageStatus(state.stages[gate.id], 0);
               mkdirSync(join(runDirPath, 'stages', gate.id), { recursive: true });
-              // Clear live.log so the SSE feed shows only the current re-evaluation's output
-              const liveLog = join(runDirPath, 'stages', gate.id, 'live.log');
-              if (existsSync(liveLog)) unlinkSync(liveLog);
               writeRunState(projectDir, runId, state);
             }
             if (existsSync(sharedVerdict)) unlinkSync(sharedVerdict);

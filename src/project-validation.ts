@@ -1,3 +1,4 @@
+import { stageLiveLogPath } from './stage-live-log.js';
 import { errorMessage } from './source_services/cli-inputs.js';
 import { appendEngineFile, withEngineIntegrity } from './engine-integrity.js';
 import { CommandActivityTracker } from './command-activity.js';
@@ -784,7 +785,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   activity?.started(request.role, request.display);
   const publishOutput = (chunk: string): void => {
     if (request.runDir && request.execution) appendEngineFile(
-      join(request.runDir, 'stages', request.execution.stageId, 'live.log'), chunk,
+      stageLiveLogPath(request.runDir, request.execution.stageId, request.execution.attemptIndex, request.execution.attemptStartedAt), chunk,
     );
   };
   let stdout = '';

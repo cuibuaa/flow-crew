@@ -1,3 +1,4 @@
+import { stageLiveLogPath } from '../../stage-live-log.js';
 // Boundary: adapt an admitted stage to the sequential race and existing workflow gates.
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
@@ -41,7 +42,7 @@ export function stageRaceAdapter(input: {
     const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-stage-race-'));
     const targets: [string, string] = [join(scratch, 'a'), join(scratch, 'b')];
     const recordPath = join(opts.runDir, 'stages', input.stage.id, `race_${opts.attemptIndex ?? 1}.json`);
-    const progress = (text: string) => appendFileSync(join(opts.runDir, 'stages', opts.stageId, 'live.log'), `${text}\n`);
+    const progress = (text: string) => appendFileSync(stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt), `${text}\n`);
     // Outside this child graph, settled predicates become snapshot facts.
     const freezeArtifact = <T extends { when?: Parameters<typeof artifactActivation>[0] }>(artifact: T): T[] => {
       if (!artifact.when || candidateIds.has(artifact.when.stage)) return [artifact];

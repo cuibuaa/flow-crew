@@ -32,16 +32,14 @@ describe('elapsed duration of a raced stage', () => {
     const parent = reserveRun(project);
     initializeReservedRun(project, parent.runId, 'fixture', 'name: fixture\nstages: []\n', ['work', 'review']);
     writeFileSync(join(parent.runDirPath, 'task_brief.md'), '# Goal\nDeliver the new answer.\n');
-    let observedWait = 0;
+    let elapsedMs = 0;
     let candidates = 0;
     workflowMock.mockImplementation(async (workflow: WorkflowConfig, _yaml: string, target: string, _adapter: Adapter,
       _agents: unknown, _skills: unknown, _agentsDir: unknown, id: string, _brief: string, _approve: unknown,
       _campaign: unknown, _inherit: unknown, _admission: unknown, _clock: unknown) => {
       candidates++;
       initializeReservedRun(target, id, workflow.name, stringify(workflow), ['work', 'review']);
-      const start = performance.now();
-      await new Promise(resolve => setTimeout(resolve, 40));
-      observedWait += performance.now() - start;
+      elapsedMs += 40;
       writeFileSync(join(target, 'answer.txt'), 'new answer\n');
       if (outcome === 'scope refusal') writeFileSync(join(target, 'outside.txt'), 'Outside the admitted scope.\n');
       writeStageOutput(target, id, 'work', JSON.stringify({ status: 'delivered', summary: 'Delivered answer.', checks: [], caveats: [] }));
@@ -50,13 +48,15 @@ describe('elapsed duration of a raced stage', () => {
       });
     });
     const adapter: Adapter = { async run() { throw new Error('Unexpected comparison invocation'); } };
-    const result = await stageRaceAdapter({ stage: work, stages: [work, review], adapter, agentsDir: directory,
-      projectDir: project, runDirPath: parent.runDirPath, state: readRunState(project, parent.runId) }).run('Deliver answer.', role,
-    { timeout_ms: 30000, workDir: project, runDir: parent.runDirPath, stageId: 'work', attemptIndex: 1, attemptStartedAt: new Date().toISOString() });
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => elapsedMs);
+    let result;
+    try {
+      result = await stageRaceAdapter({ stage: work, stages: [work, review], adapter, agentsDir: directory,
+        projectDir: project, runDirPath: parent.runDirPath, state: readRunState(project, parent.runId) }).run('Deliver answer.', role,
+      { timeout_ms: 30000, workDir: project, runDir: parent.runDirPath, stageId: 'work', attemptIndex: 1, attemptStartedAt: new Date().toISOString() });
+    } finally { clock.mockRestore(); }
     expect(result.exitCode, result.output).toBe(outcome === 'success' ? 0 : 1);
     expect(candidates).toBe(outcome === 'both authors fail' ? 2 : 1);
-    expect(observedWait).toBeGreaterThanOrEqual(30 * candidates);
-    expect(result.duration_ms).toBeGreaterThanOrEqual(Math.floor(observedWait));
-    expect(Number.isSafeInteger(result.duration_ms)).toBe(true);
+    expect(result.duration_ms).toBe(40 * candidates);
   });
 });

@@ -1,3 +1,4 @@
+import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
 // Boundary: Select and execute one scope-safe ready wave, coordinate live monitors and settle technical/failure/validation outcomes before terminal decisions.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
@@ -164,7 +165,7 @@ export async function executeReadyBatch(
       const isAttemptTimeout = result.timedOut && result.timeoutTerminationCause === 'attempt_timeout';
       const isAdapterFailure = result.adapterFailureKind !== undefined;
 
-      if ((isAttemptTimeout || isAdapterFailure) && currentRetries < maxTechnicalRetries) {
+      if ((isAttemptTimeout || (isAdapterFailure && isRetryableAdapterFailure(result.adapterFailureKind))) && currentRetries < maxTechnicalRetries) {
         const nextRetry = currentRetries + 1;
         const failedStatus = readStageStatus(projectDir, runId, stage.id);
         const retryStatus = rependStageStatus(failedStatus, nextRetry, failedStatus.error);

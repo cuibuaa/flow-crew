@@ -8,7 +8,9 @@ export interface InvocationUsage {
   tokens_in?: number;
   tokens_out?: number;
   tokens_cached?: number;
+  tokens_cache_created?: number;
   tokens_reasoning?: number;
+  cost_usd?: number;
   tokenUsage?: TokenUsage;
 }
 export interface NativeInvocationUsage extends InvocationUsage {
@@ -18,9 +20,15 @@ export interface NativeInvocationUsage extends InvocationUsage {
   sessionId?: string;
   source: 'rollout_interval' | 'native_stdout' | 'unknown';
   reason?: string;
+  models?: Record<string, InvocationUsage>;
 }
-const fields = ['tokens_in', 'tokens_out', 'tokens_cached', 'tokens_reasoning'] as const;
+const fields = ['tokens_in', 'tokens_out', 'tokens_cached', 'tokens_cache_created', 'tokens_reasoning'] as const;
 const quantity = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+const cost = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+/** Carry the same evidence through worker, attempt and stage settlement. */
+export function invocationUsageFields(value: InvocationUsage | undefined): InvocationUsage {
+  return Object.fromEntries([...fields, 'cost_usd', 'tokenUsage'].map(field => [field, value?.[field as keyof InvocationUsage]]));
+}
 export function usageComplete(value: InvocationUsage): boolean {
   return value.tokenUsage !== 'partial' && value.tokenUsage !== 'unknown'
     && quantity(value.tokens_in) && quantity(value.tokens_out);
@@ -32,9 +40,74 @@ export function sumInvocationUsage(values: InvocationUsage[]): InvocationUsage {
     const total = counters.reduce((n,v) => n+v,0);
     if (counters.length && quantity(total)) result[field] = total;
   }
+  const costs = values.map(v => v.cost_usd).filter(cost);
+  const totalCost = costs.reduce((n, v) => n + v, 0);
+  if (costs.length && cost(totalCost)) result.cost_usd = totalCost;
   result.tokenUsage = values.length > 0 && values.every(usageComplete) && usageComplete(result) ? 'known'
     : fields.some(field => result[field] !== undefined) ? 'partial' : 'unknown';
   return result;
+}
+
+/** Native counters only: never interpret numeric-looking assistant prose.
+ * Input totals include cache reads/creation where the provider reports these
+ * separately; cached-input counters already contained in input stay subsets. */
+export function normalizeNativeUsage(value: unknown): InvocationUsage {
+  if (!value || typeof value !== 'object') return {};
+  const native = value as Record<string, unknown>;
+  const result: InvocationUsage = {};
+  const input = native.input_tokens ?? native.inputTokens;
+  const output = native.output_tokens ?? native.outputTokens;
+  const read = native.cache_read_input_tokens !== undefined ? native.cache_read_input_tokens : native.cacheReadInputTokens;
+  const created = native.cache_creation_input_tokens !== undefined ? native.cache_creation_input_tokens : native.cacheCreationInputTokens;
+  const cached = read ?? native.cached_input_tokens;
+  const reasoning = native.reasoning_output_tokens ?? native.reasoningOutputTokens;
+  if (quantity(input) && (read === undefined || quantity(read)) && (created === undefined || quantity(created))) {
+    const gross = input + (quantity(read) ? read : 0) + (quantity(created) ? created : 0);
+    if (quantity(gross)) result.tokens_in = gross;
+  }
+  if (quantity(output)) result.tokens_out = output;
+  if (quantity(cached)) result.tokens_cached = cached;
+  if (quantity(created)) result.tokens_cache_created = created;
+  if (quantity(reasoning)) result.tokens_reasoning = reasoning;
+  if (cost(native.costUSD)) result.cost_usd = native.costUSD;
+  return result;
+}
+
+/** One invocation can emit updated message counters and a cumulative terminal
+ * total. Updates replace the same message; terminal totals replace messages.
+ * Model totals are a breakdown, never additional calls to sum into that total. */
+export class NativeUsageAccumulator {
+  private readonly messages = new Map<string, InvocationUsage>();
+  private cumulative?: InvocationUsage;
+  private models?: Record<string, InvocationUsage>;
+
+  observe(value: { usage?: unknown; id?: string; cumulative?: boolean; costUsd?: unknown; models?: unknown }): void {
+    const usage = normalizeNativeUsage(value.usage);
+    if (cost(value.costUsd)) usage.cost_usd = value.costUsd;
+    if (value.cumulative) {
+      this.cumulative = usage;
+      this.models = value.models && typeof value.models === 'object'
+        ? Object.fromEntries(Object.entries(value.models).map(([model, counters]) => [model, normalizeNativeUsage(counters)])) : undefined;
+    } else if (Object.keys(usage).length) {
+      const id = value.id ?? `call-${this.messages.size}`;
+      this.messages.set(id, { ...this.messages.get(id), ...usage });
+    }
+  }
+
+  settle(complete: boolean): InvocationUsage & Pick<NativeInvocationUsage, 'models' | 'reason'> {
+    const modelTotal = this.models ? sumInvocationUsage(Object.values(this.models)) : undefined;
+    const cumulativeHasTokens = this.cumulative && fields.some(field => this.cumulative?.[field] !== undefined);
+    const usage = { ...sumInvocationUsage([...this.messages.values()]), ...modelTotal, ...this.cumulative };
+    const mismatch = cumulativeHasTokens && modelTotal && ['tokens_in', 'tokens_out'].some(field => {
+      const key = field as 'tokens_in' | 'tokens_out';
+      return usage[key] !== undefined && modelTotal[key] !== undefined && usage[key] !== modelTotal[key];
+    });
+    usage.tokenUsage = complete && (usageComplete(this.cumulative ?? {}) || usageComplete(modelTotal ?? {})) && !mismatch
+      && quantity(usage.tokens_in) && quantity(usage.tokens_out) ? 'known'
+      : fields.some(field => usage[field] !== undefined) ? 'partial' : 'unknown';
+    return { ...usage, ...(this.models ? { models: this.models } : {}),
+      ...(mismatch ? { reason: 'native_model_usage_disagreement' } : {}) };
+  }
 }
 /** Legacy printed counters shared by adapters. Native invocation evidence
  * still determines whether these quantities are complete or only a lower bound. */

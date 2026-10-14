@@ -1,4 +1,5 @@
 import { atomicWrite } from '../src/store.js';
+import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -215,7 +216,7 @@ describe('attempt-scoped one-shot abort signals', () => {
     const rerun = runStage(waitThenReturnOnAbort(), stageOptions());
     await vi.advanceTimersByTimeAsync(2_500);
     const result = await rerun;
-    const liveLog = readFileSync(join(currentRunDir, 'stages', stageId, 'live.log'), 'utf-8');
+    const liveLog = readFileSync(stageLiveLogPath(currentRunDir, stageId), 'utf-8');
 
     expect(result.exitCode).toBe(0);
     expect(existsSync(signalPath)).toBe(false);

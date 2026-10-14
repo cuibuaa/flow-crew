@@ -1,194 +1,180 @@
-import { writeFileSync, appendFileSync, mkdirSync } from '../engine-fs.js';
-
-
-
+import { stageLiveLogPath } from '../stage-live-log.js';
+import { writeFileSync, mkdirSync } from '../engine-fs.js';
 import { join } from 'node:path';
-import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
+import { createHash } from 'node:crypto';
+import { isSessionUuid, settleSession } from '../adapter-session.js';
+import type { Adapter, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
-import { classifyAdapterFailure } from './failure.js';
-import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
-import type { CommandActivityTracker } from '../command-activity.js';
-import { parsePrintedTokenUsage } from '../invocation-usage.js';
+import { classifyAdapterFailure, isRetryableAdapterFailure } from './failure.js';
+import { providerRefusal, type ProviderFailure } from '../provider-result.js';
+import { NativeEventSummary, normalizeNativeEvent } from './native-events.js';
+import { NativeUsageAccumulator, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
+import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
+import { AdapterParameterRepair, CLI_BUILTIN_DEFAULT, diagnoseAdapterFailure, resolveAdapterCapabilityIdentity,
+  type NativeParameterRejection } from './diagnose.js';
 
-/**
- * Anthropic Claude Code CLI adapter.
- *
- * Non-interactive: `claude -p "prompt"` (print mode, exits after response)
- * Resume: `claude -c -p "follow-up"` (continue last session)
- * Resume by ID: `claude -r <session> -p "follow-up"`
- * Interactive: `claude` (TUI mode, needs PTY)
- *
- * Flags:
- *   -p / --print: non-interactive, print response and exit
- *   -c / --continue: resume most recent session in cwd
- *   -r / --resume <id>: resume specific session
- *   --dangerously-skip-permissions: no approval prompts
- *   --output-format text|json|stream-json: output format
- *   --model sonnet|opus: model selection
- *   --effort low|medium|high|xhigh|max: reasoning effort level
- *   --system-prompt "text": override system prompt
- *   --append-system-prompt "text": append to default system prompt
- *   --max-turns N: limit agentic turns
- */
+/** Keep the CLI's ambient authentication routing; flags isolate stage settings and tools.
+ * Resume always names the stage's captured UUID, never the operator's latest session. */
+export function buildClaudeInvocation(role: AgentConfig, opts: Pick<RunOpts, 'outputSchema'>,
+  systemPromptPath: string, resumeSessionId?: string): { args: string[]; unsetEnv: string[] } {
+  const args = ['-p', '--output-format', 'stream-json', '--verbose',
+    '--safe-mode', '--setting-sources', '', '--strict-mcp-config'];
+  // Like Codex, an empty list permits inspection. Native file tools are the
+  // only available tools; restricted mode confines their working directories.
+  if (role.tools.length === 0) args.push('--restricted', '--tools', 'Read,Glob,Grep', '--permission-mode', 'plan', '--permission-prompts', 'none');
+  else args.push('--dangerously-skip-permissions');
+  if (role.model && !['default', CLI_BUILTIN_DEFAULT].includes(role.model)) args.push('--model', role.model);
+  if (role.reasoning_effort && !['default', CLI_BUILTIN_DEFAULT].includes(role.reasoning_effort)) args.push('--effort', role.reasoning_effort);
+  if (role.prompt) args.push('--append-system-prompt-file', systemPromptPath);
+  if (opts.outputSchema && generationCompatibleSchema(opts.outputSchema)) args.push('--json-schema', JSON.stringify(opts.outputSchema));
+
+  if (resumeSessionId) args.push('--resume', resumeSessionId);
+
+  return { args, unsetEnv: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'] };
+}
+
+/** Native print transport. Ambient authentication remains owned by the CLI;
+ * stage duties, tools, settings and machine events are owned by this adapter. */
 export class ClaudeAdapter implements Adapter {
+  readonly sessionKind = 'claude';
   readonly capturesInvocationInput = true;
 
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-    const args = [
-      '-p',
-      '--dangerously-skip-permissions',
-      '--output-format', 'stream-json',
-      '--verbose',
-    ];
-    // Closed role tools keep race judgments limited to supplied text; deleting CLI plumbing cannot enforce this.
-    if (role.tools.length === 0) args.push('--tools', '');
-    if (role.model && role.model !== 'default') args.push('--model', role.model);
-    if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
-
-    // Write system prompt to file to avoid ARG_MAX on long role prompts
+    if (opts.resumeSessionId !== undefined && !isSessionUuid(opts.resumeSessionId)) {
+      throw new Error('Claude session resume requires an explicit UUID');
+    }
+    let resumeSessionId = opts.resumeSessionId;
+    let invocationPrompt = prompt;
+    let result: RunResult | undefined;
     const stageDir = join(opts.runDir, 'stages', opts.stageId);
     mkdirSync(stageDir, { recursive: true });
-    if (role.prompt) {
-      const systemPromptPath = join(stageDir, 'system_prompt.md');
-      writeFileSync(systemPromptPath, role.prompt, 'utf-8');
-      args.push('--append-system-prompt-file', systemPromptPath);
-    }
+    const systemPromptPath = join(stageDir, 'system_prompt.md');
+    if (role.prompt) writeFileSync(systemPromptPath, role.prompt, 'utf-8');
+    // Scope learned capabilities to native routing and model selection, without
+    // persisting endpoint text or examining authentication values.
+    const provider = createHash('sha256').update(JSON.stringify([
+      process.env.CLAUDE_CODE_USE_BEDROCK, process.env.CLAUDE_CODE_USE_VERTEX,
+      process.env.CLAUDE_CODE_USE_FOUNDRY, process.env.ANTHROPIC_BASE_URL,
+      process.env.ANTHROPIC_MODEL, process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL, process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
+    ])).digest('hex');
+    const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', provider, cwd: opts.workDir });
+    const repair = new AdapterParameterRepair(role, opts.runDir, identity);
+    const invocations: NativeInvocationUsage[] = [];
+    const started = Date.now();
+    for (;;) {
+      const effectiveRole = repair.role;
+      const { args, unsetEnv } = buildClaudeInvocation(effectiveRole, opts, systemPromptPath, resumeSessionId);
 
-    // Use stream-json for live output visibility — parse text from JSON stream
-    const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
-    mkdirSync(stageDir, { recursive: true });
-
-    let lineBuf = '';
-    let extractedText = '';
-    let terminalText: string | undefined;
-    // Track whether the `claude` CLI has emitted its terminal {"type":"result"}
-    // event. Upstream the CLI sometimes fails to close its stdio pipes after
-    // emitting this, which would leave our scheduler awaiting the child
-    // forever. When we see the event, we schedule a force-kill after a short
-    // grace period so the stage doesn't hang for the full stage timeout.
-    let resultReceived = false;
-    let resultIsSuccess = false;
-    let adapterDiagnostic: string | undefined;
-    let providerFailure: ProviderFailure | undefined;
-    let childKill: (() => void) | null = null;
-    let killTimer: ReturnType<typeof setTimeout> | null = null;
-    const POST_RESULT_GRACE_MS = 5000;
-    const consumeLine = (line: string, commandActivity?: CommandActivityTracker): void => {
-      if (!line.trim()) return;
+      const summary = new NativeEventSummary(opts.workDir);
+      const usage = new NativeUsageAccumulator();
+      let sessionId: string | undefined;
+      let inputCaptured = false;
+      let inputCaptureError: unknown;
+      const captureInput = (model?: string): void => {
+        if (inputCaptured) return;
+        inputCaptured = true;
+        try { opts.onInvocationInput?.({ systemPrompt: role.prompt, userPrompt: invocationPrompt,
+          model: model || (args.includes('--model') ? effectiveRole.model : 'provider-default-unresolved'),
+          resumeSessionId,
+          transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: invocationPrompt, appendedSystemPrompt: role.prompt }) } });
+        } catch (error) { inputCaptureError = error; }
+      };
+      let carry = '';
+      let eventCount = 0;
+      let providerFailure: ProviderFailure | undefined;
+      let rejected: NativeParameterRejection | undefined;
+      let childKill: (() => void) | undefined;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
+      let cleanupKill = false;
+      const consume = (line: string): void => {
+        let event: Record<string, any>;
+        try { event = JSON.parse(line); } catch { return; }
+        if (!event || typeof event !== 'object') return;
+        eventCount++;
+        const normalized = normalizeNativeEvent(event);
+        summary.observe(normalized);
+        if (normalized.sessionId) sessionId = normalized.sessionId;
+        if (event.type === 'system' && event.subtype === 'init') captureInput(normalized.model);
+        if (event.type === 'assistant') usage.observe({ usage: event.message?.usage, id: event.message?.id });
+        if (event.type === 'result') {
+          // usage describes this invocation; resumed model/cost totals include
+          // earlier session calls and cannot be added to the invocation ledger.
+          usage.observe({ usage: event.usage, cumulative: true,
+            costUsd: resumeSessionId ? undefined : event.total_cost_usd,
+            models: resumeSessionId ? undefined : event.modelUsage });
+          killTimer ??= setTimeout(() => { if (childKill) { cleanupKill = true; childKill(); } }, 5000);
+        }
+        if (normalized.terminal !== undefined) {
+          providerFailure = normalized.diagnostic && (event.type === 'error' || event.type === 'result')
+            ? providerRefusal({ provider: 'claude', eventType: event.type, message: normalized.diagnostic }) : undefined;
+          rejected = normalized.terminal === false
+            ? { parameter: event.error?.param ?? event.error?.parameter ?? event.param, message: normalized.diagnostic } : undefined;
+        }
+      };
+      const invocationStartedAt = new Date().toISOString();
+      let execution: ExecResult;
       try {
-        const parsed = JSON.parse(line);
-        let text = '';
-        // Claude Code stream-json emits assistant text as message.content[] blocks
-        // (the canonical shape — same as the dashboard's parser). The legacy
-        // top-level-string / content_block_delta forms are kept as fallbacks.
-        if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
-          for (const block of parsed.message.content) {
-            if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
-            if (block?.type === 'tool_use' && typeof block.id === 'string'
-              && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
-              const command = typeof block.input?.command === 'string'
-                ? block.input.command
-                : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
-              commandActivity?.started(block.id, command);
-            }
-          }
-        } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
-          for (const block of parsed.message.content) {
-            if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-              commandActivity?.completed(block.tool_use_id);
-            }
-          }
-        } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
-          text = parsed.content;
-        } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-          text = parsed.delta.text;
-        } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
-          text = parsed.result;
-          terminalText = parsed.result;
-        }
-        // Detect terminal result event: schedule a force-kill if the CLI
-        // doesn't exit gracefully within the grace period.
-        if (parsed.type === 'result' && !resultReceived) {
-          resultReceived = true;
-          resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
-          if (resultIsSuccess) {
-            adapterDiagnostic = undefined;
-            providerFailure = undefined;
-          }
-          else adapterDiagnostic = typeof parsed.error?.message === 'string'
-            ? parsed.error.message
-            : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
-          if (!resultIsSuccess) providerFailure = providerFailureFromEvent('claude', parsed);
-          if (!killTimer) {
-            killTimer = setTimeout(() => {
-              if (childKill) childKill();
-            }, POST_RESULT_GRACE_MS);
-          }
-        }
-        if (parsed.type === 'error') {
-          adapterDiagnostic = typeof parsed.message === 'string'
-            ? parsed.message
-            : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
-          providerFailure = providerFailureFromEvent('claude', parsed);
-        }
-        if (text) {
-          extractedText += text;
-          try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
-        }
-      } catch { /* non-JSON line, skip */ }
-    };
-    let result: RunResult;
-    try {
-      opts.onInvocationInput?.({
-        systemPrompt: role.prompt,
-        userPrompt: prompt,
-        model: role.model,
-        transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: prompt, appendedSystemPrompt: role.prompt }) },
-      });
-      result = await execWithStdin('claude', args, prompt, {
-      cwd: opts.workDir,
-      timeout_ms: opts.timeout_ms,
-      liveLogPath, // raw stream-json goes to live.log for debugging
-      execution: opts,
-      onChild: ({ kill }) => { childKill = kill; },
-      abortSignal: opts.abortSignal,
-      onStdout: (chunk: string, activity?: CommandActivityTracker) => {
-        lineBuf += chunk;
-        const lines = lineBuf.split('\n');
-        lineBuf = lines.pop()!;
-        for (const line of lines) consumeLine(line, activity);
-      },
-      });
-      if (lineBuf.trim()) consumeLine(lineBuf);
-    } finally {
-      if (killTimer) clearTimeout(killTimer);
+        execution = await execWithStdin('claude', args, invocationPrompt, {
+          cwd: opts.workDir, timeout_ms: Math.max(1, opts.timeout_ms - (Date.now() - started)),
+          liveLogPath: stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt), captureStreams: true, execution: opts,
+          unsetEnv,
+          onChild: ({ kill }) => { childKill = kill; }, abortSignal: opts.abortSignal,
+          onStdout: (chunk, activity) => {
+            activity?.feed(chunk);
+            carry += chunk;
+            const lines = carry.split('\n');
+            carry = lines.pop() ?? '';
+            for (const line of lines) consume(line);
+          },
+        });
+        if (carry.trim()) consume(carry);
+      } finally {
+        if (killTimer) clearTimeout(killTimer);
+        captureInput();
+      }
+      if (inputCaptureError !== undefined) throw inputCaptureError;
+
+      // Only our own post-result SIGKILL can turn a failed close into success.
+      // Executor timeout/abort outcomes always win, and close facts stay intact.
+      const recovered = cleanupKill && summary.completed && execution.processSignal === 'SIGKILL'
+        && execution.exitCode !== 124 && execution.exitCode !== 137;
+      const exitCode = recovered ? 0 : execution.exitCode === 0 && summary.terminal === false ? 1 : execution.exitCode;
+      const counters = usage.settle(exitCode === 0 && summary.completed);
+      invocations.push({ ...counters, startedAt: invocationStartedAt, completedAt: new Date().toISOString(),
+        exitCode, sessionId, source: eventCount ? 'native_stdout' : 'unknown' });
+      const evidence = [summary.diagnostic, execution.stderr].filter(Boolean).join('\n');
+      const diagnosis = execution.spawnError && ![124, 137].includes(exitCode)
+        ? { fix: 'none' as const, friendly: `Could not launch Claude: ${execution.spawnError.message}. Check the executable, its interpreter and working directory ${execution.spawnError.cwd}.`, matched: execution.spawnError.code ?? 'spawn error' }
+        : diagnoseAdapterFailure(eventCount ? evidence : execution.output, exitCode, rejected);
+      const kind = exitCode !== 0 && ![124, 137].includes(exitCode) && !execution.spawnError
+        ? classifyAdapterFailure(eventCount ? evidence : execution.output) : undefined;
+      let output = execution.spawnError ? execution.output : eventCount ? summary.output : execution.output;
+      if (exitCode !== 0 && execution.stderr?.trim() && !output.includes(execution.stderr.trim())) output = [output, execution.stderr.trim()].filter(Boolean).join('\n');
+      if (exitCode === 137) output += '\n[stage cancelled by control plane]\n';
+      result = { ...execution, output, exitCode, sessionId, adapterError: kind !== undefined, adapterFailureKind: kind,
+        ...(diagnosis.friendly && exitCode !== 0 ? { friendlyError: diagnosis.friendly } : {}),
+        ...(exitCode !== 0 && ![124, 125, 137].includes(exitCode) && !execution.spawnError && providerFailure ? { providerFailure } : {}),
+        writes: [...summary.writes].sort(), writeAttribution: summary.writes.size ? 'structured' : 'unknown' };
+      delete (result as ExecResult).stdout;
+      delete (result as ExecResult).stderr;
+      if ([124, 125, 137].includes(exitCode) || Date.now() - started >= opts.timeout_ms) break;
+      if (!isRetryableAdapterFailure(kind)) break;
+      // An unattested failed resume retries fresh once. Retain every call in
+      // the same ledger and budget; attested/control/spawn failures do not replay.
+      if (resumeSessionId && exitCode !== 0 && ![124, 125, 137].includes(exitCode)
+          && !execution.spawnError && !sessionId) {
+        resumeSessionId = undefined;
+        invocationPrompt = opts.freshSessionPrompt ?? prompt;
+        continue;
+      }
+      if (diagnosis.fix === 'fresh_session' || !repair.apply(diagnosis)) break;
     }
-
-    // Progress remains in the live carrier; settlement consumes the terminal record.
-    const finalOutput = terminalText ?? (extractedText || result.output);
-    const tokens = parsePrintedTokenUsage(result.output);
-    // Override exit code when the CLI emitted a successful result event but we
-    // had to force-kill its hung process to recover. The actual work succeeded;
-    // the non-zero code is just a stdio-cleanup artifact upstream.
-    const overrideExitCode = result.exitCode !== 0 && resultReceived && resultIsSuccess;
-    const finalExitCode = overrideExitCode ? 0 : result.exitCode;
-    const adapterFailureKind = finalExitCode !== 0 && finalExitCode !== 124 && finalExitCode !== 137
-      ? classifyAdapterFailure(adapterDiagnostic ?? (!extractedText && !resultReceived ? result.output : ''))
-      : undefined;
-    return {
-      ...result,
-      output: finalOutput,
-      exitCode: finalExitCode,
-      adapterError: adapterFailureKind !== undefined,
-      adapterFailureKind,
-      ...(finalExitCode !== 0 && ![124, 125, 137].includes(finalExitCode) && !result.spawnError && providerFailure ? { providerFailure } : {}),
-      tokens_in: tokens.tokens_in,
-      tokens_out: tokens.tokens_out,
-    };
+    Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: Date.now() - started });
+    settleSession(opts.runDir, opts.stageId, result, result.sessionId, resumeSessionId, opts.sessionOwnerStageId,
+      { adapter: this.sessionKind, mismatchMessage: 'Claude resume returned a different session UUID; continuation was not verified' });
+    return result;
   }
-
 }
 
-export function createAdapter(): Adapter {
-  return new ClaudeAdapter();
-}
+export function createAdapter(): Adapter { return new ClaudeAdapter(); }

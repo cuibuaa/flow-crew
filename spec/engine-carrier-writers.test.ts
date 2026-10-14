@@ -1,13 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ESLint } from 'eslint';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as engineFs from '../src/engine-fs.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { atomicWrite, createRun, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 import { resetConfigCache } from '../src/config.js';
 import { runStage } from '../src/worker.js';
@@ -27,30 +28,45 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previous); resetConfigCache(); rmSync(root, { recursive: true, force: true }); });
 
 describe('engine carrier writers', () => {
-  it.each(['none', 'delete', 'directory'])('keeps watchdog progress consistent through a real stage (tamper=%s)', async mode => {
-    const tamper = mode !== 'none';
-    const watchdog = new StageWatchdog(project, runId, { idleThresholdMs: 600_000, pollIntervalMs: 50 });
+  it('keeps watchdog progress consistent through a real stage', async () => {
+    const watchdog = new StageWatchdog(project, runId, { idleThresholdMs: 600_000 });
     const progress = join(run, 'stage_watchdog.json');
     const adapter: Adapter = { async run() {
-      const deadline = Date.now() + 5000;
-      while (!existsSync(progress)) {
-        if (Date.now() > deadline) throw new Error('Watchdog never observed the held stage');
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      return execWithStdin(process.execPath, ['-e', tamper
-        ? `const fs=require('node:fs');fs.rmSync(${JSON.stringify(progress)});${mode === 'directory' ? `fs.mkdirSync(${JSON.stringify(progress)});fs.symlinkSync(${JSON.stringify(join(project, 'ordinary'))},${JSON.stringify(progress + '.integrity-restore')});` : ''}console.log('completed')`
-        : "console.log('completed')"], '', { cwd: project, timeout_ms: 5000 });
+      await watchdog.tick();
+      return { exitCode: 0, output: 'completed', duration_ms: 0 };
     } };
-    watchdog.start();
+    const result = await runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId,
+      role, dependsOn: [], promptTemplate: 'Complete work', timeout_ms: 10000, retries: 0, artifactContract: contract });
+    expect(result.exitCode).toBe(0);
+    expect(readRunState(project, runId).stages.work.status).toBe('complete');
+    expect(JSON.parse(readFileSync(progress, 'utf8')).stageProgress.work.attemptIndex).toBe(1);
+  });
+
+  it.each(['delete', 'directory'])('rejects child tampering before a parent rename is acknowledged (%s)', async mode => {
+    const carrier = join(run, 'stage_watchdog.json');
+    writeFileSync(carrier, 'trusted');
+    const rename = fs.renameSync;
+    let armed = true;
+    // Hold the native rename's return until the real child acknowledges its
+    // mutation: this selects the publication race without clocks or polling.
+    fs.renameSync = (source, destination) => {
+      rename(source, destination);
+      if (armed && String(destination) === carrier) {
+        armed = false;
+        execFileSync(process.execPath, ['-e', `const fs=require('node:fs');fs.rmSync(${JSON.stringify(carrier)});${mode === 'directory' ? `fs.mkdirSync(${JSON.stringify(carrier)});fs.symlinkSync(${JSON.stringify(join(project, 'ordinary'))},${JSON.stringify(carrier + '.integrity-restore')});` : ''}`],
+          { cwd: project, env: { HOME: root, FC_HOME: join(root, 'state') }, timeout: 5000, stdio: 'ignore' });
+      }
+    };
+    syncBuiltinESMExports();
     try {
-      const result = await runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId,
-        role, dependsOn: [], promptTemplate: 'Complete work', timeout_ms: 10000, retries: 0, artifactContract: contract });
-      expect(result.exitCode).toBe(tamper ? 125 : 0);
-      if (tamper) expect(result.output).toContain('ENGINE_STATE_TAMPERED');
-      expect(readRunState(project, runId).stages.work.status).toBe(tamper ? 'failed' : 'complete');
-      expect(JSON.parse(readFileSync(progress, 'utf8')).stageProgress.work.attemptIndex).toBe(1);
+      await expect(withEngineIntegrity(input(), async () => { atomicWrite(carrier, 'parent replacement'); }))
+        .rejects.toThrow('ENGINE_STATE_TAMPERED');
+      expect(readFileSync(carrier, 'utf8')).toBe('parent replacement');
       expect(existsSync(join(project, 'ordinary'))).toBe(false);
-    } finally { watchdog.stop(); }
+    } finally {
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
   });
 
   it('does not adopt child tampering after a failed parent publication', async () => {
@@ -102,6 +118,17 @@ describe('engine carrier writers', () => {
       } finally { engineFs.closeSync(fd); }
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
     expect(readFileSync(history, 'utf8')).toBe('trusted');
+  });
+
+  it('accepts a parent URL rename between hardlinks to the same carrier', async () => {
+    const source = join(run, 'verdict_previous.json'), destination = join(run, 'verdict_alias.json');
+    writeFileSync(source, 'trusted');
+    fs.linkSync(source, destination);
+    await withEngineIntegrity(input(), async () => {
+      engineFs.renameSync(pathToFileURL(source), pathToFileURL(destination));
+    });
+    expect(readFileSync(source, 'utf8')).toBe('trusted');
+    expect(readFileSync(destination, 'utf8')).toBe('trusted');
   });
 
   it('publishes parent writes through a protected carrier link', async () => {

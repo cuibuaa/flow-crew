@@ -2,6 +2,7 @@ import { writeFileSync, mkdirSync, renameSync } from './engine-fs.js';
 
 
 import { dirname, join } from 'node:path';
+import { normalizeNativeEvent } from './adapters/native-events.js';
 import type { CommandLifecycleEvent } from './adapters/base.js';
 import { processGroupWork } from './process-liveness.js';
 
@@ -70,23 +71,7 @@ export function parseExplicitCommandTimeout(command: string): ExplicitCommandTim
   return { timeoutMs: Math.round(timeoutMs), duration };
 }
 
-function commandId(item: Record<string, unknown>, event: Record<string, unknown>): string | undefined {
-  for (const value of [item.id, event.item_id, event.id]) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return undefined;
-}
-
-function commandText(item: Record<string, unknown>): string | undefined {
-  for (const value of [item.command, item.cmd, item.text]) {
-    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 500);
-  }
-  return undefined;
-}
-
-/** Durable parser for Codex's JSONL command lifecycle. Stdout may be fully
- * redirected by the command itself; item.started is still control-plane proof
- * that a child command is active. */
+/** Durable native command lifecycle parser; flushes trailing events before closure. */
 export class CommandActivityTracker {
   private readonly path: string;
   private readonly active = new Map<string, CommandActivityRecord>();
@@ -164,18 +149,9 @@ export class CommandActivityTracker {
     if (!line.trim().startsWith('{')) return;
     let event: Record<string, unknown>;
     try { event = JSON.parse(line) as Record<string, unknown>; } catch { return; }
-    const type = typeof event.type === 'string' ? event.type : '';
-    if (type !== 'item.started' && type !== 'item.completed') return;
-    const item = event.item && typeof event.item === 'object'
-      ? event.item as Record<string, unknown>
-      : {};
-    if (item.type !== 'command_execution') return;
-    const id = commandId(item, event);
-    if (!id) return;
-    if (type === 'item.started') {
-      this.started(id, commandText(item));
-    } else {
-      this.completed(id);
+    for (const command of normalizeNativeEvent(event).commands) {
+      if (command.phase === 'started') this.started(command.id, command.command);
+      else this.completed(command.id);
     }
   }
 

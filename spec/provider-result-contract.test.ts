@@ -150,9 +150,9 @@ describe('provider-owned refusal contract', () => {
     }
   });
 
-  it('clears a recovered Claude error and retains its effective success override and raw exit', async () => {
+  it('clears a recovered Claude error while preserving an unrelated failed process exit', async () => {
     const result = await invoke(new ClaudeAdapter(), jsonl({ type: 'error', message }, { type: 'result', subtype: 'success', is_error: false, result: 'done' }), 1);
-    expect(result).toMatchObject({ exitCode: 0, processExitCode: 1, adapterError: false, output: 'done' });
+    expect(result).toMatchObject({ exitCode: 1, processExitCode: 1, adapterError: false, output: 'done' });
     expect(result.providerFailure).toBeUndefined();
   });
 

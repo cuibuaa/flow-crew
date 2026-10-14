@@ -10,11 +10,85 @@
  * about, at most twice) plus its friendly-error mapping: one actionable sentence
  * for the operator instead of a wall of transcript.
  *
- * This module is deliberately pure and string-only so it can be unit-tested
- * against real captured failure text with no process spawning.
+ * Native error envelopes and CLI diagnostics share the same parameter fixes and
+ * capability memory. Detect CLI changes from file identity, without launching it.
  */
 
-import { CLI_BUILTIN_DEFAULT } from './codex.js';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { basename, join } from 'node:path';
+import { mkdirSync, writeFileSync } from '../engine-fs.js';
+import { findExecutableOnPath } from './availability.js';
+
+/** Drop a rejected pin without inheriting it again from global configuration. */
+export const CLI_BUILTIN_DEFAULT = '__cli_builtin_default__';
+
+export interface AdapterCapabilityIdentity {
+  executable: string;
+  version: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+}
+
+export interface AdapterCapabilityMemory {
+  version: 1;
+  capability: 'reasoning_effort_unsupported';
+  identity: AdapterCapabilityIdentity;
+  learnedAt: string;
+}
+
+function detectedCliVersion(executable: string, cwd: string): string {
+  const selected = findExecutableOnPath(executable, process.env.PATH, cwd);
+  if (!selected) return 'unknown';
+  try {
+    const info = statSync(selected, { bigint: true });
+    return `fingerprint:${realpathSync(selected)}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}`;
+  } catch { return 'unknown'; }
+}
+
+export function resolveAdapterCapabilityIdentity(
+  role: { model?: string; reasoning_effort?: string },
+  input: Partial<AdapterCapabilityIdentity> & { executable: string; cwd?: string },
+): AdapterCapabilityIdentity {
+  const pin = (value: string | undefined) => value && value !== 'default' ? value : 'cli_builtin_default';
+  return {
+    executable: input.executable,
+    version: input.version ?? detectedCliVersion(input.executable, input.cwd ?? process.cwd()),
+    provider: input.provider ?? input.executable,
+    model: input.model ?? pin(role.model),
+    reasoningEffort: input.reasoningEffort ?? pin(role.reasoning_effort),
+  };
+}
+
+function capabilityPath(runDir: string, identity: AdapterCapabilityIdentity, namespace: string): string {
+  const digest = createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24);
+  return join(runDir, 'adapter_capabilities', `${basename(namespace)}_${digest}.json`);
+}
+
+export function readAdapterCapabilityMemory(
+  runDir: string, identity: AdapterCapabilityIdentity, namespace = identity.executable,
+): AdapterCapabilityMemory | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(capabilityPath(runDir, identity, namespace), 'utf-8')) as AdapterCapabilityMemory;
+    if (parsed.version !== 1 || parsed.capability !== 'reasoning_effort_unsupported') return undefined;
+    if (JSON.stringify(parsed.identity) !== JSON.stringify(identity)) return undefined;
+    return parsed;
+  } catch { return undefined; }
+}
+
+export function rememberUnsupportedEffort(
+  runDir: string, identity: AdapterCapabilityIdentity, namespace = identity.executable,
+): void {
+  const target = capabilityPath(runDir, identity, namespace);
+  try {
+    mkdirSync(join(runDir, 'adapter_capabilities'), { recursive: true });
+    if (existsSync(target)) return;
+    const memory: AdapterCapabilityMemory = { version: 1, capability: 'reasoning_effort_unsupported',
+      identity, learnedAt: new Date().toISOString() };
+    writeFileSync(target, `${JSON.stringify(memory, null, 2)}\n`, { encoding: 'utf-8', flag: 'wx' });
+  } catch { /* Losing an optimization must not change adapter correctness. */ }
+}
 
 /** A single-parameter fix to apply to exactly one retry attempt. */
 export type AdapterFix =
@@ -37,6 +111,13 @@ export interface Diagnosis {
   friendly: string;
   /** The marker that matched — kept so logs can show WHY a fix was chosen. */
   matched: string;
+}
+
+/** Only rejected parameters named by native protocol evidence can drive repair.
+ * Agent-authored text and generic request errors cannot attest a parameter. */
+export interface NativeParameterRejection {
+  parameter?: string;
+  message?: string;
 }
 
 interface Rule {
@@ -139,11 +220,18 @@ const RULES: Rule[] = [
  *  mentions "unsupported model" must not be read as the server saying it. */
 const TAIL_BYTES = 4096;
 
-export function diagnoseAdapterFailure(output: string, exitCode: number): Diagnosis {
+export function diagnoseAdapterFailure(output: string, exitCode: number, native?: NativeParameterRejection): Diagnosis {
   // Timeouts (124) and engine aborts (137) are not parameter problems; the
   // caller already classifies them and a "fix" here would be wrong.
   if (exitCode === 0 || exitCode === 124 || exitCode === 137) {
     return { fix: 'none', friendly: '', matched: '' };
+  }
+  if (native?.parameter === 'model' || native?.parameter === 'effort' || native?.parameter === 'reasoning_effort') {
+    const fix = native.parameter === 'model' ? 'drop_model' : 'drop_effort';
+    return { fix, friendly: fix === 'drop_model'
+      ? 'The pinned model was rejected. Retried once without it; select an available model in the engine configuration.'
+      : 'The effort setting was rejected. Retried once without it and remembered the capability for later stages in this run.',
+    matched: `native rejected parameter: ${native.parameter}` };
   }
   const tail = (output.length > TAIL_BYTES ? output.slice(-TAIL_BYTES) : output).toLowerCase();
   for (const rule of RULES) {
@@ -165,4 +253,26 @@ export function applyFix<T extends { model?: string; reasoning_effort?: string }
   if (fix === 'drop_model') return { ...role, model: CLI_BUILTIN_DEFAULT };
   if (fix === 'drop_effort') return { ...role, reasoning_effort: CLI_BUILTIN_DEFAULT };
   return role;
+}
+
+/** One bounded decision point for native parameter repairs across adapters. */
+export class AdapterParameterRepair<T extends { model?: string; reasoning_effort?: string }> {
+  role: T;
+  private readonly applied = new Set<AdapterFix>();
+
+  constructor(role: T, private readonly runDir: string, private readonly identity: AdapterCapabilityIdentity,
+    private readonly namespace = identity.executable) {
+    const remembered = readAdapterCapabilityMemory(runDir, identity, namespace) !== undefined;
+    this.role = remembered ? applyFix(role, 'drop_effort') : role;
+    if (remembered) this.applied.add('drop_effort');
+  }
+
+  apply(diagnosis: Diagnosis): boolean {
+    const fix = diagnosis.fix;
+    if (fix === 'none' || this.applied.has(fix) || this.applied.size >= 2) return false;
+    this.applied.add(fix);
+    if (fix === 'drop_effort') rememberUnsupportedEffort(this.runDir, this.identity, this.namespace);
+    this.role = applyFix(this.role, fix);
+    return true;
+  }
 }

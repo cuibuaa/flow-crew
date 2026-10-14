@@ -1,3 +1,4 @@
+import { stageAttemptKey } from './stage-live-log.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { existsSync, fsyncSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
@@ -120,13 +121,12 @@ function carrierPath(root: string, path: string): string {
   return candidate;
 }
 
-function attemptKey(index: number, startedAt: string): string { return `attempt_${index}_${sha256(startedAt).slice(0, 24)}`; }
 export function invocationInputPath(runDirectory: string, identity: Pick<InvocationInput, 'stageId' | 'attemptIndex' | 'attemptStartedAt' | 'invocationIndex'>): string {
   safeId.parse(identity.stageId);
   quantity.positive().parse(identity.attemptIndex);
   quantity.positive().parse(identity.invocationIndex);
   timestamp.parse(identity.attemptStartedAt);
-  return carrierPath(runDirectory, join('stages', identity.stageId, 'invocations', attemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json.gz`));
+  return carrierPath(runDirectory, join('stages', identity.stageId, 'invocations', stageAttemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json.gz`));
 }
 
 function checkedInvocation(value: unknown): InvocationInputRecord {

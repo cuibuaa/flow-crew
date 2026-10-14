@@ -1,4 +1,5 @@
 import { atomicWrite } from '../src/store.js';
+import { readStageLiveLogPath, stageLiveLogPath } from '../src/stage-live-log.js';
 import { appendEngineFile } from '../src/engine-integrity.js';
 import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { runStage } from '../src/worker.js';
@@ -72,14 +73,15 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         const transport = { run: async (p: string, a: AgentConfig, o: import('../src/adapters/base.js').RunOpts) => { if ((o.attemptIndex ?? 1) === 1) {
                 if (calls++ === 0) {
                     ownSession(o.runDir, 'work');
-                    appendEngineFile(join(o.runDir, 'stages', 'work', 'live.log'), 'author finished verification; delivery remains\n');
+                    appendEngineFile(stageLiveLogPath(o.runDir, o.stageId, o.attemptIndex, o.attemptStartedAt), 'author finished verification; delivery remains\n');
                 }
                 return fixtureResult({ output: 'refused after progress', sessionId: uuid, exitCode: 1, duration_ms: 1, adapterFailureKind: 'provider_internal_error' }, o);
             } resume = o.resumeSessionId; prompt = p; return fixtureResult({ output: 'continued', sessionId: uuid, exitCode: 0, duration_ms: 1 }, o); } } as Adapter;
         await executeSingleStage(config.stages[0], project, created.runId, created.runDirPath, config, transport, new Map([['coder', role]]), join(project, 'config', 'agents'), state, config.stages);
-        console.log('RUNTIME_RETRY ' + JSON.stringify({ resume, promptHasProgress: prompt.includes('live.log'), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
+        const priorLog = readStageLiveLogPath(created.runDirPath, 'work', 1);
+        console.log('RUNTIME_RETRY ' + JSON.stringify({ resume, promptHasProgress: prompt.includes(priorLog), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
         expect(resume).toBe(uuid);
-        expect(prompt).toContain('live.log');
+        expect(prompt).toContain(priorLog);
         expect(prompt).not.toContain('timed out');
     });
     it.each([true, false])('retains own progress after provider refusal with session available=%s', async (hasSession) => {
@@ -96,7 +98,7 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
                 if (++calls === 1) {
                     if (hasSession)
                         ownSession(opts.runDir, 'work');
-                    appendEngineFile(join(opts.runDir, 'stages', 'work', 'live.log'), 'verification completed; deliver the result\n');
+                    appendEngineFile(stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt), 'verification completed; deliver the result\n');
                     return fixtureResult({ output: 'partial verified work; delivery interrupted', exitCode: 1, processExitCode: 1, duration_ms: 1, providerFailure: failure, ...(hasSession ? { sessionId: uuid } : {}) }, opts);
                 }
                 resume = opts.resumeSessionId;
@@ -104,11 +106,12 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
                 return fixtureResult({ output: 'delivered verified result', exitCode: 0, duration_ms: 1 }, opts);
             } };
         const final = await runWorkflow(config, 'name: refusal', project, adapter, new Map(), undefined, join(project, 'config', 'agents'), created.runId, 'current full task duties', true);
-        console.log('RUNTIME_REFUSAL ' + JSON.stringify({ hasSession, status: final.status, resume, promptHasProgress: prompt.includes('live.log'), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
+        const priorLog = readStageLiveLogPath(created.runDirPath, 'work', 1);
+        console.log('RUNTIME_REFUSAL ' + JSON.stringify({ hasSession, status: final.status, resume, promptHasProgress: prompt.includes(priorLog), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
         expect(final.status).toBe('complete');
         expect(calls).toBe(2);
         expect(resume).toBe(hasSession ? uuid : undefined);
-        expect(prompt).toContain('live.log');
+        expect(prompt).toContain(priorLog);
         expect(prompt).not.toContain('timed out');
         expect(prompt).toContain('write the declared product after scope admission');
         expect(readStageStatus(project, created.runId, 'work').attempts?.[0].providerFailure).toEqual(failure);

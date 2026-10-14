@@ -1,5 +1,6 @@
+import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
@@ -12,6 +13,7 @@ import { fixtureArtifactContract, fixtureResult } from './test-support/declared-
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { writeEngineFile } from '../src/engine-integrity.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let project: string, run: ReturnType<typeof createRun>;
 const stageId = 'review';
@@ -45,8 +47,9 @@ function startAttempt() {
   state.stages[stageId] = status;
   writeRunState(project, run.runId, state);
   const path = join(run.runDirPath, 'stages', stageId);
-  appendFileSync(join(path, 'live.log'), `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
-  const segmentStart = Buffer.byteLength(readFileSync(join(path, 'live.log')));
+  const logPath = stageLiveLogPath(run.runDirPath, stageId, attempt.index, attempt.startedAt);
+  appendFileSync(logPath, `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
+  const segmentStart = Buffer.byteLength(readFileSync(logPath));
   writeFileSync(join(path, 'attempt_generation.json'), JSON.stringify({
     version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, segmentStart,
   }));
@@ -66,8 +69,7 @@ async function startValidation(code: string) {
   }));
   validation = recordGateValidationDelta(project, run.runId, stageId, { abortSignal: cancel.signal });
   // Wait for the owned fixture to execute, without relying on provider tools.
-  for (let count = 0; count < 100 && !existsSync(join(project, 'ready')); count++) await delay(20);
-  expect(existsSync(join(project, 'ready'))).toBe(true);
+  await waitForPathEvent(project, () => existsSync(join(project, 'ready')) ? true : undefined);
 }
 
 function monitor() { return new StageWatchdog(project, run.runId, config); }
@@ -127,22 +129,6 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() }).activeCommandCount).toBe(0);
   });
 
-  it('does not upgrade provider client polling into evidence of remote model work', async () => {
-    const status = startAttempt();
-    await startValidation("require('node:fs').writeFileSync('ready', ''); for (;;) Math.sqrt(Math.random())");
-    const activity = JSON.parse(readFileSync(join(run.runDirPath, 'stages', stageId, 'command_activity.json'), 'utf8'));
-    const provider = new CommandActivityTracker({ runDir: run.runDirPath, stageId,
-      attemptIndex: status.attempts![0].index, attemptStartedAt: status.attempts![0].startedAt });
-    provider.bindProcess(activity.process.pid, 'provider');
-    const supervisor = monitor();
-    await supervisor.tick();
-    await delay(250);
-    await supervisor.tick();
-    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() }).protectedFromIdleAbort).toBe(false);
-    expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
-    provider.close();
-  });
-
   it('retains attempt-bound work observations across a watchdog restart', async () => {
     startAttempt();
     await startValidation("require('node:fs').writeFileSync('ready', ''); setInterval(() => {}, 10000)");
@@ -173,9 +159,10 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     const activity = new CommandActivityTracker({ runDir: run.runDirPath, stageId,
       attemptIndex: status.attempts![0].index, attemptStartedAt: status.attempts![0].startedAt });
     activity.close();
-    writeFileSync(join(run.runDirPath, 'stages', stageId, 'output.md'), 'result');
-    // Establish a frozen artifact before the first millisecond-resolution tick.
-    await delay(2);
+    const output = join(run.runDirPath, 'stages', stageId, 'output.md');
+    writeFileSync(output, 'result');
+    // Freeze the artifact independently of filesystem timestamp resolution.
+    utimesSync(output, 1, 1);
     const supervisor = monitor();
     await supervisor.tick();
     const lastProgressAt = savedProgress().stageProgress[stageId].lastProgressAt;

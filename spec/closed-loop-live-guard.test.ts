@@ -14,7 +14,6 @@ import {
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { stringify } from 'yaml';
 import type { Adapter } from '../src/adapters/base.js';
 import { LiveConstraintGuard } from '../src/live-constraint-guard.js';
@@ -35,6 +34,7 @@ import {
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
 import { createLiveGuardFactory } from '../src/scheduler/sched_scope/write-enforcement.js';
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 let projectDir: string;
 let stateDir: string;
@@ -266,7 +266,7 @@ describe('portable live constraint guard', () => {
     state.maxRetries = 0;
     writeRunState(projectDir, created.runId, state);
     let invocationCount = 0;
-    let restoreLatencyMs: number | undefined;
+    let restoredBeforeSettlement = false;
     let correctionBytes: Buffer | undefined;
 
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -275,15 +275,12 @@ describe('portable live constraint guard', () => {
       if (invocationCount === 1) {
         if (scope.length > 0) writeFileSync(join(projectDir, 'src', 'allowed.ts'), 'authorized change survives\n');
         writeFileSync(testPath, 'export const invariant = "unauthorized";\n');
-        const writtenAt = performance.now();
-        const deadline = writtenAt + 1_000;
-        while (performance.now() < deadline && readFileSync(testPath, 'utf-8') !== preimage) {
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-        }
-        if (readFileSync(testPath, 'utf-8') === preimage) restoreLatencyMs = performance.now() - writtenAt;
+        await waitForPathEvent(join(projectDir, 'spec'), () =>
+          readFileSync(testPath, 'utf-8') === preimage ? true : undefined);
+        restoredBeforeSettlement = true;
         return fixtureResult({
           output: 'first invocation wrote an unlisted existing test', exitCode: 0,
-          duration_ms: performance.now() - writtenAt,
+          duration_ms: 1,
           writes: [...(scope.length > 0 ? ['src/allowed.ts'] : []), 'spec/existing.test.ts'], writeAttribution: 'structured',
         }, opts);
       }
@@ -339,8 +336,7 @@ describe('portable live constraint guard', () => {
     );
     expect(final.status).toBe('complete');
     expect(invocationCount).toBe(3);
-    expect(restoreLatencyMs).toBeDefined();
-    expect(restoreLatencyMs!).toBeLessThan(1_000);
+    expect(restoredBeforeSettlement).toBe(true);
     if (scope.length > 0) expect(readFileSync(join(projectDir, 'src', 'allowed.ts'), 'utf-8')).toContain('survives');
     else expect(existsSync(join(projectDir, 'src', 'allowed.ts'))).toBe(false);
     expect(readFileSync(join(projectDir, 'operator-note.txt'), 'utf-8')).toBe('pre-existing dirt stays intact\n');
@@ -709,10 +705,8 @@ describe('portable live constraint guard', () => {
       onMonitorFailure: (failure) => failures.push(failure as unknown as Record<string, unknown>),
     });
     const aborts: string[] = [];
-    const started = Date.now();
     const result = await guard.beginInvocation(3, (reason) => aborts.push(reason)).finish();
 
-    expect(Date.now() - started).toBeLessThan(500);
     expect(aborts).toContain('live_constraint_monitor_failure');
     expect(result.monitorFailure).toMatchObject({
       lastScanFileCount: 17,

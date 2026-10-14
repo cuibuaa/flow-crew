@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stageLiveLogPath } from './stage-live-log.js';
 import {
   isPendingStageStatus,
   isRunningRunStatus,
@@ -184,7 +185,7 @@ interface MutableDiagnostics {
 const ITERATION_DIRECTORY = /^iteration_(\d+)$/;
 const ROUND_DIRECTORY = /^round_(\d+)$/;
 const REJECTED_VERDICT_FILE = /^rejected_verdict_(.+)\.json$/;
-const STAGE_ACTIVITY_FILE = /^(?:status\.json|live\.log|output(?:_attempt_\d+)?\.md)$/;
+const STAGE_ACTIVITY_FILE = /^(?:status\.json|output(?:_attempt_\d+)?\.md)$/;
 const QUIESCENT_STAGE_STATUSES = new Set<string>([
   STAGE_STATUS.PENDING,
   STAGE_STATUS.COMPLETE,
@@ -646,6 +647,8 @@ function terminalActivityClock(
       const problem = includeFile(join(stageDir, file), true);
       if (problem) return { reason: problem };
     }
+    const logProblem = includeFile(stageLiveLogPath(runDir, stageId), false);
+    if (logProblem) return { reason: logProblem };
   }
   return Number.isFinite(latestMtimeMs)
     ? { latestMtimeMs }

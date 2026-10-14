@@ -1,8 +1,8 @@
 /** Stage/session reuse and gate continuation lifecycle; reads/writes only the supplied run directory. */
 import { type StageStatus, STAGE_STATUS, type StoreState } from '../../store.js';
-import { type CodexSessionMetadata, readCodexSession } from '../../adapters/codex.js';
+import { type SessionMetadata, readSession, finalizeStageSessions } from '../../adapter-session.js';
 import { join } from 'node:path';
-import { unlinkSync, rmSync } from '../../engine-fs.js';
+import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { type StageConfig } from './configuration.js';
 
@@ -35,13 +35,13 @@ function repairedAuthor(stage: StageConfig, allStages: StageConfig[]): StageConf
   return authors.length === 1 && authors[0].role === stage.role ? authors[0] : undefined;
 }
 
-export function canReuseCodexSession(input: {
+export function canReuseSession(input: {
   stage: StageConfig;
   predecessor: StageConfig;
   allStages: StageConfig[];
   predecessorStatus: StageStatus | undefined;
   destinationStatus: StageStatus | undefined;
-  session: CodexSessionMetadata | undefined;
+  session: SessionMetadata | undefined;
 }): boolean {
   const { stage, predecessor, allStages, predecessorStatus, destinationStatus, session } = input;
   if (stage.depends_on.length !== 1 || stage.depends_on[0] !== predecessor.id) return false;
@@ -63,29 +63,28 @@ export function sessionResumeForStage(
   state: StoreState,
   runDirPath: string,
   enabled: boolean,
+  adapter?: string,
 ): { sessionId: string; ownerStageId: string } | undefined {
   // Own-stage continuation does not inherit another role's reasoning. It is
   // independent of the opt-in predecessor reuse experiment. Gates use their
   // correction-aware continuation path instead.
-  const own = readCodexSession(runDirPath, stage.id);
+  const own = readSession(runDirPath, stage.id, adapter);
   if (!stage.is_gate && own?.ownerStageId === stage.id
-      && existsSync(join(runDirPath, 'stages', stage.id, 'codex_home'))
       && (state.stages[stage.id]?.attempts?.length ?? 0) > 0) {
     return { sessionId: own.sessionId, ownerStageId: stage.id };
   }
   const author = repairedAuthor(stage, allStages);
   if (author) {
-    const authored = readCodexSession(runDirPath, author.id);
+    const authored = readSession(runDirPath, author.id, adapter);
     return authored?.ownerStageId === author.id && state.stages[author.id]?.status === STAGE_STATUS.COMPLETE
-      && existsSync(join(runDirPath, 'stages', author.id, 'codex_home'))
       ? { sessionId: authored.sessionId, ownerStageId: author.id }
       : undefined;
   }
   if (!enabled || stage.depends_on.length !== 1) return undefined;
   const predecessor = allStages.find((candidate) => candidate.id === stage.depends_on[0]);
   if (!predecessor) return undefined;
-  const session = readCodexSession(runDirPath, predecessor.id);
-  if (!canReuseCodexSession({
+  const session = readSession(runDirPath, predecessor.id, adapter);
+  if (!canReuseSession({
     stage,
     predecessor,
     allStages,
@@ -136,7 +135,7 @@ function readAndConsumeGateVerdictCorrection(runDirPath: string, gateId: string)
 
 export function canResumeOwnGateSession(
   stage: StageConfig,
-  session: CodexSessionMetadata | undefined,
+  session: SessionMetadata | undefined,
   previousVerdictWrong: boolean,
 ): boolean {
   return stage.is_gate === true
@@ -145,8 +144,8 @@ export function canResumeOwnGateSession(
     && session.ownerStageId === stage.id;
 }
 
-function clearGateContinuationArtifacts(runDirPath: string, gateId: string): void {
-  try { rmSync(join(runDirPath, 'stages', gateId, 'codex_home'), { recursive: true, force: true }); } catch { /* best effort */ }
+function clearContinuationArtifacts(runDirPath: string, gateId: string): void {
+  finalizeStageSessions(runDirPath, gateId);
   try { const path = join(runDirPath, 'stages', gateId, 'session.json'); unlinkSync(path); } catch { /* best effort */ }
   try { unlinkSync(gateVerdictCorrectionPath(runDirPath, gateId)); } catch { /* best effort */ }
 }
@@ -154,13 +153,13 @@ function clearGateContinuationArtifacts(runDirPath: string, gateId: string): voi
 export function clearGateContinuationsForStages(runDirPath: string, stages: StageConfig[]): void {
   for (const gate of stages) {
     if (gate.is_gate && stages.some((candidate) => candidate.retry_to?.includes(gate.id))) {
-      clearGateContinuationArtifacts(runDirPath, gate.id);
+      clearContinuationArtifacts(runDirPath, gate.id);
     }
   }
   // The bounded repair loop is over, so no repair will continue an author kept for it.
   for (const stage of stages) {
     const author = repairedAuthor(stage, stages);
-    if (author) try { rmSync(join(runDirPath, 'stages', author.id, 'codex_home'), { recursive: true, force: true }); } catch { /* best effort */ }
+    if (author) clearContinuationArtifacts(runDirPath, author.id);
   }
 }
 
@@ -168,15 +167,16 @@ export function gateContinuationSessionForStage(
   stage: StageConfig,
   runDirPath: string,
   isReevaluation: boolean,
+  adapter?: string,
 ): { sessionId: string; ownerStageId: string } | undefined {
   if (!isReevaluation || stage.is_gate !== true) return undefined;
   const correction = readAndConsumeGateVerdictCorrection(runDirPath, stage.id);
   if (correction) {
     // Persisting a disproved line of reasoning is worse than rebuilding it.
-    clearGateContinuationArtifacts(runDirPath, stage.id);
+    clearContinuationArtifacts(runDirPath, stage.id);
     return undefined;
   }
-  const session = readCodexSession(runDirPath, stage.id);
+  const session = readSession(runDirPath, stage.id, adapter);
   if (!canResumeOwnGateSession(stage, session, false)) return undefined;
   return { sessionId: session!.sessionId, ownerStageId: stage.id };
 }
@@ -196,3 +196,6 @@ export function shouldPreserveSession(stage: StageConfig, allStages: StageConfig
   // provisionally, then the eligibility check still requires exactly one child.
   return stage.dynamic_dispatch || reusableDirectSuccessors(stage, allStages).length === 1;
 }
+
+// Compatibility for callers of the original Codex admission API.
+export const canReuseCodexSession = canReuseSession;

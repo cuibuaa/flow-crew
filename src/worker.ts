@@ -1,3 +1,5 @@
+import { stageLiveLogPath, readStageLiveLogPath } from './stage-live-log.js';
+import { isRetryableAdapterFailure } from './adapters/failure.js';
 import { writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
 
@@ -6,10 +8,10 @@ import { withEngineIntegrity } from './engine-integrity.js';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { recordInvocationInput } from './run-state-view.js';
-import { finalizeCodexHome, isCodexSessionUuid, readCodexSession, stageCodexHome } from './adapters/codex.js';
+import { finalizeStageSessions, isSessionUuid, readSession } from './adapter-session.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
-import { sumInvocationUsage } from './invocation-usage.js';
+import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
 import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { join, relative, resolve } from 'node:path';
@@ -268,8 +270,7 @@ function attemptArtifactFingerprint(path: string): string | null {
   try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; }
 }
 
-/** Delimit the append-only live log so each watchdog read can prove which
- * scheduler attempt produced its bytes. */
+/** Mark the attempt stream so the watchdog excludes its bookkeeping bytes. */
 export function beginAttemptEvidenceGeneration(
   runDirectory: string,
   stageId: string,
@@ -277,7 +278,7 @@ export function beginAttemptEvidenceGeneration(
   attemptStartedAt: string,
 ): AttemptEvidenceGeneration {
   const stagePath = join(runDirectory, 'stages', stageId);
-  const logPath = join(stagePath, 'live.log');
+  const logPath = stageLiveLogPath(runDirectory, stageId, attemptIndex, attemptStartedAt);
   mkdirSync(stagePath, { recursive: true });
   const marker = `\n<!-- flowcrew-attempt ${JSON.stringify({ version: 1, stageId, attemptIndex, attemptStartedAt })} -->\n`;
   appendFileSync(logPath, marker, 'utf-8');
@@ -361,13 +362,29 @@ export async function runStage(
   }
   const attemptIndex = runningStatus.attempts?.at(-1)?.index;
   if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an execution index`);
+  const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
+  if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
+  // Every execution enters here, including technical retries, repairs and
+  // resumed sessions. Arm and publish one clock before preparing its work.
+  const attemptDeadline = new AttemptDeadlineController({
+    budgetMs: opts.timeout_ms,
+    ledgerDir: join(opts.runDir, 'stages', opts.stageId),
+    executionIndex: attemptIndex,
+    ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
+  });
+  const effectiveBudgetMs = attemptDeadline.budgetMs;
+  try {
+  const timeout = attemptDeadline.snapshot();
+  const freshRunningStatus = freshRunningStageProjection(runningStatus, opts.retries, attemptStartedAt);
+  freshRunningStatus.timeout = timeout;
+  freshRunningStatus.attempts = runningStatus.attempts?.map(attempt =>
+    attempt.index === attemptIndex ? { ...attempt, timeout } : attempt);
+  writeStageStatus(opts.projectDir, opts.runId, opts.stageId, freshRunningStatus);
   if (opts.isGate) prompt = `${buildGateDispatchPreamble({
     runDirPath: opts.runDir, gateId: opts.stageId,
     evaluationRound: runningStatus.attempts!.length, priorAttemptCount: runningStatus.attempts!.length - 1,
     ...opts.gateContext,
   })}\n\n${prompt}`;
-  const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
-  if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
   const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
   // Retain delivered, targeted notices across execution boundaries. Their
   // original attempt identity remains explicit; only re-admission grants scope.
@@ -382,16 +399,12 @@ export async function runStage(
   const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string =>
     renderGuidanceDelivery(guidanceForExecution(entries, attemptIndex));
   const liveConstraintGuard = opts.liveConstraintGuardFactory?.({ attemptIndex, attemptStartedAt });
-  // Compatibility aggregates remain in the attempt ledger; live top-level
-  // outcome fields must describe this execution, not the one it retried.
-  const freshRunningStatus = freshRunningStageProjection(runningStatus, opts.retries, attemptStartedAt);
-  writeStageStatus(opts.projectDir, opts.runId, opts.stageId, freshRunningStatus);
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
   const priorAttempt = runningStatus.attempts?.at(-2);
   if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended')) {
-    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${opts.runDir}/stages/${opts.stageId}/live.log for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}. Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
+    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${readStageLiveLogPath(opts.runDir, opts.stageId, priorAttempt.index)} for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}. Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
   }
   // buildStagePrompt ran before the execution index existed and intentionally
   // included only run-wide guidance. Add notices bound to this execution now.
@@ -561,13 +574,6 @@ export async function runStage(
     template: opts.artifactObligationTemplate ?? '', artifactContract: opts.artifactContract,
     isGate: opts.isGate, planRevision: opts.planRevision, attemptIndex, attemptStartedAt,
   }) : undefined;
-  const attemptDeadline = new AttemptDeadlineController({
-    budgetMs: opts.timeout_ms,
-    ledgerDir: join(opts.runDir, 'stages', opts.stageId),
-    executionIndex: attemptIndex,
-    ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
-  });
-  const effectiveBudgetMs = attemptDeadline.budgetMs;
 
   // Abort files are one-shot envelopes owned by this exact stage attempt. A
   // crash can leave a file behind, so ownership is validated on every launch;
@@ -575,7 +581,7 @@ export async function runStage(
   const attemptAbortController = new AbortController();
   const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
   const commandInterruptSignalPath = join(opts.runDir, 'signals', `interrupt_${opts.stageId}.json`);
-  const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
+  const liveLogPath = stageLiveLogPath(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   const activeCommands = new Map<string, CommandLifecycleEvent>();
   const interruptedCommands = new Map<string, StageCommandInterruptSignal>();
   let activeInvocationAbortController: AbortController | undefined;
@@ -788,11 +794,7 @@ export async function runStage(
         ...(approvalRequestId ? { suspensionRequestId: approvalRequestId } : {}),
         ...(approvalRequestingStageId ? { suspensionRequestingStageId: approvalRequestingStageId } : {}),
       } : {}),
-      ...(tokensIn !== undefined ? { tokens_in: tokensIn } : {}),
-      ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
-      tokenUsage: telemetry?.tokenUsage,
-      tokens_cached: telemetry?.tokens_cached,
-      tokens_reasoning: telemetry?.tokens_reasoning,
+      ...invocationUsageFields({ ...telemetry, tokens_in: tokensIn, tokens_out: tokensOut }),
       invocations: telemetry?.invocations,
     };
   };
@@ -809,7 +811,7 @@ export async function runStage(
   let inputRecordIndex = 0;
   let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
   const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
-  if (opts.resumeSessionId && isCodexSessionUuid(opts.resumeSessionId)) {
+  if (opts.resumeSessionId && isSessionUuid(opts.resumeSessionId)) {
     continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
   }
   const deadlineContext = (): string => direct
@@ -1070,8 +1072,8 @@ export async function runStage(
       }).then(
         (value) => {
           if (value.writeAttribution === 'structured') liveMonitor?.observePaths(value.writes ?? []);
-          if (isCodexSessionUuid(value.sessionId)) {
-            const recorded = readCodexSession(opts.runDir, opts.stageId);
+          if (isSessionUuid(value.sessionId)) {
+            const recorded = readSession(opts.runDir, opts.stageId, selectedAdapter.sessionKind);
             continuations.set(selectedAdapter, {
               sessionId: value.sessionId,
               ownerStageId: recorded?.sessionId === value.sessionId ? recorded.ownerStageId
@@ -1158,6 +1160,7 @@ export async function runStage(
       // No correction may launch another child until the prior child is known
       // closed; a scope grant cannot turn missing closure into clean suspension.
       if (childCloseUnverified) return combined;
+      if (!isRetryableAdapterFailure(current.adapterFailureKind)) return combined;
       if (commandControl && !aggregateAbortSignal.aborted) {
         activeCommands.delete(commandControl.command.id);
         // A durable current-execution grant stops at the closed child boundary.
@@ -1319,7 +1322,7 @@ export async function runStage(
       : validationFailure ?? await invokeAdapterWithCorrection(adapter, resolvedRole);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
-    if (result.exitCode !== 0 && result.adapterError === true) {
+    if (result.exitCode !== 0 && result.adapterError === true && isRetryableAdapterFailure(result.adapterFailureKind)) {
       for (let attempt = 0; attempt < adapterRetryDelays.length; attempt++) {
         if (aggregateAbortSignal.aborted) break;
         const retryDelayMs = Math.max(0, adapterRetryDelays[attempt]);
@@ -1331,7 +1334,7 @@ export async function runStage(
           break;
         }
         result = await invokeAdapterWithCorrection(adapter, resolvedRole);
-        if (result.exitCode === 0 || result.adapterError !== true) break;
+        if (result.exitCode === 0 || result.adapterError !== true || !isRetryableAdapterFailure(result.adapterFailureKind)) break;
       }
 
       // The adapter classifies its own diagnostic channel. Worker output is an
@@ -1519,11 +1522,7 @@ export async function runStage(
           : `Exit code ${result.exitCode}`
       )
       : undefined,
-    tokens_in: result.tokens_in,
-    tokens_out: result.tokens_out,
-    tokens_cached: result.tokens_cached,
-    tokens_reasoning: result.tokens_reasoning,
-    tokenUsage: result.tokenUsage,
+    ...invocationUsageFields(result),
     invocations: result.invocations,
     adapterFailureKind: result.adapterFailureKind,
     writes,
@@ -1575,9 +1574,15 @@ export async function runStage(
     // Final classification and durable settlement, rather than a raw child zero,
     // determine whether the successful-home cleanup policy applies.
     if (final.status === RUN_STATUS.COMPLETE && !opts.preserveSession && !suspended) {
-      for (const continuation of continuations.values()) finalizeCodexHome(stageCodexHome(opts.runDir, continuation.ownerStageId), 0);
+      for (const stageId of new Set([opts.stageId, ...[...continuations.values()].map(session => session.ownerStageId)])) {
+        finalizeStageSessions(opts.runDir, stageId);
+      }
     }
   }
   if (boundaryError !== undefined) throw new StageAttemptSettlementError(opts.stageId, attemptIndex, boundaryError);
   return result;
+  } finally {
+    // Setup failures and thrown settlement errors also own this timer.
+    attemptDeadline.dispose();
+  }
 }

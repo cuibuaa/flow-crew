@@ -107,34 +107,40 @@ describe('independent declaration and decision controls', () => {
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
   });
 
-  it.each([
-    'run.json', 'events.jsonl', 'workflow.yaml', 'task_brief.md', 'brief_criteria.json',
-    'validation_baseline.json', 'validation_delta_writer.json', 'dispatch_admission.json',
-    'plan_history/next.json', 'audit_findings/next.json', 'signals/replan.json',
-    'supervisor_state.json', 'supervisor_usage.json', 'stage_evidence/iteration_1/receipt.json',
-    'scheduler.pid', 'scheduler-heartbeat.json', 'scheduler-loop-stall.json', 'approvals.jsonl',
-    '.reality-gate.json', '.reality-gate.failures.md', 'declared_outputs/next.json',
-    'guidance_history/injected.md', '.rollback-preimages/next.json', 'gate_reevaluation/next.json',
-    'dispatch_rejections/next.json', 'plan_retry/next.json', 'supervisor_rejections/next.json',
-    'discarded/next.json', 'iteration_log.md', 'run_event_status.json', 'attempt_summary_refresh.json',
-    'criterion_discharges.json', 'supervisor_guidance.md', 'supervisor_log.md', 'summary.md', 'progress.md',
-    'blockage_ledger.json', 'repeated_blockage.json', 'plan_retry_state.json', 'rollback_change_journal.jsonl',
-    'gate_contract.json', 'user_input.md', 'verdict.json',
-    'research_round_input_error.json', 'research_round_contract_repair.json', 'research_integrity_rejections.json',
-    'research_terminal_ready.json', 'research_continue.json', 'research_gate_exhausted.json',
-    'goal_met.json', 'repair_diff.json', 'campaign_revision_request.jsonl', 'post_terminate_hook.log',
-    '.run-state.lock', '.run-reservation.json', 'stages/writer/status.json',
-    'stages/writer/input.md', 'stages/writer/invocations/future.json',
-    'stages/writer/attempt_generation.json', 'stages/writer/plan_revision_decision_future.json',
-    'stages/writer/scope_revision_decision_future.json', 'stages/writer/approval_resolution.json',
-    'stages/writer/attempt_deadline_execution_1_budget.jsonl', 'stages/writer/constraint_audit_attempt_1.json',
-    'stages/writer/command_activity.json', 'stages/writer/session.json', 'stages/writer/artifact_contract.json',
-    'stages/writer/guidance_consumed.md', 'stages/writer/guidance.md', 'stages/writer/live.log', 'stages/writer/trace.jsonl',
-    'stages/work/input.md', 'verdict_other.json',
-  ])('refuses a prospective symlink alias to engine carrier %s', carrier => {
-    symlinkSync(join(directory, carrier), join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).errors.join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
+  it('refuses prospective symlink aliases to every reserved engine carrier', () => {
+    const carriers = [
+      'run.json', 'events.jsonl', 'workflow.yaml', 'task_brief.md', 'brief_criteria.json',
+      'validation_baseline.json', 'validation_delta_writer.json', 'dispatch_admission.json',
+      'plan_history/next.json', 'audit_findings/next.json', 'signals/replan.json',
+      'supervisor_state.json', 'supervisor_usage.json', 'stage_evidence/iteration_1/receipt.json',
+      'scheduler.pid', 'scheduler-heartbeat.json', 'scheduler-loop-stall.json', 'approvals.jsonl',
+      '.reality-gate.json', '.reality-gate.failures.md', 'declared_outputs/next.json',
+      'guidance_history/injected.md', '.rollback-preimages/next.json', 'gate_reevaluation/next.json',
+      'dispatch_rejections/next.json', 'plan_retry/next.json', 'supervisor_rejections/next.json',
+      'discarded/next.json', 'iteration_log.md', 'run_event_status.json', 'attempt_summary_refresh.json',
+      'criterion_discharges.json', 'supervisor_guidance.md', 'supervisor_log.md', 'summary.md', 'progress.md',
+      'blockage_ledger.json', 'repeated_blockage.json', 'plan_retry_state.json', 'rollback_change_journal.jsonl',
+      'gate_contract.json', 'user_input.md', 'verdict.json',
+      'research_round_input_error.json', 'research_round_contract_repair.json', 'research_integrity_rejections.json',
+      'research_terminal_ready.json', 'research_continue.json', 'research_gate_exhausted.json',
+      'goal_met.json', 'repair_diff.json', 'campaign_revision_request.jsonl', 'post_terminate_hook.log',
+      '.run-state.lock', '.run-reservation.json', 'stages/writer/status.json',
+      'stages/writer/input.md', 'stages/writer/invocations/future.json',
+      'stages/writer/attempt_generation.json', 'stages/writer/plan_revision_decision_future.json',
+      'stages/writer/scope_revision_decision_future.json', 'stages/writer/approval_resolution.json',
+      'stages/writer/attempt_deadline_execution_1_budget.jsonl', 'stages/writer/constraint_audit_attempt_1.json',
+      'stages/writer/command_activity.json', 'stages/writer/session.json', 'stages/writer/artifact_contract.json',
+      'stages/writer/guidance_consumed.md', 'stages/writer/guidance.md', 'stages/writer/live.log', 'stages/writer/trace.jsonl',
+      'stages/work/input.md', 'verdict_other.json',
+    ];
+    for (const carrier of carriers) {
+      const alias = join(directory, 'alias');
+      symlinkSync(join(directory, carrier), alias);
+      try {
+        const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ replays: [], version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+        expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).errors.join(';'), carrier).toContain('ARTIFACT_FRAMEWORK_PATH:');
+      } finally { rmSync(alias); }
+    }
   });
 
   it.each(['run.json', 'events.jsonl', 'stages/writer/input.md', 'stages/writer/invocations/one.json'])('refuses an existing hardlink alias to engine carrier %s', carrier => {

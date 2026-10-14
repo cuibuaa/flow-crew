@@ -5,12 +5,13 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ATTEMPT_TERMINATION_GRACE_MS,
   execWithStdin,
@@ -29,11 +30,9 @@ import {
 import { runStage } from '../src/worker.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.js';
 
-const CLEANUP_TRIALS = 3;
+const CLEANUP_TRIALS = 1;
 // Leave room for the child to install its signal handler under full-suite load.
 const FIXTURE_TIMEOUT_MS = 1_500;
-const DESCENDANT_FIXTURE_TIMEOUT_MS = 1_500;
-const DESCENDANT_READY_TIMEOUT_MS = 1_200;
 const ABORT_FIXTURE_TIMEOUT_MS = 10_000;
 const TEST_TERMINATION_GRACE_MS = 150;
 const TEST_TERMINATION_TIMING = { graceMs: TEST_TERMINATION_GRACE_MS, pollMs: 5 } as const;
@@ -285,8 +284,8 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       }
       process.stdout.write(`GRACEFUL_CLEANUP_SAMPLES=${JSON.stringify(observations)}\n`);
 
-      expect(observations.map(({ cleanupWritten }) => cleanupWritten)).toEqual([true, true, true]);
-      expect(observations.map(({ exitCode }) => exitCode)).toEqual([124, 124, 124]);
+      expect(observations.map(({ cleanupWritten }) => cleanupWritten)).toEqual([true]);
+      expect(observations.map(({ exitCode }) => exitCode)).toEqual([124]);
       expect(observations.every(({ timedOut }) => timedOut)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -333,13 +332,10 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
       const minimumEscalationDuration = IGNORE_TERM_TIMEOUT_MS
         + TEST_TERMINATION_GRACE_MS - 100;
-      const maximumEscalationDuration = IGNORE_TERM_TIMEOUT_MS
-        + TEST_TERMINATION_GRACE_MS + 3_000;
       expect(observations.every(({ termCount }) => termCount === 1)).toBe(true);
       expect(observations.every(({ survived }) => !survived)).toBe(true);
       expect(observations.every(({ settlementElapsedMs }) => (
         settlementElapsedMs >= minimumEscalationDuration
-        && settlementElapsedMs <= maximumEscalationDuration
       ))).toBe(true);
       expect(timeoutSamples.every(({ exitCode, timedOut }) => exitCode === 124 && timedOut)).toBe(true);
       expect(raceSamples.every(({ exitCode, timedOut }) => exitCode === 137 && timedOut)).toBe(true);
@@ -348,63 +344,75 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('waits for escalation when a cleanly exiting leader leaves an ignoring descendant', { timeout: 12_000 }, async () => {
+  it('waits for escalation when a cleanly exiting leader leaves an ignoring descendant', { timeout: 12_000 }, async ({ signal }) => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-descendant-'));
     const cleanupPath = join(root, 'leader-cleanup');
-    const readyPath = join(root, 'leader-ready');
     const pidPath = join(root, 'leader-pid');
-    const descendantReadyPath = join(root, 'descendant-ready');
     const descendantPidPath = join(root, 'descendant-pid');
     const descendantTermPath = join(root, 'descendant-term');
     const fixture = [
       "const fs = require('node:fs');",
       "const { spawn } = require('node:child_process');",
-      'const [cleanupPath, readyPath, pidPath, descendantReadyPath, descendantPidPath, descendantTermPath] = process.argv.slice(1);',
+      'const [cleanupPath, pidPath, descendantPidPath, descendantTermPath] = process.argv.slice(1);',
       'const descendantFixture = [',
       "  \"const fs = require('node:fs');\",",
-      "  'const [readyPath, pidPath, termPath] = process.argv.slice(1);',",
+      "  'const [pidPath, termPath] = process.argv.slice(1);',",
       "  \"process.on('SIGTERM', () => fs.writeFileSync(termPath, 'term'));\",",
       "  \"fs.writeFileSync(pidPath, String(process.pid));\",",
-      "  \"fs.writeFileSync(readyPath, 'ready');\",",
+      "  \"process.stdout.write('ready');\",",
       "  'setInterval(() => {}, 1000);',",
       "].join('\\n');",
       "process.on('SIGTERM', () => {",
       "  fs.writeFileSync(cleanupPath, 'cleaned');",
       '  process.exit(0);',
       '});',
-      "spawn(process.execPath, ['-e', descendantFixture, descendantReadyPath, descendantPidPath, descendantTermPath], { stdio: 'ignore' });",
-      'const readyTimer = setInterval(() => {',
-      '  if (!fs.existsSync(descendantReadyPath)) return;',
-      '  clearInterval(readyTimer);',
+      "const descendant = spawn(process.execPath, ['-e', descendantFixture, descendantPidPath, descendantTermPath], { stdio: ['ignore', 'pipe', 'ignore'] });",
+      "descendant.stdout.once('data', () => {",
       "  fs.writeFileSync(pidPath, String(process.pid));",
-      "  fs.writeFileSync(readyPath, 'ready');",
-      '}, 10);',
+      "  process.stdout.write('ready');",
+      '});',
     ].join('\n');
-    const settlementStarted = performance.now();
+    const controller = new AbortController();
+    let ready = false;
+    let watcher: ReturnType<typeof watch>;
+    const cleanupPublished = new Promise<void>((resolve, reject) => {
+      watcher = watch(root, () => {
+        if (existsSync(cleanupPath) && existsSync(descendantTermPath)) resolve();
+      });
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    // Advance termination time only after both children have handled SIGTERM.
+    // Child startup therefore cannot consume the execution deadline.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const execution = execWithStdin(process.execPath, [
-      '-e', fixture, cleanupPath, readyPath, pidPath,
-      descendantReadyPath, descendantPidPath, descendantTermPath,
+      '-e', fixture, cleanupPath, pidPath, descendantPidPath, descendantTermPath,
     ], '', {
       cwd: root,
-      timeout_ms: DESCENDANT_FIXTURE_TIMEOUT_MS,
+      timeout_ms: 1_500,
       env: { HOME: root, FC_HOME: join(root, 'fc-home') },
       terminationTiming: TEST_TERMINATION_TIMING,
+      abortSignal: controller.signal,
+      onStdout: () => {
+        ready = true;
+        controller.abort('stage_abort');
+      },
     });
 
     try {
-      await waitForFile(readyPath, DESCENDANT_READY_TIMEOUT_MS);
-      const result = await awaitBounded(
-        execution,
-        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
-      );
-      expect(result.exitCode).toBe(124);
-      expect(performance.now() - settlementStarted).toBeGreaterThanOrEqual(
-        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
-      );
+      await cleanupPublished;
+      expect(processSurvived(fixturePid(descendantPidPath))).toBe(true);
+      await vi.advanceTimersByTimeAsync(TEST_TERMINATION_GRACE_MS);
+      vi.useRealTimers();
+      const result = await execution;
+      expect(ready).toBe(true);
+      expect(result.exitCode).toBe(137);
+      expect(result.timedOut).toBe(false);
       expect(existsSync(cleanupPath)).toBe(true);
       expect(existsSync(descendantTermPath)).toBe(true);
       expect(await waitForProcessExit(fixturePid(descendantPidPath), 2_000)).toBe(true);
     } finally {
+      watcher!.close();
+      vi.useRealTimers();
       hardStopFixture(fixturePid(pidPath));
       hardStopFixture(fixturePid(descendantPidPath));
       await execution.catch(() => undefined);

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { isSessionHomeName } from './adapter-session.js';
 import { observeEnginePublications, publishEngineFiles } from './engine-fs.js';
 export { publishEngineFiles } from './engine-fs.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fcGlobalDir } from './store.js';
 import { engineOwnedDatabasePaths, isEngineOwnedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
@@ -18,7 +19,8 @@ const inside = (root: string, path: string): boolean => {
   const rel = relative(root, path);
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
 };
-const privateNames = new Set(['codex_home', 'auth.json', 'credentials.json', 'installation_id']);
+const privateNames = new Set(['auth.json', 'credentials.json', 'installation_id']);
+const privateName = (name: string): boolean => privateNames.has(name) || isSessionHomeName(name);
 const same = (a?: Entry, b?: Entry): boolean => a?.identity === b?.identity;
 
 function entry(path: string): Entry | undefined {
@@ -46,8 +48,13 @@ function notice(guard: Guard, paths: string[]): void {
 /** Only synchronous parent publications advance the expected record. A child
  * has no access to this memory. Check before overwriting so an append or a later
  * engine publication cannot hide changed bytes. All concurrent guards advance. */
-observeEnginePublications((paths, tree) => {
-  const physical = [...new Set(paths.flatMap(path => [resolve(path), prospectivePhysicalPath(resolve(path))]))];
+observeEnginePublications((paths, tree, transfer) => {
+  // A rename transfers the staged object, including its identity. Reading the
+  // destination after rename can instead adopt a concurrent child's deletion
+  // or replacement as a trusted parent publication.
+  const moved = transfer?.map(path => join(prospectivePhysicalPath(dirname(resolve(path))), basename(path)));
+  const postimages = new Map<Guard, Snapshot>();
+  const physical = [...new Set([...paths.flatMap(path => [resolve(path), prospectivePhysicalPath(resolve(path))]), ...(moved ?? [])])];
   const hasDirectory = (): boolean => tree && physical.some(path => {
     try { if (lstatSync(path).isDirectory()) return true; } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -67,6 +74,24 @@ observeEnginePublications((paths, tree) => {
       if (dirname(candidate) === candidate) break;
     }
     if (guard.error) throw new Error(guard.error);
+    if (moved) {
+      const snapshot: Snapshot = new Map();
+      const capture = (source: string, destination: string): void => {
+        if (!guard.owns(destination) && !guard.expected.has(destination)) return;
+        const value = entry(source);
+        if (!value) return;
+        snapshot.set(destination, value);
+        if (value.identity.startsWith('directory:')) {
+          for (const name of readdirSync(source)) capture(join(source, name), join(destination, name));
+        }
+      };
+      capture(moved[0], moved[1]);
+      // Renaming two names of the same object succeeds without removing either
+      // name. Preserve that known source postimage as well as the destination.
+      const source = entry(moved[0]);
+      if (source && same(source, entry(moved[1]))) capture(moved[0], moved[0]);
+      postimages.set(guard, snapshot);
+    }
   }
   // Only successful synchronous publications advance expected facts. A failed
   // write can contain child changes; keep its preimage for refusal and restoration.
@@ -74,17 +99,27 @@ observeEnginePublications((paths, tree) => {
     descendants ||= hasDirectory();
     for (const guard of guards) {
       if (!relevant(guard)) continue;
+      const snapshot = postimages.get(guard);
+      const published = (path: string, actual?: Entry): Entry | undefined => {
+        if (!moved || !snapshot) return actual;
+        if (inside(moved[0], path) || inside(moved[1], path)) {
+          const value = snapshot.get(path);
+          notice(guard, same(value, actual) ? [] : [path]);
+          return value;
+        }
+        return actual;
+      };
       if (descendants) {
         const current = guard.scan();
-        for (const path of new Set([...guard.expected.keys(), ...current.keys()])) {
+        for (const path of new Set([...guard.expected.keys(), ...current.keys(), ...(snapshot?.keys() ?? [])])) {
           if (!affected(path)) continue;
-          const value = current.get(path);
+          const value = published(path, current.get(path));
           if (value) guard.expected.set(path, value); else guard.expected.delete(path);
         }
       }
       for (const path of physical) for (let candidate = path; ; candidate = dirname(candidate)) {
         if (guard.owns(candidate) || guard.expected.has(candidate)) {
-          const value = entry(candidate);
+          const value = published(candidate, entry(candidate));
           if (value) guard.expected.set(candidate, value); else guard.expected.delete(candidate);
         }
         if (dirname(candidate) === candidate) break;
@@ -148,7 +183,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     if (exclusions.some(root => inside(root, path))) guard.expected.delete(path);
   }
   const owns = (path: string): boolean => {
-    if (path.split('/').some(part => privateNames.has(part)) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path)
+    if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path)
       || [...activeOutputs].some(root => inside(root, path))) return false;
     if (run && inside(run, path)) {
       const local = relative(run, path).split('\\').join('/');
@@ -171,7 +206,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     };
     const walk = (path: string, owned = true): void => {
       if (owned) separate(path);
-      if (path.split('/').some(part => privateNames.has(part)) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
+      if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
       if (!owned && !lstatSync(path).isDirectory()) return;
       const value = entry(path);
       if (!value) return;
@@ -179,7 +214,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       if (value.link !== undefined) {
         const target = prospectivePhysicalPath(path, {
           lstat(component) {
-            if (component.split('/').some(part => privateNames.has(part))) throw new Error('ENGINE_STATE_REFUSED: private adapter state cannot carry engine records');
+            if (component.split('/').some(privateName)) throw new Error('ENGINE_STATE_REFUSED: private adapter state cannot carry engine records');
             const stat = lstatSync(component);
             if (stat.isSymbolicLink()) { separate(component); result.set(component, entry(component)!); }
             return stat;

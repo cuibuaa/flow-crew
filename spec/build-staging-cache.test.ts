@@ -2,7 +2,6 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,8 +24,12 @@ function createBuildFixture(): { projectDir: string; stagingRoot: string } {
   const fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), 'flowcrew-build-cache-regression-')));
   cleanupPaths.push(fixtureRoot);
   const projectDir = join(fixtureRoot, 'project');
-  mkdirSync(join(projectDir, 'scripts'), { recursive: true });
-  cpSync(join(repositoryRoot, 'src'), join(projectDir, 'src'), { recursive: true });
+  for (const directory of ['scripts', 'src']) mkdirSync(join(projectDir, directory), { recursive: true });
+  // A small backend preserves real compiler and publication cache transitions.
+  for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'daemon-identity.ts', 'process-liveness.ts']) {
+    copyFileSync(join(repositoryRoot, 'src', file), join(projectDir, 'src', file));
+  }
+  writeFileSync(join(projectDir, 'src', 'cli.ts'), 'export const cli = true;\n');
   copyFileSync(join(repositoryRoot, 'scripts', 'build.ts'), join(projectDir, 'scripts', 'build.ts'));
   copyFileSync(join(repositoryRoot, 'package.json'), join(projectDir, 'package.json'));
   copyFileSync(join(repositoryRoot, 'tsconfig.json'), join(projectDir, 'tsconfig.json'));

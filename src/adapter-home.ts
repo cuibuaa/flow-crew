@@ -116,7 +116,7 @@ try:
             except FileNotFoundError: src = None # CLI owns missing-session diagnosis/fallback.
             try:
                 for name in os.listdir(src) if src is not None else []:
-                    if name == 'sessions':
+                    if name == config.get('sessionDirectory', 'sessions'):
                         sessions = directory(src, name, False, True)
                         try:
                             dst = directory(fd, name)
@@ -125,11 +125,12 @@ try:
                         finally: os.close(sessions)
             finally:
                 if src is not None: os.close(src)
-        tmp = directory(fd, '.tmp')
-        try: cache(tmp, 'plugins', config['plugins'])
-        finally: os.close(tmp)
-        cache(fd, 'skills', config['skills'])
-        publish(fd, 'config.toml', config['config'].encode())
+        if config.get('plugins'):
+            tmp = directory(fd, '.tmp')
+            try: cache(tmp, 'plugins', config['plugins'])
+            finally: os.close(tmp)
+        if config.get('skills'): cache(fd, 'skills', config['skills'])
+        if 'config' in config: publish(fd, 'config.toml', config['config'].encode())
     finally: os.close(fd)
 except Exception as error:
     # Do not emit file contents or source credentials.
@@ -138,8 +139,8 @@ except Exception as error:
 `;
 
 export function prepareAdapterHome(input: {
-  home: string; plugins: string; skills: string;
-  sessionHome?: string; config: string;
+  home: string; plugins?: string; skills?: string;
+  sessionHome?: string; sessionDirectory?: string; config?: string;
 }): void {
   if (process.platform !== 'linux' || !isAbsolute(input.home)) {
     throw new Error('ADAPTER_HOME_REFUSED: an absolute Linux adapter home is required for anchored publication');
@@ -148,7 +149,8 @@ export function prepareAdapterHome(input: {
   // namespace change without replacing its no-follow traversal with mkdir -p.
   const result = publishEngineFiles([dirname(input.home)], () => spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', PREPARE_HOME], {
     input: JSON.stringify({ ...input,
-      plugins: resolve(input.plugins), skills: resolve(input.skills) }),
+      plugins: input.plugins ? resolve(input.plugins) : undefined,
+      skills: input.skills ? resolve(input.skills) : undefined }),
     encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
   }));
   if (result.error || result.status !== 0) {

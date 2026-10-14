@@ -738,7 +738,7 @@ describe('aggregate inbox overview', () => {
 it('serves positive live stage output through the mounted run-page stream', async () => {
   const directory = join(runsRoot(), 'live-reader', 'stages', 'writer');
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'live.log.txt'), 'current live reader output\n');
+  writeFileSync(join(directory, 'live.log'), 'current live reader output\n');
   writeFileSync(join(directory, 'status.json'), JSON.stringify({ status: 'running' }));
   const address = app!.server.address() as { port: number };
   await new Promise<void>((resolve, reject) => {

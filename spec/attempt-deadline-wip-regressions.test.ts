@@ -3,9 +3,9 @@ import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
+import type { AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import {
   createRun,
   fcGlobalDir,
@@ -27,6 +27,31 @@ let projectRoot: string;
 let stateRoot: string;
 let previousStateRoot: string;
 
+function settlementClock() {
+  let elapsed = 0;
+  const startedWall = Date.now();
+  const timers = new Map<ReturnType<typeof setTimeout>, { at: number; callback: () => void }>();
+  const clock: AttemptDeadlineClock = {
+    monotonicNow: () => elapsed,
+    wallNow: () => startedWall + elapsed,
+    setTimer(callback, delay) {
+      const timer = {} as ReturnType<typeof setTimeout>;
+      timers.set(timer, { at: elapsed + delay, callback });
+      return timer;
+    },
+    clearTimer: timer => { timers.delete(timer); },
+  };
+  return { clock, advance(ms: number, fireTimers = false) {
+    elapsed += ms;
+    if (!fireTimers) return;
+    for (const [timer, { at, callback }] of timers) {
+      if (at > elapsed) continue;
+      timers.delete(timer);
+      callback();
+    }
+  } };
+}
+
 beforeEach(() => {
   projectRoot = mkdtempSync(join(tmpdir(), 'attempt-deadline-wip-project-'));
   stateRoot = mkdtempSync(join(tmpdir(), 'attempt-deadline-wip-state-'));
@@ -46,26 +71,15 @@ describe('immutable attempt deadline regressions', () => {
     const created = createRun(projectRoot, 'starved-deadline', 'name: starved-deadline', [stageId]);
     const budgetMs = 40;
     const home = join(created.runDirPath, 'stages', stageId, 'codex_home');
-    let adapterStartedAt: number | undefined;
-    const startedWall = Date.now();
-    // This fixture isolates starvation during a started adapter, rather than
-    // letting unrelated setup load consume the 40ms construction first.
-    const elapsed = () => adapterStartedAt === undefined ? 0 : performance.now() - adapterStartedAt;
-    const deadlineClock = {
-      monotonicNow: elapsed,
-      wallNow: () => startedWall + elapsed(),
-      setTimer: (callback: () => void, delay: number) => setTimeout(callback, delay),
-      clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
-    };
+    let adapterStarted = false;
+    const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        adapterStartedAt = performance.now();
+        adapterStarted = true;
         mkdirSync(home, { recursive: true });
         writeFileSync(join(home, 'fixture-thread.json'), '{"messages":["needed thread context"]}');
-        const blockedUntil = performance.now() + 120;
-        while (performance.now() < blockedUntil) {
-          // Deliberately prevent the already-due timer callback from running.
-        }
+        // Advance past the deadline while leaving its callback pending.
+        advance(120);
         return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
@@ -86,7 +100,7 @@ describe('immutable attempt deadline regressions', () => {
     const status = readStageStatus(projectRoot, created.runId, stageId);
 
     expect(result).toMatchObject({ exitCode: 124, timedOut: true });
-    expect(adapterStartedAt).toBeDefined();
+    expect(adapterStarted).toBe(true);
     expect(existsSync(home)).toBe(true);
     expect(status).toMatchObject({
       status: 'failed',
@@ -106,12 +120,10 @@ describe('immutable attempt deadline regressions', () => {
     const stageId = 'starved_rejection';
     const created = createRun(projectRoot, 'starved-rejection', 'name: starved-rejection', [stageId]);
     const budgetMs = 40;
+    const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        const blockedUntil = performance.now() + 120;
-        while (performance.now() < blockedUntil) {
-          // Deliberately prevent the already-due timer callback from running.
-        }
+        advance(120);
         throw new Error('late adapter rejection');
       },
     };
@@ -121,6 +133,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline-starved rejection fixture',
+      deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
@@ -147,18 +160,16 @@ describe('immutable attempt deadline regressions', () => {
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
+    const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        const blockedUntil = performance.now() + 120;
-        while (performance.now() < blockedUntil) {
-          // Deliberately prevent both the deadline and ABORT poll timers.
-        }
+        advance(120);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
           reason: 'authoritative starved supervisor abort',
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(deadlineClock.wallNow()).toISOString(),
           source: 'supervisor',
         }));
         return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
@@ -170,6 +181,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'starved supervisor ABORT fixture',
+      deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,
@@ -196,15 +208,16 @@ describe('immutable attempt deadline regressions', () => {
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
+    const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+        advance(80, true);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
           reason: 'authoritative abort after deadline signal',
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(deadlineClock.wallNow()).toISOString(),
           source: 'supervisor',
         }));
         return { output: 'settled after both signals', exitCode: 0, duration_ms: 80 };
@@ -216,6 +229,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline then supervisor ABORT fixture',
+      deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,

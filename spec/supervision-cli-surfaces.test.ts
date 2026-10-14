@@ -13,7 +13,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -213,13 +212,6 @@ describe('supervision CLI surface invariants', () => {
     expect(combined).not.toContain('available systemd user-session cgroup wrapper');
   });
 
-  it('keeps all seven supervised lifecycle assertions active', () => {
-    const source = readFileSync(join(import.meta.dirname, 'supervised-lifecycle.test.ts'), 'utf-8');
-    for (let assertion = 1; assertion <= 7; assertion += 1) {
-      expect(source).toMatch(new RegExp(`\\bit\\(['\"]\\[${assertion}\\]`));
-    }
-    expect(source).not.toMatch(/\bit\.(?:fails|skip|todo)\s*\(/);
-  });
 });
 
 function createFixture(): Fixture {

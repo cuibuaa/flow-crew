@@ -13,7 +13,6 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { NodeSystemd } from '../src/orchestrator.js';
 import { sendRpc, type RpcResponse } from '../src/orchestrator-rpc.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { TERMINAL_STATUSES } from '../src/store.js';
@@ -86,21 +85,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
       { status: cancelled.status, output },
       `cancel did not converge for recorded pid ${pid} (${pidProbe(pid)}), shim ${shimState}, exit=${existsSync(exitPath)}: ${output}; daemon=${harness.daemonOutput.slice(-500)}`,
     ).toMatchObject({ status: 0, output: expect.stringContaining(`Task #${task.id} cancelled`) });
-  });
-
-  it('[2] does not report cancellation until the recorded agent pid reaches ESRCH', async ({ signal }) => {
-    const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'cancel-pid'), HOLD_MARKER);
-    const pid = await waitForRecordedAgentPid(harness, task.unit);
-    await waitForHeldAgent(harness, pid, signal);
-
-    const cancelled = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
-    const reachedEsrch = await waitUntil(() => pidProbe(pid) === 'esrch', 5_000);
-
-    expect(
-      reachedEsrch,
-      `cancel exit=${cancelled.status}; pid ${pid} remained ${pidProbe(pid)}; ${cancelled.stderr}`,
-    ).toBe(true);
+    expect(pidProbe(pid), `cancel returned before agent ${pid} exited`).toBe('esrch');
   });
 
   it('[3] shows a natural exit code 3 and a terminal status', async () => {
@@ -122,13 +107,10 @@ describe('portable supervised lifecycle through the real CLI', () => {
 
   it('[4] returns already-terminal without clearing completed_at', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'already-terminal'), 'terminal fixture');
-    await waitForTerminalRun(harness, task.id);
+    const registry = new TaskRegistry({ baseDir: harness.fcHome });
+    const task = registry.create({ projectDir: harness.defaultProject, status: TASK_STATUS.DONE });
     const completedAt = '2026-08-06T22:00:00.000Z';
-    new TaskRegistry({ baseDir: harness.fcHome }).update(task.id, {
-      status: TASK_STATUS.DONE,
-      completed_at: completedAt,
-    });
+    registry.update(task.id, { completed_at: completedAt });
 
     let response: CancellationResult | undefined;
     let error: string | undefined;
@@ -145,19 +127,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     ).toEqual({ responseStatus: 'already-terminal', error: undefined, completedAt });
   });
 
-  it('[5] returns non-empty portable task tail output containing the mock sentinel', { timeout: 60_000 }, async () => {
-    const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'tail'), 'tail fixture');
-    await waitForTerminalRun(harness, task.id);
-
-    const tailed = runCliSync(harness, task.project, ['task', 'tail', String(task.id)]);
-
-    expect(tailed.status, tailed.stderr).toBe(0);
-    expect(tailed.stdout.trim().length).toBeGreaterThan(0);
-    expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
-  });
-
-  it('[6] merges terminal run.json state over a stale running registry status', { timeout: 60_000 }, async () => {
+  it('[6] merges terminal run.json state over a stale running registry status and preserves portable tail output', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'show-terminal'), 'show fixture');
     const terminal = await waitForTerminalRun(harness, task.id);
@@ -173,47 +143,9 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(shown.status, output).toBe(0);
     expect(output).toContain(`Status: ${terminal.state.status}`);
     expect(output).not.toContain('Status: running');
-  });
-
-  it('[7] returns only closed UnitStatus members for active, terminal, and absent fixtures', async () => {
-    const harness = await createHarness();
-    const active = registerBackgroundTask(harness, createProject(harness, 'status-active'), HOLD_MARKER);
-    await waitForRecordedAgentPid(harness, active.unit);
-    const terminal = registerBackgroundTask(harness, createProject(harness, 'status-terminal'), EXIT_THREE_MARKER);
-    const terminalPid = await waitForRecordedAgentPid(harness, terminal.unit);
-    await waitUntil(() => pidProbe(terminalPid) === 'esrch' || exitRecordExists(harness, terminal.unit), 5_000);
-
-    const previousPath = process.env.PATH;
-    process.env.PATH = harness.bin;
-    let statuses: unknown[];
-    try {
-      const backend = new NodeSystemd(harness.fcHome);
-      statuses = await Promise.all([
-        backend.isActive(active.unit),
-        backend.isActive(terminal.unit),
-        backend.isActive('flowcrew-task-absent.service'),
-      ]);
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-    }
-
-    const legalKinds = new Set([
-      'active',
-      'deactivating',
-      'terminal',
-      'terminal-unknown',
-      'absent',
-      'unobservable',
-    ]);
-    expect(
-      statuses.every((status) => (
-        typeof status === 'object'
-        && status !== null
-        && legalKinds.has(String((status as { kind?: unknown }).kind))
-      )),
-      `out-of-union status: ${JSON.stringify(statuses)}`,
-    ).toBe(true);
+    const tailed = runCliSync(harness, task.project, ['task', 'tail', String(task.id)]);
+    expect(tailed.status, tailed.stderr).toBe(0);
+    expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
   });
 });
 

@@ -1,3 +1,5 @@
+import { normalizeNativeEvent } from './adapters/native-events.js';
+import { stageLiveLogPath } from './stage-live-log.js';
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from './engine-fs.js';
@@ -1205,21 +1207,34 @@ async function inboxOverview(
   return { approvals, deferred, stale, patches, campaignCount: campaigns.length };
 }
 
-function parseStreamJsonToText(raw: string, state?: { lineBuf: string }): string {
+export function parseStreamJsonToText(raw: string, state?: { lineBuf: string; lastMessage?: string }, final = false): string {
   const buf = state || { lineBuf: '' };
   buf.lineBuf += raw;
   const lines = buf.lineBuf.split('\n');
   buf.lineBuf = lines.pop()!; // keep incomplete last line
+  if (final && buf.lineBuf) { lines.push(buf.lineBuf); buf.lineBuf = ''; }
   const output: string[] = [];
   for (const line of lines) {
     if (!line.trim()) { output.push('\n'); continue; }
     let handled = false;
     try {
       const parsed = JSON.parse(line);
+      // These native message envelopes were previously rendered from a second
+      // text carrier. Keep other CLI streams on their existing passthrough path.
+      if (['assistant', 'result', 'content_block_delta', 'stream_event'].includes(parsed.type)) {
+        const event = normalizeNativeEvent(parsed);
+        handled = true;
+        if (event.delta) output.push(event.delta);
+        if (event.message) {
+          if (event.message !== buf.lastMessage) output.push(event.message);
+          buf.lastMessage = event.message;
+        }
+        if (event.diagnostic) output.push(`\n${event.diagnostic}\n`);
+      }
+      if (parsed.type === 'user') handled = true;
       // Text content from assistant
       if (parsed.type === 'assistant' && parsed.message?.content) {
         for (const block of parsed.message.content) {
-          if (block.type === 'text' && block.text) output.push(block.text);
           if (block.type === 'tool_use') {
             const name = block.name || 'tool';
             const desc = block.input?.description || block.input?.command || block.input?.file_path || '';
@@ -1879,23 +1894,23 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         'Access-Control-Allow-Origin': '*',
       });
 
-      // Prefer live.log.txt (clean text extracted from stream-json) over raw live.log
-      const txtPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'live.log.txt');
-      const rawPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'live.log');
-      let logPath = existsSync(txtPath) ? txtPath : rawPath;
+      const runDirectory = join(runsRoot(), req.params.id);
+      let logPath = '';
       let byteOffset = 0;
       let stageFinished = false;
-      const streamParseState = { lineBuf: '' };
+      const streamParseState: { lineBuf: string; lastMessage?: string } = { lineBuf: '' };
 
       const send = () => {
         if (stageFinished) return;
-        // Switch to .txt if it appears (Claude adapter creates it mid-execution)
-        if (logPath === rawPath && existsSync(txtPath)) {
-          logPath = txtPath;
-          byteOffset = 0;
-        }
         try {
-          const stat = statSync(logPath);
+          const currentLogPath = stageLiveLogPath(runDirectory, req.params.stageId);
+          const stat = statSync(currentLogPath);
+          if (currentLogPath !== logPath || stat.size < byteOffset) {
+            logPath = currentLogPath;
+            byteOffset = 0;
+            streamParseState.lineBuf = '';
+            delete streamParseState.lastMessage;
+          }
           if (stat.size > byteOffset) {
             const len = stat.size - byteOffset;
             const buf = Buffer.alloc(len);
@@ -1907,10 +1922,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
             }
             byteOffset = stat.size;
             let newContent = buf.toString('utf-8');
-            // If reading raw stream-json (live.log), parse it into readable text
-            if (logPath === rawPath) {
-              newContent = parseStreamJsonToText(newContent, streamParseState);
-            }
+            newContent = parseStreamJsonToText(newContent, streamParseState);
             if (newContent) {
               // Normalize line endings for xterm (\n → \r\n)
               newContent = newContent.replace(/\r?\n/g, '\r\n');
@@ -1926,6 +1938,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           const raw = readFileSync(statusPath, 'utf-8');
           const ss = JSON.parse(raw) as { status?: string };
           if (ss.status && !isRunningStageStatus(ss.status) && !isPendingStageStatus(ss.status)) {
+            const trailing = parseStreamJsonToText('', streamParseState, true);
+            if (trailing) reply.raw.write(`data: ${JSON.stringify(trailing.replace(/\r?\n/g, '\r\n'))}\n\n`);
             stageFinished = true;
             clearInterval(interval);
             // Close the SSE socket now that the stage is done, instead of leaking

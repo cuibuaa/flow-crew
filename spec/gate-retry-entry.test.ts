@@ -1,41 +1,15 @@
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { routeLogsToFile } from '../src/logging.js';
 import { readRunEvents } from '../src/run-events.js';
 import { foldItems } from '../src/inbox.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
-
-const metricReadControl = vi.hoisted(() => ({
-  path: '',
-  reads: 0,
-  staleReads: 0,
-  stale: '',
-  passing: '',
-}));
-
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    readFileSync(path: Parameters<typeof actual.readFileSync>[0], options?: unknown) {
-      if (metricReadControl.path && String(path) === metricReadControl.path) {
-        metricReadControl.reads++;
-        const text = metricReadControl.reads <= metricReadControl.staleReads
-          ? metricReadControl.stale
-          : metricReadControl.passing;
-        return options === undefined ? Buffer.from(text) : text;
-      }
-      return (actual.readFileSync as (...args: unknown[]) => unknown)(path, options);
-    },
-  };
-});
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = join(HERE, '..');
@@ -46,7 +20,6 @@ const UNRELATED_GATE_ID = 'verify_unrelated';
 let root: string;
 let projectDir: string;
 let previousFcHome: string;
-let restoreLogs: (() => void) | undefined;
 
 function scoredVerdict(pass: boolean, reason: string): Record<string, unknown> {
   return { pass, reason, metric: 'e18_quality', score: pass ? 0 : -1, threshold: 0 };
@@ -165,8 +138,7 @@ function dispatchYaml(
 interface ScenarioOptions {
   gatePasses: boolean[];
   gateCriteria?: Record<string, { status: 'pass' | 'fail' | 'judgement'; evidence: string }>;
-  staleMetricReads?: number;
-  logPath?: string;
+  legacyMetricPass?: boolean;
   includeUnrelatedRejectedGate?: boolean;
   terminalArtifactOnPass?: boolean;
   researchMode?: boolean;
@@ -189,7 +161,6 @@ async function runScenario(options: ScenarioOptions): Promise<{
   let escalationCalls = 0;
   let repairSawArchivedNegative = false;
   const gateInputs: string[] = [];
-  if (options.logPath) restoreLogs = routeLogsToFile(options.logPath);
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
@@ -217,16 +188,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
           JSON.stringify(verdict, null, 2) + '\n',
         );
         const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
-        writeFileSync(metricPath, JSON.stringify(metricArtifact(pass), null, 2) + '\n');
-        if (options.staleMetricReads !== undefined && gateCalls === 1) {
-          Object.assign(metricReadControl, {
-            path: metricPath,
-            reads: 0,
-            staleReads: options.staleMetricReads,
-            stale: JSON.stringify(metricArtifact(false)),
-            passing: JSON.stringify(metricArtifact(true)),
-          });
-        }
+        writeFileSync(metricPath, JSON.stringify(metricArtifact(options.legacyMetricPass ?? pass), null, 2) + '\n');
         return fixtureResult({ output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'terminal_finalize') {
@@ -305,10 +267,6 @@ async function runScenario(options: ScenarioOptions): Promise<{
           : 'E18 scheduler-level integration fixture',
     true,
   );
-  if (restoreLogs) {
-    restoreLogs();
-    restoreLogs = undefined;
-  }
   return {
     final,
     runDirPath: runDir(projectDir, final.runId),
@@ -326,13 +284,9 @@ beforeEach(() => {
   projectDir = join(root, 'project');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
   setFcGlobalDir(join(root, 'fc-home'));
-  Object.assign(metricReadControl, { path: '', reads: 0, staleReads: 0, stale: '', passing: '' });
 });
 
 afterEach(() => {
-  restoreLogs?.();
-  restoreLogs = undefined;
-  Object.assign(metricReadControl, { path: '', reads: 0, staleReads: 0, stale: '', passing: '' });
   setFcGlobalDir(previousFcHome);
   rmSync(root, { recursive: true, force: true });
 });
@@ -496,34 +450,8 @@ describe('gate retry loop entry', () => {
     }));
   });
 
-  it('settles transient evidence without re-running a passing review', async () => {
-    const logPath = join(root, 'mechanism.log');
-    const result = await runScenario({ gatePasses: [true], staleMetricReads: 2, logPath });
-    const logs = readFileSync(logPath, 'utf-8');
-
-    expect(result.final.status).toBe('complete');
-    expect(result.gateCalls).toBe(1);
-    expect(result.repairCalls).toBe(0);
-    expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
-    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
-    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
-  });
-
-  it('does not dispatch product repair for a passing authored review with transient metric evidence', async () => {
-    const logPath = join(root, 'guard.log');
-    const result = await runScenario({ gatePasses: [true], staleMetricReads: 4, logPath });
-    const logs = readFileSync(logPath, 'utf-8');
-
-    expect(result.final.status).toBe('complete');
-    expect(result.gateCalls).toBe(1);
-    expect(result.repairCalls).toBe(0);
-    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
-    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
-    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
-  });
-
   it('ignores persistent retired metric evidence without re-running a passing review', async () => {
-    const result = await runScenario({ gatePasses: [true, true], staleMetricReads: Number.MAX_SAFE_INTEGER });
+    const result = await runScenario({ gatePasses: [true], legacyMetricPass: false });
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
@@ -531,18 +459,14 @@ describe('gate retry loop entry', () => {
   });
 
   it('guards a related pass even while an unrelated gate remains rejected', async () => {
-    const logPath = join(root, 'related-only-guard.log');
     const result = await runScenario({
       gatePasses: [true],
-      staleMetricReads: 6,
-      logPath,
+      legacyMetricPass: false,
       includeUnrelatedRejectedGate: true,
     });
-    const logs = readFileSync(logPath, 'utf-8');
 
     expect(result.repairCalls).toBe(0);
     expect(result.gateCalls).toBe(1);
-    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
     const archiveDir = join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     expect(JSON.parse(readFileSync(

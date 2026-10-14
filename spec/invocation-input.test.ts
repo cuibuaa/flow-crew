@@ -191,7 +191,9 @@ describe('empty role tools at the native invocation boundary', () => {
     const transport = JSON.parse(view().prompts.invocations[0].record!.transport!.payload!);
     if (tools.length === 0) {
       expect(transport.argv).toContain('--tools');
-      expect(transport.argv[transport.argv.indexOf('--tools') + 1]).toBe('');
+      expect(transport.argv[transport.argv.indexOf('--tools') + 1]).toBe('Read,Glob,Grep');
+      expect(transport.argv).toContain('--restricted');
+      expect(transport.argv).not.toContain('--dangerously-skip-permissions');
     } else expect(transport.argv).not.toContain('--tools');
   });
 });

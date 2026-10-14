@@ -1,4 +1,5 @@
 import { writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -15,7 +16,7 @@ import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
-import { usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
+import { invocationUsageFields, sumInvocationUsage, usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
 
 import {
   UnknownRunStatusError,
@@ -153,6 +154,10 @@ export interface StageStatus {
   error?: string;
   tokens_in?: number;
   tokens_out?: number;
+  tokens_cached?: number;
+  tokens_cache_created?: number;
+  tokens_reasoning?: number;
+  cost_usd?: number;
   /** Append-only execution ledger. Top-level timing/token fields aggregate this array. */
   attempts?: StageAttempt[];
   /** Number of executions after the first; deliberately distinct from technical retries. */
@@ -1996,6 +2001,11 @@ export function beginStageAttempt(
     reruns: Math.max(0, attempts.length - 1),
     startedAt: attempts[0]?.startedAt ?? startedAt,
   };
+  // Publish the empty stream before its attempt becomes current, so followers
+  // cannot briefly mistake an older build's legacy log for this execution.
+  const liveLog = stageLiveLogPath(runDir(projectDir, runId), stageId, nextIndex, startedAt);
+  mkdirSync(dirname(liveLog), { recursive: true });
+  appendFileSync(liveLog, '');
   writeStageStatus(projectDir, runId, stageId, running);
   return running;
 }
@@ -2070,11 +2080,10 @@ export function completedStageAttemptStatus(
     processExitCode: completion.processExitCode,
     processSignal: completion.processSignal,
     providerFailure: completion.providerFailure,
+    ...invocationUsageFields(completion),
     tokens_in: tokensIn,
     tokens_out: tokensOut,
     tokenUsage: completion.tokenUsage ?? (usageComplete(completion) ? 'known' : 'unknown'),
-    tokens_cached: completion.tokens_cached,
-    tokens_reasoning: completion.tokens_reasoning,
     invocations: completion.invocations,
     error: completion.error,
     adapterFailureKind: completion.adapterFailureKind,
@@ -2085,6 +2094,7 @@ export function completedStageAttemptStatus(
     timeout: completion.timeout,
   };
   const writes = uniqueStrings(previous?.writes, completion.writes);
+  const usage = sumInvocationUsage(attempts);
   const final: StageStatus = {
     status: completion.suspended ? STAGE_STATUS.PENDING : completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
     exitCode: completion.exitCode,
@@ -2099,6 +2109,10 @@ export function completedStageAttemptStatus(
     error: completion.suspended ? undefined : completion.error,
     tokens_in: sumAttemptField(attempts, 'tokens_in'),
     tokens_out: sumAttemptField(attempts, 'tokens_out'),
+    tokens_cached: usage.tokens_cached,
+    tokens_cache_created: usage.tokens_cache_created,
+    tokens_reasoning: usage.tokens_reasoning,
+    cost_usd: usage.cost_usd,
     attempts,
     reruns: Math.max(0, attempts.length - 1),
     writes,

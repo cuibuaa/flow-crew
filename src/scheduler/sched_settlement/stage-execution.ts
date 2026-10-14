@@ -1,3 +1,4 @@
+import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
 // Boundary: Technical attempt budgets and one repair/re-evaluation stage execution; uses existing worker and typed prompt/session/validation boundaries.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
@@ -157,7 +158,8 @@ export async function executeSingleStage(
   let retries = 0;
   let failureRetries = 0;
   const sessionReuseEnabled = isSessionReuseEnabled();
-  const gateSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined);
+  const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+  const gateSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined, stageAdapter.sessionKind);
   let result: RunResult | undefined;
   const technicalRetry = createSchedulerTechnicalRetryState(initialTimeout);
 
@@ -177,8 +179,7 @@ export async function executeSingleStage(
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
-    const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
-    const resumeSession = gateSession ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled);
+    const resumeSession = gateSession ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
     result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
@@ -225,7 +226,7 @@ export async function executeSingleStage(
     );
 
     if (retryableTechnicalFailure) {
-      if (retries < maxTechnicalRetries) {
+      if (retries < maxTechnicalRetries && isRetryableAdapterFailure(result.adapterFailureKind)) {
         retries++;
         log.warn(
           { stage: stage.id, retry: retries, adapterFailureKind: result.adapterFailureKind },
@@ -290,6 +291,7 @@ export async function executeSingleStage(
         outputSummary: `Completed in ${Math.round((stageStatus.duration_ms ?? 0) / 1000)}s`,
         tokensIn: stageStatus.tokens_in,
         tokensOut: stageStatus.tokens_out,
+        costUsd: stageStatus.cost_usd,
         durationMs: stageStatus.duration_ms ?? 0,
       });
     } catch { /* non-fatal */ }
